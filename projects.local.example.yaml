@@ -1,0 +1,23 @@
+# Личные настройки машины для kd2-rules-mcp. Скопируйте в projects.local.yaml (в git не попадает),
+# поправьте пути и выполните:  uv run python scripts/setup_local.py
+#
+# projects — где на этой машине лежит папка каждого проекта из projects.yaml (любые диски).
+# Проект, которого у вас нет, просто не указывайте.
+projects:
+  bp: D:\Repos\bp
+  zup: D:\Repos\zup
+  do: E:\Work\do
+
+# Адрес сервера для агентов этой машины (.mcp.json). Свой Docker — localhost.
+server_url: http://localhost:8060/mcp
+
+# Необязательно: рабочая папка сервера (по умолчанию workspace\ этого репозитория) и платформа 1С для
+# kdbase\kd_check.py (по умолчанию — последняя установленная в Program Files\1cv8).
+# workspace: D:\kd2\workspace
+# onec_platform: C:\Program Files\1cv8\8.3.27.2170\bin\1cv8.exe
+
+# Пользователь 1С для баз с авторизацией (bsp_check, сервер данных): «<проект>.<база>» из projects.yaml.
+# Без этого раздела логин берётся из .dev.env проекта (IB_USER / IB_PASSWORD), если у базы задан dev_env.
+# Пароль хранится только здесь — файл в git не попадает.
+# logins:
+#   bp.bp_dev: {user: Имя, password: Пароль}

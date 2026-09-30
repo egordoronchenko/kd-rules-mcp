@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExchangePlanContent xmlns="http://v8.1c.ru/8.3/xcf/extrnprops" version="2.20">
+	<Item>
+		<Metadata>Catalog.Номенклатура</Metadata>
+		<AutoRecord>Allow</AutoRecord>
+	</Item>
+	<Item>
+		<Metadata>Constant.ВалютаУчета</Metadata>
+		<AutoRecord>Allow</AutoRecord>
+	</Item>
+	<Item>
+		<Metadata>Document.Приход</Metadata>
+		<AutoRecord>Deny</AutoRecord>
+	</Item>
+	<Item>
+		<Metadata>Sequence.ДокументыОрганизаций</Metadata>
+		<AutoRecord>Deny</AutoRecord>
+	</Item>
+</ExchangePlanContent>

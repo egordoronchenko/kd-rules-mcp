@@ -1,0 +1,104 @@
+"""Сверка через базы 1С: штатная загрузка принимает реальный макет, испорченный — нет.
+
+Задача 8.1 — база КД (`kdbase/kd_check.py`): тесты запускают толстый клиент 1С, поэтому
+выполняются только с `KD2_KDBASE_CHECK=1` на машине с платформой и подготовленной базой
+(`kd_check.py prepare`). Макет — первый файл `ПравилаОбмена` корпуса (`KD2_CORPUS_DIRS`).
+
+Задача 8.2 — типовая БСП (`kdbase/bsp_check.py`): дополнительно нужны `KD2_BSP_PROJECT` и
+`KD2_BSP_BASE` (проект и база-песочница из каталога проектов) и `KD2_BSP_PLAN` — план обмена,
+макеты `ПравилаОбмена` и `ПравилаОбменаКорреспондента` которого есть в корпусе.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from kd2_rules_mcp.kd2.canonical import parse_xml
+from tests.corpus import CORPUS_ENV, CorpusFile, corpus_files
+
+ROOT = Path(__file__).resolve().parents[1]
+KD_SCRIPT = ROOT / "kdbase" / "kd_check.py"
+BSP_SCRIPT = ROOT / "kdbase" / "bsp_check.py"
+
+pytestmark = [
+    pytest.mark.kdbase,
+    pytest.mark.skipif(
+        os.environ.get("KD2_KDBASE_CHECK") != "1",
+        reason="сверка через базы 1С включается KD2_KDBASE_CHECK=1",
+    ),
+]
+
+
+def _run(*args: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    return subprocess.run(
+        [sys.executable, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=600,
+    )
+
+
+def _template() -> Path:
+    """Первый макет `ПравилаОбмена` корпуса; нет корпуса — пропуск."""
+    files = corpus_files(("ПравилаОбмена",))
+    if not files:
+        pytest.skip(f"Нет макетов ПравилаОбмена: задайте {CORPUS_ENV}")
+    return files[0].path
+
+
+def test_real_template_is_accepted() -> None:
+    template = _template()
+    expected = len(parse_xml(template.read_bytes()).findall("ПравилаКонвертацииОбъектов//Правило"))
+    result = _run(str(KD_SCRIPT), "check", str(template))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ИТОГ OK" in result.stdout
+    assert f"КОЛИЧЕСТВО ПравилаКонвертацииОбъектов {expected}" in result.stdout
+
+
+def test_broken_file_is_rejected_with_protocol_error(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.xml"
+    broken.write_bytes(_template().read_bytes()[:30000])
+    result = _run(str(KD_SCRIPT), "check", str(broken))
+    assert result.returncode == 1
+    assert "ОШИБКА" in result.stdout and "Ошибка разбора XML" in result.stdout
+    assert "ИТОГ ОШИБКА" in result.stdout
+
+
+def _bsp_pair() -> tuple[str, str, str, CorpusFile, CorpusFile]:
+    """Проект, база, план и пара макетов для `bsp_check`; чего-то нет — пропуск."""
+    names = ("KD2_BSP_PROJECT", "KD2_BSP_BASE", "KD2_BSP_PLAN")
+    values = [os.environ.get(name, "").strip() for name in names]
+    if not all(values):
+        pytest.skip(f"Проверка БСП включается переменными {', '.join(names)}")
+    project, base, plan = values
+    found = {
+        item.kind: item
+        for item in corpus_files(("ПравилаОбмена", "ПравилаОбменаКорреспондента"))
+        if item.exchange_plan == plan
+    }
+    if len(found) < 2:
+        pytest.skip(f"В корпусе ({CORPUS_ENV}) нет пары макетов плана обмена {plan}")
+    return project, base, plan, found["ПравилаОбмена"], found["ПравилаОбменаКорреспондента"]
+
+
+def test_bsp_accepts_real_rules_pair() -> None:
+    project, base, plan, rules, correspondent = _bsp_pair()
+    result = _run(
+        str(BSP_SCRIPT),
+        str(rules.path),
+        str(correspondent.path),
+        "--plan",
+        plan,
+        "--project",
+        project,
+        "--base",
+        base,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ИТОГ OK" in result.stdout

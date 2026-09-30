@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GraphicalSchema xmlns="http://v8.1c.ru/8.3/xcf/scheme" version="2.20">
+	<Items>
+		<Start id="1" uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">
+			<Properties>
+				<Name>Старт</Name>
+			</Properties>
+		</Start>
+		<ConnectionLine id="2">
+			<Properties>
+				<Name>Линия</Name>
+			</Properties>
+		</ConnectionLine>
+		<Activity id="3" uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+			<Properties>
+				<Name>Выполнить</Name>
+			</Properties>
+		</Activity>
+		<Decoration id="4">
+			<Properties>
+				<Name>Надпись</Name>
+			</Properties>
+		</Decoration>
+	</Items>
+</GraphicalSchema>

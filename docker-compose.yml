@@ -1,0 +1,35 @@
+# MCP-сервер правил обмена «Конвертации данных 2» (порт 8060).
+#
+# Первый запуск на машине:
+#   1. projects.local.example.yaml → projects.local.yaml, указать папки проектов;
+#   2. uv run python scripts/setup_local.py   — пишет docker-compose.override.yml и .mcp.json;
+#   3. docker compose up -d --build
+#
+# Пересоздать контейнер, не трогая том кэша структур:  docker compose up -d --force-recreate
+# После правки projects.local.yaml — снова setup_local.py и docker compose up -d.
+#
+# Здесь нет путей конкретной машины. Папки проектов (только на чтение, /projects/<проект>),
+# KD2_PROJECT_DIRS и KD2_PATH_MAP (перевод путей агента в пути контейнера) — в
+# docker-compose.override.yml, его compose подхватывает сам. KD2_HOST, KD2_PORT, KD2_CACHE_DIR
+# и KD2_WORKSPACE заданы в образе. Клиент: http://<адрес машины>:8060/mcp
+
+name: kd2-rules-mcp
+
+services:
+  kd2-rules-mcp:
+    container_name: kd2_rules_mcp
+    build: .
+    ports:
+      - "8060:8060"
+    restart: unless-stopped
+    environment:
+      KD2_PROJECTS_FILE: /config/projects.yaml
+    volumes:
+      - ./projects.yaml:/config/projects.yaml:ro
+      - ./structures:/structures:ro
+      - kd2_cache:/data/cache
+      - ./workspace:/data/workspace
+
+volumes:
+  kd2_cache:
+    name: kd2_structures_cache

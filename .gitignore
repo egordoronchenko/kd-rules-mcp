@@ -1,0 +1,35 @@
+# Файловая база КД — бинарная, в git не кладём
+/base/
+# Эталон формата — XML-выгрузка конфигурации КД 2.1 (выгружается из своей базы КД, лицензия 1С)
+/reference/
+# Выгрузки структур метаданных (MD83Exp) — большие, храним локально
+/structures/
+# Кэш загруженных структур (SQLite) для тестов и локальной работы
+/cache/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# Логи и временное
+*.log
+tmp/
+
+# Рабочая папка сервера MCP при локальном запуске
+/workspace/
+
+# Сверка через базу КД: собранная EPF и копии базы на время проверки
+/kdbase/build/
+/kdbase/run/
+
+# Проекты, базы и адреса серверов (пример — projects.example.yaml). В своём форке команды можно убрать
+# эту строку и хранить projects.yaml в git: паролей и путей машин в нём нет.
+/projects.yaml
+
+# Личные настройки машины и то, что из них генерирует scripts/setup_local.py
+/projects.local.yaml
+/docker-compose.override.yml
+/.mcp.json
+/.cursor/mcp.json

@@ -1,0 +1,78 @@
+# Проекты 1С для kd2-rules-mcp — пример. Скопируйте в projects.yaml и опишите свои проекты;
+# в своём форке projects.yaml можно хранить в git — он общий для команды (путей машин и паролей в нём нет).
+#
+# Проект → конфигурации (выгрузка + расширения) → базы. Пути выгрузок — от папки проекта; где папка
+# проекта лежит на конкретной машине, задаёт личный файл projects.local.yaml (пример —
+# projects.local.example.yaml). Порядок расширений — порядок наложения, только активные в базах.
+#
+# Базы: role = песочница — автоматические проверки и запись разрешены; боевая — только для справки
+# (правила из неё выгружает человек, скрипты к ней не подключаются).
+#
+# mcp_config — .mcp.json проекта (от папки проекта); code_mcp — имена серверов поиска по коду из него;
+# dev_env у базы — .dev.env проекта с IB_USER / IB_PASSWORD этой базы (логин для bsp_check);
+# data_mcp у базы — её сервер данных (HTTP-сервис MCP в ИБ), подключается агентам только у песочниц.
+# По серверам кода агент смотрит код конфигурации для обработчиков: выгрузочных — в базе-источнике,
+# загрузочных — в базе-приёмнике.
+
+projects:
+  bp:
+    name: Бухгалтерия предприятия КОРП
+    mcp_config: .mcp.json
+    configurations:
+      full:
+        dump: src/Main
+        extensions: [src/cfe/МоёРасширение]
+    bases:
+      bp_dev:
+        role: песочница
+        configuration: full
+        connection: Srvr="server1c";Ref="bp_dev";
+        dev_env: .dev.env
+        data_mcp: 1c-data-mcp
+      bp_prod:
+        role: боевая
+        configuration: full
+        connection: Srvr="server1c";Ref="bp";
+    code_mcp:
+      - 1c-code-metadata-mcp
+
+  zup:
+    name: Зарплата и управление персоналом КОРП
+    mcp_config: .mcp.json
+    configurations:
+      full:
+        dump: src/Main
+    bases:
+      zup_dev:
+        role: песочница
+        configuration: full
+        connection: File="D:\1C\Bases\zup_dev";
+    code_mcp:
+      - 1c-code-metadata-mcp
+
+  do:
+    name: Документооборот КОРП
+    mcp_config: .mcp.json
+    configurations:
+      full:
+        dump: src/Main
+    bases:
+      do_dev:
+        role: песочница
+        configuration: full
+        connection: Srvr="server1c";Ref="do_dev";
+        dev_env: .dev.env
+    code_mcp:
+      - 1c-code-metadata-mcp
+
+# Общие серверы 1С (синтакс-чекер, справка, шаблоны, ревью кода …) — берутся из .mcp.json проекта `from`.
+shared_mcp:
+  from: bp
+  names: [1c-syntax-checker-mcp, 1C-docs-mcp]
+
+# Обмены: план обмена и проекты, между которыми он работает.
+exchanges:
+  - plan: ОбменБухгалтерияПредприятияДокументооборот20
+    projects: [bp, do]
+  - plan: ОбменЗарплата3Бухгалтерия3
+    projects: [bp, zup]
