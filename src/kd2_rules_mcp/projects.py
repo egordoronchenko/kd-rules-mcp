@@ -9,6 +9,8 @@
 которую пишет `scripts/setup_local.py`.
 """
 
+import base64
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -147,6 +149,50 @@ def base_login(local: LocalSettings, project_id: str, base: Base) -> tuple[str, 
     if login is None and folder is not None and base.dev_env:
         login = dev_env_login(resolve(folder, base.dev_env))
     return login
+
+
+def basic_auth(login: tuple[str, str]) -> dict[str, str]:
+    """Заголовок Basic-авторизации пользователем 1С (HTTP-сервисы ИБ с пользователями)."""
+    token = base64.b64encode(f"{login[0]}:{login[1]}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
+def project_mcp_servers(
+    catalog: Catalog, local: LocalSettings, project_id: str
+) -> dict[str, Any] | None:
+    """`mcpServers` из .mcp.json проекта; нет папки, `mcp_config` или файла — None."""
+    project = catalog.project(project_id)
+    folder = local.project_dirs.get(project_id)
+    if folder is None or not project.mcp_config:
+        return None
+    path = resolve(folder, project.mcp_config)
+    if not path.is_file():
+        return None
+    servers = json.loads(path.read_text(encoding="utf-8")).get("mcpServers", {})
+    return servers if isinstance(servers, dict) else {}
+
+
+def data_endpoint(
+    catalog: Catalog, local: LocalSettings, project_id: str, base_id: str
+) -> tuple[str, dict[str, str]]:
+    """Адрес сервера данных базы-песочницы (`data_mcp`) и заголовки авторизации."""
+    base = catalog.base(project_id, base_id)
+    if not base.is_sandbox:
+        raise ProjectConfigError(
+            f"База {project_id}.{base_id} — «{base.role}»: скрипты работают только с песочницами"
+        )
+    if not base.data_mcp:
+        raise ProjectConfigError(f"У базы {project_id}.{base_id} не задан data_mcp")
+    servers = project_mcp_servers(catalog, local, project_id) or {}
+    entry = servers.get(base.data_mcp)
+    url = entry.get("url") if isinstance(entry, dict) else None
+    if not url:
+        raise ProjectConfigError(
+            f"Сервера {base.data_mcp} нет в .mcp.json проекта {project_id} "
+            "(или папка проекта не задана)"
+        )
+    login = base_login(local, project_id, base)
+    return str(url), basic_auth(login) if login is not None else {}
 
 
 def dev_env_login(path: Path) -> tuple[str, str] | None:

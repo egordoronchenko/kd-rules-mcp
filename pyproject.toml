@@ -37,8 +37,8 @@ typeCheckingMode = "standard"
 exclude = ["reference", "base", "structures", "**/__pycache__", ".venv"]
 venvPath = "."
 venv = ".venv"
-# Скрипты scripts/ импортируются тестами как модули.
-extraPaths = ["scripts"]
+# Скрипты scripts/ и kdbase/ импортируются тестами как модули.
+extraPaths = ["scripts", "kdbase"]
 
 [dependency-groups]
 dev = [

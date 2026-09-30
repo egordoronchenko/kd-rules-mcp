@@ -18,7 +18,7 @@
 | Путь | Что это | В git |
 |---|---|---|
 | `src/kd2_rules_mcp/` | сервер: `kd2/` (модель и чтение/запись правил), `structures/` (структуры метаданных), `validation/`, `authoring/`, `service.py`, `server.py` | да |
-| `kdbase/` | финальные проверки файлом: `kd_check.py` (база КД), `bsp_check.py` (загрузка правил БСП), исходники EPF | да |
+| `kdbase/` | финальные проверки: `kd_check.py` (база КД), `bsp_check.py` (загрузка правил БСП), `exchange_check.py` (живой обмен между песочницами), исходники EPF | да |
 | `scripts/setup_local.py` | настройка машины по `projects.local.yaml` | да |
 | `docs/research/` | разборы формата и обоснования проверок; главный — `kd2-format-digest.md` | да |
 | `tests/` | pytest; синтетические данные — `tests/data` | да |

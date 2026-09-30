@@ -11,7 +11,6 @@
 Запуск: `uv run python scripts/setup_local.py`, затем `docker compose up -d`.
 """
 
-import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -22,8 +21,10 @@ from kd2_rules_mcp.projects import (
     Catalog,
     LocalSettings,
     base_login,
+    basic_auth,
     load_catalog,
     load_local,
+    project_mcp_servers,
     resolve,
 )
 
@@ -90,8 +91,7 @@ def mcp_servers(
             login = base_login(local, project_id, base)
             if name in servers and login is not None:
                 # HTTP-сервис ИБ с пользователями без Basic-авторизации пользователем 1С — 401.
-                token = base64.b64encode(f"{login[0]}:{login[1]}".encode()).decode()
-                servers[name]["headers"] = {"Authorization": f"Basic {token}"}
+                servers[name]["headers"] = basic_auth(login)
     return servers, warnings
 
 
@@ -134,18 +134,19 @@ def main() -> None:
 def _project_servers(
     catalog: Catalog, local: LocalSettings, project_id: str, warnings: list[str]
 ) -> dict[str, dict[str, Any]]:
-    project = catalog.project(project_id)
-    folder = local.project_dirs.get(project_id)
-    if folder is None or not project.mcp_config:
-        warnings.append(f"{project_id}: папка или mcp_config не заданы — серверы проекта пропущены")
+    servers = project_mcp_servers(catalog, local, project_id)
+    if servers is None:
+        project = catalog.project(project_id)
+        folder = local.project_dirs.get(project_id)
+        if folder is None or not project.mcp_config:
+            warnings.append(
+                f"{project_id}: папка или mcp_config не заданы — серверы проекта пропущены"
+            )
+        else:
+            path = resolve(folder, project.mcp_config)
+            warnings.append(f"{project_id}: нет {path} — серверы проекта пропущены")
         return {}
-    path = resolve(folder, project.mcp_config)
-    if not path.is_file():
-        warnings.append(f"{project_id}: нет {path} — серверы проекта пропущены")
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    servers = data.get("mcpServers", {})
-    return servers if isinstance(servers, dict) else {}
+    return servers
 
 
 def _add(

@@ -95,6 +95,9 @@
 - `bsp_check.py --project … --base …` берёт подключение из `projects.yaml` и отказывается работать с базой не
   роли «песочница», пользователя 1С — из `logins`, иначе из `.dev.env` проекта (`dev_env` базы: `IB_USER`,
   `IB_PASSWORD`); `kd_check.py` запускает `1cv8.exe` (`KD2_1CV8`, `onec_platform` или последняя установленная).
+- `exchange_check.py --source/--target <проект>.<база>` — только песочницы с `data_mcp`: адрес из `.mcp.json`
+  проекта, заголовок Basic из логина базы (`projects.data_endpoint`); код 1С отправляется инструменту
+  `vcexecutecode` одной строкой (многострочный сервер данных не выполняет, ответ пустой).
 - `data_mcp` базы — её `1c-data-mcp` (HTTP-сервис в ИБ, отдельное расширение): `setup_local.py` подключает его
   агентам как `<проект>-1c-data-mcp` только у песочниц, `project_list` показывает имя. Общий `1c-qa` (менеджер
   тест-клиента 1С) — в `shared_mcp`.
