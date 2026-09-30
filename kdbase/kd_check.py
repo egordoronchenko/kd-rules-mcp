@@ -12,8 +12,10 @@
   (иначе клиент останавливается на окне «Изменился номер версии конфигурации») и заводит
   пользователя «Агент» с полными правами без предупреждений об опасных действиях (иначе
   `/Execute` останавливается на «Предупреждении безопасности»).
-- `check <файл правил>` — копия `base\\` в `kdbase\\run\\<время>\\`, сборка EPF при изменении
-  исходников, запуск, протокол в stdout; код выхода 0 — «ИТОГ OK», 1 — ошибка или таймаут.
+- `check <файл правил>` — проверка, что файл целиком читается как XML с корнем `ПравилаОбмена` (без
+  1С), затем копия `base\\` в `kdbase\\run\\<время>\\`, сборка EPF при изменении исходников, запуск,
+  протокол в stdout; код выхода 0 — «ИТОГ OK», 1 — ошибка или таймаут. Обработка считает ошибкой
+  правила без имени конфигурации источника или приёмника (файл прочитан не целиком).
 
 Платформа — `1cv8.exe` из переменной `KD2_1CV8`, `onec_platform` в projects.local.yaml или последняя
 установленная в `Program Files\\1cv8`. База КД — файловая ИБ в `base\\` из конфигурации
@@ -103,6 +105,10 @@ def prepare(base: Path) -> None:
 
 def check(rules: Path, keep: bool = False) -> int:
     """Загрузка `rules` в копию базы КД; протокол в stdout, код выхода по итогу."""
+    error = precheck(rules)
+    if error:
+        print(f"ПРАВИЛА {rules}\nОШИБКА {error}\nИТОГ ОШИБКА\n{DONE}")
+        return 1
     run_dir = RUNS / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     base = run_dir / "base"
     base.mkdir(parents=True)
@@ -128,6 +134,32 @@ def check(rules: Path, keep: bool = False) -> int:
             shutil.rmtree(run_dir, ignore_errors=True)
     print(text)
     return 0 if "\nИТОГ OK\n" in f"\n{text}\n" and DONE in text else 1
+
+
+def precheck(rules: Path) -> str:
+    """Файл читается как XML с корнем `ПравилаОбмена`; иначе — текст ошибки.
+
+    Штатное чтение КД на недописанном файле молча выходит из цикла `Пока ПравилаОбмена.Прочитать()`
+    (reference/kd2-cfg/DataProcessors/ЗагрузкаКонвертации/Ext/ObjectModule.bsl:1411) и сохраняет
+    пустую конвертацию, поэтому целостность проверяется до запуска клиента. Файл `.zip` КД
+    распаковывает сама (там же, 1359–1363 и 1565–1568) — его не проверяем.
+    """
+    from lxml import etree
+
+    from kd2_rules_mcp.errors import RulesFormatError
+    from kd2_rules_mcp.kd2.canonical import parse_xml
+
+    if not rules.is_file():
+        return f"Нет файла правил: {rules}"
+    if rules.suffix.lower() == ".zip":
+        return ""
+    try:
+        root = parse_xml(rules)
+    except RulesFormatError as error:
+        return f"Ошибка разбора XML до запуска КД: {error.__cause__ or error}"
+    if etree.QName(root).localname != "ПравилаОбмена":
+        return f"Корень файла — {etree.QName(root).localname}, ожидается ПравилаОбмена"
+    return ""
 
 
 def _build_epf(base: Path) -> None:

@@ -70,6 +70,18 @@ def test_broken_file_is_rejected_with_protocol_error(tmp_path: Path) -> None:
     assert "ИТОГ ОШИБКА" in result.stdout
 
 
+def test_rules_without_source_and_receiver_are_rejected(tmp_path: Path) -> None:
+    """Правильный XML, но конвертация пустая: КД читает его без ошибки, обработка — отклоняет."""
+    empty = tmp_path / "empty.xml"
+    empty.write_text(
+        "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата></ПравилаОбмена>", encoding="utf-8"
+    )
+    result = _run(str(KD_SCRIPT), "check", str(empty))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Правила не прочитаны целиком" in result.stdout
+    assert "ИТОГ ОШИБКА" in result.stdout
+
+
 def _bsp_pair() -> tuple[str, str, str, CorpusFile, CorpusFile]:
     """Проект, база, план и пара макетов для `bsp_check`; чего-то нет — пропуск."""
     names = ("KD2_BSP_PROJECT", "KD2_BSP_BASE", "KD2_BSP_PLAN")
