@@ -67,6 +67,8 @@ class Project:
     code_mcp: tuple[str, ...] = ()
     # .mcp.json проекта (путь от папки проекта): адреса серверов кода и общих серверов.
     mcp_config: str = ""
+    # Папка живых правил обмена (путь от папки проекта) — серверу разрешена запись в неё.
+    rules_dir: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +151,15 @@ def base_login(local: LocalSettings, project_id: str, base: Base) -> tuple[str, 
     if login is None and folder is not None and base.dev_env:
         login = dev_env_login(resolve(folder, base.dev_env))
     return login
+
+
+def project_rules_dirs(catalog: Catalog, project_dirs: dict[str, Path]) -> dict[str, Path]:
+    """Папки живых правил проектов с `rules_dir`, чьи папки заданы: проект → путь."""
+    return {
+        project_id: resolve(folder, catalog.projects[project_id].rules_dir)
+        for project_id, folder in project_dirs.items()
+        if project_id in catalog.projects and catalog.projects[project_id].rules_dir
+    }
 
 
 def basic_auth(login: tuple[str, str]) -> dict[str, str]:
@@ -259,15 +270,15 @@ def load_local(path: Path) -> LocalSettings:
     )
 
 
-def parse_project_dirs(text: str) -> dict[str, Path]:
-    """`id=путь;…` из `KD2_PROJECT_DIRS`."""
+def parse_project_dirs(text: str, variable: str = "KD2_PROJECT_DIRS") -> dict[str, Path]:
+    """`id=путь;…` из `KD2_PROJECT_DIRS` (или `KD2_RULES_DIRS`)."""
     dirs: dict[str, Path] = {}
     for chunk in text.split(";"):
         if not chunk.strip():
             continue
         project_id, sep, folder = chunk.partition("=")
         if not sep or not project_id.strip() or not folder.strip():
-            raise ProjectConfigError(f"Неверный элемент KD2_PROJECT_DIRS: «{chunk}»")
+            raise ProjectConfigError(f"Неверный элемент {variable}: «{chunk}»")
         dirs[project_id.strip()] = Path(folder.strip())
     return dirs
 
@@ -317,6 +328,7 @@ def _project(project_id: str, body: Any) -> Project:
         bases=bases,
         code_mcp=tuple(str(name) for name in data.get("code_mcp", ()) or ()),
         mcp_config=str(data.get("mcp_config", "")),
+        rules_dir=str(data.get("rules_dir") or "").strip(),
     )
 
 

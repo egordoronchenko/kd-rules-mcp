@@ -77,7 +77,7 @@
 базы и серверы кода — `projects.yaml`. Подробности, коды ошибок и переменные — `docs/research/mcp-service.md`.
 
 - Пути передаются как на машине агента: сервер видит папки проектов только на чтение и пишет только в рабочую
-  папку (`workspace\`).
+  папку (`workspace\`) и в папки живых правил проектов (`rules_dir` в `projects.yaml`, подключаются на запись).
 - Структуры: `project_list`, `structure_load_project`, `structure_load_xml`, `structure_load_md83exp`;
   запросы — `structure_list`, `structure_objects`, `structure_object`, `structure_values`,
   `structure_plan_content`, `structure_compare`. После ручной правки XML выгрузки — `force: true`.

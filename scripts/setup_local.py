@@ -3,7 +3,8 @@
 Читает общий `projects.yaml` и личный `projects.local.yaml` и пишет (все три — в git не попадают):
 
 - `docker-compose.override.yml` — папки проектов подключаются к контейнеру только на чтение как
-  `/projects/<проект>`, переменные `KD2_PROJECT_DIRS` и `KD2_PATH_MAP` (перевод путей агента);
+  `/projects/<проект>`, папки живых правил (`rules_dir`) — на запись как `/rules/<проект>`,
+  переменные `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS` и `KD2_PATH_MAP` (перевод путей агента);
 - `.mcp.json` (Claude Code) и `.cursor/mcp.json` (Cursor) — наш сервер, общие серверы 1С и серверы
   поиска по коду каждого проекта с префиксом `<проект>-` и серверы данных песочниц (с
   Basic-авторизацией логином базы, если он есть); адреса берутся из `.mcp.json` проектов.
@@ -25,6 +26,7 @@ from kd2_rules_mcp.projects import (
     load_catalog,
     load_local,
     project_mcp_servers,
+    project_rules_dirs,
     resolve,
 )
 
@@ -45,6 +47,14 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
         volumes.append(f"{_posix(folder)}:{target}:ro")
         dirs.append(f"{project_id}={target}")
         path_map.append(f"{folder}={target}")
+    rules: list[str] = []
+    for project_id, folder in existing_rules_dirs(catalog, local).items():
+        # Единственное место проекта на запись; путь агента длиннее папки проекта, поэтому
+        # PathMap переводит файлы внутри неё сюда, а не в /projects (там только чтение).
+        target = f"/rules/{project_id}"
+        volumes.append(f"{_posix(folder)}:{target}")
+        rules.append(f"{project_id}={target}")
+        path_map.append(f"{folder}={target}")
     workspace = local.workspace or ROOT / "workspace"
     path_map.append(f"{workspace}=/data/workspace")
     path_map.append(f"{ROOT / 'structures'}=/structures")
@@ -53,6 +63,7 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
     service: dict[str, Any] = {
         "environment": {
             "KD2_PROJECT_DIRS": ";".join(dirs),
+            "KD2_RULES_DIRS": ";".join(rules),
             "KD2_PATH_MAP": ";".join(path_map),
         }
     }
@@ -62,6 +73,22 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
         {"services": {SERVER: service}}, allow_unicode=True, sort_keys=False, width=1000
     )
     return HEADER + body
+
+
+def existing_rules_dirs(catalog: Catalog, local: LocalSettings) -> dict[str, Path]:
+    """Папки живых правил, которые есть на диске; нет папки — Docker создал бы её сам (root)."""
+    found = project_rules_dirs(catalog, local.project_dirs)
+    return {project_id: folder for project_id, folder in found.items() if folder.is_dir()}
+
+
+def missing_rules_dirs(catalog: Catalog, local: LocalSettings) -> list[str]:
+    """Предупреждения о `rules_dir`, которых нет на диске."""
+    found = project_rules_dirs(catalog, local.project_dirs)
+    return [
+        f"{project_id}: нет папки правил {folder} — создайте её и повторите (запись не подключена)"
+        for project_id, folder in found.items()
+        if not folder.is_dir()
+    ]
 
 
 def mcp_servers(
@@ -119,12 +146,16 @@ def main() -> None:
         compose_override(catalog, local).encode("utf-8")
     )
     servers, warnings = mcp_servers(catalog, local)
+    warnings += missing_rules_dirs(catalog, local)
     claude = {"mcpServers": {name: {"type": "http", **entry} for name, entry in servers.items()}}
     cursor = {"mcpServers": servers}
     _write_json(ROOT / ".mcp.json", claude)
     _write_json(ROOT / ".cursor" / "mcp.json", cursor)
 
     print(f"Проекты: {', '.join(local.project_dirs) or 'нет'}")
+    writable = existing_rules_dirs(catalog, local)
+    if writable:
+        print("Папки правил на запись: " + ", ".join(f"{p} → {f}" for p, f in writable.items()))
     print(f"Серверы агентов: {len(servers)} ({local.server_url} — {SERVER})")
     for warning in warnings:
         print(f"Предупреждение: {warning}")

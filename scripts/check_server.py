@@ -49,6 +49,10 @@ async def check(url: str) -> int:
                 f"  {project['project']}: папка НЕ видна — проверьте projects.local.yaml, "
                 "setup_local.py, docker compose up -d"
             )
+        rules = project.get("rules_dir")
+        if rules:
+            state = "запись есть" if rules.get("writable") else "НЕ подключена на запись"
+            print(f"    папка правил {rules.get('path')}: {state}")
     return 1 if hidden == len(projects) else 0
 
 

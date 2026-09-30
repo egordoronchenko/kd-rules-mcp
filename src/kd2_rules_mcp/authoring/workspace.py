@@ -6,6 +6,7 @@
 
 import os
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -68,15 +69,22 @@ class RulesWorkspace:
         known = ", ".join(self._projects) or "нет открытых проектов"
         raise ProjectNotFoundError(f"Рабочего проекта «{project_id}» нет ({known})")
 
-    def save(self, project_id: str, path: Path | str, *, overwrite: bool = False) -> Path:
-        """Пишет XML проекта внутрь рабочей папки и запоминает путь сохранения.
+    def save(
+        self,
+        project_id: str,
+        path: Path | str,
+        *,
+        overwrite: bool = False,
+        allowed: Sequence[Path] = (),
+    ) -> Path:
+        """Пишет XML проекта внутрь рабочей папки (или разрешённой папки) и запоминает путь.
 
         Путь относительный к корню или абсолютный. После `resolve` (включая `..` и симлинки)
-        файл должен лежать внутри корня, иначе `WorkspacePathError`. Существующий файл
-        заменяется только при `overwrite=True`.
+        файл должен лежать внутри корня или одной из `allowed` (папки живых правил проектов),
+        иначе `WorkspacePathError`. Существующий файл заменяется только при `overwrite=True`.
         """
         project = self.get(project_id)
-        destination = self._destination(path)
+        destination = self._destination(path, allowed)
         if destination.is_file() and not overwrite:
             raise Kd2Error(
                 f"Файл «{destination}» уже существует; повторная запись только при overwrite=True"
@@ -94,9 +102,9 @@ class RulesWorkspace:
         """Новый проект из документа, собранного сервером (правила регистрации, черновик)."""
         return self._remember(document, None)
 
-    def resolve(self, path: Path | str) -> Path:
-        """Проверенный путь внутри рабочей папки; вне её — `WorkspacePathError`."""
-        return self._destination(path)
+    def resolve(self, path: Path | str, allowed: Sequence[Path] = ()) -> Path:
+        """Проверенный путь внутри рабочей папки или `allowed`; вне их — `WorkspacePathError`."""
+        return self._destination(path, allowed)
 
     def _remember(self, document: RulesDocument, source_path: Path | None) -> RulesProject:
         self._next_id += 1
@@ -104,16 +112,17 @@ class RulesWorkspace:
         self._projects[project.id] = project
         return project
 
-    def _destination(self, path: Path | str) -> Path:
-        root = self.root.resolve()
+    def _destination(self, path: Path | str, allowed: Sequence[Path] = ()) -> Path:
+        roots = [self.root.resolve(), *(Path(folder).resolve() for folder in allowed)]
         candidate = Path(path)
         if not candidate.is_absolute():
             candidate = self.root / candidate
         resolved = candidate.resolve()
-        if not _is_inside(resolved, root):
+        if not any(_is_inside(resolved, root) for root in roots):
             raise WorkspacePathError(
-                f"Сохранение «{resolved}» отклонено: путь вне рабочей папки. "
-                f"Разрешённый каталог: {root}"
+                f"Сохранение «{resolved}» отклонено: путь вне рабочей папки"
+                f"{' и папок правил проектов' if allowed else ''}. "
+                f"Разрешено: {', '.join(str(root) for root in roots)}"
             )
         return resolved
 

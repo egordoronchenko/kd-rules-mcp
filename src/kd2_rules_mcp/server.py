@@ -57,8 +57,9 @@ INSTRUCTIONS = """Сервер правил обмена «Конвертаци�
 structure_load_xml / structure_load_md83exp по путям) →
 открыть правила (rules_open) или создать пустые (rules_create) → смотреть кандидатов (match_*) и
 править (rule_*, pko_create_from_candidates) → проверить (rules_validate, handlers_export для
-синтакс-чекера) → сохранить в рабочую папку (rules_save). Правила регистрации — registration_build,
-черновик обратного направления — correspondent_draft. Смысловые решения принимает агент.
+синтакс-чекера) → сохранить в рабочую папку или rules_dir проекта (rules_save). Правила
+регистрации — registration_build, черновик обратного направления — correspondent_draft.
+Смысловые решения принимает агент.
 Списки постраничные (offset, limit ≤ 200, has_more). Ошибки — JSON с полем code."""
 
 StructureId = Annotated[
@@ -120,6 +121,7 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
         payload["suggestions"] = error.suggestions
     if isinstance(error, WorkspacePathError) and service is not None:
         payload["workspace"] = service.settings.path_map.to_host(service.workspace.root.resolve())
+        payload["writable"] = service.writable_dirs()
     return payload
 
 
@@ -141,7 +143,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         """Проекты 1С из projects.yaml: конфигурации, базы (роль), серверы кода, обмены.
 
         `available` — папка проекта подключена к серверу; `structure_id` — под каким именем
-        `structure_load_project` загружает конфигурацию.
+        `structure_load_project` загружает конфигурацию; `rules_dir` — папка живых правил проекта
+        (`writable` — туда можно сохранять `rules_save`).
         """
         return await call(service.project_list)
 
@@ -405,11 +408,16 @@ def create_server(service: Kd2Service) -> MCPServer:
     async def rules_save(
         project_id: ProjectId,
         path: Annotated[
-            str, Field(description="Путь в рабочей папке сервера (относительный или абсолютный)")
+            str,
+            Field(
+                description="Путь в рабочей папке (относительный — от неё) или в папке живых "
+                "правил проекта (rules_dir из project_list, абсолютный путь)"
+            ),
         ],
         overwrite: Annotated[bool, Field(description="Заменить существующий файл")] = False,
     ) -> dict[str, Any]:
-        """Сохраняет XML только в рабочую папку; ответ — путь, размер, итог проверки формата."""
+        """Сохраняет XML в рабочую папку или в `rules_dir` проекта; ответ — путь, размер, итог
+        проверки формата. Другие пути — `path_outside_workspace` со списком `writable`."""
         return await call(service.rules_save, project_id, path, overwrite)
 
     # --- Правки ---------------------------------------------------------------------------
@@ -539,7 +547,9 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def handlers_export(
         project_id: ProjectId,
-        folder: Annotated[str, Field(description="Каталог в рабочей папке для .bsl-файлов")],
+        folder: Annotated[
+            str, Field(description="Каталог для .bsl-файлов в рабочей папке или rules_dir проекта")
+        ],
         limit: Annotated[int, Field(description="Сколько файлов перечислить", ge=1)] = 50,
     ) -> dict[str, Any]:
         """Выносит обработчики и алгоритмы в BSL-обёртки для синтакс-чекера."""

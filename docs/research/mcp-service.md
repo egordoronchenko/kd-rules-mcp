@@ -22,16 +22,19 @@
   число правил по разделам и итог проверки формата, но не XML; тексты обработчиков в `rules_get` обрезаются до
   2000 символов (полный код — через `handlers_export`).
 - Ошибки: `ToolError` с JSON `{"code", "message", …}`. Коды: `structure_not_found` (+ `structures` — загруженные),
-  `object_not_found` (+ `suggestions`), `project_not_found`, `path_outside_workspace` (+ `workspace`),
+  `object_not_found` (+ `suggestions`), `project_not_found`, `path_outside_workspace` (+ `workspace`, `writable`),
   `unknown_field`, `duplicate_rule`, `rule_not_found`, `dangling_reference`, `edit_rejected`, `rules_format`,
   `structure_format`, `rejected`, `invalid_argument`. SDK добавляет перед текстом «Error executing tool <имя>: ».
 - Пути: агент передаёт пути своей машины; `KD2_PATH_MAP` (`путь_агента=локальный;…`, длинный префикс первым,
   регистр не важен) переводит их в пути контейнера и обратно в ответах. Запись — только в рабочую папку
-  (`KD2_WORKSPACE`): путь внутри исходников проекта отклоняется с кодом `path_outside_workspace`.
+  (`KD2_WORKSPACE`) и папки живых правил проектов (`KD2_RULES_DIRS`: `проект=путь;…`; без переменной —
+  `rules_dir` проектов от их папок): другой путь внутри исходников проекта отклоняется с кодом
+  `path_outside_workspace` (+ `writable` — куда можно, путями агента). Проверка — после `resolve` (`..`,
+  ссылки), относительный путь — от рабочей папки.
 - Вызовы идут в рабочем потоке (`anyio.to_thread`): загрузка большой структуры не останавливает сервер; правки
   проектов сериализованы блокировкой.
 - Настройки: `KD2_HOST` (по умолчанию 127.0.0.1), `KD2_PORT` (8060), `KD2_CACHE_DIR` (`cache`), `KD2_WORKSPACE`
-  (`workspace`), `KD2_PATH_MAP`.
+  (`workspace`), `KD2_PATH_MAP`, `KD2_RULES_DIRS`.
 
 Проверено также настоящим HTTP: `kd2-rules-mcp` на порту 8061, клиент по URL получил 27 инструментов и ответ
 `structure_list`.
@@ -88,7 +91,8 @@
   (любые диски), `server_url`, необязательно `workspace`, `onec_platform` (путь к `1cv8.exe`) и `logins` (`<проект>.<база>: {user,
   password}` — пользователь 1С для баз с авторизацией; пароль только в личном файле).
 - `scripts/setup_local.py` пишет `docker-compose.override.yml` (папки проектов `:ro` как `/projects/<проект>`,
-  `KD2_PROJECT_DIRS`, `KD2_PATH_MAP`), `.mcp.json` и `.cursor/mcp.json` (наш сервер, общие серверы, серверы кода
+  существующие `rules_dir` — на запись как `/rules/<проект>`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`,
+  `KD2_PATH_MAP`), `.mcp.json` и `.cursor/mcp.json` (наш сервер, общие серверы, серверы кода
   проектов с префиксом `<проект>-`). В базовом `docker-compose.yml` путей машины нет.
 - Инструменты `project_list` и `structure_load_project(project, configuration="full")` — структура
   `<проект>-<конфигурация>` без путей и списка расширений; ошибки профилей — код `project_config`.

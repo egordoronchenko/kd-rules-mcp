@@ -44,7 +44,14 @@ from kd2_rules_mcp.authoring.registration import (
 from kd2_rules_mcp.authoring.workspace import RulesProject, RulesWorkspace
 from kd2_rules_mcp.errors import Kd2Error, StructureNotFoundError, WorkspacePathError
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument
-from kd2_rules_mcp.projects import Catalog, load_catalog, load_local, parse_project_dirs, resolve
+from kd2_rules_mcp.projects import (
+    Catalog,
+    load_catalog,
+    load_local,
+    parse_project_dirs,
+    project_rules_dirs,
+    resolve,
+)
 from kd2_rules_mcp.structures.queries import (
     MAX_LIMIT,
     NotFound,
@@ -162,14 +169,17 @@ class Settings:
     # Общий файл проектов и папки проектов на этой машине (или в контейнере).
     projects_file: Path = Path("projects.yaml")
     project_dirs: dict[str, Path] = field(default_factory=dict)
+    # Папки живых правил проектов (`rules_dir`), доступные на запись; пусто — из projects.yaml.
+    rules_dirs: dict[str, Path] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         """`KD2_CACHE_DIR`, `KD2_WORKSPACE`, `KD2_PATH_MAP`, `KD2_HOST`, `KD2_PORT`,
-        `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`.
+        `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`.
 
         Без `KD2_PROJECT_DIRS` папки проектов берутся из `projects.local.yaml` рядом с
-        `projects.yaml` (локальный запуск без Docker).
+        `projects.yaml` (локальный запуск без Docker); без `KD2_RULES_DIRS` папки живых правил —
+        `rules_dir` проектов от этих папок.
         """
         source = os.environ if env is None else env
         projects_file = Path(source.get("KD2_PROJECTS_FILE", "projects.yaml"))
@@ -187,6 +197,7 @@ class Settings:
             port=int(source.get("KD2_PORT", "8060")),
             projects_file=projects_file,
             project_dirs=dirs,
+            rules_dirs=parse_project_dirs(source.get("KD2_RULES_DIRS", ""), "KD2_RULES_DIRS"),
         )
 
 
@@ -223,9 +234,11 @@ class Kd2Service:
 
     def project_list(self) -> dict[str, Any]:
         catalog = self._catalog()
+        writable = self.rules_dirs()
         projects = []
         for project in catalog.projects.values():
             folder = self.settings.project_dirs.get(project.id)
+            rules_dir = writable.get(project.id)
             projects.append(
                 {
                     "project": project.id,
@@ -252,6 +265,16 @@ class Kd2Service:
                         for base in project.bases.values()
                     },
                     "code_mcp": list(project.code_mcp),
+                    **(
+                        {
+                            "rules_dir": {
+                                "path": self._host(rules_dir) if rules_dir else project.rules_dir,
+                                "writable": rules_dir is not None and rules_dir.is_dir(),
+                            }
+                        }
+                        if project.rules_dir
+                        else {}
+                    ),
                 }
             )
         exchanges = [
@@ -443,7 +466,12 @@ class Kd2Service:
     def rules_save(self, project_id: str, path: str, overwrite: bool) -> dict[str, Any]:
         with self._lock:
             project = self.workspace.get(project_id)
-            saved = self.workspace.save(project_id, self._write_path(path), overwrite=overwrite)
+            saved = self.workspace.save(
+                project_id,
+                self._write_path(path),
+                overwrite=overwrite,
+                allowed=list(self.rules_dirs().values()),
+            )
             report = check_format(project.document)
             return {
                 "project_id": project_id,
@@ -531,7 +559,9 @@ class Kd2Service:
     def handlers_export(self, project_id: str, folder: str, limit: int) -> dict[str, Any]:
         with self._lock:
             rules = self._exchange(project_id)
-            out_dir = self.workspace.resolve(self._write_path(folder))
+            out_dir = self.workspace.resolve(
+                self._write_path(folder), list(self.rules_dirs().values())
+            )
             export = export_handlers(rules, out_dir)
             self._exports[project_id] = export
         limit = _limit(limit)
@@ -633,6 +663,20 @@ class Kd2Service:
     def _catalog(self) -> Catalog:
         return load_catalog(self.settings.projects_file)
 
+    def rules_dirs(self) -> dict[str, Path]:
+        """Папки живых правил проектов на сервере (запись разрешена): `KD2_RULES_DIRS` или
+        `rules_dir` проектов от их папок; нет файла проектов — пусто."""
+        if self.settings.rules_dirs:
+            return self.settings.rules_dirs
+        if not self.settings.projects_file.is_file():
+            return {}
+        return project_rules_dirs(self._catalog(), self.settings.project_dirs)
+
+    def writable_dirs(self) -> list[str]:
+        """Каталоги, куда сервер пишет, — путями агента (для ответов и ошибок)."""
+        folders = [self.workspace.root, *self.rules_dirs().values()]
+        return [self._host(folder) for folder in folders]
+
     def _exchange(self, project_id: str) -> ExchangeRules:
         document = self.workspace.get(project_id).document
         if not isinstance(document, ExchangeRules):
@@ -695,10 +739,9 @@ class Kd2Service:
             return Path(path)
         local = self._local(path)
         if local is None:
-            workspace = self.settings.path_map.to_host(self.workspace.root.resolve())
             raise WorkspacePathError(
-                f"Сохранение «{path}» отклонено: путь вне рабочей папки. "
-                f"Разрешённый каталог: {workspace}"
+                f"Сохранение «{path}» отклонено: путь вне рабочей папки и папок правил проектов. "
+                f"Разрешено: {', '.join(self.writable_dirs())}"
             )
         return local
 
