@@ -29,6 +29,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.projects import base_login, load_catalog, load_local, with_login
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,6 +104,7 @@ def connection_for(project_id: str, base_id: str) -> str:
 
 
 def main() -> None:
+    utf8_stdout()
     parser = argparse.ArgumentParser(description="Проверка правил штатной загрузкой БСП")
     parser.add_argument("rules", type=Path, nargs="?", help="ПравилаОбмена (текущая программа)")
     parser.add_argument("correspondent", type=Path, nargs="?", help="ПравилаОбмена корреспондента")

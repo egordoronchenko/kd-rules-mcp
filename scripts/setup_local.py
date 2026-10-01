@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.projects import (
     Catalog,
     LocalSettings,
@@ -123,6 +124,7 @@ def mcp_servers(
 
 
 def main() -> None:
+    utf8_stdout()
     if not (ROOT / "projects.yaml").is_file():
         # Без файла Docker смонтировал бы на его место пустой каталог.
         raise SystemExit(

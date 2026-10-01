@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.projects import data_endpoint, load_catalog, load_local
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -358,6 +359,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main() -> None:
+    utf8_stdout()
     args = parse_args()
     ok = False
     lines: list[str] = []

@@ -26,6 +26,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.projects import DEFAULT_SERVER_URL, load_local
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -247,6 +248,7 @@ def _relink(source: Path, target: str) -> str:
 
 
 def main() -> None:
+    utf8_stdout()
     parser = argparse.ArgumentParser(description="Упаковки знаний агента kd2-rules-mcp")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="копии справочников актуальны")

@@ -58,6 +58,9 @@
 - `docs/research/mcp-service.md`: 30 инструментов вместо 27 и ссылка на `docs/tools.md`. <!-- fbe77d7 -->
 - `docs/INSTALL.md` и `kd2-install`: число инструментов в проверке установки больше не зашито — ссылка на
   `docs/tools.md`.
+- Скиллы `kd2-rules-build` и `kd2-exchange-pitfalls`, `docs/rules/mcp-1c.md`, `docs/checks.md` уточнены по итогам
+  испытания на реальной задаче: образец обработчика поиска с `ЭтоГруппа`, видом лица и обязательной `Иначе`,
+  шум синтакс-чекера, тестовые данные `exchange_check`, короткий путь без правил набора.
 
 ### Исправлено
 
@@ -75,6 +78,8 @@
   `shared_mcp` и `folder` проекта.
 - `load_local` без `server_url` давал вместо адреса текст дескриптора слота (константа `DEFAULT_SERVER_URL`).
 - `dump_tools.py --write` пересобирает копию `docs/tools.md` в скилле, `--check` проверяет и её.
+- Скрипты `scripts/` и `kdbase/` переключают вывод в UTF-8 с заменой непечатаемого
+  (`kd2_rules_mcp.console.utf8_stdout`) и не падают на консоли cp1251.
 
 ### Удалено
 

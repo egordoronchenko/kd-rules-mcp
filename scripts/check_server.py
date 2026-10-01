@@ -14,6 +14,7 @@ from typing import Any
 from mcp import Client
 from mcp.types import ListToolsResult
 
+from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.projects import LocalSettings, load_local
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,7 @@ def _payload(result: Any) -> Any:
 
 
 def main() -> None:
+    utf8_stdout()
     url = server_url()
     try:
         code = asyncio.run(check(url))

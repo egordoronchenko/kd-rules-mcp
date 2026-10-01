@@ -32,6 +32,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.projects import load_local
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -229,6 +230,7 @@ def _wait_exit(pid: int | None) -> None:
 
 
 def main() -> None:
+    utf8_stdout()
     parser = argparse.ArgumentParser(description="Сверка правил обмена через базу КД")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare", help="подготовить рабочую базу base\\")

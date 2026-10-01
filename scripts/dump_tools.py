@@ -23,6 +23,7 @@ import anyio
 import build_packs
 from mcp import Client
 
+from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.server import ERROR_CODES, create_server, error_payload
 from kd2_rules_mcp.service import Kd2Service, Settings
 
@@ -174,6 +175,7 @@ def split_doc(text: str) -> tuple[str, str, str]:
 
 
 def main() -> None:
+    utf8_stdout()
     parser = argparse.ArgumentParser(description="Справочник инструментов MCP для docs/tools.md")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(

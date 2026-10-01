@@ -18,8 +18,9 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
+
+from kd2_rules_mcp.console import utf8_stdout
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "publish"
@@ -27,14 +28,13 @@ BINARY = {".epf", ".erf", ".cf", ".cfe", ".dt", ".1cd", ".bin", ".png", ".jpg", 
 
 
 def main() -> None:
+    utf8_stdout()
     parser = argparse.ArgumentParser(description="Сборка и публикация открытого репозитория")
     parser.add_argument("-m", "--message", required=True, help="сообщение коммита открытой копии")
     parser.add_argument("--target", type=Path, help="каталог открытой копии (git-репозиторий)")
     parser.add_argument("--push", action="store_true", help="после коммита отправить в origin")
     parser.add_argument("--no-checks", action="store_true", help="не запускать ruff/pyright/pytest")
     args = parser.parse_args()
-    # Вывод проверок содержит русский текст и символы замены: консоль cp1251 на них падала.
-    sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
 
     if not CONFIG.is_dir():
         raise SystemExit("Нет каталога publish/: публикация делается из рабочего репозитория")
