@@ -112,8 +112,9 @@ uv run python scripts/check_server.py
   в Cursor — включить сервер в настройках MCP.
 - **В папке другого проекта** (спросить, нужно ли): добавить в `.mcp.json` проекта в `mcpServers`
   `"kd2-rules-mcp": {"type": "http", "url": "<server_url из projects.local.yaml>"}`, в `.cursor/mcp.json` — то
-  же без `"type"`; не затирать существующие серверы. Скопировать скиллы `kd2-rules-build` и
-  `kd2-exchange-pitfalls` в `.claude/skills/` (и `.cursor/skills/`) проекта — это правка чужого репозитория,
+  же без `"type"`; не затирать существующие серверы. Скопировать скиллы `kd2-rules-build` (папкой целиком,
+  со справочниками `references/`) и `kd2-exchange-pitfalls` в `.claude/skills/` (и `.cursor/skills/`) проекта —
+  это правка чужого репозитория,
   спросить. Проект должен быть в `projects.local.yaml` (шаги 4–5).
 
 Итоговая проверка — вызвать инструменты сервера: `project_list`, затем `structure_load_project` для одного проекта.

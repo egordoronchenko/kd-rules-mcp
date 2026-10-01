@@ -132,8 +132,9 @@ uv run python scripts/check_server.py
 { "mcpServers": { "kd2-rules-mcp": { "type": "http", "url": "http://localhost:8060/mcp" } } }
 ```
 
-(для Cursor — то же без `"type"` в `.cursor/mcp.json`) и скопируйте туда скиллы `kd2-rules-build` и
-`kd2-exchange-pitfalls` из `.claude/skills/`. Папка проекта должна быть в `projects.local.yaml` (шаг 4–5):
+(для Cursor — то же без `"type"` в `.cursor/mcp.json`) и скопируйте туда скиллы `kd2-rules-build` (папкой
+целиком, со справочниками `references/`) и `kd2-exchange-pitfalls` из `.claude/skills/`. Папка проекта должна
+быть в `projects.local.yaml` (шаг 4–5):
 сервер видит только подключённые папки и пишет результат только в `workspace\` этого репозитория.
 
 **Первая задача — проверка всей цепочки.** Попросите агента:
