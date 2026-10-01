@@ -468,7 +468,7 @@ class Kd2Service:
             project = self.workspace.get(project_id)
             saved = self.workspace.save(
                 project_id,
-                self._write_path(path),
+                self._writable(path),
                 overwrite=overwrite,
                 allowed=list(self.rules_dirs().values()),
             )
@@ -559,9 +559,7 @@ class Kd2Service:
     def handlers_export(self, project_id: str, folder: str, limit: int) -> dict[str, Any]:
         with self._lock:
             rules = self._exchange(project_id)
-            out_dir = self.workspace.resolve(
-                self._write_path(folder), list(self.rules_dirs().values())
-            )
+            out_dir = self._writable(folder)
             export = export_handlers(rules, out_dir)
             self._exports[project_id] = export
         limit = _limit(limit)
@@ -744,6 +742,17 @@ class Kd2Service:
                 f"Разрешено: {', '.join(self.writable_dirs())}"
             )
         return local
+
+    def _writable(self, path: str) -> Path:
+        """Путь записи на сервере — в рабочей папке или `rules_dir` проекта; иначе ошибка с
+        разрешёнными каталогами путями агента (пути контейнера агенту ничего не скажут)."""
+        try:
+            return self.workspace.resolve(self._write_path(path), list(self.rules_dirs().values()))
+        except WorkspacePathError as error:
+            raise WorkspacePathError(
+                f"Сохранение «{path}» отклонено: путь вне рабочей папки и папок правил проектов. "
+                f"Разрешено: {', '.join(self.writable_dirs())}"
+            ) from error
 
     def _local(self, path: str) -> Path | None:
         r"""Локальный путь сервера; абсолютный путь агента, который не удалось перевести на этой ОС

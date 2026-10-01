@@ -116,6 +116,9 @@ async def test_container_paths_rules_dir_writable_project_read_only(tmp_path: Pa
     assert exported["folder"] == rf"{host}\Проект\ПравилаОбмена\handlers"
     assert rejected["code"] == "path_outside_workspace"
     assert rejected["writable"] == [r"D:\Work\КД\workspace", rf"{host}\Проект\ПравилаОбмена"]
+    # В тексте — пути агента, а не пути сервера (в контейнере агенту они ничего не скажут).
+    assert rf"{host}\Проект\x.xml" in rejected["message"]
+    assert str(rules) not in rejected["message"] and str(mounted) not in rejected["message"]
     assert not (mounted / "Проект" / "x.xml").exists()
 
 
