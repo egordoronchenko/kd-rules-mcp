@@ -12,10 +12,12 @@
 import os
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
 
+from kd2_rules_mcp.authoring.pack import pack_rules
 from kd2_rules_mcp.kd2.canonical import parse_xml
 from tests.corpus import CORPUS_ENV, CorpusFile, corpus_files
 
@@ -97,6 +99,23 @@ def _bsp_pair() -> tuple[str, str, str, CorpusFile, CorpusFile]:
     if len(found) < 2:
         pytest.skip(f"В корпусе ({CORPUS_ENV}) нет пары макетов плана обмена {plan}")
     return project, base, plan, found["ПравилаОбмена"], found["ПравилаОбменаКорреспондента"]
+
+
+def test_bsp_accepts_packed_archive_and_rejects_wrong_names(tmp_path: Path) -> None:
+    """Архив `rules_pack` (два файла) БСП принимает; архив с чужими именами — нет."""
+    project, base, plan, rules, correspondent = _bsp_pair()
+    files = {"exchange": rules.path, "correspondent": correspondent.path}
+    packed = pack_rules(files, tmp_path / "rules.zip")
+    wrong = tmp_path / "wrong.zip"
+    with zipfile.ZipFile(wrong, "w") as archive:
+        archive.write(rules.path, "Rules.xml")
+        archive.write(correspondent.path, "CorrespondentExchangeRules.xml")
+    common = ["--plan", plan, "--project", project, "--base", base]
+    accepted = _run(str(BSP_SCRIPT), "--archive", str(packed.path), *common)
+    rejected = _run(str(BSP_SCRIPT), "--archive", str(wrong), *common)
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert "ИТОГ OK" in accepted.stdout
+    assert rejected.returncode == 1 and "ИТОГ ОШИБКА" in rejected.stdout
 
 
 def test_bsp_accepts_real_rules_pair() -> None:

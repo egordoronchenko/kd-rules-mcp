@@ -35,6 +35,7 @@ from kd2_rules_mcp.authoring.edits import (
     find_rule,
     update_rule,
 )
+from kd2_rules_mcp.authoring.pack import collect, pack_rules
 from kd2_rules_mcp.authoring.registration import (
     ObjectFilter,
     PlanFilter,
@@ -479,6 +480,46 @@ class Kd2Service:
                 "size_bytes": saved.stat().st_size,
                 "counts": _counts(project.document),
                 "format_check": _report_summary(report),
+            }
+
+    def rules_pack(
+        self,
+        folder: str,
+        exchange_rules: str,
+        correspondent_rules: str,
+        registration_rules: str,
+        path: str,
+        overwrite: bool,
+    ) -> dict[str, Any]:
+        with self._lock:
+            source_dir = self._read_path(folder) if folder else None
+            explicit = {
+                role: self._read_path(value) if value else None
+                for role, value in (
+                    ("exchange", exchange_rules),
+                    ("correspondent", correspondent_rules),
+                    ("registration", registration_rules),
+                )
+            }
+            files = collect(source_dir, explicit)
+            default = source_dir.name if source_dir is not None else files["exchange"].stem
+            result = pack_rules(
+                files, self._writable(path or f"{default}.zip"), overwrite=overwrite
+            )
+            return {
+                "path": self._host(result.path),
+                "size_bytes": result.path.stat().st_size,
+                "load_with": result.form,
+                "files": [
+                    {
+                        "file": item.name,
+                        "path": self._host(item.source),
+                        "size_bytes": item.size_bytes,
+                        "rules": item.summary,
+                    }
+                    for item in result.files
+                ],
+                "warnings": result.warnings,
             }
 
     # --- Правки ----------------------------------------------------------------------------

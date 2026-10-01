@@ -420,6 +420,49 @@ def create_server(service: Kd2Service) -> MCPServer:
         проверки формата. Другие пути — `path_outside_workspace` со списком `writable`."""
         return await call(service.rules_save, project_id, path, overwrite)
 
+    @server.tool()
+    async def rules_pack(
+        folder: Annotated[
+            str,
+            Field(
+                description="Каталог комплекта со стандартными именами файлов (ExchangeRules.xml, "
+                "CorrespondentExchangeRules.xml, RegistrationRules.xml), например папка плана "
+                "обмена в rules_dir проекта"
+            ),
+        ] = "",
+        exchange_rules: Annotated[
+            str, Field(description="ExchangeRules.xml — правила этой программы (вместо папки)")
+        ] = "",
+        correspondent_rules: Annotated[
+            str, Field(description="CorrespondentExchangeRules.xml — правила корреспондента")
+        ] = "",
+        registration_rules: Annotated[
+            str, Field(description="RegistrationRules.xml — правила регистрации (необязательно)")
+        ] = "",
+        path: Annotated[
+            str,
+            Field(
+                description="Куда записать ZIP: рабочая папка (относительный путь) или rules_dir; "
+                "по умолчанию <папка>.zip в рабочей папке"
+            ),
+        ] = "",
+        overwrite: Annotated[bool, Field(description="Заменить существующий архив")] = False,
+    ) -> dict[str, Any]:
+        """ZIP правил для загрузки в БСП: файлы байт в байт под именами, которые ждёт БСП.
+        Два файла — форма «Правила конвертации объектов», три (с регистрацией) — «Загрузить
+        правила синхронизации»; `load_with` — какая. Каждый файл проверяется по виду;
+        `warnings` — несогласованность частей (корреспондент не зеркален, регистрация — для
+        другой конфигурации)."""
+        return await call(
+            service.rules_pack,
+            folder,
+            exchange_rules,
+            correspondent_rules,
+            registration_rules,
+            path,
+            overwrite,
+        )
+
     # --- Правки ---------------------------------------------------------------------------
 
     @server.tool()

@@ -12,12 +12,18 @@
 |---|---|
 | Структуры | `structure_list`, `structure_load_xml`, `structure_load_md83exp`, `structure_objects`, `structure_object`, `structure_values`, `structure_plan_content`, `structure_compare` |
 | Кандидаты | `match_objects`, `match_properties`, `match_values` |
-| Проекты правил | `rules_open`, `rules_create`, `rules_projects`, `rules_overview`, `rules_list`, `rules_get`, `rules_save` |
+| Проекты правил | `rules_open`, `rules_create`, `rules_projects`, `rules_overview`, `rules_list`, `rules_get`, `rules_save`, `rules_pack` |
 | Правки | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates` |
 | Проверки | `rules_validate`, `handlers_export`, `handlers_locate` |
 | Генерация | `registration_build`, `correspondent_draft` |
 
 - У каждого параметра — описание в схеме (тест проверяет); у сервера — инструкция с порядком работы.
+- `rules_pack` — ZIP для загрузки в БСП из папки комплекта (стандартные имена) или из файлов: два файла —
+  форма «Правила конвертации объектов» (`ЗагрузитьПравила`, ветка `ЭтоАрхив`), три с регистрацией —
+  «Загрузить правила синхронизации» (`ЗагрузитьКомплектПравил`); файлы байт в байт, без каталогов (БСП считает
+  всё, что найдёт в распакованном архиве). Каждый файл проверяется по виду, `warnings` — корреспондент не
+  зеркален или регистрация для другой конфигурации. Запись — как у `rules_save`. Проверка архива в песочнице —
+  `bsp_check.py --archive`.
 - Компактность: списки постраничные (`offset`, `limit` ≤ 200, `has_more`); `rules_save` возвращает путь, размер,
   число правил по разделам и итог проверки формата, но не XML; тексты обработчиков в `rules_get` обрезаются до
   2000 символов (полный код — через `handlers_export`).

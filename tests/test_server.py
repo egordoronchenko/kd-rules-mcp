@@ -63,6 +63,7 @@ EXPECTED_TOOLS = {
     "rules_list",
     "rules_get",
     "rules_save",
+    "rules_pack",
     "rule_create",
     "rule_update",
     "rule_delete",
