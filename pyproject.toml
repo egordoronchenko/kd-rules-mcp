@@ -23,7 +23,7 @@ build-backend = "uv_build"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-# Скиллы — сторонний текст (THIRD_PARTY.md), примеры кода в них не наши.
+# Скиллы — тексты и служебные скрипты для агентов, не код сервера.
 extend-exclude = ["reference", "base", "structures", ".claude/skills", ".cursor/skills"]
 
 [tool.ruff.lint]

@@ -27,6 +27,7 @@ from kd2_rules_mcp.authoring.candidates import Candidate, Side, property_candida
 from kd2_rules_mcp.errors import (
     DanglingReferenceError,
     DuplicateRuleError,
+    ObjectNotFoundError,
     RuleEditError,
     RuleNotFoundError,
     UnknownFieldError,
@@ -215,15 +216,16 @@ def create_pko_with_properties(
         raise RuleEditError("Пустой адрес правила")
     source_row = find_object(source, source_object)
     if isinstance(source_row, NotFound):
-        raise RuleNotFoundError(source_row.message)
+        raise ObjectNotFoundError(source_row.message, source_row.suggestions)
     target_row = find_object(target, target_object)
     if isinstance(target_row, NotFound):
-        raise RuleNotFoundError(target_row.message)
+        raise ObjectNotFoundError(target_row.message, target_row.suggestions)
     if _find_coded(rules, "pko", code) is not None:
         raise DuplicateRuleError(f"ПКО с кодом «{code}» уже есть")
     candidates = property_candidates(source, target, source_object, target_object)
     if isinstance(candidates, NotFound):
-        raise RuleNotFoundError(candidates.message)
+        # Тот же смысл, что у find_object выше: объекта источника или приёмника нет.
+        raise ObjectNotFoundError(candidates.message, candidates.suggestions)
     _reject_identity_mismatch("pko", code, fields)
     # глНаименованиеПКО (ОбщегоНазначения, 113): тип источника, двоеточие, синоним.
     node = Node.new("pko", "Правило")

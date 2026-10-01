@@ -1,7 +1,7 @@
 """Логика инструментов MCP без транспорта (спецификация `mcp-service`).
 
 Каждый публичный метод `Kd2Service` — один инструмент: принимает простые значения, возвращает
-словарь, пригодный для JSON, и бросает `Kd2Error` (или `ObjectNotFoundError`) при отказе.
+словарь, пригодный для JSON, и бросает `Kd2Error` при отказе.
 Ответы компактные: списки — постранично (`offset`, `limit`, `has_more`), XML правил целиком
 не возвращается, тексты обработчиков обрезаются.
 
@@ -43,7 +43,12 @@ from kd2_rules_mcp.authoring.registration import (
     build_registration_rules,
 )
 from kd2_rules_mcp.authoring.workspace import RulesProject, RulesWorkspace
-from kd2_rules_mcp.errors import Kd2Error, StructureNotFoundError, WorkspacePathError
+from kd2_rules_mcp.errors import (
+    Kd2Error,
+    ObjectNotFoundError,
+    StructureNotFoundError,
+    WorkspacePathError,
+)
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument
 from kd2_rules_mcp.projects import (
     Catalog,
@@ -95,14 +100,6 @@ _ROW_FIELDS = (
     "КодПравилаКонвертации",
     "ОбъектМетаданныхИмя",
 )
-
-
-class ObjectNotFoundError(Kd2Error):
-    """Объекта метаданных нет в структуре; `suggestions` — похожие имена."""
-
-    def __init__(self, message: str, suggestions: Sequence[str] = ()) -> None:
-        super().__init__(message)
-        self.suggestions = list(suggestions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,48 +237,49 @@ class Kd2Service:
         for project in catalog.projects.values():
             folder = self.settings.project_dirs.get(project.id)
             rules_dir = writable.get(project.id)
-            projects.append(
-                {
-                    "project": project.id,
-                    "name": project.name,
-                    "available": folder is not None and folder.is_dir(),
-                    "configurations": {
-                        config.id: {
-                            "structure_id": _structure_id(project.id, config.id),
-                            "dump": config.dump,
-                            "extensions": list(config.extensions),
-                        }
-                        for config in project.configurations.values()
-                    },
-                    "bases": {
-                        base.id: {
-                            "role": base.role,
-                            "configuration": base.configuration,
-                            **(
-                                {"data_mcp": f"{project.id}-{base.data_mcp}"}
-                                if base.data_mcp and base.is_sandbox
-                                else {}
-                            ),
-                        }
-                        for base in project.bases.values()
-                    },
-                    "code_mcp": list(project.code_mcp),
-                    **(
-                        {
-                            "rules_dir": {
-                                "path": self._host(rules_dir) if rules_dir else project.rules_dir,
-                                "writable": rules_dir is not None and rules_dir.is_dir(),
-                            }
-                        }
-                        if project.rules_dir
-                        else {}
-                    ),
+            row: dict[str, Any] = {
+                "project": project.id,
+                "name": project.name,
+                "available": folder is not None and folder.is_dir(),
+                "configurations": {
+                    config.id: {
+                        "structure_id": _structure_id(project.id, config.id),
+                        "dump": config.dump,
+                        "extensions": list(config.extensions),
+                    }
+                    for config in project.configurations.values()
+                },
+                "bases": {
+                    base.id: {
+                        "role": base.role,
+                        "configuration": base.configuration,
+                        **(
+                            {"data_mcp": f"{project.id}-{base.data_mcp}"}
+                            if base.data_mcp and base.is_sandbox
+                            else {}
+                        ),
+                    }
+                    for base in project.bases.values()
+                },
+                "code_mcp": [f"{project.id}-{name}" for name in project.code_mcp],
+            }
+            if folder is not None:
+                row["folder"] = self._host(folder)
+            if project.rules_dir:
+                row["rules_dir"] = {
+                    "path": self._host(rules_dir) if rules_dir else project.rules_dir,
+                    "writable": rules_dir is not None and rules_dir.is_dir(),
                 }
-            )
+            projects.append(row)
         exchanges = [
             {"plan": item.plan, "projects": list(item.projects)} for item in catalog.exchanges
         ]
-        return {"projects": projects, "exchanges": exchanges}
+        return {
+            "projects": projects,
+            "exchanges": exchanges,
+            "workspace": self._host(self.workspace.root),
+            "shared_mcp": list(catalog.shared_mcp),
+        }
 
     def structure_load_project(
         self,
@@ -611,6 +609,7 @@ class Kd2Service:
         return {
             "folder": self._host(out_dir),
             "count": len(files),
+            "removed": len(export.removed),
             "files": files[:limit],
             "has_more": len(files) > limit,
         }

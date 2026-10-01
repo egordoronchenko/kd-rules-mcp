@@ -6,11 +6,13 @@
 
 Код: `src/kd2_rules_mcp/service.py` (логика инструментов, `PathMap`, `Settings`), `src/kd2_rules_mcp/server.py`
 (регистрация в `MCPServer` из SDK `mcp` 2.2, коды ошибок, запуск), точка входа `kd2-rules-mcp`. Тесты:
-`tests/test_server.py` — клиент MCP в том же процессе вызывает каждый из 27 инструментов.
+`tests/test_server.py` — клиент MCP в том же процессе вызывает каждый из 30 инструментов (на 27.09.2026 их было 27;
+`project_list`, `structure_load_project` и `rules_pack` добавлены позже). Полный справочник с параметрами, ответами
+и кодами ошибок — [`docs/tools.md`](../tools.md), генерируется из сервера (`scripts/dump_tools.py`).
 
 | Группа | Инструменты |
 |---|---|
-| Структуры | `structure_list`, `structure_load_xml`, `structure_load_md83exp`, `structure_objects`, `structure_object`, `structure_values`, `structure_plan_content`, `structure_compare` |
+| Проекты и структуры | `project_list`, `structure_load_project`, `structure_list`, `structure_load_xml`, `structure_load_md83exp`, `structure_objects`, `structure_object`, `structure_values`, `structure_plan_content`, `structure_compare` |
 | Кандидаты | `match_objects`, `match_properties`, `match_values` |
 | Проекты правил | `rules_open`, `rules_create`, `rules_projects`, `rules_overview`, `rules_list`, `rules_get`, `rules_save`, `rules_pack` |
 | Правки | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates` |
@@ -30,7 +32,7 @@
 - Ошибки: `ToolError` с JSON `{"code", "message", …}`. Коды: `structure_not_found` (+ `structures` — загруженные),
   `object_not_found` (+ `suggestions`), `project_not_found`, `path_outside_workspace` (+ `workspace`, `writable`),
   `unknown_field`, `duplicate_rule`, `rule_not_found`, `dangling_reference`, `edit_rejected`, `rules_format`,
-  `structure_format`, `rejected`, `invalid_argument`. SDK добавляет перед текстом «Error executing tool <имя>: ».
+  `structure_format`, `project_config`, `rejected`, `invalid_argument`. SDK добавляет перед текстом «Error executing tool <имя>: ».
 - Пути: агент передаёт пути своей машины; `KD2_PATH_MAP` (`путь_агента=локальный;…`, длинный префикс первым,
   регистр не важен) переводит их в пути контейнера и обратно в ответах. Запись — только в рабочую папку
   (`KD2_WORKSPACE`) и папки живых правил проектов (`KD2_RULES_DIRS`: `проект=путь;…`; без переменной —
@@ -40,7 +42,8 @@
 - Вызовы идут в рабочем потоке (`anyio.to_thread`): загрузка большой структуры не останавливает сервер; правки
   проектов сериализованы блокировкой.
 - Настройки: `KD2_HOST` (по умолчанию 127.0.0.1), `KD2_PORT` (8060), `KD2_CACHE_DIR` (`cache`), `KD2_WORKSPACE`
-  (`workspace`), `KD2_PATH_MAP`, `KD2_RULES_DIRS`.
+  (`workspace`), `KD2_PATH_MAP`, `KD2_RULES_DIRS`, `KD2_LOG_LEVEL` (с 01.10.2026: уровень лога, по умолчанию
+  `INFO`; строка на вызов инструмента, трассировки непредвиденных исключений).
 
 Проверено также настоящим HTTP: `kd2-rules-mcp` на порту 8061, клиент по URL получил 27 инструментов и ответ
 `structure_list`.

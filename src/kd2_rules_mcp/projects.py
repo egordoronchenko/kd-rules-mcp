@@ -22,6 +22,7 @@ from kd2_rules_mcp.errors import Kd2Error
 SANDBOX = "песочница"
 PRODUCTION = "боевая"
 ROLES = (SANDBOX, PRODUCTION)
+DEFAULT_SERVER_URL = "http://localhost:8060/mcp"
 
 
 class ProjectConfigError(Kd2Error):
@@ -124,7 +125,7 @@ class LocalSettings:
     """Личные настройки машины."""
 
     project_dirs: dict[str, Path] = field(default_factory=dict)
-    server_url: str = "http://localhost:8060/mcp"
+    server_url: str = DEFAULT_SERVER_URL
     workspace: Path | None = None
     # Платформа 1С (`1cv8.exe`) для проверки через базу КД; не задана — последняя установленная.
     onec_platform: Path | None = None
@@ -263,7 +264,7 @@ def load_local(path: Path) -> LocalSettings:
         logins[str(key)] = (user, str(body.get("password") or ""))
     return LocalSettings(
         project_dirs=dirs,
-        server_url=str(data.get("server_url") or LocalSettings.server_url),
+        server_url=str(data.get("server_url") or DEFAULT_SERVER_URL),
         workspace=Path(str(workspace)) if workspace else None,
         onec_platform=Path(str(platform)) if platform else None,
         logins=logins,

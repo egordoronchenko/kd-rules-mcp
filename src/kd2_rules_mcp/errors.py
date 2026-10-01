@@ -1,5 +1,7 @@
 """Типизированные ошибки сервера (сообщения — на русском)."""
 
+from collections.abc import Sequence
+
 
 class Kd2Error(Exception):
     """Базовая ошибка сервера правил КД 2."""
@@ -17,8 +19,16 @@ class StructureNotFoundError(Kd2Error):
     """Структуры с таким идентификатором нет в кэше."""
 
 
+class ObjectNotFoundError(Kd2Error):
+    """Объекта метаданных нет в структуре; `suggestions` — похожие имена."""
+
+    def __init__(self, message: str, suggestions: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.suggestions = list(suggestions)
+
+
 class WorkspacePathError(Kd2Error):
-    """Путь сохранения лежит вне рабочей папки."""
+    """Путь записи лежит вне рабочей папки и папок живых правил проектов (rules_dir)."""
 
 
 class ProjectNotFoundError(Kd2Error):

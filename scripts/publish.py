@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,8 @@ def main() -> None:
     parser.add_argument("--push", action="store_true", help="после коммита отправить в origin")
     parser.add_argument("--no-checks", action="store_true", help="не запускать ruff/pyright/pytest")
     args = parser.parse_args()
+    # Вывод проверок содержит русский текст и символы замены: консоль cp1251 на них падала.
+    sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
 
     if not CONFIG.is_dir():
         raise SystemExit("Нет каталога publish/: публикация делается из рабочего репозитория")
@@ -99,11 +102,20 @@ def _sync(files: list[str], target: Path) -> None:
     for path in _git(target, "-c", "core.quotePath=false", "ls-files").splitlines():
         if path not in wanted:
             (target / path).unlink(missing_ok=True)
+            _remove_empty_parents(target, (target / path).parent)
     for path in files:
         source, destination = ROOT / path, target / path
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.is_file() or destination.read_bytes() != source.read_bytes():
             shutil.copyfile(source, destination)
+
+
+def _remove_empty_parents(target: Path, folder: Path) -> None:
+    """Удаляет опустевшие каталоги до корня копии: пустая папка `.cursor/skills/kd2-*` — тоже копия
+    скилла для теста `test_skills.py`."""
+    while folder != target and folder.is_dir() and not any(folder.iterdir()):
+        folder.rmdir()
+        folder = folder.parent
 
 
 def _forbidden_hits(target: Path, files: list[str]) -> list[str]:

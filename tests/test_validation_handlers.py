@@ -283,6 +283,50 @@ def test_wrappers_cover_every_kind(tmp_path: Path) -> None:
         assert body == _model_text(rules, item.address, item.event).splitlines()
 
 
+def test_repeat_export_removes_cleared_handler(tmp_path: Path) -> None:
+    """Обработчик, очищенный в правилах, не остаётся файлом; соседний файл на месте."""
+    rules = load_exchange_rules(rules_xml())
+    first = export_handlers(rules, tmp_path)
+    kept = file_of(first, rule_address(rules.root), "ПередВыгрузкойДанных")
+    algorithm = next(item for item in rules.algorithms() if item.code == "Сложить")
+    dropped = file_of(first, rule_address(algorithm), ALGORITHM_EVENT)
+    algorithm.values["Текст"] = ""
+    again = export_handlers(rules, tmp_path)
+    assert not dropped.path.exists()
+    assert kept.path.is_file()
+    assert again.removed == (dropped.name,)
+
+
+def test_export_leaves_foreign_files(tmp_path: Path) -> None:
+    """Чужой .bsl, текст не .bsl и обёртка в подпапке после выгрузки не меняются."""
+    foreign = tmp_path / "чужой.bsl"
+    foreign.write_text("Это не обёртка", encoding="utf-8")
+    notes = tmp_path / "заметки.txt"
+    notes.write_text("заметка", encoding="utf-8")
+    nested = tmp_path / "вложенная"
+    nested.mkdir()
+    nested_bsl = nested / "старый.bsl"
+    nested_bsl.write_bytes(("\r\n".join(MODULE_VARIABLES) + "\r\n").encode("utf-8-sig"))
+    before = {
+        foreign: foreign.read_bytes(),
+        notes: notes.read_bytes(),
+        nested_bsl: nested_bsl.read_bytes(),
+    }
+    export_handlers(load_exchange_rules(rules_xml()), tmp_path)
+    for path, payload in before.items():
+        assert path.read_bytes() == payload
+
+
+def test_repeat_export_without_changes_removes_nothing(tmp_path: Path) -> None:
+    rules = load_exchange_rules(rules_xml())
+    first = export_handlers(rules, tmp_path)
+    names = {item.path.name for item in first.files}
+    again = export_handlers(rules, tmp_path)
+    assert again.removed == ()
+    assert {item.path.name for item in again.files} == names
+    assert all((tmp_path / name).is_file() for name in names)
+
+
 def _kind_of(address: str, event: str) -> str:
     if address.startswith("ПКО ") and " / ПКС " in address and event == "ПередОбработкойВыгрузки":
         return "pks_group"

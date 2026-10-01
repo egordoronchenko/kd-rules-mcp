@@ -15,6 +15,7 @@ from kd2_rules_mcp.authoring.edits import (
 from kd2_rules_mcp.errors import (
     DanglingReferenceError,
     DuplicateRuleError,
+    ObjectNotFoundError,
     RuleEditError,
     RuleNotFoundError,
     UnknownFieldError,
@@ -233,6 +234,38 @@ def test_mass_pks_follows_kd_autosetup(tmp_path: Path) -> None:
     assert any("Зарплата/Сотрудник" in item and "найдено 2" in item for item in result.unresolved)
     assert not any(item.startswith("Организация:") for item in result.unresolved)
     _assert_sound(rules)
+
+
+def test_unknown_object_raises_object_not_found(tmp_path: Path) -> None:
+    """Опечатка в имени объекта источника или приёмника — ObjectNotFoundError с подсказками."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Контрагенты")
+    target.add("Справочник", "Контрагенты")
+    rules = _rules()
+    with pytest.raises(ObjectNotFoundError, match="Контрагент") as source_error:
+        create_pko_with_properties(
+            rules,
+            "Контрагенты",
+            source.conn,
+            target.conn,
+            "Справочник.Контрагент",
+            "Справочник.Контрагенты",
+        )
+    assert source_error.value.suggestions
+    assert "Справочник.Контрагенты" in source_error.value.suggestions
+    with pytest.raises(ObjectNotFoundError, match="Контрагент") as target_error:
+        create_pko_with_properties(
+            rules,
+            "Контрагенты",
+            source.conn,
+            target.conn,
+            "Справочник.Контрагенты",
+            "Справочник.Контрагент",
+        )
+    assert target_error.value.suggestions
+    assert "Справочник.Контрагенты" in target_error.value.suggestions
+    assert rules.pko() == []
 
 
 def test_dangling_pko_reference_lists_rules_of_the_type() -> None:

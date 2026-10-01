@@ -19,7 +19,8 @@
 В тело обработчика эти объявления не входят — карта строк на них возвращает пусто.
 
 Файлы пишутся в UTF-8 с BOM и переводами строк CRLF. Повторный вызов перезаписывает
-только свои файлы.
+свои файлы и удаляет обёртки обработчиков, которых в правилах больше нет; чужие файлы
+не трогает.
 """
 
 import hashlib
@@ -607,9 +608,14 @@ class HandlerFile:
 
 @dataclass(frozen=True, slots=True)
 class HandlerExport:
-    """Файлы одной выгрузки и карта строк."""
+    """Файлы одной выгрузки и карта строк.
+
+    ``removed`` — имена прежних обёрток этой папки, которых в новой выгрузке нет.
+    Файл, удалённый и сразу записанный под тем же именем, сюда не входит.
+    """
 
     files: tuple[HandlerFile, ...]
+    removed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,13 +633,43 @@ class Handler:
 def export_handlers(rules: ExchangeRules, out_dir: Path) -> HandlerExport:
     """Пишет непустые обработчики и алгоритмы в ``out_dir`` и возвращает карту строк.
 
-    Пустой текст (пробелы и переводы строк) файл не даёт. Чужие файлы каталога не удаляются
-    и не изменяются; свои при повторном вызове перезаписываются.
+    Пустой текст (пробелы и переводы строк) файл не даёт. Перед записью из папки удаляются
+    ``*.bsl`` верхнего уровня, оставшиеся от прежней выгрузки: файл после BOM UTF-8 начинается
+    со строк ``_MODULE_VARIABLES``. Чужие файлы — не ``.bsl``, ``.bsl`` с другим началом,
+    файлы в подпапках и нечитаемые — не удаляются и не изменяются. Обёртка, которая снова
+    попадает в выгрузку, перезаписывается и в ``removed`` не входит.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    previous = [path.name for path in _own_wrappers(out_dir)]
+    for name in previous:
+        (out_dir / name).unlink()
     used: set[str] = set()
     files = tuple(_write(out_dir, item, used) for item in collect_handlers(rules))
-    return HandlerExport(files)
+    written = {item.name for item in files}
+    removed = tuple(sorted(name for name in previous if name not in written))
+    return HandlerExport(files, removed)
+
+
+def _own_wrappers(out_dir: Path) -> list[Path]:
+    """``.bsl`` верхнего уровня, записанные прежней выгрузкой."""
+    return [
+        path
+        for path in out_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".bsl" and _is_own_wrapper(path)
+    ]
+
+
+def _is_own_wrapper(path: Path) -> bool:
+    """Файл нашей выгрузки: после BOM UTF-8 идут объявления переменных модуля.
+
+    Ошибка чтения или декодирования — файл чужой.
+    """
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return False
+    head = tuple(text.splitlines()[: len(_MODULE_VARIABLES)])
+    return head == _MODULE_VARIABLES
 
 
 def locate(export: HandlerExport, file_name: str, line: int) -> HandlerLocation | None:

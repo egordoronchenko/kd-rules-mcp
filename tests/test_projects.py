@@ -107,6 +107,16 @@ def test_local_settings_and_dirs(tmp_path: Path) -> None:
     assert resolve(Path("/p"), "Проект\\main") == Path("/p/Проект/main")
 
 
+def test_load_local_server_url_defaults_to_address(tmp_path: Path) -> None:
+    path = tmp_path / "projects.local.yaml"
+    path.write_text("projects: {}\n", encoding="utf-8")
+    settings = load_local(path)
+    assert settings.server_url == "http://localhost:8060/mcp"
+    assert isinstance(settings.server_url, str)
+    path.write_text("server_url: http://srv:9/mcp\n", encoding="utf-8")
+    assert load_local(path).server_url == "http://srv:9/mcp"
+
+
 def test_local_logins_extend_connection(tmp_path: Path) -> None:
     local = tmp_path / "projects.local.yaml"
     local.write_text(

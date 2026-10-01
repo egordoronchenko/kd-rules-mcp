@@ -1,6 +1,7 @@
 """Сервер MCP через клиент MCP (спецификация `mcp-service`): каждый инструмент вызывается."""
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -204,6 +205,7 @@ async def test_rules_tools(service: Kd2Service) -> None:
         assert "summary" in validated and validated["issues"]["offset"] == 0
         exported = await _call(client, "handlers_export", project_id=project, folder="bsl")
         assert exported["count"] > 0
+        assert exported["removed"] == 0
         first = exported["files"][0]["file"]
         located = await _call(
             client, "handlers_locate", project_id=project, file_name=first, line=1
@@ -306,3 +308,77 @@ async def test_path_map_translates_agent_paths(tmp_path: Path) -> None:
     assert rejected["code"] == "path_outside_workspace"
     assert rejected["workspace"] == r"D:\Work\Проекты\КД\workspace"
     assert not (mounted / "data" / "x.xml").exists()
+
+
+def _info_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "kd2_rules_mcp" and record.levelno == logging.INFO
+    ]
+
+
+async def test_unexpected_exception_is_internal(
+    service: Kd2Service, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Исключение вне Kd2Error и ValueError — JSON code internal и трассировка в логе."""
+
+    def project_list() -> dict[str, Any]:
+        raise RuntimeError("сбой")
+
+    # Имя функции — имя инструмента: call пишет function.__name__.
+    monkeypatch.setattr(service, "project_list", project_list)
+    with caplog.at_level(logging.DEBUG, logger="kd2_rules_mcp"):
+        async with Client(create_server(service)) as client:
+            error = await _error(client, "project_list")
+    assert error["code"] == "internal"
+    assert "сбой" in error["message"]
+    errors = [
+        record
+        for record in caplog.records
+        if record.name == "kd2_rules_mcp" and record.levelno == logging.ERROR
+    ]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+    assert errors[0].exc_info[0] is RuntimeError
+    assert "project_list" in errors[0].getMessage()
+
+
+async def test_tool_calls_are_logged(service: Kd2Service, caplog: pytest.LogCaptureFixture) -> None:
+    """Успех и project_not_found дают по строке INFO с именем инструмента и итогом."""
+    with caplog.at_level(logging.DEBUG, logger="kd2_rules_mcp"):
+        async with Client(create_server(service)) as client:
+            await _call(client, "structure_list")
+            error = await _error(client, "rules_overview", project_id="нет")
+    assert error["code"] == "project_not_found"
+    messages = _info_lines(caplog)
+    assert any(line.startswith("structure_list ") and line.endswith(" ok") for line in messages)
+    assert any(
+        line.startswith("rules_overview ") and line.endswith(" project_not_found")
+        for line in messages
+    )
+    assert not any(
+        record.name == "kd2_rules_mcp" and record.levelno >= logging.ERROR
+        for record in caplog.records
+    )
+
+
+async def test_pko_unknown_object_is_object_not_found(service: Kd2Service) -> None:
+    async with Client(create_server(service)) as client:
+        await _call(client, "structure_load_xml", structure_id="dump", configuration_path=str(DUMP))
+        created = await _call(
+            client, "rules_create", source_structure="dump", target_structure="dump"
+        )
+        error = await _error(
+            client,
+            "pko_create_from_candidates",
+            project_id=created["project_id"],
+            code="Нет",
+            source_structure="dump",
+            target_structure="dump",
+            source_object="Справочник.Контрагент",
+            target_object="Справочник.Контрагенты",
+        )
+    assert error["code"] == "object_not_found"
+    assert "suggestions" in error
+    assert "Справочник.Контрагенты" in error["suggestions"]

@@ -33,3 +33,6 @@ tmp/
 /docker-compose.override.yml
 /.mcp.json
 /.cursor/mcp.json
+
+# Транскрибация чужого платного курса по КД — в git не кладём
+/course/

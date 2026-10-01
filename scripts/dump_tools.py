@@ -1,0 +1,212 @@
+"""Справочник инструментов MCP (`docs/tools.md`) из самого сервера.
+
+Поднимает сервер в этом же процессе (как `tests/test_server.py`), берёт список инструментов через
+клиент MCP и выводит Markdown: группы, описания, параметры со значениями по умолчанию и коды
+ошибок из `ERROR_CODES`. Генерируемая часть документа лежит между маркерами; ручная часть после
+них (ключи ответов, коды ошибок по инструментам) скриптом не трогается. `--write` пересобирает и
+копии справочника в скилле, `--check` проверяет и их.
+
+    uv run python scripts/dump_tools.py            # напечатать генерируемую часть
+    uv run python scripts/dump_tools.py --write    # обновить docs/tools.md и копии в скилле
+    uv run python scripts/dump_tools.py --check    # код 1, если документ или копии устарели
+"""
+
+import argparse
+import inspect
+import json
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import anyio
+import build_packs
+from mcp import Client
+
+from kd2_rules_mcp.server import ERROR_CODES, create_server, error_payload
+from kd2_rules_mcp.service import Kd2Service, Settings
+
+DOC = Path(__file__).resolve().parents[1] / "docs" / "tools.md"
+BEGIN = "<!-- tools:begin — генерирует scripts/dump_tools.py, руками не править -->"
+END = "<!-- tools:end — ниже ручная часть, скрипт её не трогает -->"
+
+# Группа каждого инструмента; новый инструмент без группы — ошибка скрипта (и теста документа).
+GROUPS: dict[str, tuple[str, ...]] = {
+    "Проекты и структуры": (
+        "project_list",
+        "structure_load_project",
+        "structure_list",
+        "structure_load_xml",
+        "structure_load_md83exp",
+        "structure_objects",
+        "structure_object",
+        "structure_values",
+        "structure_plan_content",
+        "structure_compare",
+    ),
+    "Кандидаты сопоставления": ("match_objects", "match_properties", "match_values"),
+    "Проекты правил": (
+        "rules_open",
+        "rules_create",
+        "rules_projects",
+        "rules_overview",
+        "rules_list",
+        "rules_get",
+        "rules_save",
+        "rules_pack",
+    ),
+    "Правки": ("rule_create", "rule_update", "rule_delete", "pko_create_from_candidates"),
+    "Проверки": ("rules_validate", "handlers_export", "handlers_locate"),
+    "Регистрация и корреспондент": ("registration_build", "correspondent_draft"),
+}
+
+# Что значат дополнительные поля JSON ошибки (`error_payload` в server.py).
+EXTRA_FIELDS = {
+    "structures": "загруженные структуры",
+    "suggestions": "похожие имена объектов",
+    "workspace": "рабочая папка (путь агента)",
+    "writable": "все папки, куда разрешена запись (пути агента)",
+}
+
+# «Когда» для кодов, у классов которых docstring чужой или уже узкий.
+WHEN = {
+    "path_outside_workspace": "Путь записи вне рабочей папки и папок живых правил проектов.",
+    "rejected": "Прочий отказ сервера (базовый класс `Kd2Error`): причина — в `message`.",
+    "invalid_argument": "Недопустимое значение аргумента, например неизвестный уровень или класс.",
+}
+
+
+async def _tools(service: Kd2Service) -> list[Any]:
+    async with Client(create_server(service)) as client:
+        return list((await client.list_tools()).tools)
+
+
+def _cell(text: str) -> str:
+    """Текст для ячейки таблицы: одна строка, без вертикальной черты."""
+    return " ".join(text.split()).replace("|", "\\|")
+
+
+def _type(schema: dict[str, Any]) -> str:
+    """Тип параметра из JSON-схемы: `string`, `integer 1…200`, `array of string | null`."""
+    if "anyOf" in schema:
+        return " | ".join(_type(item) for item in schema["anyOf"])
+    kind = schema.get("type", "any")
+    if kind == "array":
+        return f"array of {_type(schema.get('items', {}))}"
+    low, high = schema.get("minimum"), schema.get("maximum")
+    if low is not None and high is not None:
+        return f"{kind} {low}…{high}"
+    if low is not None:
+        return f"{kind} ≥ {low}"
+    return str(kind)
+
+
+def _tool_section(tool: Any) -> list[str]:
+    lines = [f"### `{tool.name}`", "", inspect.cleandoc(tool.description or ""), ""]
+    properties: dict[str, Any] = tool.input_schema.get("properties", {})
+    required = set(tool.input_schema.get("required", []))
+    if not properties:
+        return [*lines, "Параметров нет.", ""]
+    lines += ["| Параметр | Тип | По умолчанию | Описание |", "|---|---|---|---|"]
+    for name, schema in properties.items():
+        default = (
+            "обязательный"
+            if name in required
+            else f"`{json.dumps(schema.get('default'), ensure_ascii=False)}`"
+        )
+        description = _cell(schema.get("description", ""))
+        lines.append(f"| `{name}` | {_cell(_type(schema))} | {default} | {description} |")
+    return [*lines, ""]
+
+
+def _error_rows(service: Kd2Service) -> list[str]:
+    lines = ["| Код | Класс | Когда | Дополнительные поля |", "|---|---|---|---|"]
+    for kind, code in ERROR_CODES:
+        extra = sorted(set(error_payload(kind("…"), service)) - {"code", "message"})
+        fields = ", ".join(f"`{name}` — {EXTRA_FIELDS.get(name, '')}" for name in extra) or "—"
+        doc = WHEN.get(code) or (kind.__doc__ or "").strip().splitlines()[0]
+        lines.append(f"| `{code}` | `{kind.__name__}` | {_cell(doc)} | {fields} |")
+    return lines
+
+
+def render() -> str:
+    """Генерируемая часть `docs/tools.md` вместе с маркерами."""
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        service = Kd2Service(Settings(cache_dir=root / "cache", workspace=root / "workspace"))
+        tools = {tool.name: tool for tool in anyio.run(_tools, service)}
+        errors = _error_rows(service)
+    grouped = [name for names in GROUPS.values() for name in names]
+    if missing := sorted(set(tools) - set(grouped)):
+        raise SystemExit(f"Инструменты без группы в GROUPS: {', '.join(missing)}")
+    if stale := sorted(set(grouped) - set(tools)):
+        raise SystemExit(f"В GROUPS лишние инструменты: {', '.join(stale)}")
+    lines = [BEGIN, "", f"Инструментов: {len(tools)}.", ""]
+    lines += ["| Группа | Инструменты |", "|---|---|"]
+    lines += [
+        f"| {group} | {', '.join(f'[`{name}`](#{name})' for name in names)} |"
+        for group, names in GROUPS.items()
+    ]
+    lines.append("")
+    for group, names in GROUPS.items():
+        lines += [f"## {group}", ""]
+        for name in names:
+            lines += _tool_section(tools[name])
+    lines += ["## Коды ошибок", ""]
+    lines += [
+        'Ошибка инструмента — JSON `{"code", "message", …}` в тексте ошибки MCP; код — по '
+        "первому подходящему классу исключения (порядок строк важен: подклассы раньше базовых).",
+        "",
+        *errors,
+        "",
+        END,
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def split_doc(text: str) -> tuple[str, str, str]:
+    """Документ → (до маркера, генерируемая часть с маркерами, после маркера)."""
+    start, end = text.find(BEGIN), text.find(END)
+    if start < 0 or end < start:
+        raise SystemExit(f"В {DOC} нет маркеров генерируемой части")
+    end += len(END) + 1
+    return text[:start], text[start:end], text[end:]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Справочник инструментов MCP для docs/tools.md")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--write", action="store_true", help="обновить документ и копии справочника в скилле"
+    )
+    mode.add_argument(
+        "--check", action="store_true", help="код 1, если документ или копии устарели"
+    )
+    args = parser.parse_args()
+    generated = render()
+    if not (args.write or args.check):
+        sys.stdout.write(generated)
+        return
+    head, current, tail = split_doc(DOC.read_text(encoding="utf-8"))
+    if args.check:
+        stale: list[str] = []
+        if current != generated:
+            stale.append(str(DOC))
+        stale.extend(build_packs.stale_copies())
+        if stale:
+            print("\n".join(stale), file=sys.stderr)
+            print("uv run python scripts/dump_tools.py --write", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"{DOC}: актуален")
+        return
+    DOC.write_text(head + generated + tail, encoding="utf-8", newline="\n")
+    print(f"{DOC}: обновлён")
+    rewritten = build_packs.write_copies()
+    if rewritten:
+        print("\n".join(rewritten))
+    else:
+        print("копии в скилле актуальны")
+
+
+if __name__ == "__main__":
+    main()

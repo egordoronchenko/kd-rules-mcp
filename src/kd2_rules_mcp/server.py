@@ -4,10 +4,19 @@
 инструмента выполняется в рабочем потоке: загрузка большой структуры не останавливает сервер.
 
 Ошибка инструмента — `ToolError` с JSON: `code` (по нему агент выбирает действие), `message`
-на русском и дополнительные поля (`structures`, `suggestions`, `workspace`).
+на русском и дополнительные поля (`structures`, `suggestions`, `workspace`). Любое исключение
+внутри инструмента оборачивается в этот JSON. `Kd2Error` и `ValueError` получают код из
+`ERROR_CODES`; прочее исключение — код `internal` и текст исключения, трассировка пишется
+в логгер `kd2_rules_mcp` (уровень ERROR). Каждый вызов даёт одну строку INFO: имя инструмента,
+длительность и итог (`ok` или код ошибки). Уровень лога задаёт `main()` по переменной
+`KD2_LOG_LEVEL` (по умолчанию INFO). Неизвестное значение не останавливает запуск: остаётся
+INFO, в лог пишется предупреждение. `create_server` логирование не настраивает.
 """
 
 import json
+import logging
+import os
+import time
 from collections.abc import Callable
 from functools import partial
 from typing import Annotated, Any
@@ -21,6 +30,7 @@ from kd2_rules_mcp.errors import (
     DanglingReferenceError,
     DuplicateRuleError,
     Kd2Error,
+    ObjectNotFoundError,
     ProjectNotFoundError,
     RuleEditError,
     RuleNotFoundError,
@@ -31,7 +41,9 @@ from kd2_rules_mcp.errors import (
     WorkspacePathError,
 )
 from kd2_rules_mcp.projects import ProjectConfigError
-from kd2_rules_mcp.service import Kd2Service, ObjectNotFoundError, Settings
+from kd2_rules_mcp.service import Kd2Service, Settings
+
+logger = logging.getLogger("kd2_rules_mcp")
 
 # Код ошибки по классу; порядок важен — подклассы раньше базовых.
 ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
@@ -130,11 +142,19 @@ def create_server(service: Kd2Service) -> MCPServer:
     server = MCPServer("kd2-rules-mcp", instructions=INSTRUCTIONS)
 
     async def call(function: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> Any:
+        # Имя метода сервиса совпадает с именем инструмента.
+        name = function.__name__
+        started = time.perf_counter()
         try:
-            return await anyio.to_thread.run_sync(partial(function, *args, **kwargs))
-        except (Kd2Error, ValueError) as error:
+            result = await anyio.to_thread.run_sync(partial(function, *args, **kwargs))
+        except Exception as error:
             payload = error_payload(error, service)
+            if not isinstance(error, (Kd2Error, ValueError)):
+                logger.exception("Инструмент %s: непредвиденное исключение", name)
+            _log_call(name, started, str(payload["code"]))
             raise ToolError(json.dumps(payload, ensure_ascii=False)) from error
+        _log_call(name, started, "ok")
+        return result
 
     # --- Структуры ---------------------------------------------------------------------------
 
@@ -144,7 +164,10 @@ def create_server(service: Kd2Service) -> MCPServer:
 
         `available` — папка проекта подключена к серверу; `structure_id` — под каким именем
         `structure_load_project` загружает конфигурацию; `rules_dir` — папка живых правил проекта
-        (`writable` — туда можно сохранять `rules_save`).
+        (`writable` — туда можно сохранять `rules_save`). `folder` — папка проекта путём агента,
+        если она задана на сервере; иначе ключа нет. `code_mcp` и `data_mcp` — имена серверов
+        с префиксом `<проект>-`, как в `.mcp.json` агента. В корне ответа: `workspace` — рабочая
+        папка путём агента, `shared_mcp` — общие серверы без префикса.
         """
         return await call(service.project_list)
 
@@ -657,8 +680,39 @@ def create_server(service: Kd2Service) -> MCPServer:
     return server
 
 
+def _log_call(name: str, started: float, outcome: str) -> None:
+    """Строка INFO: имя инструмента, длительность в миллисекундах, итог."""
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    logger.info("%s %d мс %s", name, elapsed_ms, outcome)
+
+
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def _configure_logging() -> None:
+    """Уровень — `KD2_LOG_LEVEL` (имя уровня `logging`, по умолчанию INFO).
+
+    Неизвестное значение не останавливает запуск: уровень INFO и предупреждение в лог.
+    """
+    raw = os.environ.get("KD2_LOG_LEVEL", "INFO").strip()
+    level = logging.getLevelNamesMapping().get(raw.upper())
+    if level is None:
+        logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
+        logging.getLogger().setLevel(logging.INFO)
+        logger.warning("Неизвестное значение KD2_LOG_LEVEL «%s», используется INFO", raw)
+        return
+    logging.basicConfig(level=level, format=_LOG_FORMAT)
+    logging.getLogger().setLevel(level)
+
+
 def main() -> None:
-    """Запуск сервера по HTTP; настройки — переменные окружения `KD2_*`."""
+    """Запуск сервера по HTTP; настройки — переменные окружения `KD2_*`.
+
+    Уровень лога — `KD2_LOG_LEVEL` (имя уровня `logging`, по умолчанию `INFO`).
+    Неизвестное значение не останавливает запуск: остаётся `INFO`, в лог пишется
+    предупреждение. `create_server` логирование не настраивает.
+    """
+    _configure_logging()
     settings = Settings.from_env()
     server = create_server(Kd2Service(settings))
     server.run(
