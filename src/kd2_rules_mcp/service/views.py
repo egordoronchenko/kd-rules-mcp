@@ -38,6 +38,24 @@ _ROW_FIELDS = (
     "КодПравилаКонвертации",
     "ОбъектМетаданныхИмя",
 )
+# Коды других правил. В схеме это значение `КодПравилаКонвертации` и атрибут
+# `ПравилоКонвертации`. Писатель КД дополняет их пробелами; в ответ отдаём без пробелов.
+_RULE_CODE_FIELDS = frozenset({"КодПравилаКонвертации", "ПравилоКонвертации"})
+# Вид узла раздела с группами → имя раздела в инструментах (как в `TITLES`).
+_KIND_SECTIONS = {
+    "pko": "pko",
+    "pko_group": "pko",
+    "pvd": "pvd",
+    "pvd_group": "pvd",
+    "pod": "pod",
+    "pod_group": "pod",
+    "algorithm": "algorithms",
+    "algorithm_group": "algorithms",
+    "query": "queries",
+    "query_group": "queries",
+    "pro": REGISTRATION_SECTION,
+    "pro_group": REGISTRATION_SECTION,
+}
 
 
 def project_structure_id(project_id: str, configuration_id: str) -> str:
@@ -151,17 +169,21 @@ def section_node(document: RulesDocument, tag: str) -> Node | None:
     return document.root.children.get(tag)
 
 
-def section_rules(document: RulesDocument, section: str) -> list[Node]:
+def list_section(document: RulesDocument, section: str) -> Node | None:
+    """Узел раздела по имени инструмента. Неизвестный раздел — ошибка, пустого нет — `None`."""
     if isinstance(document, RegistrationRules):
         if section != REGISTRATION_SECTION:
             raise Kd2Error(f"У правил регистрации один раздел: «{REGISTRATION_SECTION}»")
-        node = section_node(document, "ПравилаРегистрацииОбъектов")
-    else:
-        tag = EXCHANGE_SECTIONS.get(section)
-        if tag is None:
-            known = ", ".join(EXCHANGE_SECTIONS)
-            raise Kd2Error(f"Неизвестный раздел «{section}»; разделы правил обмена: {known}")
-        node = section_node(document, tag)
+        return section_node(document, "ПравилаРегистрацииОбъектов")
+    tag = EXCHANGE_SECTIONS.get(section)
+    if tag is None:
+        known = ", ".join(EXCHANGE_SECTIONS)
+        raise Kd2Error(f"Неизвестный раздел «{section}»; разделы правил обмена: {known}")
+    return section_node(document, tag)
+
+
+def section_rules(document: RulesDocument, section: str) -> list[Node]:
+    node = list_section(document, section)
     if node is None:
         return []
     if section == "parameters":
@@ -169,11 +191,100 @@ def section_rules(document: RulesDocument, section: str) -> list[Node]:
     return list(node.walk())
 
 
-def rule_row(node: Node) -> dict[str, Any]:
+def group_paths(section: Node) -> dict[int, str]:
+    """Путь групп над узлом списка: `id(node)` → коды через `/`.
+
+    У правила и группы верхнего уровня путь пустой. У вложенного — коды групп от раздела
+    до родителя (`Перечисления`, `Справочники/Основные`), без собственного кода группы.
+    """
+    paths: dict[int, str] = {}
+
+    def visit(node: Node, prefix: str) -> None:
+        for item in node.items:
+            paths[id(item)] = prefix
+            if item.is_group:
+                nested = f"{prefix}/{item.code}" if prefix else item.code
+                visit(item, nested)
+
+    visit(section, "")
+    return paths
+
+
+def rule_group(document: RulesDocument, node: Node) -> str:
+    """Путь групп над узлом раздела. У верхнего уровня и у вложенного правила путь пустой."""
+    section = _KIND_SECTIONS.get(node.kind.name)
+    if section is None:
+        return ""
+    container = list_section(document, section)
+    if container is None:
+        return ""
+    return group_paths(container).get(id(node), "")
+
+
+def listed_rule_rows(document: RulesDocument, section: str) -> list[dict[str, Any]]:
+    """Строки `rules_list`. Ключ `group` есть только у правила внутри группы."""
+    container = list_section(document, section)
+    paths = group_paths(container) if container is not None else {}
+    return [rule_row(node, paths.get(id(node), "")) for node in section_rules(document, section)]
+
+
+def overview_groups(document: RulesDocument) -> dict[str, list[dict[str, Any]]]:
+    """Группы разделов, где они есть. Ключ совпадает с ключом `counts` того же ответа.
+
+    `count` — число правил непосредственно в группе, без вложенных групп. Раздел без групп
+    в словарь не входит. Порядок — порядок групп в документе.
+    """
+    if isinstance(document, RegistrationRules):
+        pairs = (("registration_rules", "ПравилаРегистрацииОбъектов"),)
+    else:
+        pairs = tuple(
+            (name, tag) for name, tag in EXCHANGE_SECTIONS.items() if name != "parameters"
+        )
+    found: dict[str, list[dict[str, Any]]] = {}
+    for name, tag in pairs:
+        node = section_node(document, tag)
+        if node is None:
+            continue
+        groups = _group_counts(node)
+        if groups:
+            found[name] = groups
+    return found
+
+
+def _group_counts(section: Node) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+
+    def visit(node: Node, prefix: str) -> None:
+        for item in node.items:
+            if not item.is_group:
+                continue
+            path = f"{prefix}/{item.code}" if prefix else item.code
+            groups.append(
+                {
+                    "path": path,
+                    "count": sum(1 for child in item.items if not child.is_group),
+                }
+            )
+            visit(item, path)
+
+    visit(section, "")
+    return groups
+
+
+def _reference_text(tag: str, value: Any) -> Any:
+    """Код правила в поле-ссылке без хвостовых пробелов. Значение узла не меняется."""
+    if tag in _RULE_CODE_FIELDS and isinstance(value, str):
+        return value.strip()
+    return value
+
+
+def rule_row(node: Node, group: str = "") -> dict[str, Any]:
     values = node.values
     row: dict[str, Any] = {"address": rule_address(node), "code": node.code}
+    if group:
+        row["group"] = group
     for tag in _ROW_FIELDS:
-        value = values.get(tag)
+        value = _reference_text(tag, values.get(tag))
         if value not in (None, ""):
             row[tag] = value
     for name in ("Отключить", "ИспользуетсяПриЗагрузке"):
@@ -185,13 +296,33 @@ def rule_row(node: Node) -> dict[str, Any]:
     return row
 
 
-def node_view(node: Node, limit: int) -> dict[str, Any]:
+def _pks_row(path: str, item: Node) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "path": path,
+        "kind": item.kind.name,
+        "source": side_name(item, "Источник"),
+        "target": side_name(item, "Приемник"),
+    }
+    if item.attrs.get("Отключить") is True:
+        row["disabled"] = True
+    if item.attrs.get("Поиск") is True:
+        row["search"] = True
+    code = _reference_text("КодПравилаКонвертации", item.values.get("КодПравилаКонвертации"))
+    if code:
+        row["conversion"] = code
+    return row
+
+
+def node_view(node: Node, limit: int, group: str = "") -> dict[str, Any]:
     view: dict[str, Any] = {"kind": node.kind.name, "title": node.kind.title}
+    if group:
+        view["group"] = group
     if node.attrs:
-        view["attrs"] = dict(node.attrs)
+        view["attrs"] = {tag: _reference_text(tag, value) for tag, value in node.attrs.items()}
     fields: dict[str, Any] = {}
     for tag, value in node.values.items():
-        fields[tag] = clip(value) if isinstance(value, str) else value
+        shown = _reference_text(tag, value)
+        fields[tag] = clip(shown) if isinstance(shown, str) else shown
     if fields:
         view["fields"] = fields
     sides = {
@@ -202,23 +333,11 @@ def node_view(node: Node, limit: int) -> dict[str, Any]:
     if sides:
         view["sides"] = sides
     properties = node.child("Свойства")
-    if properties is not None:
-        rows = [
-            {
-                "path": path,
-                "kind": item.kind.name,
-                "source": side_name(item, "Источник"),
-                "target": side_name(item, "Приемник"),
-                **({"disabled": True} if item.attrs.get("Отключить") is True else {}),
-                **({"search": True} if item.attrs.get("Поиск") is True else {}),
-                **(
-                    {"conversion": item.values["КодПравилаКонвертации"]}
-                    if item.values.get("КодПравилаКонвертации")
-                    else {}
-                ),
-            }
-            for path, item in walk_pks(properties)
-        ]
+    # У только что созданного ПКО контейнера `Свойства` ещё нет: он появляется с первой ПКС.
+    if properties is not None or node.kind.name == "pko":
+        rows: list[dict[str, Any]] = []
+        if properties is not None:
+            rows = [_pks_row(path, item) for path, item in walk_pks(properties)]
         view["properties"] = {"total": len(rows), "items": rows[:limit]}
         view["address"] = rule_address(node)
     values = node.child("Значения")

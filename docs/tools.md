@@ -244,7 +244,8 @@
 ### `rules_save`
 
 Сохраняет XML в рабочую папку или в `rules_dir` проекта; ответ — путь, размер, итог
-проверки формата. Другие пути — `path_outside_workspace` со списком `writable`.
+проверки формата. При записи поверх существующего файла концы строк неизменённых строк
+сохраняются. Другие пути — `path_outside_workspace` со списком `writable`.
 
 | Параметр | Тип | По умолчанию | Описание |
 |---|---|---|---|
@@ -491,17 +492,18 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `match_objects` | страница списка: элементы — `confidence`, `auto`, `source`, `target` (`Вид.Имя`), `synonym`, `note` |
 | `match_properties`, `match_values` | страница списка: элементы — `confidence`, `auto`, `source`, `target` (`name`, `kind`, `path`, `synonym`, `types` — до пяти), `path` (путь ПКС), `note` |
 | `rules_open` | проект правил, `reused`; при повторном открытии — `source_changed` |
-| `rules_create`, `rules_overview` | проект правил |
+| `rules_create` | проект правил |
+| `rules_overview` | проект правил; `groups` — только разделы, где есть группы (`pko`, `pvd`, `pod`, `algorithms`, `queries`, у регистрации `registration_rules`): список `{path, count}` в порядке документа, `count` — число правил непосредственно в группе |
 | `rules_projects` | `projects` — список проектов правил |
 | `rules_close` | `project_id`, `closed`, `snapshot_removed` |
-| `rules_list` | страница списка: элементы — `address`, `code`, заполненные поля строки правила, флаги `Отключить`, `ИспользуетсяПриЗагрузке`, `pks_count` |
-| `rules_get` | `kind`, `title`, `attrs`, `fields` (тексты длиннее 2000 символов обрезаны), `sides` (ПКС), `properties` (`total`, `items`) и `address` (ПКО), `values` (`total`, `items`), `nested` |
+| `rules_list` | страница списка: элементы — `address`, `code`, `group` (путь групп через `/`, только если правило внутри группы), заполненные поля строки правила (код в `КодПравилаКонвертации` без хвостовых пробелов), флаги `Отключить`, `ИспользуетсяПриЗагрузке`, `pks_count` |
+| `rules_get` | `kind`, `title`, `group` (путь групп через `/`, только если не пуст), `attrs` (код в `ПравилоКонвертации` без хвостовых пробелов), `fields` (тексты длиннее 2000 символов обрезаны; код в `КодПравилаКонвертации` без хвостовых пробелов), `sides` (ПКС), `properties` (`total`, `items`, у ПКС `conversion` без хвостовых пробелов; у ПКО всегда, без контейнера `Свойства` — `total` 0) и `address` (у ПКО всегда), `values` (`total`, `items`), `nested` |
 | `rules_save` | `project_id`, `path`, `size_bytes`, `counts`, `format_check` (`errors`, `warnings`, `skipped`, `by_check`, `text`) |
 | `rules_pack` | `path`, `size_bytes`, `load_with` (форма загрузки в БСП), `files` (`file`, `path`, `size_bytes`, `rules`), `warnings` |
 | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates` | итог правки: `address` и только непустые списки `warnings` (строки `<проверка>: <текст>`), `skipped`, `not_applied`, `unresolved`, `disabled` — ключа нет, значит список пуст |
 | `rule_update_many` | `owner`, `kind`, `count`, `updated` — итог правки на каждую цель |
 | `rules_validate` | `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница списка: `level`, `check`, `address`, `message`) |
-| `rules_diff` | `left`, `right` (`project_id` или `path` — путь агента), `kind` (`exchange` или `registration`), `ignored_fields` (пусто при `include_header`; иначе `ДатаВремяСоздания` и `Ид`), `summary` (только непустые разделы: `added`, `removed`, `changed`), `changes` (страница: `section`, `address`, `change`, и при изменении поля — `field`, `old`, `new`, `handler_diff`) |
+| `rules_diff` | `left`, `right` (`project_id` или `path` — путь агента), `kind` (`exchange` или `registration`), `ignored_fields` (пусто при `include_header`; иначе `ДатаВремяСоздания` и `Ид`), `summary` (только непустые разделы: `added`, `removed`, `changed`), `changes` (страница: `section`, `address`, `change`, и при изменении поля — `field`, `old`, `new`, `handler_diff`). Добавленное или удалённое правило — одна строка, его содержимое не раскрывается |
 | `handlers_export` | `folder`, `count`, `removed` (число удалённых прежних обёрток), `files` (`file`, `address`, `event`), `has_more` |
 | `handlers_locate` | `found`; если найдено — `address`, `event`, `handler_line`, иначе `file`, `line` |
 | `registration_build` | проект правил + `warnings` |

@@ -488,7 +488,7 @@ def _check_pks_types(
     source, target = found[SOURCE], found[TARGET]
     if _has_handlers(pks):
         return
-    code = str(pks.get("КодПравилаКонвертации"))
+    code = _conversion_code(pks)  # писатель КД дополняет код пробелами до ширины
     if code:
         rule = context.pko_by_code.get(code)
         if rule is None:
@@ -631,7 +631,7 @@ def _check_pvd(context: _Context, pvd: Node) -> None:
             address,
             f"Объект выборки «{selection}» не найден в структуре источника",
         )
-    code = str(pvd.get("КодПравилаКонвертации"))
+    code = _conversion_code(pvd)
     rule = context.pko_by_code.get(code) if code else None
     if rule is not None and selection and str(rule.get(SOURCE)) not in ("", selection):
         context.report.warning(

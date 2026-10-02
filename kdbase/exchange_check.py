@@ -16,6 +16,7 @@
   заданный не меняется), узел корреспондента в каждой базе, признак «настройка завершена», сверка
   идентификаторов узлов.
 - `run --plan … --source … --target … --object <Документ.Имя> --ref <уникальный идентификатор>` —
+  до загрузки правил проверяется состав плана обмена;
   `--source-rules` / `--target-rules` (ZIP комплекта из трёх файлов; без них — правила баз),
   выгрузка, загрузка, `--query <запрос к приёмнику>` и `--expect-rows N`. Протокол — в stdout,
   сообщение обмена — в `kdbase\\run\\exchange-<время>\\`. Код выхода 0 — «ИТОГ OK», 1 — ошибка.
@@ -90,6 +91,20 @@ def correspondent_node(plan: str, code: str) -> str:
 def load_rules(plan: str, archive: bytes, file_name: str) -> str:
     """Комплект правил (ZIP из трёх файлов) в `ПравилаДляОбменаДанными`, как форма загрузки."""
     return load_rules_code(plan, archive, file_name, write=True)
+
+
+def plan_content_check(plan: str, full_name: str) -> str:
+    """«OK» если объект `full_name` входит в состав плана `plan`, иначе «НЕТ <имя>»."""
+    return guarded(
+        f"""Объект = Метаданные.НайтиПоПолномуИмени({bsl(full_name)});
+        Если Объект = Неопределено Тогда
+        Результат = "НЕТ объект не найден";
+        ИначеЕсли Метаданные.ПланыОбмена[{bsl(plan)}].Состав.Содержит(Объект) Тогда
+        Результат = "OK";
+        Иначе
+        Результат = "НЕТ " + {bsl(full_name)};
+        КонецЕсли;"""
+    )
 
 
 def export_object(plan: str, node_code: str, full_name: str, ref: str) -> str:
@@ -175,13 +190,25 @@ def setup(plan: str, source: DataServer, target: DataServer, codes: tuple[str, s
 
 
 def run(args: argparse.Namespace, source: DataServer, target: DataServer, lines: list[str]) -> bool:
-    """Правила, выгрузка, загрузка, запрос; строки протокола — в `lines`, результат — успех."""
+    """Состав плана, правила, выгрузка, загрузка, запрос; строки — в `lines`, результат — успех."""
     lines.append(f"ПЛАН {args.plan}")
     source_code = source.run(this_node_code(args.plan, args.source_code)).strip()
     target_code = target.run(this_node_code(args.plan, args.target_code)).strip()
     lines.append(
         f"ИСТОЧНИК {source.label} ({source_code}) → ПРИЕМНИК {target.label} ({target_code})"
     )
+    # `call`, не `run`: ответ «НЕТ …» — не ошибка транспорта, а отказ до записи правил.
+    # Всё остальное, кроме «OK» (ошибка 1С, пустой ответ), — сбой шага, как у `run`.
+    answer = source.call(plan_content_check(args.plan, args.object)).strip()
+    if answer.startswith("НЕТ"):
+        lines.append(
+            f"ОШИБКА объект {args.object} не входит в состав плана обмена {args.plan} в "
+            f"{source.label}: правила не загружались, базы не менялись"
+        )
+        return False
+    if answer != "OK":
+        detail = short_error(answer) if answer else "пустой ответ сервера данных"
+        raise ExchangeCheckError(f"{source.label}: проверка состава плана: {detail}")
     for label, server, archive in (
         ("ИСТОЧНИКА", source, args.source_rules),
         ("ПРИЕМНИКА", target, args.target_rules),
@@ -219,8 +246,11 @@ def run(args: argparse.Namespace, source: DataServer, target: DataServer, lines:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Живая проверка правил обменом в песочницах")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name, help_text in (("setup", "узлы плана обмена"), ("run", "выгрузка и загрузка объекта")):
-        command = commands.add_parser(name, help=help_text)
+    for name, help_text in (
+        ("setup", "узлы плана обмена"),
+        ("run", "выгрузка и загрузка объекта; состав плана проверяется до загрузки правил"),
+    ):
+        command = commands.add_parser(name, help=help_text, description=help_text)
         command.add_argument("--plan", required=True, help="имя плана обмена")
         command.add_argument("--source", required=True, help="база-источник <проект>.<база>")
         command.add_argument("--target", required=True, help="база-приёмник <проект>.<база>")

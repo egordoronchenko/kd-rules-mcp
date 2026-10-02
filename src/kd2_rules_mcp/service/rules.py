@@ -20,11 +20,12 @@ from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.views import (
     counts,
     edit_view,
+    listed_rule_rows,
     node_view,
+    overview_groups,
     page_limit,
     report_summary,
-    rule_row,
-    section_rules,
+    rule_group,
     slice_rows,
 )
 from kd2_rules_mcp.validation.format import check_format
@@ -65,14 +66,20 @@ class RulesMixin(ServiceBase):
 
     def rules_overview(self, project_id: str) -> dict[str, Any]:
         with self._lock:
-            return self._project_view(self.workspace.get(project_id))
+            project = self.workspace.get(project_id)
+            view = self._project_view(project)
+            document = project.document
+            if document is not None:
+                groups = overview_groups(document)
+                if groups:
+                    view["groups"] = groups
+            return view
 
     def rules_list(
         self, project_id: str, section: str, text: str | None, offset: int, limit: int
     ) -> dict[str, Any]:
         with self._lock:
-            document = self._document(project_id)
-            rows = [rule_row(node) for node in section_rules(document, section)]
+            rows = listed_rule_rows(self._document(project_id), section)
         if text:
             needle = text.casefold()
             rows = [row for row in rows if needle in " ".join(map(str, row.values())).casefold()]
@@ -82,8 +89,9 @@ class RulesMixin(ServiceBase):
         self, project_id: str, kind: str, key: str, owner: str, limit: int
     ) -> dict[str, Any]:
         with self._lock:
-            node = find_rule(self._exchange(project_id), kind, key, owner)
-            return node_view(node, page_limit(limit))
+            rules = self._exchange(project_id)
+            node = find_rule(rules, kind, key, owner)
+            return node_view(node, page_limit(limit), rule_group(rules, node))
 
     def rules_save(self, project_id: str, path: str, overwrite: bool) -> dict[str, Any]:
         with self._lock:

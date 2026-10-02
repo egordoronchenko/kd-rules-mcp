@@ -9,6 +9,7 @@ from kd2_rules_mcp.kd2.xmlstyle import (
     detect_style,
     escape_attr,
     escape_text,
+    preserve_line_endings,
 )
 
 DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>'
@@ -195,3 +196,90 @@ def test_writer_result_applies_bom_declaration_and_final_newline(final_newline: 
     if final_newline:
         body += "\r\n"
     assert writer.result() == BOM + body.encode("utf-8")
+
+
+def _bodies(data: bytes) -> list[bytes]:
+    """Строки без концов."""
+    bodies: list[bytes] = []
+    for line in data.splitlines(keepends=True):
+        if line.endswith(b"\r\n"):
+            bodies.append(line[:-2])
+        elif line.endswith(b"\n") or line.endswith(b"\r"):
+            bodies.append(line[:-1])
+        else:
+            bodies.append(line)
+    return bodies
+
+
+def test_preserve_line_endings_keeps_handler_lf_and_neighbor_crlf() -> None:
+    """CRLF в XML и LF в трёх строках обработчика; добавленные строки берут конец строки выше."""
+    old = (
+        BOM
+        + b"<Root>\r\n"
+        + b"\t<Handler>\r\n"
+        + b"\t\tline one\n"
+        + b"\t\tline two\n"
+        + b"\t\tline three\n"
+        + b"\t</Handler>\r\n"
+        + b"</Root>"
+    )
+    new = (
+        BOM
+        + b"<Root>\r\n"
+        + b"\t<Added1/>\r\n"
+        + b"\t<Added2/>\r\n"
+        + b"\t<Handler>\r\n"
+        + b"\t\tline one\r\n"
+        + b"\t\tline two\r\n"
+        + b"\t\tline three\r\n"
+        + b"\t</Handler>\r\n"
+        + b"</Root>"
+    )
+    result = preserve_line_endings(old, new)
+    assert result == (
+        BOM
+        + b"<Root>\r\n"
+        + b"\t<Added1/>\r\n"
+        + b"\t<Added2/>\r\n"
+        + b"\t<Handler>\r\n"
+        + b"\t\tline one\n"
+        + b"\t\tline two\n"
+        + b"\t\tline three\n"
+        + b"\t</Handler>\r\n"
+        + b"</Root>"
+    )
+    assert _bodies(result) == _bodies(new)
+
+
+def test_preserve_line_endings_same_text_returns_old_bytes() -> None:
+    """Без изменений содержимого результат совпадает со старым файлом, включая BOM."""
+    old = BOM + b"a\r\nb\nc\r\n"
+    new = BOM + b"a\nb\r\nc\n"
+    result = preserve_line_endings(old, new)
+    assert result == old
+    assert _bodies(result) == _bodies(new)
+
+
+def test_preserve_line_endings_uniform_crlf_matches_new() -> None:
+    """Единый CRLF у старого файла: результат совпадает с новым."""
+    old = b"a\r\nb\r\nc\r\n"
+    new = b"a\r\nX\r\nb\r\nc\r\n"
+    assert preserve_line_endings(old, new) == new
+
+
+def test_preserve_line_endings_empty_old_returns_new() -> None:
+    """Пустой старый файл не подменяет переводы строк нового."""
+    new = b"a\r\nb\n"
+    assert preserve_line_endings(b"", new) == new
+
+
+def test_preserve_line_endings_delete_keeps_neighbor_endings() -> None:
+    """Удаление не меняет концы соседей; неизменённая последняя строка остаётся без перевода."""
+    old = b"a\r\nDEL\nb\nlast"
+    new = b"a\r\nb\r\nlast"
+    assert preserve_line_endings(old, new) == b"a\r\nb\nlast"
+
+
+def test_preserve_line_endings_changed_last_line_uses_new_ending() -> None:
+    """Изменённая последняя строка берёт конец из нового файла."""
+    assert preserve_line_endings(b"a\nlast", b"a\r\nchanged") == b"a\nchanged"

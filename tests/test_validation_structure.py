@@ -215,6 +215,22 @@ def test_reference_type_without_pko(sides: tuple[sqlite3.Connection, ...]) -> No
     assert "создайте ПКО" in issues[0].message
 
 
+def test_padded_conversion_code_is_resolved(sides: tuple[sqlite3.Connection, ...]) -> None:
+    """Код ПКО с пробелами писателя КД находит ПКО: несовместимый тип источника замечен."""
+    padded = "<КодПравилаКонвертации>Контрагенты      </КодПравилаКонвертации>"
+    body = pks_xml("Владелец", "Владелец", "Свойство", extra=padded)
+    xml = rules_xml(
+        pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)
+        + pko_xml("Контрагенты", NOMENCLATURE, NOMENCLATURE)
+    )
+    report = check(sides, xml)
+    assert only(report, "structure.pko_missing") == []
+    # Несовместимы обе стороны ПКО «Контрагенты»: два замечания на одной ПКС.
+    assert {i.address for i in only(report, "structure.pks_type")} == {
+        "ПКО «Номенклатура» / ПКС Владелец"
+    }
+
+
 def test_reference_set_by_pko_handler_is_warning(sides: tuple[sqlite3.Connection, ...]) -> None:
     """Свойство без ПКО, которое упоминает обработчик ПКО, — предупреждение, а не ошибка."""
     body = pks_xml("Владелец", "Владелец", "Свойство")

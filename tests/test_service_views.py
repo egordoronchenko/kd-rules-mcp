@@ -6,12 +6,15 @@ import pytest
 
 from kd2_rules_mcp.authoring.edits import EditResult
 from kd2_rules_mcp.errors import Kd2Error
+from kd2_rules_mcp.kd2.model import Node
 from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
 from kd2_rules_mcp.service.views import (
     TEXT_LIMIT,
     counts,
     edit_view,
+    group_paths,
     node_view,
+    overview_groups,
     page_view,
     report_summary,
     rule_row,
@@ -140,6 +143,75 @@ def test_report_summary_counts_error_warning_and_skipped() -> None:
 
 def test_edit_view_omits_empty_lists() -> None:
     assert edit_view(EditResult(address="ПКО «Организации»")) == {"address": "ПКО «Организации»"}
+
+
+def test_group_path_on_nested_pko_row_view_and_overview() -> None:
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    section = rules.root.children["ПравилаКонвертацииОбъектов"]
+    catalogs = section.items[0]
+    assert catalogs.is_group and catalogs.code == "Справочники"
+    inner = Node.new("pko_group", "Группа")
+    inner.values["Код"] = "Основные"
+    nested = Node.new("pko", "Правило")
+    nested.values["Код"] = "Банки"
+    inner.items.append(nested)
+    catalogs.items.append(inner)
+    top = Node.new("pko", "Правило")
+    top.values["Код"] = "Контрагенты"
+    section.items.append(top)
+
+    paths = group_paths(section)
+    nested_row = rule_row(nested, paths[id(nested)])
+    assert nested_row["group"] == "Справочники/Основные"
+    assert "group" not in rule_row(top, paths[id(top)])
+    assert rule_row(inner, paths[id(inner)])["group"] == "Справочники"
+    assert "group" not in rule_row(catalogs, paths[id(catalogs)])
+
+    view = node_view(nested, 10, paths[id(nested)])
+    assert view["group"] == "Справочники/Основные"
+    assert "group" not in node_view(top, 10, paths[id(top)])
+
+    assert overview_groups(rules)["pko"] == [
+        {"path": "Справочники", "count": 2},
+        {"path": "Справочники/Основные", "count": 1},
+    ]
+    assert "pvd" not in overview_groups(rules)
+
+
+def test_node_view_pko_without_properties_has_address_and_empty_list() -> None:
+    node = Node.new("pko", "Правило")
+    node.values["Код"] = "Новый"
+    view = node_view(node, 10)
+    assert view["address"] == "ПКО «Новый»"
+    assert view["properties"] == {"total": 0, "items": []}
+    assert "values" not in view
+
+
+def test_rule_row_strips_padded_rule_code_and_keeps_model_value() -> None:
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    pvd = rules.pvd()[0]
+    pvd.values["КодПравилаКонвертации"] = "Организации   "
+    row = rule_row(pvd)
+    assert row["КодПравилаКонвертации"] == "Организации"
+    assert pvd.values["КодПравилаКонвертации"] == "Организации   "
+
+    view = node_view(pvd, 10)
+    assert view["fields"]["КодПравилаКонвертации"] == "Организации"
+    assert pvd.values["КодПравилаКонвертации"] == "Организации   "
+
+    pko = rules.pko()[0]
+    properties = pko.child("Свойства")
+    assert properties is not None
+    pks = next(item for item in properties.items if not item.is_group)
+    pks.values["КодПравилаКонвертации"] = "ВидыОпераций  "
+    items = node_view(pko, 10)["properties"]["items"]
+    assert items[0]["conversion"] == "ВидыОпераций"
+    assert pks.values["КодПравилаКонвертации"] == "ВидыОпераций  "
+
+    parameter = Node.new("parameter", "Параметр")
+    parameter.attrs["ПравилоКонвертации"] = "Организации   "
+    assert node_view(parameter, 10)["attrs"]["ПравилоКонвертации"] == "Организации"
+    assert parameter.attrs["ПравилоКонвертации"] == "Организации   "
 
 
 def test_edit_view_truncates_lists_past_max_limit() -> None:

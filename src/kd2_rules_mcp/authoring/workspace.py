@@ -29,7 +29,7 @@ from kd2_rules_mcp.errors import (
 )
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument
 from kd2_rules_mcp.kd2.rules_io import SUPPORTED_FORMAT_VERSION, dump_rules, load_rules
-from kd2_rules_mcp.kd2.xmlstyle import KD_STYLE
+from kd2_rules_mcp.kd2.xmlstyle import KD_STYLE, preserve_line_endings
 from kd2_rules_mcp.structures.store import StructureStore
 from kd2_rules_mcp.validation.handlers import HandlerExport, HandlerFile
 
@@ -207,7 +207,11 @@ class RulesWorkspace:
                 f"Файл «{destination}» уже существует; повторная запись только при overwrite=True"
             )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(dump_rules(document))
+        if destination.is_file():
+            data = preserve_line_endings(destination.read_bytes(), dump_rules(document))
+        else:
+            data = dump_rules(document)
+        destination.write_bytes(data)
         project.saved_path = destination
         project.modified = False
         self.snapshot(project_id)

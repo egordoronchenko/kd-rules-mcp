@@ -27,6 +27,7 @@ def _all_snippets() -> dict[str, str]:
     return {
         "this_node_code": ec.this_node_code(PLAN, "KD2S"),
         "correspondent_node": ec.correspondent_node(PLAN, 'K"1'),
+        "plan_content_check": ec.plan_content_check(PLAN, "Справочник.Контрагенты"),
         "load_rules": ec.load_rules(PLAN, b"PK\x03\x04", "Правила.zip"),
         "export_object": ec.export_object(PLAN, "KD2T", "Документ.Заказ", "0a-1b"),
         "import_message": ec.import_message(PLAN, "KD2S", "<ФайлОбмена/>".encode()),
@@ -42,6 +43,16 @@ def test_snippets_are_one_guarded_line(name: str) -> None:
     assert 'Результат = "ОШИБКА " + ПодробноеПредставлениеОшибки' in code
     # Метод у выражения «Новый Тип(…)» — ошибка компиляции 1С («Неопознанный оператор»).
     assert not re.search(r"Новый \w+\([^;]*?\)\s*\.", code)
+
+
+def test_plan_content_check_queries_composition() -> None:
+    code = ec.plan_content_check(PLAN, "Справочник.Контрагенты")
+    assert "\n" not in code
+    assert code.startswith("Попытка ")
+    assert "Состав.Содержит(" in code
+    assert "НайтиПоПолномуИмени(" in code
+    assert 'НайтиПоПолномуИмени("Справочник.Контрагенты")' in code
+    assert 'Результат = "НЕТ объект не найден"' in code
 
 
 def test_snippets_quote_values_and_payloads() -> None:
@@ -206,14 +217,19 @@ def test_arguments() -> None:
 
 
 class _Scripted(ec.DataServer):
-    """Сервер данных с ответами по очереди (без HTTP)."""
+    """Сервер данных с ответами по очереди (без HTTP); `codes` — полученные тексты кода."""
+
+    _replies: list[str]
+    codes: list[str]
 
     def __init__(self, label: str, replies: list[str]) -> None:
         super().__init__(label, "", {})
         object.__setattr__(self, "_replies", replies)
+        object.__setattr__(self, "codes", [])
 
     def call(self, code: str) -> str:
-        return self._replies.pop(0)  # type: ignore[attr-defined]  # задан в __init__
+        self.codes.append(code)
+        return self._replies.pop(0)
 
 
 @pytest.mark.parametrize(
@@ -240,7 +256,7 @@ def test_run_protocol(
 ) -> None:
     monkeypatch.setattr(ec, "RUNS", tmp_path)
     message = base64.b64encode("<ФайлОбмена/>".encode()).decode()
-    source = _Scripted("a.src", ["OK KD2S", f"OK {message}"])
+    source = _Scripted("a.src", ["OK KD2S", "OK", f"OK {message}"])
     target = _Scripted("a.dst", ["OK KD2T", imported, found])
     args = ec.parse_args(
         [
@@ -267,3 +283,43 @@ def test_run_protocol(
     assert "ИСТОЧНИК a.src (KD2S) → ПРИЕМНИК a.dst (KD2T)" in text
     assert all(item in text for item in expected), text
     assert (next(tmp_path.glob("exchange-*")) / "message.xml").read_text("utf-8") == "<ФайлОбмена/>"
+
+
+def test_run_stops_before_rules_when_object_not_in_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ec, "RUNS", tmp_path)
+    rules = tmp_path / "rules.zip"
+    rules.write_bytes(b"PK\x03\x04")
+    source = _Scripted("a.src", ["OK KD2S", "НЕТ Справочник.ФизическиеЛица"])
+    target = _Scripted("a.dst", ["OK KD2T"])
+    args = ec.parse_args(
+        [
+            "run",
+            "--plan",
+            PLAN,
+            "--source",
+            "a.src",
+            "--target",
+            "a.dst",
+            "--object",
+            "Справочник.ФизическиеЛица",
+            "--ref",
+            "0a",
+            "--source-rules",
+            str(rules),
+            "--target-rules",
+            str(rules),
+        ]
+    )
+    lines: list[str] = []
+    assert ec.run(args, source, target, lines) is False
+    text = "\n".join(lines)
+    assert (
+        f"ОШИБКА объект Справочник.ФизическиеЛица не входит в состав плана обмена {PLAN} "
+        "в a.src: правила не загружались, базы не менялись"
+    ) in text
+    received = "\n".join([*source.codes, *target.codes])
+    assert "ЗагрузитьКомплектПравил" not in received
+    assert "ЗарегистрироватьИзменения" not in received
+    assert any("Состав.Содержит(" in code for code in source.codes)

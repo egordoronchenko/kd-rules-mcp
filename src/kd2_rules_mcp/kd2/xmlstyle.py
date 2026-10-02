@@ -5,6 +5,7 @@
 см. дайджест §2.1). Стиль исходного файла запоминается при импорте и повторяется при экспорте.
 """
 
+import difflib
 import re
 from dataclasses import dataclass
 
@@ -106,3 +107,49 @@ class XmlWriter:
             text += self.style.newline
         data = text.encode("utf-8")
         return BOM + data if self.style.bom else data
+
+
+def _split_lines(data: bytes) -> list[tuple[bytes, bytes]]:
+    """Содержимое строки и её конец: CRLF, LF, CR или пусто."""
+    lines: list[tuple[bytes, bytes]] = []
+    for raw in data.splitlines(keepends=True):
+        if raw.endswith(b"\r\n"):
+            lines.append((raw[:-2], b"\r\n"))
+        elif raw.endswith(b"\n") or raw.endswith(b"\r"):
+            lines.append((raw[:-1], raw[-1:]))
+        else:
+            lines.append((raw, b""))
+    return lines
+
+
+def preserve_line_endings(old: bytes, new: bytes) -> bytes:
+    """Переводы строк старого файла у строк, которые не менялись; у новых — как у строки выше."""
+    old_lines = _split_lines(old)
+    new_lines = _split_lines(new)
+    if not old_lines:
+        return new
+    matcher = difflib.SequenceMatcher(
+        None,
+        [text for text, _ending in old_lines],
+        [text for text, _ending in new_lines],
+        autojunk=False,
+    )
+    parts: list[bytes] = []
+    # Первая новая строка файла не имеет строки выше: берём конец первой строки старого.
+    previous = old_lines[0][1]
+    last = len(new_lines) - 1
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "delete":
+            continue
+        if tag == "equal":
+            for old_index, new_index in zip(range(i1, i2), range(j1, j2), strict=True):
+                ending = old_lines[old_index][1]
+                parts.append(new_lines[new_index][0] + ending)
+                previous = ending
+            continue
+        for new_index in range(j1, j2):
+            # Последняя строка, если она новая, берёт конец из new, а не у строки выше.
+            ending = new_lines[new_index][1] if new_index == last else previous
+            parts.append(new_lines[new_index][0] + ending)
+            previous = ending
+    return b"".join(parts)

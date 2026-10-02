@@ -1,5 +1,6 @@
 """Рабочий проект правил (спецификация `rules-authoring`, «Рабочий проект правил»)."""
 
+import difflib
 import hashlib
 import re
 import shutil
@@ -26,6 +27,7 @@ from kd2_rules_mcp.kd2.rules_io import dump_rules, load_rules
 from kd2_rules_mcp.service import Kd2Service, Settings
 from kd2_rules_mcp.structures.store import StructureStore
 from kd2_rules_mcp.validation.format import check_format
+from tests.test_rules_io import EXCHANGE, as_file
 
 DATA = Path(__file__).parent / "data"
 DUMP = DATA / "xmldump"
@@ -231,6 +233,68 @@ def test_repeated_save_needs_overwrite(tmp_path: Path) -> None:
     assert rewritten == saved
     assert "правка".encode() in saved.read_bytes()
     assert project.saved_path == saved
+
+
+def _line_body(line: bytes) -> bytes:
+    if line.endswith(b"\r\n"):
+        return line[:-2]
+    if line.endswith(b"\n") or line.endswith(b"\r"):
+        return line[:-1]
+    return line
+
+
+def _lf_on_handler(raw: bytes) -> bytes:
+    """Три строки обработчика — LF, остальной XML остаётся с прежними концами."""
+    markers = (
+        "ПередВыгрузкойДанных".encode(),
+        "Отказ = Истина;".encode(),
+        "КонецЕсли;".encode(),
+    )
+    parts: list[bytes] = []
+    changed = 0
+    for line in raw.splitlines(keepends=True):
+        body = _line_body(line)
+        ending = line[len(body) :]
+        if any(marker in body for marker in markers):
+            ending = b"\n"
+            changed += 1
+        parts.append(body + ending)
+    assert changed == 3
+    return b"".join(parts)
+
+
+def _differing_lines(before: bytes, after: bytes) -> int:
+    """Число строк, которые не совпали с учётом концов, после выравнивания."""
+    left = before.splitlines(keepends=True)
+    right = after.splitlines(keepends=True)
+    matcher = difflib.SequenceMatcher(None, left, right, autojunk=False)
+    count = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "equal":
+            count += max(i2 - i1, j2 - j1)
+    return count
+
+
+def test_first_save_is_dump_rules(tmp_path: Path) -> None:
+    """Первая запись в новый файл совпадает с `dump_rules`."""
+    workspace, project = _workspace_with_sample(tmp_path)
+    assert project.document is not None
+    saved = workspace.save(project.id, "fresh.xml")
+    assert saved.read_bytes() == dump_rules(project.document)
+
+
+def test_save_overwrite_keeps_mixed_line_endings(tmp_path: Path) -> None:
+    """Поверх файла с переводами вперемешку меняется только строка правки."""
+    raw = as_file(EXCHANGE)
+    mixed = _lf_on_handler(raw)
+    workspace = RulesWorkspace(tmp_path / "ws")
+    path = workspace.root / "rules.xml"
+    path.write_bytes(mixed)
+    project = workspace.open_rules(path).project
+    assert project.document is not None
+    project.document.root.values["Наименование"] = "правка"
+    workspace.save(project.id, path, overwrite=True)
+    assert _differing_lines(mixed, path.read_bytes()) == 1
 
 
 def test_unknown_project_lists_open_projects(tmp_path: Path) -> None:

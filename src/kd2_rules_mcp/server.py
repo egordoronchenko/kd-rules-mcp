@@ -472,7 +472,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         overwrite: Annotated[bool, Field(description="Заменить существующий файл")] = False,
     ) -> dict[str, Any]:
         """Сохраняет XML в рабочую папку или в `rules_dir` проекта; ответ — путь, размер, итог
-        проверки формата. Другие пути — `path_outside_workspace` со списком `writable`."""
+        проверки формата. При записи поверх существующего файла концы строк неизменённых строк
+        сохраняются. Другие пути — `path_outside_workspace` со списком `writable`."""
         return await call(service.rules_save, project_id, path, overwrite)
 
     @server.tool()

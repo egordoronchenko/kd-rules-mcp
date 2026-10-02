@@ -468,7 +468,7 @@ async def test_pko_unknown_object_is_object_not_found(service: Kd2Service) -> No
 
 
 async def test_rule_create_puts_rule_into_group(service: Kd2Service) -> None:
-    """`rules_get` и `rules_list` группу не отдают — повтор того же кода даёт duplicate_rule."""
+    """Правило попадает в существующую группу; повтор того же кода — duplicate_rule."""
     opened = service.rules_open(str(DATA / "exchange_rules.xml"))
     project = opened["project_id"]
     created = service.rule_create(
@@ -480,9 +480,15 @@ async def test_rule_create_puts_rule_into_group(service: Kd2Service) -> None:
     )
     assert created["address"] == "ПКО «Контрагенты»"
     listed = service.rules_list(project, "pko", None, 0, 50)
-    assert "Контрагенты" in [row["code"] for row in listed["items"]]
+    row = next(item for item in listed["items"] if item["code"] == "Контрагенты")
+    assert row["group"] == "Справочники"
     got = service.rules_get(project, "pko", "Контрагенты", "", 50)
     assert got["fields"]["Наименование"] == "Справочник: Контрагенты"
+    assert got["group"] == "Справочники"
+    assert got["address"] == "ПКО «Контрагенты»"
+    assert got["properties"] == {"total": 0, "items": []}
+    overview = service.rules_overview(project)
+    assert {"path": "Справочники", "count": 3} in overview["groups"]["pko"]
 
     document = service.workspace.get(project).document
     assert isinstance(document, ExchangeRules)
