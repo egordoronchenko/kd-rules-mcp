@@ -432,12 +432,12 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 ## Ответы инструментов
 
 Ответ — JSON-объект (`structuredContent` MCP). Ниже — ключи верхнего уровня по коду `Kd2Service`
-(`src/kd2_rules_mcp/service.py`); вложенные поля — в описании инструмента или в самом ответе.
+(`src/kd2_rules_mcp/service/`); вложенные поля — в описании инструмента или в самом ответе.
 
-**Страница списка** — общий вид постраничных ответов (`_slice`, `_page`, `src/kd2_rules_mcp/service.py:923-934`):
+**Страница списка** — общий вид постраничных ответов (`slice_rows`, `page_view`, `src/kd2_rules_mcp/service/views.py:54-75`):
 `items`, `total`, `offset`, `limit` (не больше 200), `has_more`.
 
-**Проект правил** — общий вид ответа о рабочем проекте (`_project_view`, `src/kd2_rules_mcp/service.py:862`):
+**Проект правил** — общий вид ответа о рабочем проекте (`_project_view`, `src/kd2_rules_mcp/service/base.py:188`):
 `project_id`, `kind` (`exchange` или `registration`), `source_path`, `saved_path`, `modified` (документ менялся
 после открытия, создания или последнего сохранения), `counts` (число правил по разделам: `pko`, `pvd`, `pod`,
 `algorithms`, `queries`, `parameters` или `registration_rules`), `name`; у правил обмена — `source`, `target`;
@@ -445,7 +445,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 `source_changed` (у файла на диске изменились время или размер с момента открытия; перечитать — `rules_close`
 и снова `rules_open`).
 
-**Итог правки** — `_edit_view` (`src/kd2_rules_mcp/service.py:1142`): `address` и, если не пусто, `warnings`,
+**Итог правки** — `edit_view` (`src/kd2_rules_mcp/service/views.py:273`): `address` и, если не пусто, `warnings`,
 `skipped`, `not_applied`, `unresolved`, `disabled` (до 200 строк, при большем числе — ещё `<ключ>_total`).
 
 | Инструмент | Ключи ответа |

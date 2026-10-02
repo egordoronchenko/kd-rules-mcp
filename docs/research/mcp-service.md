@@ -4,7 +4,7 @@
 
 ## 7.1. Поверхность инструментов
 
-Код: `src/kd2_rules_mcp/service.py` (логика инструментов, `PathMap`, `Settings`), `src/kd2_rules_mcp/server.py`
+Код: `src/kd2_rules_mcp/service/` (логика инструментов, `PathMap`, `Settings`), `src/kd2_rules_mcp/server.py`
 (регистрация в `MCPServer` из SDK `mcp` 2.2, коды ошибок, запуск), точка входа `kd2-rules-mcp`. Тесты:
 `tests/test_server.py` — клиент MCP в том же процессе вызывает каждый из 31 инструмента (на 27.09.2026 их было 27;
 `project_list`, `structure_load_project`, `rules_pack` и `rules_close` добавлены позже). Полный справочник с параметрами, ответами
