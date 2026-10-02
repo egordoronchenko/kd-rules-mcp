@@ -59,6 +59,9 @@ _TOP: dict[str, tuple[str, str, str]] = {
 }
 _NESTED_TAGS = {"pks": "Свойство", "pks_group": "Группа", "pkz": "Значение"}
 _KINDS = set(_TOP) | set(_NESTED_TAGS)
+# Группа списка при создании — только у ПКО, ПВД и ПОД. У алгоритма, запроса и параметра
+# группы в схеме есть, но параметр `group` для них не задаётся.
+_GROUPED = frozenset({"pko", "pvd", "pod"})
 _STRUCTURE_KINDS = frozenset({"pko", "pvd", "pod", "pks", "pks_group", "pkz"})
 _ATTR_IDENTITY = frozenset({"algorithm", "query", "parameter"})
 _REF_FIELDS = {
@@ -122,13 +125,17 @@ def create_rule(
     owner: str = "",
     source: sqlite3.Connection | None = None,
     target: sqlite3.Connection | None = None,
+    group: str = "",
 ) -> EditResult:
     """Создаёт правило. `key` — код, имя, путь ПКС или имя значения источника ПКЗ.
 
-    `owner` — код ПКО для ПКС, группы ПКС и ПКЗ. `source` и `target` — структуры сторон;
-    без них проверка объектов, свойств и значений не выполняется.
+    `owner` — код ПКО для ПКС, группы ПКС и ПКЗ. `group` — путь кодов групп списка
+    через `/` (`Справочники` или `Справочники/Подгруппа`); пусто — корень списка.
+    Только для ПКО, ПВД и ПОД, группа должна уже существовать. `source` и `target` —
+    структуры сторон; без них проверка объектов, свойств и значений не выполняется.
     """
     _require_key(kind_name, key)
+    list_group = _list_group(rules, kind_name, group)
     node = Node.new(kind_name, _tag(kind_name))
     _set_identity(node, kind_name, key)
     _reject_identity_mismatch(kind_name, key, fields)
@@ -141,7 +148,7 @@ def create_rule(
     sides = _load_sides(source, target)
     _check_dangling(rules, kind_name, node)
     _check_structure(kind_name, node, pko, groups, sides)
-    _attach(rules, kind_name, node, pko, parent)
+    _attach(rules, kind_name, node, pko, parent, list_group)
     return _result(kind_name, node, owner, pko, source, target)
 
 
@@ -203,6 +210,8 @@ def create_pko_with_properties(
     source_object: str,
     target_object: str,
     fields: Mapping[str, FieldValue] | None = None,
+    *,
+    group: str = "",
 ) -> EditResult:
     """Создаёт ПКО пары объектов и ПКС по `property_candidates`.
 
@@ -211,9 +220,12 @@ def create_pko_with_properties(
     `auto = False` и «по синониму» не создаются и попадают в `not_applied`. Для ссылочного
     типа приёмника `КодПравилаКонвертации` заполняется, если в правилах ровно одно ПКО
     с такими типами источника и приёмника; иначе поле пустое, а свойство — в `unresolved`.
+    `group` — путь кодов групп списка ПКО через `/`; пусто — корень списка. Группа должна
+    уже существовать.
     """
     if not code:
         raise RuleEditError("Пустой адрес правила")
+    list_group = _list_group(rules, "pko", group)
     source_row = find_object(source, source_object)
     if isinstance(source_row, NotFound):
         raise ObjectNotFoundError(source_row.message, source_row.suggestions)
@@ -236,15 +248,17 @@ def create_pko_with_properties(
     if fields:
         _apply_fields(node, fields)
     _check_structure("pko", node, None, [], _load_sides(source, target))
-    section = rules.section("ПравилаКонвертацииОбъектов")
-    section.items.append(node)
+    container = list_group
+    if container is None:
+        container = rules.section("ПравилаКонвертацииОбъектов")
+    container.items.append(node)
     result = EditResult(rule_address(node))
     try:
         properties = Node.new("pks_list", "Свойства")
         node.children["Свойства"] = properties
         _fill_properties(properties, candidates, rules, "", result)
     except Exception:
-        section.items.remove(node)
+        container.items.remove(node)
         raise
     return result
 
@@ -561,15 +575,42 @@ def _reject_segment_mismatch(node: Node, last: str) -> None:
     )
 
 
+def _list_group(rules: ExchangeRules, kind_name: str, group: str) -> Node | None:
+    """Группа верхнего списка по пути кодов; пустой путь — корень списка (`None`).
+
+    Ищется по цепочке `items`: узел `is_group` с `code`, равным сегменту пути.
+    Группа не создаётся.
+    """
+    if not group:
+        return None
+    if kind_name not in _GROUPED:
+        raise RuleEditError(f"Группа «{group}» задаётся только для ПКО, ПВД и ПОД")
+    section = _TOP[kind_name][0]
+    container = _section_node(rules, section)
+    for segment in group.split("/"):
+        found: Node | None = None
+        if container is not None:
+            for item in container.items:
+                if item.is_group and item.code == segment:
+                    found = item
+                    break
+        if found is None:
+            raise RuleNotFoundError(f"Группа «{group}» в списке {section} не найдена")
+        container = found
+    return container
+
+
 def _attach(
     rules: ExchangeRules,
     kind_name: str,
     node: Node,
     pko: Node | None,
     parent: Node | None,
+    list_group: Node | None,
 ) -> None:
     if kind_name in _TOP:
-        rules.section(_TOP[kind_name][0]).items.append(node)
+        container = list_group if list_group is not None else rules.section(_TOP[kind_name][0])
+        container.items.append(node)
         return
     if parent is None:
         if pko is None:

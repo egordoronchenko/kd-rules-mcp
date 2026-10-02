@@ -148,6 +148,17 @@ def test_relative_and_absolute_paths_inside_workspace(tmp_path: Path) -> None:
     assert project.saved_path == absolute
 
 
+def test_relative_backslash_is_a_subdirectory(tmp_path: Path) -> None:
+    """`sub\\rules.xml` — подпапка, а не файл с обратной косой в имени."""
+    workspace, project = _workspace_with_sample(tmp_path)
+    saved = workspace.save(project.id, "sub\\rules.xml")
+    root = workspace.root.resolve()
+    assert saved.relative_to(root).parts == ("sub", "rules.xml")
+    assert (root / "sub").is_dir()
+    assert saved.is_file()
+    assert all("\\" not in item.name for item in root.iterdir())
+
+
 def test_save_outside_workspace_is_rejected(tmp_path: Path) -> None:
     """Сценарий «Сохранение вне рабочей папки»: абсолютный путь и `..\\..\\x.xml`."""
     workspace, project = _workspace_with_sample(tmp_path)

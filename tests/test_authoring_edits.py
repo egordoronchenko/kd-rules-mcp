@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from lxml import etree
 
 from kd2_rules_mcp.authoring.edits import (
     EditResult,
@@ -90,6 +91,23 @@ def _rules() -> ExchangeRules:
     document = load_rules(_HEAD.encode())
     assert isinstance(document, ExchangeRules)
     return document
+
+
+def _section_with_groups(section: str, body: str) -> ExchangeRules:
+    xml = (
+        "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>"
+        f"<{section}>{body}</{section}></ПравилаОбмена>"
+    )
+    document = load_rules(xml.encode())
+    assert isinstance(document, ExchangeRules)
+    return document
+
+
+def _group_node(rules: ExchangeRules, section: str, path: str) -> Node:
+    container = rules.root.children[section]
+    for segment in path.split("/"):
+        container = next(item for item in container.items if item.is_group and item.code == segment)
+    return container
 
 
 def _assert_sound(rules: ExchangeRules) -> None:
@@ -740,3 +758,144 @@ def test_one_structure_checks_only_its_side(tmp_path: Path) -> None:
             source=source.conn,
         )
     assert dump_rules(rules) == before
+
+
+def test_create_pko_inside_existing_group() -> None:
+    """ПКО ложится в items группы «Справочники», а не рядом с ней в корне списка."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    result = create_rule(
+        rules,
+        "pko",
+        "Контрагенты",
+        {"Источник": "СправочникСсылка.Контрагенты", "Приемник": "СправочникСсылка.Контрагенты"},
+        group="Справочники",
+    )
+    assert result.address == "ПКО «Контрагенты»"
+    section = rules.root.children["ПравилаКонвертацииОбъектов"]
+    catalogs = _group_node(rules, "ПравилаКонвертацииОбъектов", "Справочники")
+    assert [item.code for item in catalogs.items] == ["Организации", "ВидыОпераций", "Контрагенты"]
+    assert catalogs.items[-1] in rules.pko()
+    assert all(item.code != "Контрагенты" for item in section.items)
+
+    raw = dump_rules(rules)
+    written = etree.fromstring(raw).find(
+        "ПравилаКонвертацииОбъектов/Группа[Код='Справочники']/Правило[Код='Контрагенты']"
+    )
+    assert written is not None
+    parent = written.getparent()
+    assert parent is not None and parent.tag == "Группа"
+    _assert_sound(rules)
+
+
+@pytest.mark.parametrize(
+    ("kind", "section"),
+    [
+        ("pko", "ПравилаКонвертацииОбъектов"),
+        ("pvd", "ПравилаВыгрузкиДанных"),
+        ("pod", "ПравилаОчисткиДанных"),
+    ],
+)
+def test_create_rule_in_nested_group(kind: str, section: str) -> None:
+    rules = _section_with_groups(
+        section, "<Группа><Код>A</Код><Группа><Код>B</Код></Группа></Группа>"
+    )
+    create_rule(rules, kind, "Новый", group="A/B")
+    outer = _group_node(rules, section, "A")
+    inner = _group_node(rules, section, "A/B")
+    assert [item.code for item in inner.items] == ["Новый"]
+    assert all(item.code != "Новый" for item in outer.items)
+    assert any(item.code == "Новый" for item in rules.root.children[section].walk())
+    _assert_sound(rules)
+
+
+def test_missing_group_is_not_created() -> None:
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    before = dump_rules(rules)
+    with pytest.raises(
+        RuleNotFoundError, match="Группа «НетТакой» в списке ПравилаКонвертацииОбъектов не найдена"
+    ):
+        create_rule(rules, "pko", "Новый", group="НетТакой")
+    with pytest.raises(
+        RuleNotFoundError,
+        match="Группа «Справочники/Нет» в списке ПравилаВыгрузкиДанных не найдена",
+    ):
+        create_rule(rules, "pvd", "Новый", group="Справочники/Нет")
+    assert dump_rules(rules) == before
+
+
+@pytest.mark.parametrize("kind", ["algorithm", "query", "parameter", "pks", "pks_group", "pkz"])
+def test_group_rejected_for_kind_without_list_group(kind: str) -> None:
+    rules = _rules()
+    before = dump_rules(rules)
+    with pytest.raises(RuleEditError, match="задаётся только для ПКО, ПВД и ПОД"):
+        create_rule(rules, kind, "Код", group="Справочники")
+    assert dump_rules(rules) == before
+
+
+def test_duplicate_code_in_another_group_is_refused() -> None:
+    rules = _section_with_groups(
+        "ПравилаКонвертацииОбъектов",
+        "<Группа><Код>Справочники</Код></Группа>"
+        "<Группа><Код>Другая</Код>"
+        "<Правило><Код>Организации</Код><Источник>А</Источник><Приемник>Б</Приемник></Правило>"
+        "</Группа>",
+    )
+    before = dump_rules(rules)
+    with pytest.raises(DuplicateRuleError, match="кодом «Организации»"):
+        create_rule(
+            rules,
+            "pko",
+            "Организации",
+            {"Источник": "А", "Приемник": "Б"},
+            group="Справочники",
+        )
+    assert dump_rules(rules) == before
+
+
+def test_create_pko_with_properties_lands_in_group(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Контрагенты", synonym="Контрагенты")
+    target.add("Справочник", "Контрагенты", synonym="Контрагенты")
+    rules = _section_with_groups(
+        "ПравилаКонвертацииОбъектов",
+        "<Группа><Код>Другая</Код>"
+        "<Правило><Код>Занято</Код><Источник>А</Источник><Приемник>Б</Приемник></Правило>"
+        "</Группа>"
+        "<Группа><Код>Справочники</Код></Группа>",
+    )
+    before = dump_rules(rules)
+    with pytest.raises(RuleNotFoundError, match="Группа «Нет»"):
+        create_pko_with_properties(
+            rules,
+            "Контрагенты",
+            source.conn,
+            target.conn,
+            "Справочник.Контрагенты",
+            "Справочник.Контрагенты",
+            group="Нет",
+        )
+    assert dump_rules(rules) == before
+    result = create_pko_with_properties(
+        rules,
+        "Контрагенты",
+        source.conn,
+        target.conn,
+        "Справочник.Контрагенты",
+        "Справочник.Контрагенты",
+        group="Справочники",
+    )
+    assert result.address == "ПКО «Контрагенты»"
+    catalogs = _group_node(rules, "ПравилаКонвертацииОбъектов", "Справочники")
+    assert [item.code for item in catalogs.items] == ["Контрагенты"]
+    assert catalogs.items[0] in rules.pko()
+    with pytest.raises(DuplicateRuleError, match="Занято"):
+        create_pko_with_properties(
+            rules,
+            "Занято",
+            source.conn,
+            target.conn,
+            "Справочник.Контрагенты",
+            "Справочник.Контрагенты",
+            group="Справочники",
+        )

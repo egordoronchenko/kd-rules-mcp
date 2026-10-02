@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 from mcp import Client
 
+from kd2_rules_mcp.errors import DuplicateRuleError, RuleNotFoundError
+from kd2_rules_mcp.kd2.model import ExchangeRules
 from kd2_rules_mcp.server import create_server
 from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
 
@@ -310,6 +312,20 @@ async def test_path_map_translates_agent_paths(tmp_path: Path) -> None:
     assert not (mounted / "data" / "x.xml").exists()
 
 
+async def test_relative_backslash_folder_is_a_subdirectory(service: Kd2Service) -> None:
+    """`handlers_export(folder='out\\\\handlers')` создаёт каталог `out/handlers`."""
+    async with Client(create_server(service)) as client:
+        opened = await _call(client, "rules_open", path=str(DATA / "exchange_rules.xml"))
+        exported = await _call(
+            client, "handlers_export", project_id=opened["project_id"], folder="out\\handlers"
+        )
+    folder = Path(exported["folder"])
+    root = service.workspace.root.resolve()
+    assert folder.relative_to(root).parts == ("out", "handlers")
+    assert "\\" not in folder.name
+    assert folder.is_dir()
+
+
 def _info_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         record.getMessage()
@@ -382,3 +398,47 @@ async def test_pko_unknown_object_is_object_not_found(service: Kd2Service) -> No
     assert error["code"] == "object_not_found"
     assert "suggestions" in error
     assert "Справочник.Контрагенты" in error["suggestions"]
+
+
+async def test_rule_create_puts_rule_into_group(service: Kd2Service) -> None:
+    """`rules_get` и `rules_list` группу не отдают — повтор того же кода даёт duplicate_rule."""
+    opened = service.rules_open(str(DATA / "exchange_rules.xml"))
+    project = opened["project_id"]
+    created = service.rule_create(
+        project,
+        "pko",
+        "Контрагенты",
+        fields={"Наименование": "Справочник: Контрагенты"},
+        group="Справочники",
+    )
+    assert created["address"] == "ПКО «Контрагенты»"
+    listed = service.rules_list(project, "pko", None, 0, 50)
+    assert "Контрагенты" in [row["code"] for row in listed["items"]]
+    got = service.rules_get(project, "pko", "Контрагенты", "", 50)
+    assert got["fields"]["Наименование"] == "Справочник: Контрагенты"
+
+    document = service.workspace.get(project).document
+    assert isinstance(document, ExchangeRules)
+    section = document.root.children["ПравилаКонвертацииОбъектов"]
+    catalogs = next(item for item in section.items if item.is_group and item.code == "Справочники")
+    assert any(item.code == "Контрагенты" and not item.is_group for item in catalogs.items)
+    assert all(item.code != "Контрагенты" for item in section.items)
+
+    with pytest.raises(DuplicateRuleError, match="Контрагенты"):
+        service.rule_create(project, "pko", "Контрагенты")
+
+
+async def test_pko_create_from_candidates_requires_existing_group(service: Kd2Service) -> None:
+    service.structure_load_xml("dump", str(DUMP))
+    created = service.rules_create("dump", "dump")
+    with pytest.raises(RuleNotFoundError, match="Группа «Справочники»"):
+        service.pko_create_from_candidates(
+            created["project_id"],
+            "Контрагенты",
+            "dump",
+            "dump",
+            "Справочник.Контрагенты",
+            "Справочник.Контрагенты",
+            None,
+            group="Справочники",
+        )

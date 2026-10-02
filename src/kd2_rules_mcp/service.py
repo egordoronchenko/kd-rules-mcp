@@ -42,7 +42,7 @@ from kd2_rules_mcp.authoring.registration import (
     RegistrationObject,
     build_registration_rules,
 )
-from kd2_rules_mcp.authoring.workspace import RulesProject, RulesWorkspace
+from kd2_rules_mcp.authoring.workspace import RulesProject, RulesWorkspace, normalize_relative
 from kd2_rules_mcp.errors import (
     Kd2Error,
     ObjectNotFoundError,
@@ -522,8 +522,10 @@ class Kd2Service:
 
     # --- Правки ----------------------------------------------------------------------------
 
-    def rule_create(self, project_id: str, kind: str, key: str, **options: Any) -> dict[str, Any]:
-        return self._edit(create_rule, project_id, kind, key, **options)
+    def rule_create(
+        self, project_id: str, kind: str, key: str, group: str = "", **options: Any
+    ) -> dict[str, Any]:
+        return self._edit(create_rule, project_id, kind, key, group=group, **options)
 
     def rule_update(self, project_id: str, kind: str, key: str, **options: Any) -> dict[str, Any]:
         return self._edit(update_rule, project_id, kind, key, **options)
@@ -551,6 +553,7 @@ class Kd2Service:
         source_object: str,
         target_object: str,
         fields: Mapping[str, Any] | None,
+        group: str = "",
     ) -> dict[str, Any]:
         with (
             self._lock,
@@ -559,7 +562,7 @@ class Kd2Service:
         ):
             rules = self._exchange(project_id)
             result = create_pko_with_properties(
-                rules, code, source, target, source_object, target_object, fields
+                rules, code, source, target, source_object, target_object, fields, group=group
             )
             return _edit_view(result)
 
@@ -692,10 +695,17 @@ class Kd2Service:
         owner: str = "",
         source_structure: str | None = None,
         target_structure: str | None = None,
+        group: str | None = None,
     ) -> dict[str, Any]:
         with self._lock, self._sides(source_structure, target_structure) as (source, target):
             rules = self._exchange(project_id)
-            result = operation(rules, kind, key, fields, owner=owner, source=source, target=target)
+            # `group` передаётся только из `rule_create`: у `update_rule` такого параметра нет.
+            extra: dict[str, Any] = {}
+            if group is not None:
+                extra["group"] = group
+            result = operation(
+                rules, kind, key, fields, owner=owner, source=source, target=target, **extra
+            )
             return _edit_view(result)
 
     def _catalog(self) -> Catalog:
@@ -797,6 +807,8 @@ class Kd2Service:
     def _local(self, path: str) -> Path | None:
         r"""Локальный путь сервера; абсолютный путь агента, который не удалось перевести на этой ОС
         (например, `C:\…` в Linux-контейнере вне подключённых папок), — `None`."""
+        if not _is_absolute(path):
+            path = normalize_relative(path)
         local = self.settings.path_map.to_local(path)
         if _is_absolute(path) and not local.is_absolute():
             return None

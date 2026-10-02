@@ -102,6 +102,15 @@ RuleKey = Annotated[
     ),
 ]
 Owner = Annotated[str, Field(description="Код ПКО-владельца для pks, pks_group и pkz; иначе пусто")]
+RuleGroup = Annotated[
+    str,
+    Field(
+        description=(
+            "Группа списка правил, куда положить правило: путь кодов групп через `/` "
+            "(например `Справочники`); пусто — корень списка. Только для pko, pvd, pod"
+        )
+    ),
+]
 Fields = Annotated[
     dict[str, Any] | None,
     Field(
@@ -497,6 +506,7 @@ def create_server(service: Kd2Service) -> MCPServer:
         owner: Owner = "",
         source_structure: OptionalStructure = None,
         target_structure: OptionalStructure = None,
+        group: RuleGroup = "",
     ) -> dict[str, Any]:
         """Создаёт правило; висячие ссылки на ПКО и отсутствующие объекты отклоняются."""
         return await call(
@@ -508,6 +518,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             owner=owner,
             source_structure=source_structure,
             target_structure=target_structure,
+            group=group,
         )
 
     @server.tool()
@@ -561,6 +572,7 @@ def create_server(service: Kd2Service) -> MCPServer:
         source_object: ObjectName,
         target_object: ObjectName,
         fields: Fields = None,
+        group: RuleGroup = "",
     ) -> dict[str, Any]:
         """ПКО с ПКС по кандидатам: «точно» и «синоним КД» включены, без пары — выключены."""
         return await call(
@@ -572,6 +584,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             source_object,
             target_object,
             fields,
+            group,
         )
 
     # --- Проверки ---------------------------------------------------------------------------

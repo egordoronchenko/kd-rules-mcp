@@ -106,7 +106,8 @@ def test_target_attribute_removed(sides: tuple[sqlite3.Connection, ...]) -> None
     )
     issues = check(sides, xml).issues
     assert [(i.level, i.check, i.address) for i in issues] == [
-        (Level.ERROR, "structure.pks_target", "ПКО «Номенклатура» / ПКС КомментарийРасш")
+        (Level.ERROR, "structure.pks_target", "ПКО «Номенклатура» / ПКС КомментарийРасш"),
+        (Level.WARNING, "structure.pko_unreachable", "ПКО «Номенклатура»"),
     ]
     assert "КомментарийРасш" in issues[0].message
 
@@ -189,7 +190,9 @@ def test_handlers_and_disabled_pks_are_not_type_checked(
         "Владелец", "Владелец", "Свойство", "<ПриВыгрузке>Значение = Неопределено;</ПриВыгрузке>"
     ) + pks_xml("Нет", "Нет", attrs=' Отключить="true"')
     report = check(sides, rules_xml(pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)))
-    assert report.issues == []
+    assert [(i.level, i.check, i.address) for i in report.issues] == [
+        (Level.WARNING, "structure.pko_unreachable", "ПКО «Номенклатура»"),
+    ]
 
 
 def test_primitive_to_reference(sides: tuple[sqlite3.Connection, ...]) -> None:
@@ -230,6 +233,7 @@ def test_unknown_objects(sides: tuple[sqlite3.Connection, ...]) -> None:
         ("structure.pko_target", "ПКО «Нет»"),
         ("structure.pvd_object", "ПВД «В»"),
         ("structure.pod_object", "ПОД «О»"),
+        ("structure.pko_unreachable", "ПКО «Нет»"),
     ]
 
 
@@ -255,14 +259,18 @@ def test_uncovered_enum_values(sides: tuple[sqlite3.Connection, ...]) -> None:
     xml = rules_xml(pko_xml("Виды", ENUM, ENUM, values=pkz_xml("Приход", "Приход")))
     issues = check(sides, xml).issues
     assert [(i.level, i.check, i.address) for i in issues] == [
-        (Level.WARNING, "structure.pkz_coverage", "ПКО «Виды»")
+        (Level.WARNING, "structure.pkz_coverage", "ПКО «Виды»"),
+        (Level.WARNING, "structure.pko_unreachable", "ПКО «Виды»"),
     ]
     assert issues[0].message.endswith("Корректировка, Расход")
 
 
 def test_enum_without_pkz_is_not_coverage_issue(sides: tuple[sqlite3.Connection, ...]) -> None:
     """Без ПКЗ соответствие значений не строится (Исп:738) — покрытие не проверяется."""
-    assert check(sides, rules_xml(pko_xml("Виды", ENUM, ENUM))).issues == []
+    issues = check(sides, rules_xml(pko_xml("Виды", ENUM, ENUM))).issues
+    assert [(i.level, i.check, i.address) for i in issues] == [
+        (Level.WARNING, "structure.pko_unreachable", "ПКО «Виды»"),
+    ]
 
 
 def test_unknown_enum_values(sides: tuple[sqlite3.Connection, ...]) -> None:
@@ -276,6 +284,7 @@ def test_unknown_enum_values(sides: tuple[sqlite3.Connection, ...]) -> None:
     assert [(i.check, i.address) for i in report.issues] == [
         ("structure.pkz_source", "ПКО «Виды» / ПКЗ Нет"),
         ("structure.pkz_target", "ПКО «Виды» / ПКЗ Корректировка"),
+        ("structure.pko_unreachable", "ПКО «Виды»"),
     ]
 
 
@@ -286,6 +295,122 @@ def test_missing_structure_is_skipped(sides: tuple[sqlite3.Connection, ...]) -> 
         pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, pks_xml("КомментарийРасш", "Нет"))
     )
     report = check_structures(load_exchange_rules(xml), source, None)
-    assert report.issues == []
+    assert [(i.level, i.check, i.address) for i in report.issues] == [
+        (Level.WARNING, "structure.pko_unreachable", "ПКО «Номенклатура»"),
+    ]
     assert [item.check for item in report.skipped] == ["structure.target"]
     assert "результат неполный" in report.summary()
+
+
+def _pvd(code: str, pko: str, *, disabled: bool = False) -> str:
+    flag = ' Отключить="true"' if disabled else ""
+    return (
+        f"<Правило{flag}><Код>{code}</Код><ОбъектВыборки>{NOMENCLATURE}</ОбъектВыборки>"
+        f"<КодПравилаКонвертации>{pko}</КодПравилаКонвертации></Правило>"
+    )
+
+
+def test_unreachable_pko_warns(sides: tuple[sqlite3.Connection, ...]) -> None:
+    """ПКО без ПВД и без ссылок из ПКС — одно предупреждение на его адрес."""
+    report = check(sides, rules_xml(pko_xml("Лишний", NOMENCLATURE, NOMENCLATURE)))
+    assert [(i.level, i.check, i.address, i.message) for i in report.issues] == [
+        (
+            Level.WARNING,
+            "structure.pko_unreachable",
+            "ПКО «Лишний»",
+            "ПКО «Лишний» не вызывается ни из ПВД, ни из ПКС: проверьте состав плана обмена"
+            " (structure_plan_content) и добавьте ПВД или ссылку из ПКС",
+        )
+    ]
+
+
+def test_pvd_makes_pko_reachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+    xml = rules_xml(pko_xml("Лишний", NOMENCLATURE, NOMENCLATURE), pvd=_pvd("В", "Лишний"))
+    assert only(check(sides, xml), "structure.pko_unreachable") == []
+
+
+def test_pks_of_another_pko_makes_pko_reachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+    body = pks_xml(
+        "Владелец",
+        "Владелец",
+        "Свойство",
+        "<КодПравилаКонвертации>Лишний</КодПравилаКонвертации>",
+    )
+    xml = rules_xml(
+        pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)
+        + pko_xml("Лишний", "СправочникСсылка.Контрагенты", "СправочникСсылка.Контрагенты"),
+        pvd=_pvd("В", "Номенклатура"),
+    )
+    assert only(check(sides, xml), "structure.pko_unreachable") == []
+
+
+def test_pks_group_code_makes_pko_reachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+    body = (
+        "<Группа><КодПравилаКонвертации>Лишний</КодПравилаКонвертации>"
+        '<Источник Имя="Товары" Вид="ТабличнаяЧасть"/>'
+        '<Приемник Имя="Товары" Вид="ТабличнаяЧасть"/><Свойства/></Группа>'
+    )
+    xml = rules_xml(
+        pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)
+        + pko_xml("Лишний", NOMENCLATURE, NOMENCLATURE),
+        pvd=_pvd("В", "Номенклатура"),
+    )
+    assert only(check(sides, xml), "structure.pko_unreachable") == []
+
+
+def test_empty_source_pko_is_not_unreachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+    report = check(sides, rules_xml(pko_xml("ИзОбработчика", "", NOMENCLATURE)))
+    assert only(report, "structure.pko_unreachable") == []
+
+
+def test_disabled_pko_is_not_unreachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+    xml = rules_xml(
+        f'<Правило Отключить="true"><Код>Лишний</Код><Источник>{NOMENCLATURE}</Источник>'
+        f"<Приемник>{NOMENCLATURE}</Приемник></Правило>"
+    )
+    assert only(check(sides, xml), "structure.pko_unreachable") == []
+
+
+def test_disabled_pvd_does_not_make_pko_reachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+    xml = rules_xml(
+        pko_xml("Лишний", NOMENCLATURE, NOMENCLATURE),
+        pvd=_pvd("В", "Лишний", disabled=True),
+    )
+    issues = only(check(sides, xml), "structure.pko_unreachable")
+    assert [i.address for i in issues] == ["ПКО «Лишний»"]
+
+
+def test_handler_mention_makes_pko_reachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+    carrier = pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE).replace(
+        "<Свойства>",
+        '<ПередВыгрузкой>ИмяПКО = "Лишний";</ПередВыгрузкой><Свойства>',
+        1,
+    )
+    xml = rules_xml(
+        carrier + pko_xml("Лишний", "СправочникСсылка.Контрагенты", "СправочникСсылка.Контрагенты"),
+        pvd=_pvd("В", "Номенклатура"),
+    )
+    assert only(check(sides, xml), "structure.pko_unreachable") == []
+
+
+def test_algorithm_mention_makes_pko_reachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+    pko = pko_xml("Лишний", NOMENCLATURE, NOMENCLATURE)
+    xml = (
+        "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>"
+        f"<ПравилаКонвертацииОбъектов>{pko}</ПравилаКонвертацииОбъектов>"
+        '<Алгоритмы><Алгоритм Имя="Вызов">'
+        "<Текст>ВыгрузитьПоПравилу(Лишний);</Текст></Алгоритм></Алгоритмы>"
+        "</ПравилаОбмена>"
+    ).encode()
+    assert only(check(sides, xml), "structure.pko_unreachable") == []
+
+
+def test_unreachable_pko_does_not_need_structures() -> None:
+    """Проверка по самим правилам: без структур не пропускается."""
+    report = check_structures(
+        load_exchange_rules(rules_xml(pko_xml("Лишний", NOMENCLATURE, NOMENCLATURE))),
+        None,
+        None,
+    )
+    assert [i.check for i in report.issues] == ["structure.pko_unreachable"]
+    assert "structure.pko_unreachable" not in {item.check for item in report.skipped}

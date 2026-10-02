@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node
+from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS
 from kd2_rules_mcp.validation.address import (
     pks_address,
     pks_segment,
@@ -25,7 +26,7 @@ from kd2_rules_mcp.validation.report import ValidationReport
 SOURCE = "Источник"
 TARGET = "Приемник"
 SIDE_TITLES = {SOURCE: "источника", TARGET: "приёмника"}
-# Префиксы ссылочных типов: значение такого типа выгружается только через ПКО (Исп:13152-13161).
+# Префиксы ссылочных типов: значение такого типа выгружается только через ПКО (БСП:13152-13161).
 REF_PREFIXES = (
     "СправочникСсылка.",
     "ДокументСсылка.",
@@ -48,6 +49,24 @@ PKO_HANDLERS = (
     "ПередЗагрузкой",
     "ПриЗагрузке",
     "ПослеЗагрузки",
+)
+# Тексты, где упоминание кода ПКО считается вызовом: обработчики ПКО, ПКС, ПВД, ПОД
+# и события конвертации. Текст алгоритма смотрится отдельно — у запроса тег тоже `Текст`.
+_CALL_TEXTS = frozenset(
+    {
+        *PKO_HANDLERS,
+        "ПоследовательностьПолейПоиска",
+        *PKS_HANDLERS,
+        "ПередОбработкойВыгрузки",
+        "ПослеОбработкиВыгрузки",
+        "ПередОбработкойПравила",
+        "ПередВыгрузкойОбъекта",
+        "ПослеВыгрузкиОбъекта",
+        "ПослеОбработкиПравила",
+        "ПередУдалениемОбъекта",
+        "ПослеЗагрузкиПараметра",
+        *CONVERSION_EVENTS,
+    }
 )
 
 
@@ -175,6 +194,7 @@ def check_structures(
         _check_pvd(context, pvd)
     for pod in rules.pod():
         _check_pod(context, pod)
+    _check_unreachable_pko(context)
     return report
 
 
@@ -433,4 +453,79 @@ def _check_pod(context: _Context, pod: Node) -> None:
             "structure.pod_object",
             rule_address(pod),
             f"Объект выборки «{selection}» не найден в структуре приёмника",
+        )
+
+
+def _disabled(node: Node) -> bool:
+    """`Отключить`: у ПВД булево, у ПКО атрибута нет в схеме — остаётся строка `true`."""
+    flag = node.attrs.get("Отключить")
+    return flag is True or flag == "true"
+
+
+def _conversion_code(node: Node) -> str:
+    """Код ПКО из `КодПравилаКонвертации` (ПКС, группа ПКС, ПКЗ, ПВД)."""
+    return str(node.get("КодПравилаКонвертации")).strip()
+
+
+def _referenced_pko_codes(rules: ExchangeRules) -> set[str]:
+    """Коды ПКО, на которые есть ссылка из включённого ПВД, ПКС, группы ПКС или ПКЗ."""
+    codes: set[str] = set()
+    for pvd in rules.pvd():
+        if _disabled(pvd):
+            continue
+        code = _conversion_code(pvd)
+        if code:
+            codes.add(code)
+    for pko in rules.pko():
+        for container_tag in ("Свойства", "Значения"):
+            container = pko.child(container_tag)
+            if container is None:
+                continue
+            # `walk()` раскрывает группы и не возвращает их; `walk_all` отдаёт и группы,
+            # у которых поле тоже `КодПравилаКонвертации`.
+            for node in container.walk_all():
+                code = _conversion_code(node)
+                if code:
+                    codes.add(code)
+    return codes
+
+
+def _handler_corpus(rules: ExchangeRules) -> str:
+    """Тексты обработчиков и алгоритмов: подстрока кода ПКО считается вызовом."""
+    chunks: list[str] = []
+    for node in rules.root.walk_all():
+        if node.kind.name == "algorithm":
+            text = node.get("Текст")
+            if text:
+                chunks.append(str(text))
+        for tag, value in node.values.items():
+            if tag in _CALL_TEXTS and value:
+                chunks.append(str(value))
+        loaded = node.attrs.get("ПослеЗагрузкиПараметра")
+        if loaded:
+            chunks.append(str(loaded))
+    return "\n".join(chunks)
+
+
+def _check_unreachable_pko(context: _Context) -> None:
+    """ПКО, которое ничем не вызывается.
+
+    Исполнитель берёт ПКО из ПВД, по коду у свойства или подбором по типу значения
+    (БСП:13152-13161). Подбор по типу ещё возможен, поэтому это предупреждение.
+    Пустой источник — выгрузка из обработчиков; выключенное ПКО не исполняется.
+    От загруженных структур не зависит.
+    """
+    called = _referenced_pko_codes(context.rules)
+    handlers = _handler_corpus(context.rules)
+    for pko in context.rules.pko():
+        if _disabled(pko) or not str(pko.get(SOURCE)).strip():
+            continue
+        code = pko.code.strip()
+        if code and (code in called or code in handlers):
+            continue
+        context.report.warning(
+            "structure.pko_unreachable",
+            rule_address(pko),
+            f"ПКО «{pko.code}» не вызывается ни из ПВД, ни из ПКС: проверьте состав"
+            " плана обмена (structure_plan_content) и добавьте ПВД или ссылку из ПКС",
         )

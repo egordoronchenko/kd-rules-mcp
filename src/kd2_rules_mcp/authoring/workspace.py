@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from kd2_rules_mcp.errors import Kd2Error, ProjectNotFoundError, WorkspacePathError
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RulesDocument
@@ -114,7 +114,7 @@ class RulesWorkspace:
 
     def _destination(self, path: Path | str, allowed: Sequence[Path] = ()) -> Path:
         roots = [self.root.resolve(), *(Path(folder).resolve() for folder in allowed)]
-        candidate = Path(path)
+        candidate = Path(normalize_relative(os.fspath(path)))
         if not candidate.is_absolute():
             candidate = self.root / candidate
         resolved = candidate.resolve()
@@ -125,6 +125,17 @@ class RulesWorkspace:
                 f"Разрешено: {', '.join(str(root) for root in roots)}"
             )
         return resolved
+
+
+def normalize_relative(path: str) -> str:
+    """Обратная косая в относительном пути — разделитель каталогов, не символ имени.
+
+    Абсолютный путь Windows (`C:\\…`, `\\\\сервер\\…`) и POSIX (`/…`) не меняется:
+    его переводит соответствие путей агента и сервера.
+    """
+    if PureWindowsPath(path).is_absolute() or PurePosixPath(path).is_absolute():
+        return path
+    return path.replace("\\", "/")
 
 
 def _is_inside(path: Path, root: Path) -> bool:

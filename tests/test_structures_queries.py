@@ -211,6 +211,17 @@ def test_exchange_plan_content_includes_unresolved_type(connection: sqlite3.Conn
     assert "не найден" in missed.message
 
 
+def test_exchange_plan_content_accepts_name_without_prefix(connection: sqlite3.Connection) -> None:
+    full = exchange_plan_content(connection, "ПланОбмена.Обмен")
+    bare = exchange_plan_content(connection, "Обмен")
+    assert isinstance(full, Page)
+    assert bare == full
+    missed = exchange_plan_content(connection, "НетТакого")
+    assert isinstance(missed, NotFound)
+    assert missed.name == "НетТакого"
+    assert missed.message.startswith("Объект «НетТакого» не найден")
+
+
 def test_compare_identical_structure_is_empty(connection: sqlite3.Connection) -> None:
     diff = compare_structures(connection, connection)
     assert diff.counts() == {

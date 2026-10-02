@@ -188,10 +188,15 @@ def exchange_plan_content(
     offset: int = 0,
     limit: int = 50,
 ) -> Page | NotFound:
-    """Элементы состава плана обмена. Объект другого вида — не найден как план обмена."""
+    """Элементы состава плана обмена. Объект другого вида — не найден как план обмена.
+
+    Имя без точки — имя плана: сначала ищется ``ПланОбмена.<имя>``. Нет такого объекта —
+    подсказки по исходному имени, как при любом другом промахе.
+    """
     offset, limit = _page_window(offset, limit)
     _prepare(conn)
-    row = _find_object(conn, name)
+    lookup = name if "." in name else f"ПланОбмена.{name}"
+    row = _find_object(conn, lookup)
     if row is None:
         return _not_found(conn, name)
     if row["kind"] != "ПланОбмена":
