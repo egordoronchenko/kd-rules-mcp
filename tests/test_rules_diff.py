@@ -109,15 +109,29 @@ def test_renamed_pko_is_removed_and_added() -> None:
 
 
 def test_duplicate_pks_address_gets_ordinal() -> None:
+    """Две обычные ПКС на один приёмник в диффе различаются позицией `#N`."""
     left = load_exchange_rules(EXCHANGE)
-    _properties(left, "Организации").items.append(_property("ИНН", "2"))
+    properties = _properties(left, "Организации")
+    properties.items[0].attrs.pop("Поиск", None)
+    properties.items.append(_property("ИНН", "2"))
     right = _clone(left)
     _properties(right, "Организации").items[1].values["Наименование"] = "Второй ИНН"
     changes = diff_rules(left, right)
     assert len(changes) == 1
     assert changes[0].section == "pks"
-    assert changes[0].address == "ПКО «Организации» / ПКС ИНН #2"
+    assert changes[0].address == "ПКО «Организации» / ПКС ИНН#2"
     assert changes[0].field == "Наименование"
+
+
+def test_search_pks_address_in_diff_matches_walk() -> None:
+    """Поисковая ПКС рядом с обычной того же имени в диффе получает `[поиск]`."""
+    left = load_exchange_rules(EXCHANGE)
+    _properties(left, "Организации").items.append(_property("ИНН", "2"))
+    right = _clone(left)
+    _properties(right, "Организации").items[0].values["Наименование"] = "Поисковый ИНН"
+    changes = diff_rules(left, right)
+    assert len(changes) == 1
+    assert changes[0].address == "ПКО «Организации» / ПКС ИНН[поиск]"
 
 
 def test_duplicate_pro_code_includes_metadata_and_ordinal() -> None:

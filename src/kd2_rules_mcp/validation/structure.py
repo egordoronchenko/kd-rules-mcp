@@ -16,7 +16,7 @@ from kd2_rules_mcp.kd2.model import ExchangeRules, Node
 from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS
 from kd2_rules_mcp.validation.address import (
     pks_address,
-    pks_segment,
+    pks_segments,
     pkz_address,
     rule_address,
     side_name,
@@ -274,8 +274,8 @@ def _find_pks(
     container: Node, target: Node, prefix: str, ancestors: list[Node]
 ) -> tuple[list[Node], str] | None:
     """Группы над `target` и его путь `группа/…/свойство`. Сам узел в предки не входит."""
-    for index, item in enumerate(container.items):
-        path = f"{prefix}{pks_segment(item, index)}"
+    for segment, item in zip(pks_segments(container), container.items, strict=True):
+        path = f"{prefix}{segment}"
         if item is target:
             return ancestors, path
         if item.is_group:
@@ -347,8 +347,8 @@ def _check_pks_list(
     address_prefix: str,
 ) -> None:
     """ПКС контейнера: пути свойств на каждой стороне собираются из имён групп (ТЧ, наборов)."""
-    for index, item in enumerate(container.items):
-        path = f"{address_prefix}{pks_segment(item, index)}"
+    for segment, item in zip(pks_segments(container), container.items, strict=True):
+        path = f"{address_prefix}{segment}"
         if item.attrs.get("Отключить") is True:
             continue
         found = _check_pks_sides(context, pko, item, objects, prefixes, parent_kinds, path)
@@ -591,8 +591,9 @@ def _check_pkz_coverage(
 ) -> None:
     source, source_structure = objects[SOURCE], context.sides[SOURCE]
     target_type = str(pko.get(TARGET))
-    # Исп:740-772: при непустом соответствии значений значение перечисления без ПКЗ
-    # выгружается пустой ссылкой с ошибкой 71 в протоколе. Без ПКЗ соответствие не строится.
+    # Исп:740-772: при непустом соответствии значений значение перечисления без ПКЗ даёт ошибку 71
+    # в протоколе и «Возврат Неопределено»; вызывающий код пропускает свойство (Исп:13208-13213) —
+    # в сообщение оно не попадает вовсе. Без ПКЗ соответствие не строится.
     if (
         not pkz_list
         or source is None
@@ -607,7 +608,8 @@ def _check_pkz_coverage(
         context.report.warning(
             "structure.pkz_coverage",
             rule_address(pko),
-            f"Значения без ПКЗ (выгрузятся пустой ссылкой): {', '.join(uncovered)}",
+            "Значения без ПКЗ (свойство не выгрузится, в протоколе ошибка 71): "
+            + ", ".join(uncovered),
         )
 
 

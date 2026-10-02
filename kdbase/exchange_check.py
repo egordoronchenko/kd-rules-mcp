@@ -25,53 +25,34 @@
 `ВыполнитьОбменДаннымиДляУзлаИнформационнойБазыЧерезФайлИлиСтроку` (`ЗагрузкаДанных`);
 `РегистрыСведений.ПравилаДляОбменаДанными.ЗагрузитьКомплектПравил`;
 `РегистрыСведений.ОбщиеНастройкиУзловИнформационныхБаз.УстановитьПризнакНастройкаЗавершена`.
+Код загрузки комплекта — `bsp_load.load_rules_code(..., write=True)`.
 Порядок и грабли — скилл `kd2-exchange-pitfalls`, «Как проверить исправление живым обменом».
 """
 
 import argparse
 import base64
-import json
-import re
 import sys
-import urllib.request
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from bsp_load import (
+    DataServer,
+    ExchangeCheckError,
+    bsl,
+    guarded,
+    load_rules_code,
+    server_for,
+    short_error,
+)
+
 from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.projects import data_endpoint, load_catalog, load_local
+
+__all__ = ["DataServer", "ExchangeCheckError", "server_for", "short_error"]
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "kdbase" / "run"
-TOOL = "vcexecutecode"
 DONE = "КОНЕЦ"
 NODE_NAME = "kd2 exchange_check"
-TIMEOUT_S = 900
-
-
-class ExchangeCheckError(Exception):
-    """Ошибка шага проверки: текст — для протокола."""
-
-
-def bsl(value: str) -> str:
-    """Строковый литерал 1С."""
-    return '"' + value.replace('"', '""') + '"'
-
-
-def one_line(code: str) -> str:
-    """Код одной строкой: многострочный код сервер данных не выполняет (ответ пустой)."""
-    return " ".join(line.strip() for line in code.splitlines() if line.strip())
-
-
-def guarded(body: str) -> str:
-    """Тело в `Попытка`: результат «OK …» или «ОШИБКА <подробное представление>»."""
-    return one_line(
-        f"""Попытка
-        {body}
-        Исключение
-        Результат = "ОШИБКА " + ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
-        КонецПопытки;"""
-    )
 
 
 def this_node_code(plan: str, default: str) -> str:
@@ -108,31 +89,7 @@ def correspondent_node(plan: str, code: str) -> str:
 
 def load_rules(plan: str, archive: bytes, file_name: str) -> str:
     """Комплект правил (ZIP из трёх файлов) в `ПравилаДляОбменаДанными`, как форма загрузки."""
-    payload = base64.b64encode(archive).decode("ascii")
-    kinds = "ПравилаКонвертацииОбъектов,ПравилаРегистрацииОбъектов"
-    return guarded(
-        f"""Рег = РегистрыСведений.ПравилаДляОбменаДанными; Записи = Новый Массив;
-        Для Каждого Вид Из СтрРазделить({bsl(kinds)}, ",") Цикл
-        З = Рег.СоздатьМенеджерЗаписи(); З.ИмяПланаОбмена = {bsl(plan)};
-        З.ВидПравил = Перечисления.ВидыПравилДляОбменаДанными[Вид];
-        З.ИсточникПравил = Перечисления.ИсточникиПравилДляОбменаДанными.Файл;
-        Записи.Добавить(З);
-        КонецЦикла;
-        Данные = Новый Структура("ЗаписьПравилКонвертации, ЗаписьПравилРегистрации",
-        Записи[0], Записи[1]);
-        Адрес = ПоместитьВоВременноеХранилище(Base64Значение({bsl(payload)}));
-        Отказ = Ложь; Описание = "";
-        Рег.ЗагрузитьКомплектПравил(Отказ, Данные, Описание, Адрес, {bsl(file_name)});
-        Если Отказ Или Не Записи[0].ПравилаЗагружены Или Не Записи[1].ПравилаЗагружены Тогда
-        Тексты = Новый Массив; Тексты.Добавить(Описание);
-        Для Каждого С Из ПолучитьСообщенияПользователю(Истина) Цикл
-        Тексты.Добавить(С.Текст);
-        КонецЦикла;
-        ВызватьИсключение "Правила не загружены: " + СтрСоединить(Тексты, "; ");
-        КонецЕсли;
-        Записи[0].Записать(); Записи[1].Записать();
-        Результат = "OK";"""
-    )
+    return load_rules_code(plan, archive, file_name, write=True)
 
 
 def export_object(plan: str, node_code: str, full_name: str, ref: str) -> str:
@@ -195,85 +152,6 @@ def query_rows(text: str) -> str:
         Результат = "OK " + Формат(Т.Количество(), "ЧН=0; ЧГ=") + Символы.ПС
         + СтрСоединить(Строки, Символы.ПС);"""
     )
-
-
-def short_error(text: str) -> str:
-    """Ошибка 1С без эха нашего кода и стека HTTP-сервиса: до первой строки стека «{…}»."""
-    text = re.sub(r"[A-Za-z0-9+/=]{200,}", "<base64>", text)
-    kept: list[str] = []
-    for line in text.removeprefix("ОШИБКА ").splitlines():
-        if kept and line.lstrip().startswith("{"):
-            break
-        kept.append(line.strip())
-    return " ".join(part for part in kept if part)
-
-
-@dataclass(frozen=True, slots=True)
-class DataServer:
-    """Сервер данных базы-песочницы: `vcexecutecode` по HTTP (JSON-RPC MCP)."""
-
-    label: str
-    url: str
-    headers: dict[str, str]
-
-    def call(self, code: str) -> str:
-        """Текст ответа инструмента; ошибка HTTP или JSON-RPC — `ExchangeCheckError`."""
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": TOOL, "arguments": {"bslcode": code}},
-        }
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={
-                **self.headers,
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-                raw = response.read().decode("utf-8")
-        except OSError as error:
-            raise ExchangeCheckError(f"{self.label}: сервер данных недоступен: {error}") from error
-        answer = json.loads(_sse_data(raw))
-        if "error" in answer:
-            raise ExchangeCheckError(f"{self.label}: {answer['error']}")
-        result = answer.get("result", {})
-        return "".join(part.get("text", "") for part in result.get("content", []))
-
-    def run(self, code: str) -> str:
-        """Код из `guarded`: текст после «OK»; «ОШИБКА …» или пустой ответ — ошибка шага."""
-        text = self.call(code)
-        if text.startswith("OK"):
-            return text[2:].removeprefix(" ").removeprefix("\n")
-        if not text:
-            raise ExchangeCheckError(
-                f"{self.label}: пустой ответ сервера данных "
-                f"(код не выполнился или нет инструмента {TOOL})"
-            )
-        raise ExchangeCheckError(f"{self.label}: {short_error(text)}")
-
-
-def _sse_data(raw: str) -> str:
-    """Тело JSON-RPC: ответ в формате SSE (`data: …`) или обычный JSON."""
-    for line in raw.splitlines():
-        if line.startswith("data:"):
-            return line[5:].strip()
-    return raw
-
-
-def server_for(ref: str, root: Path = ROOT) -> DataServer:
-    """Сервер данных базы `<проект>.<база>` из projects.yaml (только песочница)."""
-    project_id, _, base_id = ref.partition(".")
-    if not base_id:
-        raise ExchangeCheckError(f"База задаётся как <проект>.<база>, получено «{ref}»")
-    catalog = load_catalog(root / "projects.yaml")
-    local = load_local(root / "projects.local.yaml")
-    url, headers = data_endpoint(catalog, local, project_id, base_id)
-    return DataServer(ref, url, headers)
 
 
 def setup(plan: str, source: DataServer, target: DataServer, codes: tuple[str, str]) -> list[str]:

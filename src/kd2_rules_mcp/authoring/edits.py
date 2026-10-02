@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 
 from kd2_rules_mcp.authoring.candidates import Candidate, Side, property_candidates
 from kd2_rules_mcp.errors import (
+    AmbiguousAddressError,
     DanglingReferenceError,
     DuplicateRuleError,
     ObjectNotFoundError,
@@ -43,7 +44,8 @@ from kd2_rules_mcp.kd2.schema import Scalar, ValueType
 from kd2_rules_mcp.structures.queries import NotFound, find_object
 from kd2_rules_mcp.validation.address import (
     pks_address,
-    pks_segment,
+    pks_base_segment,
+    pks_candidates,
     pkz_address,
     rule_address,
     side_name,
@@ -184,11 +186,14 @@ def update_rule(
     _require_key(kind_name, key)
     container, node, pko = _require(rules, kind_name, key, owner)
     old_code = node.code
+    previous_target = side_name(node, TARGET)
     snap = _save(node)
     try:
         if fields:
             _apply_fields(node, fields)
-        warnings = _after_change(rules, kind_name, node, container, pko, old_code, source, target)
+        warnings = _after_change(
+            rules, kind_name, node, container, pko, old_code, previous_target, source, target
+        )
     except Exception:
         _restore(node, snap)
         raise
@@ -229,11 +234,20 @@ def update_rules(
     results: list[EditResult] = []
     for index, (container, node, pko) in enumerate(loaded):
         old_code = node.code
+        previous_target = side_name(node, TARGET)
         try:
             if fields:
                 _apply_fields(node, fields)
             warnings = _after_change(
-                rules, kind_name, node, container, pko, old_code, source, target
+                rules,
+                kind_name,
+                node,
+                container,
+                pko,
+                old_code,
+                previous_target,
+                source,
+                target,
             )
         except Exception:
             # Текущая цель могла измениться частично — её снимок тоже возвращается.
@@ -494,16 +508,30 @@ def _find_pkz(container: Node, source_name: str) -> tuple[Node, Node] | None:
     return None
 
 
-def _find_pks(container: Node, path: str, prefix: str = "") -> tuple[Node, Node] | None:
-    for index, item in enumerate(container.items):
-        item_path = f"{prefix}{pks_segment(item, index)}"
-        if item_path == path:
-            return container, item
-        if item.is_group and path.startswith(f"{item_path}/"):
-            found = _find_pks(item, path, f"{item_path}/")
-            if found is not None:
-                return found
-    return None
+def _find_pks(
+    container: Node, path: str, prefix: str = "", owner: str = ""
+) -> tuple[Node, Node] | None:
+    """Контейнер и узел по пути ПКС. Голое имя при нескольких кандидатах — ошибка."""
+    segment, _, rest = path.partition("/")
+    found = pks_candidates(container, segment)
+    if len(found) > 1:
+        addresses = [
+            pks_address(owner, f"{prefix}{built}") if owner else f"{prefix}{built}"
+            for built, _item in found
+        ]
+        listed = ", ".join(addresses)
+        raise AmbiguousAddressError(
+            f"Адрес «{prefix}{segment}» подходит нескольким правилам: {listed}"
+        )
+    if not found:
+        return None
+    built, item = found[0]
+    item_path = f"{prefix}{built}"
+    if not rest:
+        return container, item
+    if not item.is_group:
+        return None
+    return _find_pks(item, rest, f"{item_path}/", owner)
 
 
 def _require_pko(rules: ExchangeRules, owner: str) -> Node:
@@ -542,7 +570,7 @@ def _place_context(
         return pko, properties
     if properties is None:
         raise RuleNotFoundError(f"Группа ПКС «{parent_path}» в ПКО «{pko.code}» не найдена")
-    found = _find_pks(properties, parent_path)
+    found = _find_pks(properties, parent_path, owner=pko.code)
     if found is None or not found[1].is_group:
         raise RuleNotFoundError(f"Группа ПКС «{parent_path}» в ПКО «{pko.code}» не найдена")
     return pko, found[1]
@@ -628,7 +656,7 @@ def _require(
             raise RuleNotFoundError(_missing(kind_name, key, owner))
         return found_pkz[0], found_pkz[1], pko
     properties = pko.child("Свойства")
-    found_pks = _find_pks(properties, key) if properties is not None else None
+    found_pks = _find_pks(properties, key, owner=pko.code) if properties is not None else None
     if found_pks is None:
         raise RuleNotFoundError(_missing(kind_name, key, owner))
     if found_pks[1].kind.name != kind_name:
@@ -663,16 +691,38 @@ def _select_batch(
     keys: Sequence[str] | None,
     except_keys: Sequence[str],
 ) -> list[str]:
-    """Адреса целей в порядке обхода. Неизвестный адрес — ошибка, документ не меняется."""
+    """Адреса целей в порядке обхода. Неизвестный адрес — ошибка, документ не меняется.
+
+    ПКС и группы сравниваются через те же звенья, что `walk_pks`: голое имя при нескольких
+    кандидатах отклоняется, квалифицированное попадает ровно в одно правило.
+    """
     available = _nested_keys(rules, kind_name, owner)
-    known = set(available)
+    if kind_name == "pkz":
+        known = set(available)
+        if keys is None:
+            _reject_unknown(rules, kind_name, owner, except_keys, known)
+            excluded = set(except_keys)
+            return [key for key in available if key not in excluded]
+        _reject_unknown(rules, kind_name, owner, keys, known)
+        wanted = set(keys)
+        return [key for key in available if key in wanted]
     if keys is None:
-        _reject_unknown(rules, kind_name, owner, except_keys, known)
-        excluded = set(except_keys)
+        excluded = {_canonical_pks_path(rules, kind_name, owner, key) for key in except_keys}
         return [key for key in available if key not in excluded]
-    _reject_unknown(rules, kind_name, owner, keys, known)
-    wanted = set(keys)
+    wanted = {_canonical_pks_path(rules, kind_name, owner, key) for key in keys}
     return [key for key in available if key in wanted]
+
+
+def _canonical_pks_path(rules: ExchangeRules, kind_name: str, owner: str, key: str) -> str:
+    """Построенный путь ПКС, который обозначает `key`."""
+    _container, node, pko = _require(rules, kind_name, key, owner)
+    properties = pko.child("Свойства") if pko is not None else None
+    if properties is None:
+        raise RuleNotFoundError(_missing(kind_name, key, owner))
+    for path, item in walk_pks(properties):
+        if item is node:
+            return path
+    raise RuleNotFoundError(_missing(kind_name, key, owner))
 
 
 def _reject_unknown(
@@ -729,11 +779,14 @@ def _reject_duplicate(
 
 
 def _segment_taken(container: Node, segment: str) -> bool:
-    return any(pks_segment(item, index) == segment for index, item in enumerate(container.items))
+    """Базовое имя приёмника уже занято. Квалификатор адреса при создании не учитывается."""
+    return any(
+        pks_base_segment(item, index) == segment for index, item in enumerate(container.items)
+    )
 
 
 def _reject_segment_mismatch(node: Node, last: str) -> None:
-    segment = pks_segment(node, 0)
+    segment = pks_base_segment(node, 0)
     if segment == last:
         return
     raise RuleEditError(
@@ -816,6 +869,7 @@ def _after_change(
     container: Node,
     pko: Node | None,
     old_code: str,
+    previous_target: str,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
 ) -> list[str]:
@@ -832,16 +886,21 @@ def _after_change(
                 noun = "именем" if kind_name in _ATTR_IDENTITY else "кодом"
                 raise DuplicateRuleError(f"{node.kind.title} с {noun} «{node.code}» уже есть")
     if kind_name in ("pks", "pks_group"):
-        _reject_receiver_clash(container, node)
+        _reject_receiver_clash(container, node, previous_target)
     if kind_name == "pkz" and pko is not None:
         _reject_pkz_clash(container, node)
     _check_dangling(rules, kind_name, node)
     return _apply_structure(rules, kind_name, node, source, target)
 
 
-def _reject_receiver_clash(container: Node, node: Node) -> None:
+def _reject_receiver_clash(container: Node, node: Node, previous: str) -> None:
+    """Новое имя приёмника не должно совпасть с соседним.
+
+    Неизменное имя не проверяется: поисковая и обычная ПКС с одним приёмником уже
+    могут стоять в документе, и правка других полей такой пары законна.
+    """
     name = side_name(node, TARGET)
-    if not name:
+    if not name or name == previous:
         return
     for item in container.items:
         if item is not node and side_name(item, TARGET) == name:

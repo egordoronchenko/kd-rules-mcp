@@ -11,6 +11,7 @@
 """
 
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -28,6 +29,8 @@ BSP_SCRIPT = ROOT / "kdbase" / "bsp_check.py"
 sys.path.insert(0, str(ROOT / "kdbase"))
 
 import bsp_check  # noqa: E402 — скрипт из kdbase/, не пакет
+import bsp_load  # noqa: E402 — скрипт из kdbase/, не пакет
+import exchange_check  # noqa: E402 — скрипт из kdbase/, не пакет
 
 _needs_base = pytest.mark.skipif(
     os.environ.get("KD2_KDBASE_CHECK") != "1",
@@ -160,3 +163,220 @@ def test_require_login_refuses_client_server_without_user(monkeypatch: pytest.Mo
     bsp_check.require_login('File="C:/base";')
     monkeypatch.setenv("KD2_BSP_USER", "agent")
     bsp_check.require_login(server)
+
+
+def _projects(tmp_path: Path) -> Path:
+    """Песочница с `data_mcp`, песочница без него и боевая; строки `File=`, без `.mcp.json`."""
+    (tmp_path / "projects.yaml").write_text(
+        """
+projects:
+  alpha:
+    name: Альфа
+    mcp_config: .mcp.json
+    configurations: {full: {dump: main}}
+    bases:
+      sandbox:
+        {role: песочница, configuration: full, connection: 'File="C:/sb";', data_mcp: data-a}
+      nodata: {role: песочница, configuration: full, connection: 'File="C:/nd";'}
+      prod: {role: боевая, configuration: full, connection: 'File="C:/pr";', data_mcp: data-a}
+""",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_resolve_transport_reads_only_projects(tmp_path: Path) -> None:
+    root = _projects(tmp_path)
+    assert bsp_check.resolve_transport("alpha", "sandbox", None, root) == "data"
+    assert bsp_check.resolve_transport("alpha", "sandbox", "com", root) == "com"
+    assert bsp_check.resolve_transport("alpha", "sandbox", "data", root) == "data"
+    assert bsp_check.resolve_transport("alpha", "nodata", None, root) == "com"
+    with pytest.raises(SystemExit, match="data_mcp") as caught:
+        bsp_check.resolve_transport("alpha", "nodata", "data", root)
+    assert "alpha.nodata" in str(caught.value)
+    for via in (None, "data"):
+        with pytest.raises(SystemExit, match="только к песочницам"):
+            bsp_check.resolve_transport("alpha", "prod", via, root)
+
+
+@pytest.fixture
+def routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """`main` с подменёнными ветками загрузки; каталог — `_projects`."""
+    monkeypatch.setattr(bsp_check, "ROOT", _projects(tmp_path))
+    seen = {"com": 0, "data": 0}
+
+    def check_com(archive: Path, plan: str, connection: str) -> int:
+        seen["com"] += 1
+        return 0
+
+    def check_data(archive: Path, plan: str, server: bsp_load.DataServer) -> int:
+        seen["data"] += 1
+        return 0
+
+    def server_for(ref: str, root: Path = tmp_path) -> bsp_load.DataServer:
+        return bsp_load.DataServer(ref, "http://stub", {})
+
+    monkeypatch.setattr(bsp_check, "check_com", check_com)
+    monkeypatch.setattr(bsp_check, "check_data", check_data)
+    monkeypatch.setattr(bsp_check, "server_for", server_for)
+    return seen
+
+
+def _main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> SystemExit:
+    monkeypatch.setattr(sys, "argv", ["bsp_check", *argv])
+    with pytest.raises(SystemExit) as caught:
+        bsp_check.main()
+    return caught.value
+
+
+def test_main_picks_transport(
+    tmp_path: Path, routes: dict[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def go(*args: str) -> SystemExit:
+        routes["com"] = 0
+        routes["data"] = 0
+        return _main(monkeypatch, ["--archive", str(tmp_path / "a.zip"), "--plan", "План", *args])
+
+    assert go("--project", "alpha", "--base", "sandbox").code == 0
+    assert routes == {"com": 0, "data": 1}
+    assert go("--project", "alpha", "--base", "nodata").code == 0
+    assert routes == {"com": 1, "data": 0}
+    assert go("--project", "alpha", "--base", "sandbox", "--via", "com").code == 0
+    assert routes == {"com": 1, "data": 0}
+    refused = go("--project", "alpha", "--base", "nodata", "--via", "data")
+    assert routes == {"com": 0, "data": 0}
+    assert "nodata" in str(refused) and "data_mcp" in str(refused)
+    assert go("--connection", 'File="C:/base";').code == 0
+    assert routes == {"com": 1, "data": 0}
+    refused = go(
+        "--connection",
+        'File="C:/base";',
+        "--via",
+        "data",
+        "--project",
+        "alpha",
+        "--base",
+        "sandbox",
+    )
+    assert routes == {"com": 0, "data": 0}
+    assert "data_mcp" in str(refused)
+
+
+def test_load_rules_code_write_and_report_branches() -> None:
+    plan, archive, name = "План", b"PK\x03\x04", "rules.zip"
+    written = bsp_load.load_rules_code(plan, archive, name, write=True)
+    assert exchange_check.load_rules(plan, archive, name) == written
+    assert ".Записать()" in written
+    assert "ЗагрузитьКомплектПравил(Отказ, Данные, Описание, Адрес, " in written
+    quiet = bsp_load.load_rules_code(plan, archive, name, write=False)
+    pair = bsp_load.load_rules_code(plan, archive, name, write=False, full_set=False)
+    for code in (written, quiet, pair):
+        assert "\n" not in code
+        assert code.startswith("Попытка ") and code.endswith("КонецПопытки;")
+        assert not re.search(r"Новый \w+\([^;]*?\)\s*\.", code)
+    assert ".Записать()" not in quiet and ".Записать()" not in pair
+    assert "ЗагрузитьКомплектПравил" in quiet
+    assert "ЗагрузитьПравила(Отказ, Записи[0], Адрес, " in pair
+    assert re.search(r"ЗагрузитьПравила\([^;]*?, Истина\)", pair)
+    assert "ЗагрузитьКомплектПравил" not in pair
+    with pytest.raises(ValueError):
+        bsp_load.load_rules_code(plan, archive, name, write=True, full_set=False)
+
+
+_INFO = "строка1\nстрока2"
+_MESSAGE = "ошибка\nразбора"
+_EXAMPLE = "\n".join(["OK", "R", "2", "1", "15", _INFO, "0", "0", "", "M", "1", "14", _MESSAGE])
+
+
+def test_parse_load_report_reads_lengths_not_lines() -> None:
+    assert len(_INFO) == 15 and len(_MESSAGE) == 14
+    assert "\n0\n\nM\n" in _EXAMPLE
+    assert bsp_load.parse_load_report(_EXAMPLE) == bsp_load.LoadReport(
+        (True, False), (_INFO, ""), (_MESSAGE,)
+    )
+    ok = "\n".join(["OK", "R", "2", "1", "0", "", "1", "0", "", "M", "0"])
+    assert bsp_load.parse_load_report(ok) == bsp_load.LoadReport((True, True), ("", ""), ())
+    with pytest.raises(ValueError):
+        bsp_load.parse_load_report("ОШИБКА нет")
+    with pytest.raises(ValueError):
+        bsp_load.parse_load_report(_EXAMPLE + "\nхвост")
+    with pytest.raises(ValueError):
+        bsp_load.parse_load_report("OK\nR\n1\n1\n5\nаб")
+
+
+class _Scripted(bsp_load.DataServer):
+    """Сервер данных с ответами по очереди (без HTTP)."""
+
+    def __init__(self, label: str, replies: list[str]) -> None:
+        super().__init__(label, "", {})
+        object.__setattr__(self, "_replies", replies)
+
+    def call(self, code: str) -> str:
+        return self._replies.pop(0)  # type: ignore[attr-defined]  # задан в __init__
+
+
+def _rules_zip(path: Path) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        for name in (
+            "ExchangeRules.xml",
+            "CorrespondentExchangeRules.xml",
+            "RegistrationRules.xml",
+        ):
+            archive.writestr(name, b"x")
+    return path
+
+
+def test_check_data_prints_protocol(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    archive = _rules_zip(tmp_path / "rules.zip")
+    code = bsp_check.check_data(archive, "План", _Scripted("alpha.sandbox", [_EXAMPLE]))
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "ТРАНСПОРТ сервер данных" in out
+    assert "ЗАГРУЗКА ЗагрузитьКомплектПравил" in out
+    assert "ИНФОРМАЦИЯ строка1 | строка2" in out
+    assert out.count("ИНФОРМАЦИЯ") == 1
+    assert "СООБЩЕНИЕ ошибка разбора" in out
+    assert "ИТОГ ОШИБКА" in out
+    assert not any(line.startswith("ОШИБКА ") for line in out.splitlines())
+
+    ok = "\n".join(["OK", "R", "2", "1", "0", "", "1", "0", "", "M", "0"])
+    code = bsp_check.check_data(archive, "План", _Scripted("alpha.sandbox", [ok]))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "ИТОГ OK" in out
+    assert "ОШИБКА" not in out
+    assert "ИНФОРМАЦИЯ" not in out
+    assert "СООБЩЕНИЕ" not in out
+
+
+def test_check_data_reports_call_failures(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    archive = _rules_zip(tmp_path / "rules.zip")
+    failed = "ОШИБКА Ошибка разбора\n{Модуль(1)}:ВызватьИсключение"
+    code = bsp_check.check_data(archive, "План", _Scripted("alpha.sandbox", [failed]))
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "ОШИБКА Ошибка разбора" in out
+    assert "{Модуль" not in out
+    assert "ИТОГ ОШИБКА" in out
+    assert "ИНФОРМАЦИЯ" not in out
+
+    code = bsp_check.check_data(archive, "План", _Scripted("alpha.sandbox", [""]))
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "alpha.sandbox: пустой ответ сервера данных" in out
+    assert "vcexecutecode" in out
+
+    class _Down(bsp_load.DataServer):
+        def __init__(self) -> None:
+            super().__init__("alpha.sandbox", "", {})
+
+        def call(self, code: str) -> str:
+            raise bsp_load.ExchangeCheckError("alpha.sandbox: сервер данных недоступен")
+
+    code = bsp_check.check_data(archive, "План", _Down())
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "ОШИБКА alpha.sandbox: сервер данных недоступен" in out
+    assert "ТРАНСПОРТ сервер данных" in out

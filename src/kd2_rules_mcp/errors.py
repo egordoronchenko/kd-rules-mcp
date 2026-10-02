@@ -55,5 +55,9 @@ class RuleNotFoundError(RuleEditError):
     """Правило по адресу не найдено."""
 
 
+class AmbiguousAddressError(RuleNotFoundError):
+    """Адрес ПКС совпал с несколькими правилами одного контейнера."""
+
+
 class DanglingReferenceError(RuleEditError):
     """Ссылка на отсутствующее правило, объект, свойство или значение."""

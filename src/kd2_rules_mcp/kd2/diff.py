@@ -26,7 +26,7 @@ from kd2_rules_mcp.kd2.model import (
     RulesDocument,
 )
 from kd2_rules_mcp.kd2.schema import Child, Scalar, kind
-from kd2_rules_mcp.validation.address import pks_address, pks_segment, pkz_address, rule_address
+from kd2_rules_mcp.validation.address import pks_address, pks_segments, pkz_address, rule_address
 from kd2_rules_mcp.validation.handlers import ALGORITHM_EVENT, EVENT_AREAS
 
 # Поля заголовка, которые писатель КД заполняет заново при каждой выгрузке.
@@ -216,8 +216,8 @@ def _diff_list(
             parent_address,
             out,
         )
-    left_rows = _rows(_items(left), mode, pko_code, prefix, parent_address)
-    right_rows = _rows(_items(right), mode, pko_code, prefix, parent_address)
+    left_rows = _rows(left, mode, pko_code, prefix, parent_address)
+    right_rows = _rows(right, mode, pko_code, prefix, parent_address)
     right_by_key = {address: (node, path) for address, node, path in right_rows}
     left_keys = {address for address, _, _ in left_rows}
     for address, node, path in left_rows:
@@ -334,9 +334,14 @@ def _diff_processor_size(
 
 
 def _rows(
-    items: list[Node], mode: str, pko_code: str, prefix: str, parent_address: str
+    container: Node | None, mode: str, pko_code: str, prefix: str, parent_address: str
 ) -> list[tuple[str, Node, str]]:
-    raw = [(_local_key(item, mode, pko_code, index), item) for index, item in enumerate(items)]
+    items = _items(container)
+    if mode == "pks":
+        segments = pks_segments(container) if container is not None else []
+        raw = list(zip(segments, items, strict=True))
+    else:
+        raw = [(_local_key(item, mode, pko_code, index), item) for index, item in enumerate(items)]
     rows: list[tuple[str, Node, str]] = []
     for key, node in _with_suffixes(raw):
         if mode == "pks":
@@ -352,9 +357,7 @@ def _rows(
     return rows
 
 
-def _local_key(node: Node, mode: str, pko_code: str, index: int) -> str:
-    if mode == "pks":
-        return pks_segment(node, index)
+def _local_key(node: Node, mode: str, pko_code: str, _index: int) -> str:
     if mode == "pkz":
         if node.kind.name == "pkz":
             return pkz_address(pko_code, str(node.values.get("Источник", "")))

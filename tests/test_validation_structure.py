@@ -131,9 +131,10 @@ def test_tabular_section_paths_and_group_kind(sides: tuple[sqlite3.Connection, .
     report = check(sides, rules_xml(pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, group)))
     assert [(i.check, i.address) for i in report.issues] == [
         # В приёмнике (без расширения) у ТЧ Товары нет колонки Аналитика.
-        ("structure.pks_target", "ПКО «Номенклатура» / ПКС Товары/Аналитика"),
+        # Две группы с приёмником Товары различаются позицией в контейнере.
+        ("structure.pks_target", "ПКО «Номенклатура» / ПКС Товары#1/Аналитика"),
         # Набора движений Товары у справочника нет — его свойства в источнике не проверяются.
-        ("structure.pks_source", "ПКО «Номенклатура» / ПКС Товары"),
+        ("structure.pks_source", "ПКО «Номенклатура» / ПКС Товары#2"),
     ]
     assert "«НаборДвиженийРегистраНакопления»" in report.issues[1].message
 
@@ -182,6 +183,21 @@ def test_check_rule_reports_only_the_touched_node(sides: tuple[sqlite3.Connectio
     assert body is not None
     alone = check_rule(missing, body.items[0], source, target)
     assert [(i.level, i.check) for i in alone.issues] == [(Level.ERROR, "structure.pko_missing")]
+
+
+def test_search_and_plain_pks_report_different_addresses(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    """Два `structure.pko_missing` на поисковую и обычную ПКС с одним именем — разные адреса."""
+    body = pks_xml("Владелец", "Владелец", "Свойство", attrs=' Поиск="true"') + pks_xml(
+        "Владелец", "Владелец", "Свойство"
+    )
+    xml = rules_xml(pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body))
+    issues = only(check(sides, xml), "structure.pko_missing")
+    assert [i.address for i in issues] == [
+        "ПКО «Номенклатура» / ПКС Владелец[поиск]",
+        "ПКО «Номенклатура» / ПКС Владелец",
+    ]
 
 
 def test_reference_type_without_pko(sides: tuple[sqlite3.Connection, ...]) -> None:

@@ -32,6 +32,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from kd2_rules_mcp.errors import (
+    AmbiguousAddressError,
     DanglingReferenceError,
     DuplicateProjectError,
     DuplicateRuleError,
@@ -60,6 +61,7 @@ ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (WorkspacePathError, "path_outside_workspace"),
     (UnknownFieldError, "unknown_field"),
     (DuplicateRuleError, "duplicate_rule"),
+    (AmbiguousAddressError, "ambiguous_address"),
     (RuleNotFoundError, "rule_not_found"),
     (DanglingReferenceError, "dangling_reference"),
     (RuleEditError, "edit_rejected"),
@@ -106,7 +108,8 @@ RuleKey = Annotated[
     Field(
         description=(
             "Адрес правила: код (ПКО, ПВД, ПОД), имя (алгоритм, запрос, параметр), путь ПКС "
-            "`группа/…/свойство-приёмник` или имя значения источника ПКЗ"
+            "`группа/…/свойство-приёмник` или имя значения источника ПКЗ. При совпадении имён "
+            "в одном контейнере к звену ПКС добавляются квалификаторы `[поиск]` и `#N`"
         )
     ),
 ]
@@ -597,8 +600,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(
                 description=(
                     "Какие правила менять: путь ПКС `группа/…/свойство-приёмник` или имя "
-                    "значения источника ПКЗ. Не задано — все правила этого вида у ПКО, кроме "
-                    "except_keys. Неизвестный адрес — ошибка до правок"
+                    "значения источника ПКЗ. При совпадении имён в одном контейнере к звену ПКС "
+                    "добавляются квалификаторы `[поиск]` и `#N`. Не задано — все правила этого "
+                    "вида у ПКО, кроме except_keys. Неизвестный адрес — ошибка до правок"
                 )
             ),
         ] = None,
@@ -607,7 +611,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(
                 description=(
                     "Адреса, которые пропустить, когда keys не задан: путь ПКС или имя значения "
-                    "ПКЗ. Неизвестный адрес — ошибка до правок"
+                    "ПКЗ. При совпадении имён в одном контейнере к звену ПКС добавляются "
+                    "квалификаторы `[поиск]` и `#N`. Неизвестный адрес — ошибка до правок"
                 )
             ),
         ] = None,

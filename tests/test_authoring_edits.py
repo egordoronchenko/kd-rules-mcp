@@ -16,6 +16,7 @@ from kd2_rules_mcp.authoring.edits import (
     update_rules,
 )
 from kd2_rules_mcp.errors import (
+    AmbiguousAddressError,
     DanglingReferenceError,
     DuplicateRuleError,
     ObjectNotFoundError,
@@ -26,6 +27,7 @@ from kd2_rules_mcp.errors import (
 from kd2_rules_mcp.kd2.canonical import canonical_diff, canonical_form
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node
 from kd2_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_rules
+from kd2_rules_mcp.server import error_payload
 from kd2_rules_mcp.structures import db
 from kd2_rules_mcp.validation.address import side_name, walk_pks
 from kd2_rules_mcp.validation.format import check_format
@@ -1428,3 +1430,86 @@ def test_pks_code_and_order_round_trip() -> None:
     again = _by_target(_pks(loaded, "Организации"))["КПП"]
     assert again.values["Код"] == "2"
     assert again.values["Порядок"] == 100
+
+
+def _property_xml(name: str, *, search: bool = False) -> str:
+    attrs = ' Поиск="true"' if search else ""
+    return (
+        f"<Свойство{attrs}>"
+        f'<Источник Имя="{name}" Вид="Реквизит" Тип="Строка"/>'
+        f'<Приемник Имя="{name}" Вид="Реквизит" Тип="Строка"/>'
+        "</Свойство>"
+    )
+
+
+def _accounts(*properties: str) -> ExchangeRules:
+    """ПКО «БанковскиеСчета» с заданными ПКС. Два свойства с одним именем грузятся из XML."""
+    body = "".join(properties)
+    xml = (
+        "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>"
+        "<ПравилаКонвертацииОбъектов><Правило><Код>БанковскиеСчета</Код>"
+        f"<Свойства>{body}</Свойства></Правило></ПравилаКонвертацииОбъектов></ПравилаОбмена>"
+    )
+    return load_exchange_rules(xml.encode())
+
+
+def test_update_by_search_qualifier_changes_only_the_search_pks() -> None:
+    """`Владелец[поиск]` меняет поисковую ПКС, а не обычную с тем же именем."""
+    rules = _accounts(_property_xml("Владелец", search=True), _property_xml("Владелец"))
+    result = update_rule(
+        rules,
+        "pks",
+        "Владелец[поиск]",
+        {"Комментарий": "поиск"},
+        owner="БанковскиеСчета",
+    )
+    assert result.address == "ПКО «БанковскиеСчета» / ПКС Владелец[поиск]"
+    properties = rules.pko()[0].child("Свойства")
+    assert properties is not None
+    assert properties.items[0].values["Комментарий"] == "поиск"
+    assert "Комментарий" not in properties.items[1].values
+
+
+def test_bare_pks_name_is_ambiguous_when_search_and_plain_share_it() -> None:
+    """Голое имя при двух кандидатах — `ambiguous_address` с обоими адресами."""
+    rules = _accounts(_property_xml("Владелец", search=True), _property_xml("Владелец"))
+    before = dump_rules(rules)
+    with pytest.raises(AmbiguousAddressError) as error:
+        update_rule(rules, "pks", "Владелец", {"Комментарий": "нет"}, owner="БанковскиеСчета")
+    message = str(error.value)
+    assert message == (
+        "Адрес «Владелец» подходит нескольким правилам: "
+        "ПКО «БанковскиеСчета» / ПКС Владелец[поиск], "
+        "ПКО «БанковскиеСчета» / ПКС Владелец"
+    )
+    assert error_payload(error.value)["code"] == "ambiguous_address"
+    assert dump_rules(rules) == before
+
+
+def test_bare_pks_name_finds_the_only_search_property() -> None:
+    """Единственная поисковая ПКС находится по голому имени: адрес без квалификатора."""
+    rules = _accounts(_property_xml("Владелец", search=True))
+    result = update_rule(rules, "pks", "Владелец", {"Комментарий": "один"}, owner="БанковскиеСчета")
+    assert result.address == "ПКО «БанковскиеСчета» / ПКС Владелец"
+    with pytest.raises(RuleNotFoundError, match="не найдено") as error:
+        update_rule(
+            rules, "pks", "Владелец[поиск]", {"Комментарий": "нет"}, owner="БанковскиеСчета"
+        )
+    assert type(error.value) is RuleNotFoundError
+
+
+def test_update_rules_key_selects_the_search_pks() -> None:
+    """`rule_update_many` с `keys=["Владелец[поиск]"]` меняет только поисковую ПКС."""
+    rules = _accounts(_property_xml("Владелец", search=True), _property_xml("Владелец"))
+    results = update_rules(
+        rules,
+        "pks",
+        {"НеЗамещать": True},
+        owner="БанковскиеСчета",
+        keys=["Владелец[поиск]"],
+    )
+    assert [item.address for item in results] == ["ПКО «БанковскиеСчета» / ПКС Владелец[поиск]"]
+    properties = rules.pko()[0].child("Свойства")
+    assert properties is not None
+    assert properties.items[0].values["НеЗамещать"] is True
+    assert "НеЗамещать" not in properties.items[1].values
