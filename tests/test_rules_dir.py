@@ -61,7 +61,7 @@ async def _error(client: Client, tool: str, /, **arguments: Any) -> dict[str, An
 
 def test_workspace_writes_into_allowed_folder_only(tmp_path: Path) -> None:
     workspace = RulesWorkspace(tmp_path / "ws")
-    project = workspace.open_rules(RULES)
+    project = workspace.open_rules(RULES).project
     rules = tmp_path / "project" / "rules"
     rules.mkdir(parents=True)
     saved = workspace.save(project.id, rules / "ExchangeRules.xml", allowed=[rules])

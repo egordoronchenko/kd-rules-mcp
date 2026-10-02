@@ -13,6 +13,7 @@
 INFO, в лог пишется предупреждение. `create_server` логирование не настраивает.
 """
 
+import hmac
 import json
 import logging
 import os
@@ -22,12 +23,17 @@ from functools import partial
 from typing import Annotated, Any
 
 import anyio
+import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from kd2_rules_mcp.errors import (
     DanglingReferenceError,
+    DuplicateProjectError,
     DuplicateRuleError,
     Kd2Error,
     ObjectNotFoundError,
@@ -40,7 +46,7 @@ from kd2_rules_mcp.errors import (
     UnknownFieldError,
     WorkspacePathError,
 )
-from kd2_rules_mcp.projects import ProjectConfigError
+from kd2_rules_mcp.projects import ProjectConfigError, is_loopback_host
 from kd2_rules_mcp.service import Kd2Service, Settings
 
 logger = logging.getLogger("kd2_rules_mcp")
@@ -50,6 +56,7 @@ ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (StructureNotFoundError, "structure_not_found"),
     (ObjectNotFoundError, "object_not_found"),
     (ProjectNotFoundError, "project_not_found"),
+    (DuplicateProjectError, "duplicate_project"),
     (WorkspacePathError, "path_outside_workspace"),
     (UnknownFieldError, "unknown_field"),
     (DuplicateRuleError, "duplicate_rule"),
@@ -69,8 +76,9 @@ INSTRUCTIONS = """Сервер правил обмена «Конвертаци�
 structure_load_xml / structure_load_md83exp по путям) →
 открыть правила (rules_open) или создать пустые (rules_create) → смотреть кандидатов (match_*) и
 править (rule_*, pko_create_from_candidates) → проверить (rules_validate, handlers_export для
-синтакс-чекера) → сохранить в рабочую папку или rules_dir проекта (rules_save). Правила
-регистрации — registration_build, черновик обратного направления — correspondent_draft.
+синтакс-чекера) → сохранить в рабочую папку или rules_dir проекта (rules_save). Закрыть проект и
+удалить его снимок — rules_close (файлы rules_save остаются). Правила регистрации —
+registration_build, черновик обратного направления — correspondent_draft.
 Смысловые решения принимает агент.
 Списки постраничные (offset, limit ≤ 200, has_more). Ошибки — JSON с полем code."""
 
@@ -392,10 +400,20 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def rules_create(
-        source_structure: StructureId, target_structure: StructureId
+        source_structure: StructureId,
+        target_structure: StructureId,
+        project_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Свой идентификатор нового проекта правил; "
+                    "пусто — выводится из источника и вида"
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Новые пустые правила обмена для пары структур (заголовок как у КД, правил нет)."""
-        return await call(service.rules_create, source_structure, target_structure)
+        return await call(service.rules_create, source_structure, target_structure, project_id)
 
     @server.tool()
     async def rules_projects() -> dict[str, Any]:
@@ -452,6 +470,11 @@ def create_server(service: Kd2Service) -> MCPServer:
         """Сохраняет XML в рабочую папку или в `rules_dir` проекта; ответ — путь, размер, итог
         проверки формата. Другие пути — `path_outside_workspace` со списком `writable`."""
         return await call(service.rules_save, project_id, path, overwrite)
+
+    @server.tool()
+    async def rules_close(project_id: ProjectId) -> dict[str, Any]:
+        """Закрывает рабочий проект и удаляет его снимок. Файлы `rules_save` не трогает."""
+        return await call(service.rules_close, project_id)
 
     @server.tool()
     async def rules_pack(
@@ -669,10 +692,24 @@ def create_server(service: Kd2Service) -> MCPServer:
                 )
             ),
         ] = None,
+        project_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Свой идентификатор нового проекта правил; "
+                    "пусто — выводится из источника и вида"
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Правила регистрации из состава плана обмена в новый рабочий проект."""
         return await call(
-            service.registration_build, structure_id, exchange_plan, rules_project_id, objects
+            service.registration_build,
+            structure_id,
+            exchange_plan,
+            rules_project_id,
+            objects,
+            project_id,
         )
 
     @server.tool()
@@ -688,9 +725,25 @@ def create_server(service: Kd2Service) -> MCPServer:
         limit: Annotated[
             int, Field(description="Сколько обработчиков и ПКС перечислить", ge=1)
         ] = 50,
+        new_project_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Свой идентификатор нового проекта правил; "
+                    "пусто — выводится из источника и вида"
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Черновик правил обратного направления; обработчики — «перенести вручную»."""
-        return await call(service.correspondent_draft, project_id, codes, target_structure, limit)
+        return await call(
+            service.correspondent_draft,
+            project_id,
+            codes,
+            target_structure,
+            limit,
+            new_project_id,
+        )
 
     return server
 
@@ -720,19 +773,86 @@ def _configure_logging() -> None:
     logging.getLogger().setLevel(level)
 
 
+class _BearerTokenMiddleware:
+    """Проверяет `Authorization: Bearer` на `/mcp`.
+
+    Свой ASGI-вызов, без `BaseHTTPMiddleware`: тот буферизует тело и ломает поток
+    streamable HTTP. Сравнение токена — `hmac.compare_digest`.
+    """
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self._app = app
+        self._expected = b"Bearer " + token.encode("utf-8")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope.get("type") == "http"
+            and _is_mcp_path(scope)
+            and not _bearer_ok(scope, self._expected)
+        ):
+            await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+            return
+        await self._app(scope, receive, send)
+
+
+def _is_mcp_path(scope: Scope) -> bool:
+    path = scope.get("path", "")
+    return isinstance(path, str) and path.rstrip("/") == "/mcp"
+
+
+def _bearer_ok(scope: Scope, expected: bytes) -> bool:
+    presented = b""
+    for name, value in scope.get("headers", []):
+        if name == b"authorization":
+            presented = bytes(value)
+            break
+    return hmac.compare_digest(presented, expected)
+
+
+def create_app(
+    service: Kd2Service, token: str | None = None, *, host: str = "127.0.0.1"
+) -> Starlette:
+    """ASGI-приложение MCP (`/mcp`).
+
+    `host` передаётся в `streamable_http_app`, как это делает `MCPServer.run`: для петли
+    SDK включает защиту от DNS rebinding. При заданном токене запрос к `/mcp` без
+    `Authorization: Bearer <token>` отвечает 401.
+    """
+    app = create_server(service).streamable_http_app(streamable_http_path="/mcp", host=host)
+    if token:
+        app.add_middleware(_BearerTokenMiddleware, token=token)
+    return app
+
+
 def main() -> None:
     """Запуск сервера по HTTP; настройки — переменные окружения `KD2_*`.
 
     Уровень лога — `KD2_LOG_LEVEL` (имя уровня `logging`, по умолчанию `INFO`).
     Неизвестное значение не останавливает запуск: остаётся `INFO`, в лог пишется
     предупреждение. `create_server` логирование не настраивает.
+
+    Токен `KD2_TOKEN` (если задан) проверяется на `/mcp`: заголовок
+    `Authorization: Bearer`. Хост вне петли (`127.0.0.1`, `localhost`, `::1`) без
+    токена — отказ при старте. Исключение — контейнер. В образе `KD2_HOST=0.0.0.0`:
+    это адрес внутри контейнера, наружу порт публикует compose, а не процесс.
+    Dockerfile ставит `KD2_IN_CONTAINER=1`. Пока эта переменная задана, проверка
+    «хост вне петли без токена» молчит — иначе контейнер не стартовал бы никогда.
+    Снаружи защиту даёт публикация порта: по умолчанию `127.0.0.1`, для команды —
+    `bind` в `projects.local.yaml`.
     """
     _configure_logging()
     settings = Settings.from_env()
-    server = create_server(Kd2Service(settings))
-    server.run(
-        "streamable-http",
+    if (
+        "KD2_IN_CONTAINER" not in os.environ
+        and not is_loopback_host(settings.host)
+        and not settings.token
+    ):
+        raise SystemExit(
+            f"KD2_HOST «{settings.host}» вне петлевого интерфейса, а KD2_TOKEN не задан. "
+            "Для сервера на внешнем интерфейсе задайте token."
+        )
+    uvicorn.run(
+        create_app(Kd2Service(settings), settings.token, host=settings.host),
         host=settings.host,
         port=settings.port,
-        streamable_http_path="/mcp",
     )

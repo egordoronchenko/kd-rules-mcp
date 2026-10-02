@@ -35,7 +35,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     KD2_HOST=0.0.0.0 \
     KD2_PORT=8060 \
     KD2_CACHE_DIR=/data/cache \
-    KD2_WORKSPACE=/data/workspace
+    KD2_WORKSPACE=/data/workspace \
+    KD2_IN_CONTAINER=1
 
 RUN useradd --uid 1000 --create-home --user-group kd2 \
     && mkdir -p /data/cache /data/workspace \

@@ -54,6 +54,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "rules_list",
         "rules_get",
         "rules_save",
+        "rules_close",
         "rules_pack",
     ),
     "Правки": ("rule_create", "rule_update", "rule_delete", "pko_create_from_candidates"),

@@ -2,8 +2,9 @@
 
 Общий файл (в git) описывает проект → конфигурации (выгрузка и расширения, пути от папки проекта)
 → базы (роль, конфигурация, строка соединения), серверы кода проекта и обмены. Личный файл
-машины говорит только, где лежит папка каждого проекта, — поэтому общий файл одинаков у всех,
-а проекты могут лежать на любых дисках. Путь выгрузки = папка проекта + путь из общего файла.
+машины говорит, где лежит папка каждого проекта, и для командной установки — интерфейс
+`bind` и `token`. Общий файл одинаков у всех, а проекты могут лежать на любых дисках.
+Путь выгрузки = папка проекта + путь из общего файла.
 
 Сервер в контейнере получает папки проектов переменной `KD2_PROJECT_DIRS` (`id=путь;…`),
 которую пишет `scripts/setup_local.py`.
@@ -23,6 +24,8 @@ SANDBOX = "песочница"
 PRODUCTION = "боевая"
 ROLES = (SANDBOX, PRODUCTION)
 DEFAULT_SERVER_URL = "http://localhost:8060/mcp"
+# Петля: сервер виден только своей машине. Всё остальное — внешний интерфейс, нужен token.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 class ProjectConfigError(Kd2Error):
@@ -131,6 +134,10 @@ class LocalSettings:
     onec_platform: Path | None = None
     # Пользователь 1С баз с авторизацией: «<проект>.<база>» → (имя, пароль). Только в личном файле.
     logins: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Интерфейс публикации порта; пусто — только 127.0.0.1 из базового compose-файла.
+    bind: str | None = None
+    # Общий секрет MCP; пусто на внешнем bind — ошибка разбора. На петле токен допустим и без bind.
+    token: str | None = None
 
     def login(self, project_id: str, base_id: str) -> tuple[str, str] | None:
         """Пользователь и пароль базы, если заданы."""
@@ -167,6 +174,16 @@ def basic_auth(login: tuple[str, str]) -> dict[str, str]:
     """Заголовок Basic-авторизации пользователем 1С (HTTP-сервисы ИБ с пользователями)."""
     token = base64.b64encode(f"{login[0]}:{login[1]}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
+
+
+def bearer_auth(token: str) -> dict[str, str]:
+    """Заголовок Bearer для MCP-клиента (`Authorization`)."""
+    return {"Authorization": f"Bearer {token}"}
+
+
+def is_loopback_host(host: str) -> bool:
+    """Петлевой адрес: `127.0.0.1`, `localhost`, `::1` (без учёта регистра)."""
+    return host.strip().casefold() in _LOOPBACK_HOSTS
 
 
 def project_mcp_servers(
@@ -262,13 +279,27 @@ def load_local(path: Path) -> LocalSettings:
         if "." not in str(key) or not user:
             raise ProjectConfigError(f"logins.{key}: ключ «<проект>.<база>» и непустой «user»")
         logins[str(key)] = (user, str(body.get("password") or ""))
+    bind = _optional_text(data.get("bind"))
+    token = _optional_text(data.get("token"))
+    if bind is not None and not is_loopback_host(bind) and token is None:
+        raise ProjectConfigError(
+            f"bind «{bind}» — внешний интерфейс: для сервера на внешнем интерфейсе задайте token"
+        )
     return LocalSettings(
         project_dirs=dirs,
         server_url=str(data.get("server_url") or DEFAULT_SERVER_URL),
         workspace=Path(str(workspace)) if workspace else None,
         onec_platform=Path(str(platform)) if platform else None,
         logins=logins,
+        bind=bind,
+        token=token,
     )
+
+
+def _optional_text(value: Any) -> str | None:
+    """Непустая строка или None; число из YAML тоже становится строкой."""
+    text = str(value or "").strip()
+    return text or None
 
 
 def parse_project_dirs(text: str, variable: str = "KD2_PROJECT_DIRS") -> dict[str, Path]:

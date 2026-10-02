@@ -66,6 +66,7 @@ EXPECTED_TOOLS = {
     "rules_list",
     "rules_get",
     "rules_save",
+    "rules_close",
     "rules_pack",
     "rule_create",
     "rule_update",
@@ -448,6 +449,65 @@ async def test_rule_create_puts_rule_into_group(service: Kd2Service) -> None:
 
     with pytest.raises(DuplicateRuleError, match="Контрагенты"):
         service.rule_create(project, "pko", "Контрагенты")
+
+
+async def test_rules_open_reused_and_duplicate_project_id(service: Kd2Service) -> None:
+    """Повторный rules_open — reused; занятый project_id — duplicate_project."""
+    async with Client(create_server(service)) as client:
+        await _call(client, "structure_load_xml", structure_id="dump", configuration_path=str(DUMP))
+        first = await _call(client, "rules_open", path=str(DATA / "exchange_rules.xml"))
+        second = await _call(client, "rules_open", path=str(DATA / "exchange_rules.xml"))
+        assert first["reused"] is False
+        assert "source_changed" not in first
+        assert second["reused"] is True
+        assert second["source_changed"] is False
+        assert second["project_id"] == first["project_id"]
+        listed = await _call(client, "rules_projects")
+        assert [item["project_id"] for item in listed["projects"]] == [first["project_id"]]
+
+        created = await _call(
+            client,
+            "rules_create",
+            source_structure="dump",
+            target_structure="dump",
+            project_id="bp-zup-new",
+        )
+        assert created["project_id"] == "bp-zup-new"
+        error = await _error(
+            client,
+            "rules_create",
+            source_structure="dump",
+            target_structure="dump",
+            project_id="bp-zup-new",
+        )
+        assert error["code"] == "duplicate_project"
+        assert "bp-zup-new" in error["message"]
+        assert first["project_id"] in error["message"]
+
+
+def test_restart_restores_edits_handlers_and_close(service: Kd2Service) -> None:
+    """Новый Kd2Service видит правки и карту строк; rules_close удаляет только снимок."""
+    opened = service.rules_open(str(DATA / "exchange_rules.xml"))
+    project_id = opened["project_id"]
+    service.rule_update(project_id, "pko", "Организации", fields={"Наименование": "После снимка"})
+    exported = service.handlers_export(project_id, "bsl", 50)
+    file_name = exported["files"][0]["file"]
+    located = service.handlers_locate(project_id, file_name, 1)
+    assert located["found"] is False
+
+    restored = Kd2Service(service.settings)
+    listed = [item["project_id"] for item in restored.rules_projects()["projects"]]
+    assert listed == [project_id]
+    got = restored.rules_get(project_id, "pko", "Организации", "", 20)
+    assert got["fields"]["Наименование"] == "После снимка"
+    assert restored.handlers_locate(project_id, file_name, 1) == located
+
+    saved = restored.rules_save(project_id, "kept.xml", True)
+    closed = restored.rules_close(project_id)
+    assert closed == {"project_id": project_id, "closed": True, "snapshot_removed": True}
+    assert restored.rules_projects()["projects"] == []
+    assert Path(saved["path"]).is_file()
+    assert not (service.settings.workspace / ".projects" / project_id).exists()
 
 
 async def test_pko_create_from_candidates_requires_existing_group(service: Kd2Service) -> None:

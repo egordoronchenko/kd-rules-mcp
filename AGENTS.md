@@ -98,7 +98,8 @@
   применяются только решением агента.
 - Правила: `rules_open` / `rules_create` → `rules_list`, `rules_get` → `rule_create`, `rule_update`,
   `rule_delete`, `pko_create_from_candidates` → `rules_validate` → `rules_save`; ZIP для загрузки в БСП —
-  `rules_pack` (папка комплекта или файлы). Проекты правил живут в памяти сервера до перезапуска контейнера.
+  `rules_pack` (папка комплекта или файлы). Проекты правил переживают перезапуск контейнера: снимки в
+  `workspace\.projects\`, идентификатор — имя файла и хеш пути; закрыть — `rules_close`.
 - Код обработчиков — `handlers_export`, синтакс-чекер, `handlers_locate`.
 - Правила регистрации — `registration_build`; черновик обратного направления — `correspondent_draft`.
 - Ошибка инструмента — JSON с полем `code`.

@@ -46,6 +46,7 @@ from kd2_rules_mcp.authoring.workspace import RulesProject, RulesWorkspace, norm
 from kd2_rules_mcp.errors import (
     Kd2Error,
     ObjectNotFoundError,
+    RulesFormatError,
     StructureNotFoundError,
     WorkspacePathError,
 )
@@ -72,7 +73,7 @@ from kd2_rules_mcp.structures.store import LoadResult, StructureStore
 from kd2_rules_mcp.validation.address import rule_address, side_name, walk_pks
 from kd2_rules_mcp.validation.algorithms import check_algorithm_refs
 from kd2_rules_mcp.validation.format import check_format
-from kd2_rules_mcp.validation.handlers import HandlerExport, export_handlers, locate
+from kd2_rules_mcp.validation.handlers import export_handlers, locate
 from kd2_rules_mcp.validation.registration import check_registration
 from kd2_rules_mcp.validation.report import Level, ValidationReport
 from kd2_rules_mcp.validation.search import check_search_params
@@ -164,6 +165,8 @@ class Settings:
     path_map: PathMap = field(default_factory=PathMap)
     host: str = "127.0.0.1"
     port: int = 8060
+    # Общий секрет MCP (`KD2_TOKEN`); пусто — заголовок Authorization не проверяется.
+    token: str | None = None
     # Общий файл проектов и папки проектов на этой машине (или в контейнере).
     projects_file: Path = Path("projects.yaml")
     project_dirs: dict[str, Path] = field(default_factory=dict)
@@ -172,12 +175,12 @@ class Settings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
-        """`KD2_CACHE_DIR`, `KD2_WORKSPACE`, `KD2_PATH_MAP`, `KD2_HOST`, `KD2_PORT`,
+        """`KD2_CACHE_DIR`, `KD2_WORKSPACE`, `KD2_PATH_MAP`, `KD2_HOST`, `KD2_PORT`, `KD2_TOKEN`,
         `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`.
 
         Без `KD2_PROJECT_DIRS` папки проектов берутся из `projects.local.yaml` рядом с
         `projects.yaml` (локальный запуск без Docker); без `KD2_RULES_DIRS` папки живых правил —
-        `rules_dir` проектов от этих папок.
+        `rules_dir` проектов от этих папок. Пустой `KD2_TOKEN` — токена нет.
         """
         source = os.environ if env is None else env
         projects_file = Path(source.get("KD2_PROJECTS_FILE", "projects.yaml"))
@@ -193,6 +196,7 @@ class Settings:
             path_map=PathMap.parse(source.get("KD2_PATH_MAP", "")),
             host=source.get("KD2_HOST", "127.0.0.1"),
             port=int(source.get("KD2_PORT", "8060")),
+            token=source.get("KD2_TOKEN", "").strip() or None,
             projects_file=projects_file,
             project_dirs=dirs,
             rules_dirs=parse_project_dirs(source.get("KD2_RULES_DIRS", ""), "KD2_RULES_DIRS"),
@@ -206,8 +210,8 @@ class Kd2Service:
         self.settings = settings
         self.store = StructureStore(settings.cache_dir)
         self.workspace = RulesWorkspace(settings.workspace)
-        self._exports: dict[str, HandlerExport] = {}
         # Проекты правил меняются на месте — вызовы, которые их трогают, идут по одному.
+        # Снимок пишет `RulesWorkspace` из этих же вызовов, под этой блокировкой.
         self._lock = threading.RLock()
 
     # --- Структуры ---------------------------------------------------------------------------
@@ -432,17 +436,33 @@ class Kd2Service:
 
     def rules_open(self, path: str) -> dict[str, Any]:
         with self._lock:
-            project = self.workspace.open_rules(self._read_path(path))
-            return self._project_view(project)
+            opened = self.workspace.open_rules(self._read_path(path))
+            view = self._project_view(opened.project)
+            view["reused"] = opened.reused
+            if opened.reused:
+                view["source_changed"] = opened.source_changed
+            return view
 
-    def rules_create(self, source_structure: str, target_structure: str) -> dict[str, Any]:
+    def rules_create(
+        self, source_structure: str, target_structure: str, project_id: str | None = None
+    ) -> dict[str, Any]:
         with self._lock:
-            project = self.workspace.create_exchange(self.store, source_structure, target_structure)
+            project = self.workspace.create_exchange(
+                self.store, source_structure, target_structure, project_id
+            )
             return self._project_view(project)
 
     def rules_projects(self) -> dict[str, Any]:
         with self._lock:
-            return {"projects": [self._project_view(item) for item in self._projects()]}
+            return {
+                "projects": [self._project_view(item) for item in self.workspace.iter_projects()]
+            }
+
+    def rules_close(self, project_id: str) -> dict[str, Any]:
+        """Удаляет рабочий проект и его снимок. Файл `rules_save` не трогает."""
+        with self._lock:
+            removed = self.workspace.close(project_id)
+            return {"project_id": project_id, "closed": True, "snapshot_removed": removed}
 
     def rules_overview(self, project_id: str) -> dict[str, Any]:
         with self._lock:
@@ -452,7 +472,7 @@ class Kd2Service:
         self, project_id: str, section: str, text: str | None, offset: int, limit: int
     ) -> dict[str, Any]:
         with self._lock:
-            document = self.workspace.get(project_id).document
+            document = self._document(project_id)
             rows = [_rule_row(node) for node in _section_rules(document, section)]
         if text:
             needle = text.casefold()
@@ -468,19 +488,19 @@ class Kd2Service:
 
     def rules_save(self, project_id: str, path: str, overwrite: bool) -> dict[str, Any]:
         with self._lock:
-            project = self.workspace.get(project_id)
             saved = self.workspace.save(
                 project_id,
                 self._writable(path),
                 overwrite=overwrite,
                 allowed=list(self.rules_dirs().values()),
             )
-            report = check_format(project.document)
+            document = self._document(project_id)
+            report = check_format(document)
             return {
                 "project_id": project_id,
                 "path": self._host(saved),
                 "size_bytes": saved.stat().st_size,
-                "counts": _counts(project.document),
+                "counts": _counts(document),
                 "format_check": _report_summary(report),
             }
 
@@ -583,7 +603,7 @@ class Kd2Service:
         limit: int,
     ) -> dict[str, Any]:
         with self._lock, self._sides(source_structure, target_structure) as (source, target):
-            document = self.workspace.get(project_id).document
+            document = self._document(project_id)
             report = check_format(document)
             if isinstance(document, ExchangeRules):
                 report.extend(check_structures(document, source, target))
@@ -607,7 +627,7 @@ class Kd2Service:
             rules = self._exchange(project_id)
             out_dir = self._writable(folder)
             export = export_handlers(rules, out_dir)
-            self._exports[project_id] = export
+            self.workspace.remember_handlers(project_id, export)
         limit = _limit(limit)
         files = [
             {"file": item.name, "address": item.address, "event": item.event}
@@ -623,7 +643,7 @@ class Kd2Service:
 
     def handlers_locate(self, project_id: str, file_name: str, line: int) -> dict[str, Any]:
         with self._lock:
-            export = self._exports.get(project_id)
+            export = self.workspace.get(project_id).handlers
         if export is None:
             raise Kd2Error(
                 f"Обработчики проекта «{project_id}» ещё не выгружались: сначала handlers_export"
@@ -646,6 +666,7 @@ class Kd2Service:
         exchange_plan: str,
         rules_project_id: str | None,
         objects: Sequence[Mapping[str, Any]] | None,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
         with self._lock, self._structure(structure_id) as conn:
             exchange = self._exchange(rules_project_id) if rules_project_id else None
@@ -653,16 +674,21 @@ class Kd2Service:
             build = build_registration_rules(
                 conn, exchange_plan, exchange_rules=exchange, objects=specs
             )
-            project = self.workspace.add(build.document)
+            project = self.workspace.add(build.document, project_id, label=f"reg-{exchange_plan}")
             return {**self._project_view(project), "warnings": build.warnings}
 
     def correspondent_draft(
-        self, project_id: str, codes: Sequence[str], target_structure: str | None, limit: int
+        self,
+        project_id: str,
+        codes: Sequence[str],
+        target_structure: str | None,
+        limit: int,
+        new_project_id: str | None = None,
     ) -> dict[str, Any]:
         limit = _limit(limit)
         with self._lock, self._sides(target_structure, None) as (target, _):
             result = mirror_rules(self._exchange(project_id), codes, target)
-            project = self.workspace.add(result.rules)
+            project = self.workspace.add(result.rules, new_project_id, label=f"corr-{project_id}")
             handlers = [
                 {
                     "address": item.address,
@@ -713,9 +739,19 @@ class Kd2Service:
             return self._edited(project_id, result)
 
     def _edited(self, project_id: str, result: EditResult) -> dict[str, Any]:
-        """Успешная правка документа проекта: помечает его изменённым и отдаёт итог правки."""
+        """Успешная правка документа проекта: помечает его изменённым, пишет снимок, отдаёт итог.
+
+        Отказ правки сюда не попадает — снимок остаётся прежним.
+        """
         self.workspace.mark_modified(project_id)
         return _edit_view(result)
+
+    def _document(self, project_id: str) -> RulesDocument:
+        """Документ проекта. `get` разбирает снимок, если его ещё не читали."""
+        document = self.workspace.get(project_id).document
+        if document is None:
+            raise RulesFormatError(f"Проект «{project_id}» не загружен из снимка")
+        return document
 
     def _catalog(self) -> Catalog:
         return load_catalog(self.settings.projects_file)
@@ -735,13 +771,10 @@ class Kd2Service:
         return [self._host(folder) for folder in folders]
 
     def _exchange(self, project_id: str) -> ExchangeRules:
-        document = self.workspace.get(project_id).document
+        document = self._document(project_id)
         if not isinstance(document, ExchangeRules):
             raise Kd2Error(f"Проект «{project_id}» — правила регистрации, а нужны правила обмена")
         return document
-
-    def _projects(self) -> list[RulesProject]:
-        return [self.workspace.get(project_id) for project_id in self.workspace.ids()]
 
     @contextmanager
     def _structure(self, structure_id: str) -> Generator[sqlite3.Connection]:
@@ -788,7 +821,11 @@ class Kd2Service:
                 "scripts/setup_local.py)"
             )
         if not local.exists():
-            raise Kd2Error(f"Путь «{path}» не найден (на сервере: {local})")
+            # Внутренний путь контейнера агенту не показываем: остаётся путь, который он передал.
+            raise Kd2Error(
+                f"Путь «{path}» не найден: путь не входит в подключённые папки проектов "
+                "(`project_list`)"
+            )
         return local
 
     def _write_path(self, path: str) -> Path:
@@ -831,14 +868,22 @@ class Kd2Service:
 
     def _project_view(self, project: RulesProject) -> dict[str, Any]:
         document = project.document
+        if isinstance(document, RegistrationRules):
+            kind = "registration"
+        elif isinstance(document, ExchangeRules):
+            kind = "exchange"
+        else:
+            kind = project.kind
         view: dict[str, Any] = {
             "project_id": project.id,
-            "kind": "registration" if isinstance(document, RegistrationRules) else "exchange",
+            "kind": kind,
             "source_path": self._host(project.source_path) if project.source_path else None,
             "saved_path": self._host(project.saved_path) if project.saved_path else None,
             "modified": project.modified,
-            "counts": _counts(document),
         }
+        if document is None:
+            return view
+        view["counts"] = _counts(document)
         if isinstance(document, ExchangeRules):
             view["name"] = str(document.root.values.get("Наименование", ""))
             view["source"] = document.source_name

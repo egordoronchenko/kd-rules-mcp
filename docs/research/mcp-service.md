@@ -6,15 +6,15 @@
 
 Код: `src/kd2_rules_mcp/service.py` (логика инструментов, `PathMap`, `Settings`), `src/kd2_rules_mcp/server.py`
 (регистрация в `MCPServer` из SDK `mcp` 2.2, коды ошибок, запуск), точка входа `kd2-rules-mcp`. Тесты:
-`tests/test_server.py` — клиент MCP в том же процессе вызывает каждый из 30 инструментов (на 27.09.2026 их было 27;
-`project_list`, `structure_load_project` и `rules_pack` добавлены позже). Полный справочник с параметрами, ответами
+`tests/test_server.py` — клиент MCP в том же процессе вызывает каждый из 31 инструмента (на 27.09.2026 их было 27;
+`project_list`, `structure_load_project`, `rules_pack` и `rules_close` добавлены позже). Полный справочник с параметрами, ответами
 и кодами ошибок — [`docs/tools.md`](../tools.md), генерируется из сервера (`scripts/dump_tools.py`).
 
 | Группа | Инструменты |
 |---|---|
 | Проекты и структуры | `project_list`, `structure_load_project`, `structure_list`, `structure_load_xml`, `structure_load_md83exp`, `structure_objects`, `structure_object`, `structure_values`, `structure_plan_content`, `structure_compare` |
 | Кандидаты | `match_objects`, `match_properties`, `match_values` |
-| Проекты правил | `rules_open`, `rules_create`, `rules_projects`, `rules_overview`, `rules_list`, `rules_get`, `rules_save`, `rules_pack` |
+| Проекты правил | `rules_open`, `rules_create`, `rules_projects`, `rules_overview`, `rules_list`, `rules_get`, `rules_save`, `rules_close`, `rules_pack` |
 | Правки | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates` |
 | Проверки | `rules_validate`, `handlers_export`, `handlers_locate` |
 | Генерация | `registration_build`, `correspondent_draft` |

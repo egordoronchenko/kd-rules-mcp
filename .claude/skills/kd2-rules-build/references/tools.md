@@ -16,13 +16,13 @@
 
 <!-- tools:begin — генерирует scripts/dump_tools.py, руками не править -->
 
-Инструментов: 30.
+Инструментов: 31.
 
 | Группа | Инструменты |
 |---|---|
 | Проекты и структуры | [`project_list`](#project_list), [`structure_load_project`](#structure_load_project), [`structure_list`](#structure_list), [`structure_load_xml`](#structure_load_xml), [`structure_load_md83exp`](#structure_load_md83exp), [`structure_objects`](#structure_objects), [`structure_object`](#structure_object), [`structure_values`](#structure_values), [`structure_plan_content`](#structure_plan_content), [`structure_compare`](#structure_compare) |
 | Кандидаты сопоставления | [`match_objects`](#match_objects), [`match_properties`](#match_properties), [`match_values`](#match_values) |
-| Проекты правил | [`rules_open`](#rules_open), [`rules_create`](#rules_create), [`rules_projects`](#rules_projects), [`rules_overview`](#rules_overview), [`rules_list`](#rules_list), [`rules_get`](#rules_get), [`rules_save`](#rules_save), [`rules_pack`](#rules_pack) |
+| Проекты правил | [`rules_open`](#rules_open), [`rules_create`](#rules_create), [`rules_projects`](#rules_projects), [`rules_overview`](#rules_overview), [`rules_list`](#rules_list), [`rules_get`](#rules_get), [`rules_save`](#rules_save), [`rules_close`](#rules_close), [`rules_pack`](#rules_pack) |
 | Правки | [`rule_create`](#rule_create), [`rule_update`](#rule_update), [`rule_delete`](#rule_delete), [`pko_create_from_candidates`](#pko_create_from_candidates) |
 | Проверки | [`rules_validate`](#rules_validate), [`handlers_export`](#handlers_export), [`handlers_locate`](#handlers_locate) |
 | Регистрация и корреспондент | [`registration_build`](#registration_build), [`correspondent_draft`](#correspondent_draft) |
@@ -205,6 +205,7 @@
 |---|---|---|---|
 | `source_structure` | string | обязательный | Идентификатор структуры в кэше (structure_list), например `zup-full` |
 | `target_structure` | string | обязательный | Идентификатор структуры в кэше (structure_list), например `zup-full` |
+| `project_id` | string \| null | `null` | Свой идентификатор нового проекта правил; пусто — выводится из источника и вида |
 
 ### `rules_projects`
 
@@ -254,6 +255,14 @@
 | `project_id` | string | обязательный | Идентификатор рабочего проекта правил (rules_projects) |
 | `path` | string | обязательный | Путь в рабочей папке (относительный — от неё) или в папке живых правил проекта (rules_dir из project_list, абсолютный путь) |
 | `overwrite` | boolean | `false` | Заменить существующий файл |
+
+### `rules_close`
+
+Закрывает рабочий проект и удаляет его снимок. Файлы `rules_save` не трогает.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project_id` | string | обязательный | Идентификатор рабочего проекта правил (rules_projects) |
 
 ### `rules_pack`
 
@@ -382,6 +391,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `exchange_plan` | string | обязательный | План обмена: имя или `ПланОбмена.Имя` |
 | `rules_project_id` | string \| null | `null` | Проект правил обмена: объекты берутся из его ПВД, если objects нет |
 | `objects` | array of object \| null | `null` | Явный выбор: [{"metadata_name": "Справочник.X", "name"?, "code"?, "unload_mode"?, "plan_filters"?: [{"plan_property", "object_property", "property_type", "comparison", "constant"}], "object_filters"?: [{"object_property", "property_type", "comparison", "constant_value"}]}]; отборы соединяются через «И» |
+| `project_id` | string \| null | `null` | Свой идентификатор нового проекта правил; пусто — выводится из источника и вида |
 
 ### `correspondent_draft`
 
@@ -393,6 +403,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `codes` | array of string | обязательный | Коды ПКО для зеркалирования |
 | `target_structure` | string \| null | `null` | Структура нового приёмника (источника исходных правил) для проверки |
 | `limit` | integer ≥ 1 | `50` | Сколько обработчиков и ПКС перечислить |
+| `new_project_id` | string \| null | `null` | Свой идентификатор нового проекта правил; пусто — выводится из источника и вида |
 
 ## Коды ошибок
 
@@ -403,6 +414,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `structure_not_found` | `StructureNotFoundError` | Структуры с таким идентификатором нет в кэше. | `structures` — загруженные структуры |
 | `object_not_found` | `ObjectNotFoundError` | Объекта метаданных нет в структуре; `suggestions` — похожие имена. | `suggestions` — похожие имена объектов |
 | `project_not_found` | `ProjectNotFoundError` | Рабочего проекта с таким идентификатором нет. | — |
+| `duplicate_project` | `DuplicateProjectError` | Идентификатор рабочего проекта уже занят. | — |
 | `path_outside_workspace` | `WorkspacePathError` | Путь записи вне рабочей папки и папок живых правил проектов. | `workspace` — рабочая папка (путь агента), `writable` — все папки, куда разрешена запись (пути агента) |
 | `unknown_field` | `UnknownFieldError` | Поле не входит в схему этого вида правила. | — |
 | `duplicate_rule` | `DuplicateRuleError` | Код или имя уже заняты в своём списке. | — |
@@ -422,16 +434,18 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 Ответ — JSON-объект (`structuredContent` MCP). Ниже — ключи верхнего уровня по коду `Kd2Service`
 (`src/kd2_rules_mcp/service.py`); вложенные поля — в описании инструмента или в самом ответе.
 
-**Страница списка** — общий вид постраничных ответов (`_slice`, `_page`, `src/kd2_rules_mcp/service.py:864-885`):
+**Страница списка** — общий вид постраничных ответов (`_slice`, `_page`, `src/kd2_rules_mcp/service.py:923-934`):
 `items`, `total`, `offset`, `limit` (не больше 200), `has_more`.
 
-**Проект правил** — общий вид ответа о рабочем проекте (`_project_view`, `src/kd2_rules_mcp/service.py:812`):
+**Проект правил** — общий вид ответа о рабочем проекте (`_project_view`, `src/kd2_rules_mcp/service.py:862`):
 `project_id`, `kind` (`exchange` или `registration`), `source_path`, `saved_path`, `modified` (документ менялся
 после открытия, создания или последнего сохранения), `counts` (число правил по разделам: `pko`, `pvd`, `pod`,
 `algorithms`, `queries`, `parameters` или `registration_rules`), `name`; у правил обмена — `source`, `target`;
-у правил регистрации — `exchange_plan`.
+у правил регистрации — `exchange_plan`. У `rules_open` дополнительно `reused`; при `reused: true` ещё
+`source_changed` (у файла на диске изменились время или размер с момента открытия; перечитать — `rules_close`
+и снова `rules_open`).
 
-**Итог правки** — `_edit_view` (`src/kd2_rules_mcp/service.py:1083`): `address` и, если не пусто, `warnings`,
+**Итог правки** — `_edit_view` (`src/kd2_rules_mcp/service.py:1142`): `address` и, если не пусто, `warnings`,
 `skipped`, `not_applied`, `unresolved`, `disabled` (до 200 строк, при большем числе — ещё `<ключ>_total`).
 
 | Инструмент | Ключи ответа |
@@ -446,8 +460,10 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `structure_compare` | `counts`, `limit`, `added_objects`, `removed_objects`, `added_properties`, `removed_properties`, `changed_properties`, `added_values`, `removed_values` (каждый список — до `limit`) |
 | `match_objects` | страница списка: элементы — `confidence`, `auto`, `source`, `target` (`Вид.Имя`), `synonym`, `note` |
 | `match_properties`, `match_values` | страница списка: элементы — `confidence`, `auto`, `source`, `target` (`name`, `kind`, `path`, `synonym`, `types` — до пяти), `path` (путь ПКС), `note` |
-| `rules_open`, `rules_create`, `rules_overview` | проект правил |
+| `rules_open` | проект правил, `reused`; при повторном открытии — `source_changed` |
+| `rules_create`, `rules_overview` | проект правил |
 | `rules_projects` | `projects` — список проектов правил |
+| `rules_close` | `project_id`, `closed`, `snapshot_removed` |
 | `rules_list` | страница списка: элементы — `address`, `code`, заполненные поля строки правила, флаги `Отключить`, `ИспользуетсяПриЗагрузке`, `pks_count` |
 | `rules_get` | `kind`, `title`, `attrs`, `fields` (тексты длиннее 2000 символов обрезаны), `sides` (ПКС), `properties` (`total`, `items`) и `address` (ПКО), `values` (`total`, `items`), `nested` |
 | `rules_save` | `project_id`, `path`, `size_bytes`, `counts`, `format_check` (`errors`, `warnings`, `skipped`, `by_check`, `text`) |
@@ -467,10 +483,11 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 |---|---|---|
 | структура не загружена | `structure_not_found` | все, что принимают идентификатор структуры |
 | объекта нет в структуре | `object_not_found` | `structure_object`, `structure_values`, `structure_plan_content`, `match_properties`, `match_values`, `pko_create_from_candidates` |
-| рабочего проекта правил нет (в том числе после перезапуска сервера) | `project_not_found` | все, что принимают `project_id` |
+| рабочего проекта правил нет (не открывался или закрыт `rules_close`) | `project_not_found` | все, что принимают `project_id` |
+| явный идентификатор нового проекта уже занят | `duplicate_project` | `rules_create`, `registration_build`, `correspondent_draft` |
 | путь записи вне рабочей папки и `rules_dir` | `path_outside_workspace` | `rules_save`, `rules_pack`, `handlers_export` |
 | путь чтения серверу не виден или не найден; папка проекта не задана; `handlers_locate` до `handlers_export`; отрицательное смещение | `rejected` | `structure_load_*`, `rules_open`, `rules_pack`, `handlers_locate`, списки |
-| файл правил не разбирается или не того вида | `rules_format` | `rules_open`, `rules_pack` |
+| файл правил или снимок проекта не разбирается | `rules_format` | `rules_open`, `rules_pack`, обращение к проекту с битым снимком |
 | файл структуры не разбирается | `structure_format` | `structure_load_xml`, `structure_load_md83exp`, `structure_load_project` |
 | ошибка в `projects.yaml`, неизвестный проект, конфигурация или база | `project_config` | `project_list`, `structure_load_project` |
 | отказ правки | `unknown_field`, `duplicate_rule`, `rule_not_found`, `dangling_reference`, `edit_rejected` | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates`, `rules_get` (`rule_not_found`) |

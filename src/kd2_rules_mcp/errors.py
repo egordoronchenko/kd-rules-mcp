@@ -35,6 +35,10 @@ class ProjectNotFoundError(Kd2Error):
     """Рабочего проекта с таким идентификатором нет."""
 
 
+class DuplicateProjectError(Kd2Error):
+    """Идентификатор рабочего проекта уже занят."""
+
+
 class RuleEditError(Kd2Error):
     """Правка правила отклонена."""
 

@@ -11,7 +11,9 @@
 # Здесь нет путей конкретной машины. Папки проектов (только на чтение, /projects/<проект>),
 # KD2_PROJECT_DIRS и KD2_PATH_MAP (перевод путей агента в пути контейнера) — в
 # docker-compose.override.yml, его compose подхватывает сам. KD2_HOST, KD2_PORT, KD2_CACHE_DIR
-# и KD2_WORKSPACE заданы в образе. Клиент: http://<адрес машины>:8060/mcp
+# и KD2_WORKSPACE заданы в образе. Порт по умолчанию — только 127.0.0.1 (своя машина).
+# Для команды setup_local.py по bind из projects.local.yaml подменяет публикацию
+# (ports: !override) и задаёт KD2_TOKEN. Клиент на этой машине: http://localhost:8060/mcp
 
 name: kd2-rules-mcp
 
@@ -20,7 +22,7 @@ services:
     container_name: kd2_rules_mcp
     build: .
     ports:
-      - "8060:8060"
+      - "127.0.0.1:8060:8060"
     restart: unless-stopped
     environment:
       KD2_PROJECTS_FILE: /config/projects.yaml

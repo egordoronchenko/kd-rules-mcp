@@ -5,6 +5,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -105,6 +106,76 @@ def test_local_settings_and_dirs(tmp_path: Path) -> None:
         "beta": Path("/projects/beta"),
     }
     assert resolve(Path("/p"), "Проект\\main") == Path("/p/Проект/main")
+
+
+def test_load_local_bind_requires_token_off_loopback(tmp_path: Path) -> None:
+    """Внешний bind без token — ошибка; с token поля читаются; без bind — None."""
+    path = tmp_path / "projects.local.yaml"
+    path.write_text("bind: 0.0.0.0\n", encoding="utf-8")
+    with pytest.raises(ProjectConfigError, match="для сервера на внешнем интерфейсе задайте token"):
+        load_local(path)
+    path.write_text('bind: "0.0.0.0"\ntoken: "  "\n', encoding="utf-8")
+    with pytest.raises(ProjectConfigError, match="задайте token"):
+        load_local(path)
+    path.write_text("bind: 0.0.0.0\ntoken: секрет\n", encoding="utf-8")
+    settings = load_local(path)
+    assert settings.bind == "0.0.0.0"
+    assert settings.token == "секрет"
+    path.write_text("projects: {}\n", encoding="utf-8")
+    bare = load_local(path)
+    assert bare.bind is None
+    assert bare.token is None
+    path.write_text("token: секрет\n", encoding="utf-8")
+    token_only = load_local(path)
+    assert token_only.bind is None
+    assert token_only.token == "секрет"
+    path.write_text("bind: 127.0.0.1\n", encoding="utf-8")
+    assert load_local(path).token is None
+    path.write_text("bind: LocalHost\n", encoding="utf-8")
+    assert load_local(path).bind == "LocalHost"
+    path.write_text("bind: '::1'\n", encoding="utf-8")
+    assert load_local(path).bind == "::1"
+
+
+def test_compose_override_ports_and_bearer(tmp_path: Path) -> None:
+    """Без bind в override нет ports; с bind и token — !override, KD2_TOKEN и Bearer."""
+    catalog = load_catalog(_write_catalog(tmp_path))
+    plain = LocalSettings()
+    plain_text = setup_local.compose_override(catalog, plain)
+    plain_service = yaml.safe_load(plain_text)["services"]["kd2-rules-mcp"]
+    assert "ports" not in plain_service
+    assert "KD2_TOKEN" not in plain_service["environment"]
+    servers, _warnings = setup_local.mcp_servers(catalog, plain)
+    assert "headers" not in servers["kd2-rules-mcp"]
+
+    bound = LocalSettings(
+        bind="192.0.2.10", token="секрет", server_url="http://192.0.2.10:8060/mcp"
+    )
+    text = setup_local.compose_override(catalog, bound)
+    assert "!override" in text
+    assert "192.0.2.10:8060:8060" in text
+    loaded = yaml.load(text, Loader=_OverrideLoader)
+    service = loaded["services"]["kd2-rules-mcp"]
+    assert service["ports"] == ["192.0.2.10:8060:8060"]
+    assert service["environment"]["KD2_TOKEN"] == "секрет"
+    servers, _warnings = setup_local.mcp_servers(catalog, bound)
+    claude = {"mcpServers": {name: {"type": "http", **entry} for name, entry in servers.items()}}
+    assert claude["mcpServers"]["kd2-rules-mcp"]["headers"] == {"Authorization": "Bearer секрет"}
+    assert servers["kd2-rules-mcp"]["headers"]["Authorization"] == "Bearer секрет"
+    assert setup_local.localhost_server_url_warning(bound) is None
+    loop = LocalSettings(bind="192.0.2.10", token="секрет")
+    assert setup_local.localhost_server_url_warning(loop) is not None
+
+
+class _OverrideLoader(yaml.SafeLoader):
+    """Разбирает тег compose `!override` как обычный список."""
+
+
+def _construct_override(loader: yaml.SafeLoader, node: Any) -> list[object]:
+    return list(loader.construct_sequence(node))
+
+
+_OverrideLoader.add_constructor("!override", _construct_override)
 
 
 def test_load_local_server_url_defaults_to_address(tmp_path: Path) -> None:

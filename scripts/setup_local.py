@@ -5,9 +5,12 @@
 - `docker-compose.override.yml` — папки проектов подключаются к контейнеру только на чтение как
   `/projects/<проект>`, папки живых правил (`rules_dir`) — на запись как `/rules/<проект>`,
   переменные `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS` и `KD2_PATH_MAP` (перевод путей агента);
+  при `token` — `KD2_TOKEN`, при `bind` — публикация порта `!override` на этот интерфейс
+  (compose иначе сливает список `ports` с базовым файлом, где порт только на `127.0.0.1`);
 - `.mcp.json` (Claude Code) и `.cursor/mcp.json` (Cursor) — наш сервер, общие серверы 1С и серверы
   поиска по коду каждого проекта с префиксом `<проект>-` и серверы данных песочниц (с
   Basic-авторизацией логином базы, если он есть); адреса берутся из `.mcp.json` проектов.
+  При `token` у `kd2-rules-mcp` — заголовок `Authorization: Bearer`.
 
 Запуск: `uv run python scripts/setup_local.py`, затем `docker compose up -d`.
 """
@@ -15,6 +18,7 @@
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -24,6 +28,7 @@ from kd2_rules_mcp.projects import (
     LocalSettings,
     base_login,
     basic_auth,
+    bearer_auth,
     load_catalog,
     load_local,
     project_mcp_servers,
@@ -35,6 +40,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 SERVER = "kd2-rules-mcp"
 HEADER = "# Сгенерировано scripts/setup_local.py из projects.local.yaml — не править руками.\n"
+# Compose сливает списки ports; тег заменяет публикацию базового файла целиком.
+_OVERRIDE_TAG = "!override"
+
+
+class _PortOverride(list[str]):
+    """Список портов, который compose должен подставить вместо базового, а не дописать."""
+
+
+class _ComposeDumper(yaml.SafeDumper):
+    """SafeDumper с тегом `!override` для списка портов."""
+
+
+def _represent_port_override(dumper: yaml.SafeDumper, data: _PortOverride) -> yaml.Node:
+    return dumper.represent_sequence(_OVERRIDE_TAG, list(data), flow_style=True)
+
+
+_ComposeDumper.add_representer(_PortOverride, _represent_port_override)
+
+
+def _published_port(bind: str) -> str:
+    """`<bind>:8060:8060`; IPv6 — в квадратных скобках, иначе compose не разберёт адрес."""
+    host = f"[{bind}]" if ":" in bind else bind
+    return f"{host}:8060:8060"
 
 
 def compose_override(catalog: Catalog, local: LocalSettings) -> str:
@@ -68,10 +96,18 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
             "KD2_PATH_MAP": ";".join(path_map),
         }
     }
+    if local.token:
+        service["environment"]["KD2_TOKEN"] = local.token
+    if local.bind:
+        service["ports"] = _PortOverride([_published_port(local.bind)])
     if volumes:
         service["volumes"] = volumes
-    body = yaml.safe_dump(
-        {"services": {SERVER: service}}, allow_unicode=True, sort_keys=False, width=1000
+    body = yaml.dump(
+        {"services": {SERVER: service}},
+        Dumper=_ComposeDumper,
+        allow_unicode=True,
+        sort_keys=False,
+        width=1000,
     )
     return HEADER + body
 
@@ -96,7 +132,10 @@ def mcp_servers(
     catalog: Catalog, local: LocalSettings
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Серверы для агентов и предупреждения о тех, что не найдены."""
-    servers: dict[str, dict[str, Any]] = {SERVER: {"url": local.server_url}}
+    ours: dict[str, Any] = {"url": local.server_url}
+    if local.token:
+        ours["headers"] = bearer_auth(local.token)
+    servers: dict[str, dict[str, Any]] = {SERVER: ours}
     warnings: list[str] = []
     if catalog.shared_mcp_from:
         known = _project_servers(catalog, local, catalog.shared_mcp_from, warnings)
@@ -149,6 +188,9 @@ def main() -> None:
     )
     servers, warnings = mcp_servers(catalog, local)
     warnings += missing_rules_dirs(catalog, local)
+    url_warning = localhost_server_url_warning(local)
+    if url_warning:
+        warnings.append(url_warning)
     claude = {"mcpServers": {name: {"type": "http", **entry} for name, entry in servers.items()}}
     cursor = {"mcpServers": servers}
     _write_json(ROOT / ".mcp.json", claude)
@@ -194,6 +236,19 @@ def _add(
         warnings.append(f"{label} — нет в .mcp.json проекта (или это не HTTP-сервер), пропущен")
         return
     servers[name] = {"url": str(url)}
+
+
+def localhost_server_url_warning(local: LocalSettings) -> str | None:
+    """`bind` задан, а `server_url` всё ещё петлевой — клиентам с других машин он не подойдёт."""
+    if local.bind is None:
+        return None
+    host = (urlsplit(local.server_url).hostname or "").casefold()
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        return None
+    return (
+        f"bind задан ({local.bind}), а server_url остался {local.server_url} — "
+        "для клиентов на других машинах укажите адрес этого интерфейса"
+    )
 
 
 def _posix(path: Path) -> str:
