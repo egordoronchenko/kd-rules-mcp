@@ -11,6 +11,10 @@ from kd2_rules_mcp.authoring.edits import (
     update_rule,
 )
 from kd2_rules_mcp.authoring.pack import collect, pack_rules
+from kd2_rules_mcp.errors import Kd2Error
+from kd2_rules_mcp.kd2.diff import SECTIONS, RuleChange, diff_rules, ignored_header_fields
+from kd2_rules_mcp.kd2.model import RulesDocument
+from kd2_rules_mcp.kd2.rules_io import load_rules
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.views import (
     counts,
@@ -180,3 +184,65 @@ class RulesMixin(ServiceBase):
                 rules, code, source, target, source_object, target_object, fields, group=group
             )
             return self._edited(project_id, result)
+
+    def rules_diff(
+        self,
+        left: str,
+        right: str,
+        include_header: bool,
+        order: bool,
+        section: str | None,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Смысловой дифф двух сторон: открытый проект или файл правил по пути агента."""
+        if section and section not in SECTIONS:
+            known = ", ".join(SECTIONS)
+            raise Kd2Error(f"Неизвестный раздел «{section}»; разделы: {known}")
+        left_ref, left_doc = self._diff_side(left)
+        right_ref, right_doc = self._diff_side(right)
+        changes = diff_rules(left_doc, right_doc, include_header=include_header, order=order)
+        if section:
+            changes = [item for item in changes if item.section == section]
+        return {
+            "left": left_ref,
+            "right": right_ref,
+            "kind": "registration" if left_doc.root_tag == "ПравилаРегистрации" else "exchange",
+            "ignored_fields": ignored_header_fields(include_header),
+            "summary": _diff_summary(changes),
+            "changes": slice_rows([_change_row(item) for item in changes], offset, limit),
+        }
+
+    def _diff_side(self, ref: str) -> tuple[dict[str, str], RulesDocument]:
+        """Проект — по наличию идентификатора среди открытых; иначе путь, как у `rules_open`."""
+        with self._lock:
+            if ref in self.workspace.ids():
+                return {"project_id": ref}, self._document(ref)
+        path = self._read_path(ref)
+        return {"path": self._host(path)}, load_rules(path)
+
+
+def _diff_summary(changes: list[RuleChange]) -> dict[str, dict[str, int]]:
+    """Счётчики по непустым разделам, в порядке разделов инструментов."""
+    counts: dict[str, dict[str, int]] = {}
+    for change in changes:
+        bucket = counts.setdefault(change.section, {"added": 0, "removed": 0, "changed": 0})
+        bucket[change.change] += 1
+    return {name: counts[name] for name in SECTIONS if name in counts}
+
+
+def _change_row(change: RuleChange) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "section": change.section,
+        "address": change.address,
+        "change": change.change,
+    }
+    if change.field is not None:
+        row["field"] = change.field
+    if change.old is not None:
+        row["old"] = change.old
+    if change.new is not None:
+        row["new"] = change.new
+    if change.handler_diff is not None:
+        row["handler_diff"] = change.handler_diff
+    return row

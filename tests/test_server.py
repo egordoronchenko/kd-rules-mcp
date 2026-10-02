@@ -73,6 +73,7 @@ EXPECTED_TOOLS = {
     "rule_delete",
     "pko_create_from_candidates",
     "rules_validate",
+    "rules_diff",
     "handlers_export",
     "handlers_locate",
     "registration_build",
@@ -524,3 +525,74 @@ async def test_pko_create_from_candidates_requires_existing_group(service: Kd2Se
             None,
             group="Справочники",
         )
+
+
+async def test_rules_diff_project_against_file_and_errors(service: Kd2Service) -> None:
+    """Правка проекта против исходного файла; чужая сторона и разные виды — отказ."""
+    source = str(DATA / "exchange_rules.xml")
+    missing = r"C:\kd2-rules-missing\no.xml"
+    async with Client(create_server(service)) as client:
+        opened = await _call(client, "rules_open", path=source)
+        project = opened["project_id"]
+        await _call(
+            client,
+            "rule_update",
+            project_id=project,
+            kind="pko",
+            key="Организации",
+            fields={"Наименование": "Организации (правка)"},
+        )
+        diff = await _call(client, "rules_diff", left=source, right=project)
+        assert diff["left"]["path"] == source
+        assert diff["right"] == {"project_id": project}
+        assert diff["kind"] == "exchange"
+        assert diff["ignored_fields"] == ["ДатаВремяСоздания", "Ид"]
+        assert diff["summary"] == {"pko": {"added": 0, "removed": 0, "changed": 1}}
+        assert diff["changes"]["total"] == 1
+        change = diff["changes"]["items"][0]
+        assert change["section"] == "pko"
+        assert change["address"] == "ПКО «Организации»"
+        assert change["change"] == "changed"
+        assert change["field"] == "Наименование"
+        assert change["new"] == "Организации (правка)"
+
+        unknown = await _error(client, "rules_diff", left=missing, right=source)
+        opened_missing = await _error(client, "rules_open", path=missing)
+        assert unknown["code"] == opened_missing["code"]
+        assert unknown["code"] in {"project_not_found", "rejected"}
+
+        registration = await _call(client, "rules_open", path=str(DATA / "registration_rules.xml"))
+        mismatch = await _error(
+            client, "rules_diff", left=project, right=registration["project_id"]
+        )
+        assert mismatch["code"] == "rejected"
+        assert "правила обмена" in mismatch["message"]
+        assert "правила регистрации" in mismatch["message"]
+
+
+async def test_rules_diff_pages_large_result(service: Kd2Service) -> None:
+    """Изменений больше страницы: total, has_more и вторая страница по offset."""
+    source = str(DATA / "exchange_rules.xml")
+    async with Client(create_server(service)) as client:
+        opened = await _call(client, "rules_open", path=source)
+        project = opened["project_id"]
+        await _call(
+            client,
+            "rule_update",
+            project_id=project,
+            kind="pko",
+            key="Организации",
+            fields={"Наименование": "Новое имя", "Комментарий": "Новый комментарий"},
+        )
+        first = await _call(client, "rules_diff", left=project, right=source, limit=1)
+        assert first["changes"]["total"] == 2
+        assert first["changes"]["has_more"] is True
+        assert len(first["changes"]["items"]) == 1
+        second = await _call(client, "rules_diff", left=project, right=source, limit=1, offset=1)
+        assert second["changes"]["has_more"] is False
+        assert second["changes"]["total"] == 2
+        assert second["changes"]["items"][0]["field"] != first["changes"]["items"][0]["field"]
+        assert {first["changes"]["items"][0]["field"], second["changes"]["items"][0]["field"]} == {
+            "Наименование",
+            "Комментарий",
+        }

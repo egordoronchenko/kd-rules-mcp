@@ -12,7 +12,7 @@
 
 <!-- tools:begin — генерирует scripts/dump_tools.py, руками не править -->
 
-Инструментов: 31.
+Инструментов: 32.
 
 | Группа | Инструменты |
 |---|---|
@@ -20,7 +20,7 @@
 | Кандидаты сопоставления | [`match_objects`](#match_objects), [`match_properties`](#match_properties), [`match_values`](#match_values) |
 | Проекты правил | [`rules_open`](#rules_open), [`rules_create`](#rules_create), [`rules_projects`](#rules_projects), [`rules_overview`](#rules_overview), [`rules_list`](#rules_list), [`rules_get`](#rules_get), [`rules_save`](#rules_save), [`rules_close`](#rules_close), [`rules_pack`](#rules_pack) |
 | Правки | [`rule_create`](#rule_create), [`rule_update`](#rule_update), [`rule_delete`](#rule_delete), [`pko_create_from_candidates`](#pko_create_from_candidates) |
-| Проверки | [`rules_validate`](#rules_validate), [`handlers_export`](#handlers_export), [`handlers_locate`](#handlers_locate) |
+| Проверки | [`rules_validate`](#rules_validate), [`rules_diff`](#rules_diff), [`handlers_export`](#handlers_export), [`handlers_locate`](#handlers_locate) |
 | Регистрация и корреспондент | [`registration_build`](#registration_build), [`correspondent_draft`](#correspondent_draft) |
 
 ## Проекты и структуры
@@ -355,6 +355,23 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
 
+### `rules_diff`
+
+Смысловой дифф двух версий правил одного вида: что добавлено, удалено или изменено.
+
+Сторона — открытый проект или файл. Ответ — сводка по разделам и страница изменений,
+без XML.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `left` | string | обязательный | Левая сторона: идентификатор открытого проекта правил или путь к файлу XML |
+| `right` | string | обязательный | Правая сторона: идентификатор открытого проекта правил или путь к файлу XML |
+| `include_header` | boolean | `false` | Сравнивать изменчивые поля заголовка ДатаВремяСоздания и Ид |
+| `order` | boolean | `false` | Показывать перестановку ПКС и ПКЗ |
+| `section` | string \| null | `null` | Раздел: header, pko, pks, pkz, pvd, pod, algorithms, queries, parameters, registration; пусто — все |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+
 ### `handlers_export`
 
 Выносит обработчики и алгоритмы в BSL-обёртки для синтакс-чекера.
@@ -466,6 +483,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `rules_pack` | `path`, `size_bytes`, `load_with` (форма загрузки в БСП), `files` (`file`, `path`, `size_bytes`, `rules`), `warnings` |
 | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates` | итог правки |
 | `rules_validate` | `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница списка: `level`, `check`, `address`, `message`) |
+| `rules_diff` | `left`, `right` (`project_id` или `path` — путь агента), `kind` (`exchange` или `registration`), `ignored_fields` (пусто при `include_header`; иначе `ДатаВремяСоздания` и `Ид`), `summary` (только непустые разделы: `added`, `removed`, `changed`), `changes` (страница: `section`, `address`, `change`, и при изменении поля — `field`, `old`, `new`, `handler_diff`) |
 | `handlers_export` | `folder`, `count`, `removed` (число удалённых прежних обёрток), `files` (`file`, `address`, `event`), `has_more` |
 | `handlers_locate` | `found`; если найдено — `address`, `event`, `handler_line`, иначе `file`, `line` |
 | `registration_build` | проект правил + `warnings` |
@@ -482,8 +500,8 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | рабочего проекта правил нет (не открывался или закрыт `rules_close`) | `project_not_found` | все, что принимают `project_id` |
 | явный идентификатор нового проекта уже занят | `duplicate_project` | `rules_create`, `registration_build`, `correspondent_draft` |
 | путь записи вне рабочей папки и `rules_dir` | `path_outside_workspace` | `rules_save`, `rules_pack`, `handlers_export` |
-| путь чтения серверу не виден или не найден; папка проекта не задана; `handlers_locate` до `handlers_export`; отрицательное смещение | `rejected` | `structure_load_*`, `rules_open`, `rules_pack`, `handlers_locate`, списки |
-| файл правил или снимок проекта не разбирается | `rules_format` | `rules_open`, `rules_pack`, обращение к проекту с битым снимком |
+| путь чтения серверу не виден или не найден; папка проекта не задана; `handlers_locate` до `handlers_export`; отрицательное смещение; разные виды правил | `rejected` | `structure_load_*`, `rules_open`, `rules_pack`, `rules_diff`, `handlers_locate`, списки |
+| файл правил или снимок проекта не разбирается | `rules_format` | `rules_open`, `rules_pack`, `rules_diff`, обращение к проекту с битым снимком |
 | файл структуры не разбирается | `structure_format` | `structure_load_xml`, `structure_load_md83exp`, `structure_load_project` |
 | ошибка в `projects.yaml`, неизвестный проект, конфигурация или база | `project_config` | `project_list`, `structure_load_project` |
 | отказ правки | `unknown_field`, `duplicate_rule`, `rule_not_found`, `dangling_reference`, `edit_rejected` | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates`, `rules_get` (`rule_not_found`) |

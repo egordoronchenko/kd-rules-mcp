@@ -96,22 +96,28 @@ class CanonicalElement:
     children: tuple["CanonicalElement", ...]
 
 
-def _normalize_newlines(value: str) -> str:
+def normalize_newlines(value: str) -> str:
+    """Переводы строк к LF: `CRLF` и одиночный `CR` (правило К3)."""
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _text_fragment(value: str | None) -> "CanonicalElement | None":
-    stripped = _normalize_newlines(value or "").strip()
-    return CanonicalElement(TEXT_TAG, (), stripped, ()) if stripped else None
-
-
-def _is_default(tag: str, text: str) -> bool:
+def is_default_value(tag: str, text: str) -> bool:
     """Равен ли листовой элемент без атрибутов отсутствующему (правила К4, К5, К7)."""
     if not text.strip():
         return True
     if tag in FALSE_DEFAULT_FLAG_TAGS and text == "false":
         return True
     return tag in ZERO_DEFAULT_NUMBER_TAGS and text == "0"
+
+
+# Прежние имена внутренних помощников.
+_normalize_newlines = normalize_newlines
+_is_default = is_default_value
+
+
+def _text_fragment(value: str | None) -> "CanonicalElement | None":
+    stripped = _normalize_newlines(value or "").strip()
+    return CanonicalElement(TEXT_TAG, (), stripped, ()) if stripped else None
 
 
 def _canonicalize(element: etree._Element) -> CanonicalElement | None:

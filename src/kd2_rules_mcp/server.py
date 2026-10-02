@@ -76,7 +76,8 @@ INSTRUCTIONS = """Сервер правил обмена «Конвертаци�
 structure_load_xml / structure_load_md83exp по путям) →
 открыть правила (rules_open) или создать пустые (rules_create) → смотреть кандидатов (match_*) и
 править (rule_*, pko_create_from_candidates) → проверить (rules_validate, handlers_export для
-синтакс-чекера) → сохранить в рабочую папку или rules_dir проекта (rules_save). Закрыть проект и
+синтакс-чекера) → сохранить в рабочую папку или rules_dir проекта (rules_save). Что изменилось
+между двумя версиями правил или проектом и его файлом — rules_diff. Закрыть проект и
 удалить его снимок — rules_close (файлы rules_save остаются). Правила регистрации —
 registration_build, черновик обратного направления — correspondent_draft.
 Смысловые решения принимает агент.
@@ -646,6 +647,50 @@ def create_server(service: Kd2Service) -> MCPServer:
             check_prefix,
             offset,
             limit,
+        )
+
+    @server.tool()
+    async def rules_diff(
+        left: Annotated[
+            str,
+            Field(
+                description=(
+                    "Левая сторона: идентификатор открытого проекта правил или путь к файлу XML"
+                )
+            ),
+        ],
+        right: Annotated[
+            str,
+            Field(
+                description=(
+                    "Правая сторона: идентификатор открытого проекта правил или путь к файлу XML"
+                )
+            ),
+        ],
+        include_header: Annotated[
+            bool,
+            Field(description="Сравнивать изменчивые поля заголовка ДатаВремяСоздания и Ид"),
+        ] = False,
+        order: Annotated[bool, Field(description="Показывать перестановку ПКС и ПКЗ")] = False,
+        section: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Раздел: header, pko, pks, pkz, pvd, pod, algorithms, queries, parameters, "
+                    "registration; пусто — все"
+                )
+            ),
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Смысловой дифф двух версий правил одного вида: что добавлено, удалено или изменено.
+
+        Сторона — открытый проект или файл. Ответ — сводка по разделам и страница изменений,
+        без XML.
+        """
+        return await call(
+            service.rules_diff, left, right, include_header, order, section, offset, limit
         )
 
     @server.tool()

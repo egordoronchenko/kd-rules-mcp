@@ -11,13 +11,13 @@ from kd2_rules_mcp.authoring.registration import (
     RegistrationObject,
 )
 from kd2_rules_mcp.errors import Kd2Error, ObjectNotFoundError
+from kd2_rules_mcp.kd2.diff import TEXT_LIMIT, clip
 from kd2_rules_mcp.kd2.model import Node, RegistrationRules, RulesDocument
 from kd2_rules_mcp.structures.queries import MAX_LIMIT, NotFound, Page
 from kd2_rules_mcp.validation.address import rule_address, side_name, walk_pks
 from kd2_rules_mcp.validation.report import ValidationReport
 
-# Длина текста обработчика или поля в ответе; полный код — через handlers_export.
-TEXT_LIMIT = 2000
+__all__ = ["TEXT_LIMIT", "clip"]
 
 # Разделы правил обмена: имя раздела в инструментах → тег.
 EXCHANGE_SECTIONS = {
@@ -79,10 +79,6 @@ def require_found[T](result: T | NotFound) -> T:
     if isinstance(result, NotFound):
         raise ObjectNotFoundError(result.message, result.suggestions)
     return result
-
-
-def clip(text: str) -> str:
-    return text if len(text) <= TEXT_LIMIT else text[:TEXT_LIMIT] + " …[обрезано]"
 
 
 def candidate_row(candidate: Candidate, path: str) -> dict[str, Any]:
