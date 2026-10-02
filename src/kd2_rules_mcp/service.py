@@ -254,14 +254,18 @@ class Kd2Service:
                         "role": base.role,
                         "configuration": base.configuration,
                         **(
-                            {"data_mcp": f"{project.id}-{base.data_mcp}"}
+                            {
+                                "data_mcp": base.data_mcp,
+                                "data_mcp_server": f"{project.id}-{base.data_mcp}",
+                            }
                             if base.data_mcp and base.is_sandbox
                             else {}
                         ),
                     }
                     for base in project.bases.values()
                 },
-                "code_mcp": [f"{project.id}-{name}" for name in project.code_mcp],
+                "code_mcp": list(project.code_mcp),
+                "code_mcp_server": [f"{project.id}-{name}" for name in project.code_mcp],
             }
             if folder is not None:
                 row["folder"] = self._host(folder)
@@ -542,7 +546,7 @@ class Kd2Service:
         with self._lock, self._sides(source_structure, target_structure) as (source, target):
             rules = self._exchange(project_id)
             result = delete_rule(rules, kind, key, owner=owner, source=source, target=target)
-            return _edit_view(result)
+            return self._edited(project_id, result)
 
     def pko_create_from_candidates(
         self,
@@ -564,7 +568,7 @@ class Kd2Service:
             result = create_pko_with_properties(
                 rules, code, source, target, source_object, target_object, fields, group=group
             )
-            return _edit_view(result)
+            return self._edited(project_id, result)
 
     # --- Проверки -------------------------------------------------------------------------
 
@@ -706,7 +710,12 @@ class Kd2Service:
             result = operation(
                 rules, kind, key, fields, owner=owner, source=source, target=target, **extra
             )
-            return _edit_view(result)
+            return self._edited(project_id, result)
+
+    def _edited(self, project_id: str, result: EditResult) -> dict[str, Any]:
+        """Успешная правка документа проекта: помечает его изменённым и отдаёт итог правки."""
+        self.workspace.mark_modified(project_id)
+        return _edit_view(result)
 
     def _catalog(self) -> Catalog:
         return load_catalog(self.settings.projects_file)
@@ -827,6 +836,7 @@ class Kd2Service:
             "kind": "registration" if isinstance(document, RegistrationRules) else "exchange",
             "source_path": self._host(project.source_path) if project.source_path else None,
             "saved_path": self._host(project.saved_path) if project.saved_path else None,
+            "modified": project.modified,
             "counts": _counts(document),
         }
         if isinstance(document, ExchangeRules):

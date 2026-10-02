@@ -28,12 +28,17 @@ _CODE_LENGTH = 40
 
 @dataclass(eq=False, slots=True)
 class RulesProject:
-    """Открытый рабочий проект: документ в памяти, путь источника и путь последнего сохранения."""
+    """Открытый рабочий проект: документ в памяти, пути и признак несохранённых правок.
+
+    `modified` — документ менялся после открытия, создания или последнего сохранения.
+    Новый проект, который ещё ни разу не писали, виден по `saved_path is None`.
+    """
 
     id: str
     document: RulesDocument
     source_path: Path | None
     saved_path: Path | None = None
+    modified: bool = False
 
 
 class RulesWorkspace:
@@ -82,6 +87,7 @@ class RulesWorkspace:
         Путь относительный к корню или абсолютный. После `resolve` (включая `..` и симлинки)
         файл должен лежать внутри корня или одной из `allowed` (папки живых правил проектов),
         иначе `WorkspacePathError`. Существующий файл заменяется только при `overwrite=True`.
+        Успешная запись сбрасывает `modified`.
         """
         project = self.get(project_id)
         destination = self._destination(path, allowed)
@@ -92,6 +98,7 @@ class RulesWorkspace:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(dump_rules(project.document))
         project.saved_path = destination
+        project.modified = False
         return destination
 
     def ids(self) -> list[str]:
@@ -101,6 +108,10 @@ class RulesWorkspace:
     def add(self, document: RulesDocument) -> RulesProject:
         """Новый проект из документа, собранного сервером (правила регистрации, черновик)."""
         return self._remember(document, None)
+
+    def mark_modified(self, project_id: str) -> None:
+        """Помечает проект: документ менялся после открытия, создания или последнего сохранения."""
+        self.get(project_id).modified = True
 
     def resolve(self, path: Path | str, allowed: Sequence[Path] = ()) -> Path:
         """Проверенный путь внутри рабочей папки или `allowed`; вне их — `WorkspacePathError`."""

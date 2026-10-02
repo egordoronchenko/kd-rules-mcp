@@ -203,6 +203,15 @@ def test_symlink_outside_workspace_is_rejected(tmp_path: Path) -> None:
     assert not (outside / "x.xml").exists()
 
 
+def test_save_resets_modified(tmp_path: Path) -> None:
+    """Успешное сохранение сбрасывает признак правок."""
+    workspace, project = _workspace_with_sample(tmp_path)
+    workspace.mark_modified(project.id)
+    assert project.modified is True
+    workspace.save(project.id, "rules.xml")
+    assert project.modified is False
+
+
 def test_repeated_save_needs_overwrite(tmp_path: Path) -> None:
     workspace, project = _workspace_with_sample(tmp_path)
     saved = workspace.save(project.id, "rules.xml")

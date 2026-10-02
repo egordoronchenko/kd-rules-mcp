@@ -128,9 +128,26 @@ def test_rules_entry_is_short_and_points_into_pack() -> None:
 
 
 def test_dest_without_cursor_config_writes_only_mcp_json(tmp_path: Path) -> None:
-    build_packs.install(tmp_path, "claude", URL)
+    report = build_packs.install(tmp_path, "claude", URL)
     assert not (tmp_path / ".cursor").exists()
     assert not (tmp_path / ".agents").exists()
+    assert (
+        "Cursor: `.cursor/mcp.json` в проекте нет — добавьте сервер "
+        "в настройках MCP Cursor или запустите с `--cursor`"
+    ) in report
+
+
+def test_dest_cursor_flag_creates_cursor_mcp_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["build_packs.py", "--dest", str(tmp_path), "--server-url", URL, "--cursor"],
+    )
+    build_packs.main()
+    config = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
+    assert config["mcpServers"] == {"kd2-rules-mcp": {"url": URL}}
 
 
 def test_dest_reinstall_removes_stale_files_only_in_own_skills(tmp_path: Path) -> None:

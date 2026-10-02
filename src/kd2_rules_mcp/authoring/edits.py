@@ -13,6 +13,12 @@
 В XML тип стороны пишется только при единственном типе, у группы тип не пишется
 (`ВыгрузкаКонвертации/Ext/ObjectModule.bsl`, 643–672 и 714–726).
 
+Одиночные ПКС и группа ПКС в `create_rule` получают `Код` и `Порядок`, если их не
+передали. `Порядок` считается по контейнеру (`Свойства` или группа): максимум плюс
+шаг 50; пустой контейнер и контейнер, где `Порядок` ни у кого не задан, получают 0 —
+как первая строка `_fill_properties`, чтобы оба пути нумеровали одинаково (0, 50, 100, …).
+`Код` — следующее целое по всем ПКС ПКО.
+
 ПКО при массовом создании получает источник, приёмник и наименование
 (`АвтонастройкаПравилКонвертацииОбъектов/Ext/ObjectModule.bsl`, `СохранитьПравила`, 227–234;
 `ОбщегоНазначения/Ext/Module.bsl`, `глНаименованиеПКО`, 113). В XML это имена типов
@@ -133,6 +139,10 @@ def create_rule(
     через `/` (`Справочники` или `Справочники/Подгруппа`); пусто — корень списка.
     Только для ПКО, ПВД и ПОД, группа должна уже существовать. `source` и `target` —
     структуры сторон; без них проверка объектов, свойств и значений не выполняется.
+    У ПКС и группы ПКС `Код` и `Порядок`, которых нет в `fields`, подставляются как у
+    соседей (`_assign_pks_defaults`). В пустом контейнере `Порядок` равен 0 — как у
+    первой строки `_fill_properties`, а не шаг 50: иначе нумерация разошлась бы с
+    автонастройкой.
     """
     _require_key(kind_name, key)
     list_group = _list_group(rules, kind_name, group)
@@ -142,6 +152,8 @@ def create_rule(
     if fields:
         _apply_fields(node, fields)
     pko, parent, groups = _place_context(rules, kind_name, key, owner)
+    if kind_name in ("pks", "pks_group"):
+        _assign_pks_defaults(node, pko, parent, fields)
     _reject_duplicate(rules, kind_name, key, owner, parent, node)
     if kind_name in ("pks", "pks_group"):
         _reject_segment_mismatch(node, key.rpartition("/")[2])
@@ -336,6 +348,15 @@ def _coerce(value_type: ValueType, value: FieldValue, node: Node, name: str) -> 
     if value_type is ValueType.STR:
         if isinstance(value, str):
             return value
+        # `Код` ПКС в правилах КД — целое (`tests/data/exchange_rules.xml`); число не
+        # подменяется строковым приведением и остаётся как передано.
+        if (
+            name == "Код"
+            and node.kind.name in ("pks", "pks_group")
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        ):
+            return value
         raise RuleEditError(f"Поле «{name}» у {node.kind.title}: ожидается строка")
     if value_type is ValueType.BOOL:
         if isinstance(value, bool):
@@ -491,6 +512,69 @@ def _place_context(
     if found is None or not found[1].is_group:
         raise RuleNotFoundError(f"Группа ПКС «{parent_path}» в ПКО «{pko.code}» не найдена")
     return pko, found[1], _groups_above(pko, found[1])
+
+
+def _assign_pks_defaults(
+    node: Node,
+    pko: Node | None,
+    parent: Node | None,
+    fields: Mapping[str, FieldValue] | None,
+) -> None:
+    """Подставляет `Код` и `Порядок` ПКС, если этих полей нет в `fields`.
+
+    `Порядок` — среди прямых ПКС и групп того же контейнера (`Свойства` или группа):
+    максимум плюс `_ORDER_STEP`. Пустой контейнер и контейнер, где `Порядок` ни у кого
+    не задан, получают 0. Так же начинает `_fill_properties` (`order = 0`, затем шаг),
+    поэтому ПКС из `create_rule` и из автонастройки нумеруются одинаково: 0, 50, 100, ….
+    `Код` — наибольшее целое среди всех ПКС ПКО (`walk_pks` раскрывает группы) плюс 1;
+    нечисловые коды пропускаются; если целых нет — 1. В модель код пишется строкой,
+    как поле схемы и как `<Код>1</Код>` в выгрузке.
+    """
+    given = fields or {}
+    if "Порядок" not in given:
+        node.values["Порядок"] = _next_pks_order(parent)
+    if "Код" not in given:
+        node.values["Код"] = str(_next_pks_code(pko))
+
+
+def _next_pks_order(parent: Node | None) -> int:
+    """Следующий `Порядок` прямых элементов контейнера; пустой контейнер — 0."""
+    if parent is None:
+        return 0
+    numbers: list[int] = []
+    for item in parent.items:
+        number = _optional_int(item.values.get("Порядок"))
+        if number is not None:
+            numbers.append(number)
+    if not numbers:
+        return 0
+    return max(numbers) + _ORDER_STEP
+
+
+def _next_pks_code(pko: Node | None) -> int:
+    """Следующий числовой `Код` ПКС этого ПКО; нечисловые не считаются."""
+    properties = pko.child("Свойства") if pko is not None else None
+    if properties is None:
+        return 1
+    numbers: list[int] = []
+    for _path, item in walk_pks(properties):
+        number = _optional_int(item.values.get("Код"))
+        if number is not None:
+            numbers.append(number)
+    return max(numbers) + 1 if numbers else 1
+
+
+def _optional_int(value: object) -> int | None:
+    """Целое из поля правила; пустое и нечисловое — `None`."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if _is_int(text):
+            return int(text)
+    return None
 
 
 def _require(

@@ -170,6 +170,28 @@ async def test_md83exp_load(service: Kd2Service) -> None:
     assert loaded["counts"]["objects"] > 0
 
 
+async def test_rules_project_modified_tracks_edits_and_save(service: Kd2Service) -> None:
+    """`modified` ложен после открытия и сохранения и истинен после правки."""
+    async with Client(create_server(service)) as client:
+        opened = await _call(client, "rules_open", path=str(DATA / "exchange_rules.xml"))
+        project = opened["project_id"]
+        listed = await _call(client, "rules_projects")
+        assert listed["projects"][0]["modified"] is False
+        await _call(
+            client,
+            "rule_update",
+            project_id=project,
+            kind="pko",
+            key="Организации",
+            fields={"Наименование": "Организации (правка)"},
+        )
+        assert (await _call(client, "rules_projects"))["projects"][0]["modified"] is True
+        assert (await _call(client, "rules_overview", project_id=project))["modified"] is True
+        await _call(client, "rules_save", project_id=project, path="out/rules.xml")
+        assert (await _call(client, "rules_projects"))["projects"][0]["modified"] is False
+        assert (await _call(client, "rules_overview", project_id=project))["modified"] is False
+
+
 async def test_rules_tools(service: Kd2Service) -> None:
     async with Client(create_server(service)) as client:
         await _call(client, "structure_load_xml", structure_id="dump", configuration_path=str(DUMP))

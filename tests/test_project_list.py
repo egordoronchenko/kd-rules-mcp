@@ -92,27 +92,40 @@ async def test_project_list_reports_agent_paths_and_server_names(tmp_path: Path)
     assert listed["workspace"] == HOST_WORKSPACE
     assert listed["shared_mcp"] == ["docs"]
     by_id = {item["project"]: item for item in listed["projects"]}
-    assert by_id["alpha"]["code_mcp"] == ["alpha-code-a", "alpha-code-graph"]
-    assert by_id["alpha"]["bases"]["sandbox"]["data_mcp"] == "alpha-data-a"
+    assert by_id["alpha"]["code_mcp"] == ["code-a", "code-graph"]
+    assert by_id["alpha"]["code_mcp_server"] == ["alpha-code-a", "alpha-code-graph"]
+    sandbox = by_id["alpha"]["bases"]["sandbox"]
+    assert sandbox["data_mcp"] == "data-a"
+    assert sandbox["data_mcp_server"] == "alpha-data-a"
     assert by_id["alpha"]["folder"] == HOST_PROJECT
     assert "folder" not in by_id["beta"]
 
 
 @pytest.mark.anyio
 async def test_project_list_server_names_match_setup_local(tmp_path: Path) -> None:
-    """Имена code_mcp и data_mcp из project_list есть среди ключей mcp_servers."""
+    """Оба набора имён: без префикса — как в .mcp.json, с префиксом — ключи setup_local."""
     settings, local = _prepare(tmp_path)
     catalog = load_catalog(settings.projects_file)
     servers, _warnings = setup_local.mcp_servers(catalog, local)
     async with Client(create_server(Kd2Service(settings))) as client:
         listed = (await client.call_tool("project_list", {})).structured_content
     assert listed is not None
-    names: list[str] = []
+    plain: list[str] = []
+    prefixed: list[str] = []
     for project in listed["projects"]:
-        names.extend(project["code_mcp"])
+        plain.extend(project["code_mcp"])
+        prefixed.extend(project["code_mcp_server"])
+        assert project["code_mcp_server"] == [
+            f"{project['project']}-{name}" for name in project["code_mcp"]
+        ]
         for base in project["bases"].values():
-            if "data_mcp" in base:
-                names.append(base["data_mcp"])
-    assert names
-    assert set(names) <= servers.keys()
+            if "data_mcp" not in base:
+                continue
+            plain.append(base["data_mcp"])
+            prefixed.append(base["data_mcp_server"])
+            assert base["data_mcp_server"] == f"{project['project']}-{base['data_mcp']}"
+    assert plain == ["code-a", "code-graph", "data-a"]
+    assert prefixed
+    assert set(prefixed) <= servers.keys()
+    assert set(plain).isdisjoint(servers.keys())
     assert set(listed["shared_mcp"]) <= servers.keys()

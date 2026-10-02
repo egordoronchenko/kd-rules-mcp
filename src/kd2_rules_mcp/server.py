@@ -174,8 +174,9 @@ def create_server(service: Kd2Service) -> MCPServer:
         `available` — папка проекта подключена к серверу; `structure_id` — под каким именем
         `structure_load_project` загружает конфигурацию; `rules_dir` — папка живых правил проекта
         (`writable` — туда можно сохранять `rules_save`). `folder` — папка проекта путём агента,
-        если она задана на сервере; иначе ключа нет. `code_mcp` и `data_mcp` — имена серверов
-        с префиксом `<проект>-`, как в `.mcp.json` агента. В корне ответа: `workspace` — рабочая
+        если она задана на сервере; иначе ключа нет. `code_mcp`/`data_mcp` — имена как в
+        `.mcp.json` проекта (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` —
+        с префиксом проекта (работа из папки сервера). В корне ответа: `workspace` — рабочая
         папка путём агента, `shared_mcp` — общие серверы без префикса.
         """
         return await call(service.project_list)
@@ -508,7 +509,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         target_structure: OptionalStructure = None,
         group: RuleGroup = "",
     ) -> dict[str, Any]:
-        """Создаёт правило; висячие ссылки на ПКО и отсутствующие объекты отклоняются."""
+        """Создаёт правило; висячие ссылки на ПКО и отсутствующие объекты отклоняются.
+        У ПКС `Код` и `Порядок` без явных значений подставляются как у соседей."""
         return await call(
             service.rule_create,
             project_id,

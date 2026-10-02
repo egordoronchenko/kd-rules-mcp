@@ -19,6 +19,8 @@
 `--connection <строка>`. Пользователь 1С базы с авторизацией — `logins` в личном projects.local.yaml
 (`<проект>.<база>: {user, password}`), иначе `IB_USER` / `IB_PASSWORD` из .dev.env проекта
 (`dev_env` базы в projects.yaml); для `--connection` — `KD2_BSP_USER` / `KD2_BSP_PASSWORD`.
+Клиент-серверная строка (`Srvr=`) без `Usr=` и без `KD2_BSP_USER` — отказ до подключения;
+файловая (`File=`) подключается как раньше.
 """
 
 import argparse
@@ -34,6 +36,21 @@ from kd2_rules_mcp.projects import base_login, load_catalog, load_local, with_lo
 
 ROOT = Path(__file__).resolve().parents[1]
 KINDS = ("ПравилаКонвертацииОбъектов", "ПравилаРегистрацииОбъектов")
+
+
+def require_login(connection: str) -> None:
+    """Отказ до COM, если клиент-серверная база без пользователя 1С.
+
+    Файловая база (`File=`) и строка с `Usr=` проходят. `KD2_BSP_USER` тоже считается логином:
+    его подставит `check()` при подключении.
+    """
+    if "Srvr=" not in connection or "Usr=" in connection or os.environ.get("KD2_BSP_USER", ""):
+        return
+    raise SystemExit(
+        f"База {connection}: логин не задан — укажите его в `projects.local.yaml` (`logins`) "
+        "или `.dev.env` проекта (`dev_env` у базы в `projects.yaml`); "
+        "без логина к клиент-серверной базе не подключаемся"
+    )
 
 
 def check(archive: Path, plan: str, connection_string: str) -> int:
@@ -120,6 +137,7 @@ def main() -> None:
         connection = connection_for(args.project, args.base)
     else:
         parser.error("укажите --project и --base (песочница из projects.yaml) или --connection")
+    require_login(connection)
     if args.archive is not None:
         if args.rules is not None:
             parser.error("укажите либо --archive, либо пару файлов правил")

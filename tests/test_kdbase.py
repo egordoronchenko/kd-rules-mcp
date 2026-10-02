@@ -7,6 +7,7 @@
 Задача 8.2 — типовая БСП (`kdbase/bsp_check.py`): дополнительно нужны `KD2_BSP_PROJECT` и
 `KD2_BSP_BASE` (проект и база-песочница из каталога проектов) и `KD2_BSP_PLAN` — план обмена,
 макеты `ПравилаОбмена` и `ПравилаОбменаКорреспондента` которого есть в корпусе.
+`bsp_check.require_login` проверяется без базы и без `KD2_KDBASE_CHECK`.
 """
 
 import os
@@ -24,14 +25,14 @@ from tests.corpus import CORPUS_ENV, CorpusFile, corpus_files
 ROOT = Path(__file__).resolve().parents[1]
 KD_SCRIPT = ROOT / "kdbase" / "kd_check.py"
 BSP_SCRIPT = ROOT / "kdbase" / "bsp_check.py"
+sys.path.insert(0, str(ROOT / "kdbase"))
 
-pytestmark = [
-    pytest.mark.kdbase,
-    pytest.mark.skipif(
-        os.environ.get("KD2_KDBASE_CHECK") != "1",
-        reason="сверка через базы 1С включается KD2_KDBASE_CHECK=1",
-    ),
-]
+import bsp_check  # noqa: E402 — скрипт из kdbase/, не пакет
+
+_needs_base = pytest.mark.skipif(
+    os.environ.get("KD2_KDBASE_CHECK") != "1",
+    reason="сверка через базы 1С включается KD2_KDBASE_CHECK=1",
+)
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -54,6 +55,8 @@ def _template() -> Path:
     return files[0].path
 
 
+@pytest.mark.kdbase
+@_needs_base
 def test_real_template_is_accepted() -> None:
     template = _template()
     expected = len(parse_xml(template.read_bytes()).findall("ПравилаКонвертацииОбъектов//Правило"))
@@ -63,6 +66,8 @@ def test_real_template_is_accepted() -> None:
     assert f"КОЛИЧЕСТВО ПравилаКонвертацииОбъектов {expected}" in result.stdout
 
 
+@pytest.mark.kdbase
+@_needs_base
 def test_broken_file_is_rejected_with_protocol_error(tmp_path: Path) -> None:
     broken = tmp_path / "broken.xml"
     broken.write_bytes(_template().read_bytes()[:30000])
@@ -72,6 +77,8 @@ def test_broken_file_is_rejected_with_protocol_error(tmp_path: Path) -> None:
     assert "ИТОГ ОШИБКА" in result.stdout
 
 
+@pytest.mark.kdbase
+@_needs_base
 def test_rules_without_source_and_receiver_are_rejected(tmp_path: Path) -> None:
     """Правильный XML, но конвертация пустая: КД читает его без ошибки, обработка — отклоняет."""
     empty = tmp_path / "empty.xml"
@@ -101,6 +108,8 @@ def _bsp_pair() -> tuple[str, str, str, CorpusFile, CorpusFile]:
     return project, base, plan, found["ПравилаОбмена"], found["ПравилаОбменаКорреспондента"]
 
 
+@pytest.mark.kdbase
+@_needs_base
 def test_bsp_accepts_packed_archive_and_rejects_wrong_names(tmp_path: Path) -> None:
     """Архив `rules_pack` (два файла) БСП принимает; архив с чужими именами — нет."""
     project, base, plan, rules, correspondent = _bsp_pair()
@@ -118,6 +127,8 @@ def test_bsp_accepts_packed_archive_and_rejects_wrong_names(tmp_path: Path) -> N
     assert rejected.returncode == 1 and "ИТОГ ОШИБКА" in rejected.stdout
 
 
+@pytest.mark.kdbase
+@_needs_base
 def test_bsp_accepts_real_rules_pair() -> None:
     project, base, plan, rules, correspondent = _bsp_pair()
     result = _run(
@@ -133,3 +144,19 @@ def test_bsp_accepts_real_rules_pair() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ИТОГ OK" in result.stdout
+
+
+def test_require_login_refuses_client_server_without_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`Srvr=` без `Usr=` и без `KD2_BSP_USER` — отказ; строка с `Usr=` проходит дальше."""
+    monkeypatch.delenv("KD2_BSP_USER", raising=False)
+    server = 'Srvr="x";Ref="y";'
+    with pytest.raises(SystemExit, match="логин не задан") as caught:
+        bsp_check.require_login(server)
+    message = str(caught.value)
+    assert server in message
+    assert "projects.local.yaml" in message
+    assert "клиент-серверной" in message
+    bsp_check.require_login('Srvr="x";Ref="y";Usr="u";')
+    bsp_check.require_login('File="C:/base";')
+    monkeypatch.setenv("KD2_BSP_USER", "agent")
+    bsp_check.require_login(server)

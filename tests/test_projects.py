@@ -205,7 +205,8 @@ async def test_project_tools_load_by_name(tmp_path: Path) -> None:
         assert by_id["beta"]["available"] is False
         assert by_id["alpha"]["bases"]["prod"]["role"] == "боевая"
         # Сервер данных показывается только у песочницы.
-        assert by_id["alpha"]["bases"]["sandbox"]["data_mcp"] == "alpha-data-a"
+        assert by_id["alpha"]["bases"]["sandbox"]["data_mcp"] == "data-a"
+        assert by_id["alpha"]["bases"]["sandbox"]["data_mcp_server"] == "alpha-data-a"
         assert "data_mcp" not in by_id["alpha"]["bases"]["prod"]
         loaded = (
             await client.call_tool("structure_load_project", {"project": "alpha"})

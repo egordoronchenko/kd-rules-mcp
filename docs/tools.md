@@ -32,8 +32,9 @@
 `available` — папка проекта подключена к серверу; `structure_id` — под каким именем
 `structure_load_project` загружает конфигурацию; `rules_dir` — папка живых правил проекта
 (`writable` — туда можно сохранять `rules_save`). `folder` — папка проекта путём агента,
-если она задана на сервере; иначе ключа нет. `code_mcp` и `data_mcp` — имена серверов
-с префиксом `<проект>-`, как в `.mcp.json` агента. В корне ответа: `workspace` — рабочая
+если она задана на сервере; иначе ключа нет. `code_mcp`/`data_mcp` — имена как в
+`.mcp.json` проекта (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` —
+с префиксом проекта (работа из папки сервера). В корне ответа: `workspace` — рабочая
 папка путём агента, `shared_mcp` — общие серверы без префикса.
 
 Параметров нет.
@@ -272,6 +273,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 ### `rule_create`
 
 Создаёт правило; висячие ссылки на ПКО и отсутствующие объекты отклоняются.
+У ПКС `Код` и `Порядок` без явных значений подставляются как у соседей.
 
 | Параметр | Тип | По умолчанию | Описание |
 |---|---|---|---|
@@ -420,16 +422,17 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 `items`, `total`, `offset`, `limit` (не больше 200), `has_more`.
 
 **Проект правил** — общий вид ответа о рабочем проекте (`_project_view`, `src/kd2_rules_mcp/service.py:812`):
-`project_id`, `kind` (`exchange` или `registration`), `source_path`, `saved_path`, `counts` (число правил по
-разделам: `pko`, `pvd`, `pod`, `algorithms`, `queries`, `parameters` или `registration_rules`), `name`; у правил
-обмена — `source`, `target`; у правил регистрации — `exchange_plan`.
+`project_id`, `kind` (`exchange` или `registration`), `source_path`, `saved_path`, `modified` (документ менялся
+после открытия, создания или последнего сохранения), `counts` (число правил по разделам: `pko`, `pvd`, `pod`,
+`algorithms`, `queries`, `parameters` или `registration_rules`), `name`; у правил обмена — `source`, `target`;
+у правил регистрации — `exchange_plan`.
 
 **Итог правки** — `_edit_view` (`src/kd2_rules_mcp/service.py:1083`): `address` и, если не пусто, `warnings`,
 `skipped`, `not_applied`, `unresolved`, `disabled` (до 200 строк, при большем числе — ещё `<ключ>_total`).
 
 | Инструмент | Ключи ответа |
 |---|---|
-| `project_list` | `workspace` — рабочая папка путём агента; `shared_mcp` — общие серверы без префикса; `projects` — по проекту: `project`, `name`, `available`, `folder` — папка проекта путём агента, если задана на сервере (иначе ключа нет), `configurations` (`structure_id`, `dump`, `extensions`), `bases` (`role`, `configuration`, у песочницы — `data_mcp` с префиксом `<проект>-`), `code_mcp` — имена с префиксом `<проект>-`, `rules_dir` (`path`, `writable`) — если задан; `exchanges` — `plan`, `projects` |
+| `project_list` | `workspace` — рабочая папка путём агента; `shared_mcp` — общие серверы без префикса; `projects` — по проекту: `project`, `name`, `available`, `folder` — папка проекта путём агента, если задана на сервере (иначе ключа нет), `configurations` (`structure_id`, `dump`, `extensions`), `bases` (`role`, `configuration`, у песочницы — `data_mcp` и `data_mcp_server`), `code_mcp`, `code_mcp_server`, `rules_dir` (`path`, `writable`) — если задан; `exchanges` — `plan`, `projects`. `code_mcp`/`data_mcp` — имена как в `.mcp.json` проекта (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` — с префиксом проекта (работа из папки сервера) |
 | `structure_load_project` | как у `structure_load_xml` + `project`, `configuration` |
 | `structure_list` | `structures` — `structure_id`, `configuration`, `synonym`, `version`, `source`, `source_path`, `extensions`, `loaded_at` |
 | `structure_load_xml`, `structure_load_md83exp` | `structure_id`, `reused`, `counts`, `elapsed_s`, `message`; при неразрешённых типах — `unresolved_total`, `unresolved_top` (до 20) |

@@ -11,13 +11,16 @@
 2. `--dest <папка проекта> --client claude|agents` — ставит скиллы `kd2-*` в проект:
    `claude` — `.claude/skills/` (Claude Code, Cursor, OpenCode), `agents` — `.agents/skills/` и
    `KD2-RULES.md` в корень (Codex и клиенты, которые `.claude/skills` не читают). Обе сразу
-   нельзя: Cursor и OpenCode увидели бы каждый скилл дважды. В `.mcp.json` проекта (и в
-   `.cursor/mcp.json`, если он есть) добавляется сервер `kd2-rules-mcp`, другие серверы не
-   трогаются. Адрес — `--server-url`, по умолчанию `server_url` из `projects.local.yaml` этого
-   репозитория. Это правка чужого репозитория — только с согласия человека.
+   нельзя: Cursor и OpenCode увидели бы каждый скилл дважды. В `.mcp.json` проекта добавляется
+   сервер `kd2-rules-mcp`, другие серверы не трогаются. В `.cursor/mcp.json` — тоже, если файл
+   уже есть; `--cursor` создаёт его, когда файла нет. Без флага и без файла скрипт сообщает,
+   что сервер нужно добавить в настройках MCP Cursor. Адрес — `--server-url`, по умолчанию
+   `server_url` из `projects.local.yaml` этого репозитория. Это правка чужого репозитория —
+   только с согласия человека.
 
 Запуск: `uv run python scripts/build_packs.py --check` (или `--write`);
-`uv run python scripts/build_packs.py --dest <папка проекта> --client claude [--server-url URL]`.
+`uv run python scripts/build_packs.py --dest <папка проекта> --client claude`
+`[--cursor] [--server-url URL]`.
 """
 
 import argparse
@@ -139,8 +142,13 @@ def portability_hits(files: dict[str, bytes]) -> list[str]:
     return hits
 
 
-def install(dest: Path, client: str, server_url: str | None = None) -> list[str]:
-    """Ставит упаковку в папку проекта; возвращает строки отчёта."""
+def install(
+    dest: Path, client: str, server_url: str | None = None, *, cursor: bool = False
+) -> list[str]:
+    """Ставит упаковку в папку проекта; возвращает строки отчёта.
+
+    `cursor` — создать `.cursor/mcp.json` с сервером, если файла ещё нет.
+    """
     dest = dest.resolve()
     if not dest.is_dir():
         raise SystemExit(f"Нет папки проекта {dest}")
@@ -155,8 +163,10 @@ def install(dest: Path, client: str, server_url: str | None = None) -> list[str]
             )
     # Конфигурации MCP читаются до записи: битый файл останавливает установку, ничего не меняя.
     configs = [(dest / ".mcp.json", True)]
-    if (dest / ".cursor" / "mcp.json").is_file():
-        configs.append((dest / ".cursor" / "mcp.json", False))
+    cursor_config = dest / ".cursor" / "mcp.json"
+    # Без --cursor файл не создаём: у Cursor серверы часто лежат в глобальных настройках.
+    if cursor or cursor_config.is_file():
+        configs.append((cursor_config, False))
     loaded = [(path, read_mcp_config(path), typed) for path, typed in configs]
     report = _remove_stale(dest, CLIENT_ROOTS[client], {dest / name for name in files})
     written = 0
@@ -170,6 +180,11 @@ def install(dest: Path, client: str, server_url: str | None = None) -> list[str]
     report.append(f"упаковка {client}: файлов {len(files)}, записано {written}")
     url = server_url or default_server_url()
     report.extend(add_server(path, data, url, typed=typed) for path, data, typed in loaded)
+    if not cursor and not cursor_config.is_file():
+        report.append(
+            "Cursor: `.cursor/mcp.json` в проекте нет — добавьте сервер "
+            "в настройках MCP Cursor или запустите с `--cursor`"
+        )
     if client == "agents":
         report.append(
             "добавьте в AGENTS.md проекта строку «Правила обмена КД 2 и сервер kd2-rules-mcp — "
@@ -256,6 +271,11 @@ def main() -> None:
     mode.add_argument("--dest", type=Path, help="папка проекта 1С, куда поставить скиллы")
     parser.add_argument("--client", choices=sorted(CLIENT_ROOTS), default="claude")
     parser.add_argument("--server-url", help="адрес сервера для .mcp.json проекта")
+    parser.add_argument(
+        "--cursor",
+        action="store_true",
+        help="создать .cursor/mcp.json с kd2-rules-mcp, если файла нет",
+    )
     args = parser.parse_args()
 
     if args.check:
@@ -277,7 +297,7 @@ def main() -> None:
     else:
         if stale_copies():
             print("Внимание: копии справочников в репозитории устарели (--write); ставится сборка")
-        print("\n".join(install(args.dest, args.client, args.server_url)))
+        print("\n".join(install(args.dest, args.client, args.server_url, cursor=args.cursor)))
 
 
 if __name__ == "__main__":

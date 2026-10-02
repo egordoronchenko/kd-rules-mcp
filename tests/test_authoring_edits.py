@@ -899,3 +899,152 @@ def test_create_pko_with_properties_lands_in_group(tmp_path: Path) -> None:
             "Справочник.Контрагенты",
             group="Справочники",
         )
+
+
+# --- Код и Порядок ПКС -------------------------------------------------------------------------
+
+
+def _pks_sides(name: str, kind: str = "Реквизит", type_name: str = "") -> dict[str, dict[str, str]]:
+    return {"Источник": _side(name, kind, type_name), "Приемник": _side(name, kind, type_name)}
+
+
+def _property_element(raw: bytes, pko_code: str, target: str) -> etree._Element:
+    root = etree.fromstring(raw)
+    for rule in root.iter("Правило"):
+        if rule.findtext("Код") != pko_code:
+            continue
+        properties = rule.find("Свойства")
+        if properties is None:
+            continue
+        for prop in properties.iter("Свойство"):
+            receiver = prop.find("Приемник")
+            if receiver is not None and receiver.get("Имя") == target:
+                return prop
+    raise AssertionError(f"ПКС «{target}» в ПКО «{pko_code}» не найдено в XML")
+
+
+def test_pks_code_and_order_follow_neighbors() -> None:
+    """У ПКО с ПКС новый код — max+1, порядок — max+50 того же контейнера."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    create_rule(rules, "pks", "КПП", _pks_sides("КПП", type_name="Строка"), owner="Организации")
+    created = _by_target(_pks(rules, "Организации"))["КПП"]
+    # В макете у ИНН код «1» и порядок 50.
+    assert created.values["Код"] == "2"
+    assert created.values["Порядок"] == 100
+
+    only_order = create_rule(
+        rules,
+        "pks",
+        "ОГРН",
+        {**_pks_sides("ОГРН", type_name="Строка"), "Порядок": 10},
+        owner="Организации",
+    )
+    assert only_order.address == "ПКО «Организации» / ПКС ОГРН"
+    ogrn = _by_target(_pks(rules, "Организации"))["ОГРН"]
+    assert ogrn.values["Код"] == "3"
+    assert ogrn.values["Порядок"] == 10
+    _assert_sound(rules)
+
+
+def test_pks_in_empty_properties_gets_first_code_and_order() -> None:
+    """Пустой контейнер: код 1, порядок 0 — как первая строка автонастройки."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    create_rule(rules, "pks", "Имя", _pks_sides("Имя"), owner="ВидыОпераций")
+    created = _pks(rules, "ВидыОпераций").items[0]
+    assert created.values["Код"] == "1"
+    assert created.values["Порядок"] == 0
+
+    fresh = _rules()
+    create_rule(fresh, "pko", "Новый", {"Источник": "А", "Приемник": "Б"})
+    create_rule(fresh, "pks", "Поле", _pks_sides("Поле"), owner="Новый")
+    assert _pks(fresh, "Новый").items[0].values["Код"] == "1"
+    assert _pks(fresh, "Новый").items[0].values["Порядок"] == 0
+    _assert_sound(fresh)
+
+
+def test_pks_in_group_takes_order_from_group_and_code_from_pko() -> None:
+    """Порядок — по группе, код — по всему ПКО, нечисловые коды не считаются."""
+    rules = _rules()
+    create_rule(rules, "pko", "Док", {"Источник": "А", "Приемник": "Б"})
+    create_rule(
+        rules,
+        "pks",
+        "Номер",
+        {**_pks_sides("Номер"), "Код": "4", "Порядок": 50},
+        owner="Док",
+    )
+    create_rule(
+        rules,
+        "pks",
+        "Комментарий",
+        {**_pks_sides("Комментарий"), "Код": "нечисло", "Порядок": 100},
+        owner="Док",
+    )
+    create_rule(
+        rules,
+        "pks_group",
+        "Строки",
+        {**_pks_sides("Строки", "ТабличнаяЧасть"), "Код": "9", "Порядок": 150},
+        owner="Док",
+    )
+    create_rule(
+        rules,
+        "pks",
+        "Строки/Товар",
+        {**_pks_sides("Товар"), "Код": "2", "Порядок": 50},
+        owner="Док",
+    )
+    create_rule(rules, "pks", "Строки/Количество", _pks_sides("Количество"), owner="Док")
+    group = _by_target(_pks(rules, "Док"))["Строки"]
+    created = _by_target(group)["Количество"]
+    # Коды ПКО: 4, «нечисло» (мимо), 9 у группы, 2 у строки. Порядок группы — 50, не 150 корня.
+    assert created.values["Код"] == "10"
+    assert created.values["Порядок"] == 100
+
+    create_rule(rules, "pks_group", "Прочее", _pks_sides("Прочее", "ТабличнаяЧасть"), owner="Док")
+    extra = _by_target(_pks(rules, "Док"))["Прочее"]
+    assert extra.values["Код"] == "11"
+    assert extra.values["Порядок"] == 200
+    _assert_sound(rules)
+
+
+def test_explicit_pks_code_and_order_are_kept() -> None:
+    """Переданные `Код` и `Порядок` не заменяются соседними; у ПКЗ и ПВД по-прежнему пусто."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    create_rule(
+        rules,
+        "pks",
+        "КПП",
+        {**_pks_sides("КПП", type_name="Строка"), "Код": 7, "Порядок": 10},
+        owner="Организации",
+    )
+    created = _by_target(_pks(rules, "Организации"))["КПП"]
+    assert created.values["Код"] == 7
+    assert created.values["Порядок"] == 10
+
+    create_rule(rules, "pkz", "Прочее", {"Приемник": "Прочее"}, owner="Организации")
+    values = next(item for item in rules.pko() if item.code == "Организации").child("Значения")
+    assert values is not None
+    pkz = next(item for item in values.items if str(item.get("Источник")) == "Прочее")
+    assert "Код" not in pkz.values
+    assert "Порядок" not in pkz.values
+
+    create_rule(rules, "pvd", "Новая", {"Наименование": "Новая"})
+    pvd = next(item for item in rules.pvd() if item.code == "Новая")
+    assert pvd.values["Код"] == "Новая"
+    assert "Порядок" not in pvd.values
+    _assert_sound(rules)
+
+
+def test_pks_code_and_order_round_trip() -> None:
+    """`<Код>` и `<Порядок>` новой ПКС пишутся в XML и читаются обратно."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    create_rule(rules, "pks", "КПП", _pks_sides("КПП", type_name="Строка"), owner="Организации")
+    raw = dump_rules(rules)
+    element = _property_element(raw, "Организации", "КПП")
+    assert element.findtext("Код") == "2"
+    assert element.findtext("Порядок") == "100"
+    loaded = load_exchange_rules(raw)
+    again = _by_target(_pks(loaded, "Организации"))["КПП"]
+    assert again.values["Код"] == "2"
+    assert again.values["Порядок"] == 100

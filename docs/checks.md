@@ -82,6 +82,11 @@ uv run python kdbase\bsp_check.py --archive <ZIP из rules_pack> --plan <пла
 `projects.local.yaml`, иначе `IB_USER`/`IB_PASSWORD` из `.dev.env` проекта (для `--connection` —
 `KD2_BSP_USER`/`KD2_BSP_PASSWORD`).
 
+Агент запускает `bsp_check`, только если у базы есть логин (`dev_env` у базы в `projects.yaml` или `logins` в
+`projects.local.yaml`) и человек знает, что правила грузятся в эту песочницу. Нет логина — ступень «не
+прогонялась», сказать человеку: без логина к клиент-серверной базе скрипт отказывает, вход под пустым
+пользователем не пробуется.
+
 ### `exchange_check`
 
 ```powershell
