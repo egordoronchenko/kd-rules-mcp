@@ -13,7 +13,8 @@
    `KD2-RULES.md` в корень (Codex и клиенты, которые `.claude/skills` не читают). Обе сразу
    нельзя: Cursor и OpenCode увидели бы каждый скилл дважды. В `.mcp.json` проекта добавляется
    сервер `kd2-rules-mcp`, другие серверы не трогаются. В `.cursor/mcp.json` — тоже, если файл
-   уже есть; `--cursor` создаёт его, когда файла нет. Без флага и без файла скрипт сообщает,
+   уже есть; `--cursor` создаёт его, когда файла нет, и переносит туда HTTP-серверы из `.mcp.json`
+   (stdio с `command` не переносит). Без флага и без файла скрипт сообщает,
    что сервер нужно добавить в настройках MCP Cursor. Адрес — `--server-url`, по умолчанию
    `server_url` из `projects.local.yaml` этого репозитория. Заголовок `Authorization` — из
    `token` того же файла, если токен задан. Это правка чужого репозитория — только с согласия
@@ -148,8 +149,10 @@ def install(
 ) -> list[str]:
     """Ставит упаковку в папку проекта; возвращает строки отчёта.
 
-    `cursor` — создать `.cursor/mcp.json` с сервером, если файла ещё нет.
-    Заголовок `Authorization` берётся из `token` в `projects.local.yaml`, если токен задан.
+    `cursor` — создать `.cursor/mcp.json` с сервером, если файла ещё нет. При создании туда
+    переносятся HTTP-серверы из `.mcp.json` проекта; уже существующий файл только дополняется
+    `kd2-rules-mcp`. Заголовок `Authorization` берётся из `token` в `projects.local.yaml`,
+    если токен задан.
     """
     dest = dest.resolve()
     if not dest.is_dir():
@@ -167,6 +170,7 @@ def install(
     configs = [(dest / ".mcp.json", True)]
     cursor_config = dest / ".cursor" / "mcp.json"
     # Без --cursor файл не создаём: у Cursor серверы часто лежат в глобальных настройках.
+    creating_cursor = cursor and not cursor_config.is_file()
     if cursor or cursor_config.is_file():
         configs.append((cursor_config, False))
     loaded = [(path, read_mcp_config(path), typed) for path, typed in configs]
@@ -180,6 +184,13 @@ def install(
         path.write_bytes(content)
         written += 1
     report.append(f"упаковка {client}: файлов {len(files)}, записано {written}")
+    if creating_cursor:
+        source = next(data for path, data, _typed in loaded if path == dest / ".mcp.json")
+        target = next(data for path, data, _typed in loaded if path == cursor_config)
+        transferred, skipped = transfer_http_servers(source, target)
+        report.append(f"перенесено серверов из .mcp.json: {transferred}")
+        if skipped:
+            report.append("не перенесены: " + ", ".join(skipped))
     url = server_url or default_server_url()
     headers = default_server_headers()
     report.extend(
@@ -211,6 +222,35 @@ def read_mcp_config(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
         raise SystemExit(f"{path}: ожидался объект JSON с объектом mcpServers — файл не тронут")
     return data
+
+
+def transfer_http_servers(source: dict[str, Any], target: dict[str, Any]) -> tuple[int, list[str]]:
+    """Копирует HTTP-серверы из `.mcp.json` в создаваемый конфиг Cursor.
+
+    Запись — `url` и `headers`, если они есть; поле `type` не пишется. Серверы с `command`
+    (stdio) не копируются: их имена возвращаются вторым списком.
+    """
+    servers = source.get("mcpServers") or {}
+    if not isinstance(servers, dict):
+        return 0, []
+    dest_servers = target.setdefault("mcpServers", {})
+    skipped: list[str] = []
+    transferred = 0
+    for name, entry in servers.items():
+        if not isinstance(entry, dict) or "command" in entry:
+            if isinstance(entry, dict) and "command" in entry:
+                skipped.append(str(name))
+            continue
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        copied: dict[str, Any] = {"url": url}
+        headers = entry.get("headers")
+        if isinstance(headers, dict):
+            copied["headers"] = headers
+        dest_servers[str(name)] = copied
+        transferred += 1
+    return transferred, skipped
 
 
 def add_server(
@@ -302,7 +342,7 @@ def main() -> None:
     parser.add_argument(
         "--cursor",
         action="store_true",
-        help="создать .cursor/mcp.json с kd2-rules-mcp, если файла нет",
+        help="создать .cursor/mcp.json, если файла нет, и перенести HTTP-серверы из .mcp.json",
     )
     args = parser.parse_args()
 

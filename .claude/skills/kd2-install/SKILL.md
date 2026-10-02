@@ -29,8 +29,13 @@ https://raw.githubusercontent.com/egordoronchenko/kd2-rules-mcp/main/.claude/ski
      (шаг 2); `docker info` падает (шаг 0).
 - **Инструменты сервера — только через клиент.** Свой MCP-клиент, HTTP-запросы к серверу из скриптов — нельзя:
   это обход одобрения сервера человеком. Исключение — `scripts/check_server.py` из клона как проверка шага 5.
-- `projects.yaml`, `projects.local.yaml`, `.mcp.json`, `.cursor/mcp.json`, `docker-compose.override.yml` в git
-  не коммитить (они в `.gitignore`).
+- **Чужие настройки не читать.** Глобальные настройки клиентов (`~\.cursor`, `~\.claude`, `%APPDATA%\…`) не
+  читать и не цитировать: там токены других серверов. Что подключено к клиенту — `claude mcp list` /
+  `cursor-agent mcp list` или вопрос человеку. Чужие контейнеры и процессы (`docker inspect`, `docker exec` не
+  своего контейнера) не трогать: в их настройках чужие пути и секреты. Имена и порты своего экземпляра —
+  `docker ps` и `docker compose config` в папке клона.
+- `projects.yaml`, `projects.local.yaml`, `.mcp.json`, `.cursor/mcp.json`, `docker-compose.override.yml`, `.env`
+  в git не коммитить (они в `.gitignore`).
 - Тексты с обратной косой (пути Windows) править инструментами редактирования файлов, а не строками Python в
   скрипте.
 
@@ -76,7 +81,11 @@ uv sync
 - выгрузка основной конфигурации — каталог с `Configuration.xml`, где нет `ConfigurationExtensionPurpose`
   (обычно `src/Main`, `Main`, `main`); расширения — каталоги с `Configuration.xml`, в котором есть
   `<ConfigurationExtensionPurpose>` (порядок наложения и какие активны в базе — **спросить**);
-- `.mcp.json` проекта: имена серверов поиска по коду (`code_mcp`), сервер данных базы, если есть (`data_mcp`);
+- `.mcp.json` проекта: имена серверов кода и метаданных (`code_mcp` — все такие серверы проекта, включая граф
+  метаданных `1c-graph-metadata-mcp`), сервер данных базы, если есть (`data_mcp` — кандидат, см. ниже);
+- `data_mcp` у базы — **спросить**: сервер данных смотрит именно в эту песочницу? Сверить имя публикации в URL
+  сервера данных с `Ref` базы — они не обязаны совпадать, поэтому решает человек. Без его подтверждения
+  `data_mcp` не указывать и сказать, что без него не будет `exchange_check` и запросов к данным песочницы;
 - `.dev.env` проекта (если есть): **только имена ключей и путь к базе** — `INFOBASE_PATH`, есть ли `IB_USER`.
   Значения паролей не читать вслух и не переносить никуда.
 - папка живых правил обмена (`rules_dir`) — **спросить**, держать ли правила, загружаемые в базу из файла, в
@@ -89,7 +98,7 @@ uv sync
 |---|---|---|
 | XML-выгрузка конфигурации (формат Конфигуратора, не EDT) и расширений | каталоги с `Configuration.xml` (выше) | сервер не работает с проектом — закончить ход |
 | база-песочница | спросить; строка соединения | не будет `bsp_check` и `exchange_check` |
-| MCP-серверы для 1С в `.mcp.json` проекта (пакет comol): код и метаданные, данные базы | `.mcp.json` проекта | правила разбираются и правятся, но код обработчиков пишется вслепую |
+| MCP-серверы для 1С в `.mcp.json` проекта (пакет comol): код и метаданные, граф метаданных, данные базы | `.mcp.json` проекта | правила разбираются и правятся, но код обработчиков пишется вслепую |
 | набор правил comol `ai_rules_1c` | `.ai-rules.json` в корне проекта, правила `.cursor\rules\mcp-policy.mdc` и `mcp-first-search.mdc` (для Claude Code — `.claude\rules-1c\`, для Codex — `.codex\rules\`) | серверы 1С работают, но хуже: скиллы kd2 опираются на эти правила, а не повторяют их |
 
 Набора нет — предложить человеку поставить его по https://github.com/comol/ai_rules_1c (ставит человек: это
@@ -103,7 +112,9 @@ copy projects.example.yaml projects.yaml
 
 Заполнить по черновику шага 2 (формат и поля — комментарии в `projects.example.yaml`, таблица — `docs/INSTALL.md`,
 шаг 3). Пути выгрузок — **от папки проекта**. Базы: строка соединения `Srvr="…";Ref="…";` или `File="…";`, роль —
-как сказал человек; `dev_env: .dev.env` (путь от папки проекта), если логин базы в нём.
+как сказал человек; `dev_env: .dev.env` (путь от папки проекта), если логин базы в нём. `code_mcp` — все
+серверы кода и метаданных проекта из его `.mcp.json`, граф метаданных (`1c-graph-metadata-mcp`) тоже;
+`data_mcp` — только у песочницы, которую человек подтвердил на шаге 2, иначе строки нет.
 
 Проверка:
 
@@ -120,7 +131,17 @@ uv run python -c "from pathlib import Path; from kd2_rules_mcp.projects import l
 copy projects.local.example.yaml projects.local.yaml
 ```
 
-В `projects:` — папки проектов на этой машине (ключи — как в `projects.yaml`). Остальное оставить.
+В `projects:` — папки проектов на этой машине (ключи — как в `projects.yaml`). Остальное оставить, кроме двух
+случаев (проверить до шага 5: `docker ps` — занят ли порт 8060 и есть ли уже контейнер `kd2_rules_mcp`):
+
+- **порт 8060 занят** — `port: 8061` (или другой свободный) и `server_url` с тем же портом
+  (`http://localhost:8061/mcp`);
+- **второй экземпляр сервера на этой машине** — `instance: <суффикс>` (буквы, цифры, `_`, `-`) и свой `port`:
+  контейнер, том кэша и проект compose получают суффикс (`kd2_rules_mcp_<суффикс>`), первый экземпляр не
+  затрагивается.
+
+`setup_local.py` (шаг 5) пишет из этих полей `.env` клона (`KD2_PUBLISHED_PORT`, `KD2_BIND`, `KD2_CONTAINER`,
+`KD2_CACHE_VOLUME`, `COMPOSE_PROJECT_NAME`); `.env` и `docker-compose.yml` руками не править.
 
 ## 5. Запуск
 
@@ -130,9 +151,10 @@ docker compose up -d --build
 uv run python scripts/check_server.py
 ```
 
-Проверка: `check_server.py` печатает число инструментов (полный список — `docs/tools.md`) и «папка видна» у каждого
-проекта; код выхода 0.
-Первая сборка образа — пара минут.
+Проверка: `setup_local.py` печатает контейнер, порт и том — те, что задумали на шаге 4; `check_server.py`
+печатает число инструментов (полный список — `docs/tools.md`) и «папка видна» у каждого проекта; код выхода 0.
+Первая сборка образа — пара минут. Поменяли `port`, `instance` или `bind` позже — снова `setup_local.py` и
+`docker compose up -d`.
 
 ## 6. Подключить агента
 
@@ -152,8 +174,12 @@ uv run python scripts/check_server.py
   Ставит скиллы `kd2-*` в `.claude\skills\` проекта (их читают Claude Code, Cursor и OpenCode) вместе со
   справочниками и правилом серверов 1С, добавляет `kd2-rules-mcp` в `.mcp.json` проекта (и в `.cursor\mcp.json`,
   если он есть), чужие серверы не трогает; адрес — `server_url` из `projects.local.yaml` (другой —
-  `--server-url`). Человек работает в Cursor — добавить `--cursor`: создаст `.cursor\mcp.json`, если его нет;
-  без флага и без файла человек добавляет сервер сам в настройках MCP Cursor (сказать ему). Клиент, который `.claude\skills` не читает (Codex), — `--client agents`: скиллы в
+  `--server-url`). Человек работает в Cursor — добавить `--cursor`: Cursor `.mcp.json` проекта не читает, и
+  скрипт создаёт `.cursor\mcp.json` (если его нет) с `kd2-rules-mcp` и переносит в него HTTP-серверы 1С из
+  `.mcp.json` проекта; stdio-серверы он только перечислит — человек добавляет их сам в настройках MCP Cursor
+  (передать ему список). `.cursor\mcp.json` уже был — скрипт дописывает только `kd2-rules-mcp`, серверы 1С в нём
+  не трогает. Без флага и без файла человек добавляет сервер сам в настройках MCP Cursor (сказать ему).
+  Клиент, который `.claude\skills` не читает (Codex), — `--client agents`: скиллы в
   `.agents\skills\`, в корне проекта `KD2-RULES.md` — порядок работы и какой файл когда читать; строку о нём в
   `AGENTS.md` проекта добавляет человек (скрипт её напечатает). Обе упаковки в один проект не ставить — Cursor и
   OpenCode увидят скиллы дважды; скрипт откажет. Проект должен быть в `projects.local.yaml` (шаги 4–5).
@@ -197,11 +223,11 @@ uv run python kdbase/kd_check.py check tests/data/exchange_rules.xml
    **или** `modified: true` — **закончить ход**: спросить человека, сохранить ли их `rules_save` и куда.
 2. **Запомнить образ для отката.** Имя образа не угадывать: в папке клона `docker compose config --images` —
    имя образа сервиса (учитывает `name:` в compose и `COMPOSE_PROJECT_NAME` из `.env`); по умолчанию
-   `kd2-rules-mcp-kd2-rules-mcp`. Затем `docker image tag <образ>:latest <образ>:prev`; записать текущий
+   `kd2-rules-mcp-kd2-rules-mcp`, при `instance` — `kd2-rules-mcp-<суффикс>-kd2-rules-mcp`. Затем `docker image tag <образ>:latest <образ>:prev`; записать текущий
    коммит: `git rev-parse --short HEAD`.
 3. **Обновить:** в папке сервера `git pull` → `uv sync` → `uv run python scripts/setup_local.py` →
    `docker compose up -d --build`. `setup_local.py` — после каждого обновления: новая версия может добавить папки,
-   переменные или серверы; он переписывает `docker-compose.override.yml`, `.mcp.json`, `.cursor/mcp.json`
+   переменные или серверы; он переписывает `docker-compose.override.yml`, `.env`, `.mcp.json`, `.cursor/mcp.json`
    целиком (ручные правки в них не сохранять). `projects*.yaml` обновление не трогает; новые поля — смотреть
    `git diff <прежний коммит> -- projects.example.yaml` и спросить человека, нужны ли они.
 4. **Проверить:** `docker compose ps` — `running`; `uv run python scripts/check_server.py` — код 0, «папка видна»
@@ -223,7 +249,8 @@ uv run python kdbase/kd_check.py check tests/data/exchange_rules.xml
 | 3 | `ProjectConfigError` | текст называет поле и проект — исправить `projects.yaml`, показать человеку |
 | 5 | «Нет projects.yaml» / «Нет папок проектов» | шаги 3–4; путь — папка проекта, не выгрузки |
 | 5 | на месте `projects.yaml` каталог | `docker compose down`, удалить каталог, шаги 3–5 |
-| 5 | `check_server.py`: недоступен (код 2) | `docker compose ps`, `docker compose logs kd2-rules-mcp --tail 30`; занят порт 8060 — сказать человеку |
+| 5 | `check_server.py`: недоступен (код 2) | `docker compose ps`, `docker compose logs kd2-rules-mcp --tail 30`; занят порт 8060 — предложить человеку `port: 8061` и `server_url` с тем же портом в `projects.local.yaml` (шаг 4), затем `setup_local.py` и `docker compose up -d` |
+| 5 | контейнер с именем `kd2_rules_mcp` уже есть (другой клон) | его не трогать: второй экземпляр — `instance` и `port` в `projects.local.yaml` (шаг 4), затем `setup_local.py` и `docker compose up -d` |
 | 5 | «папка НЕ видна» | проект не в `projects.local.yaml` или не перезапускали `setup_local.py` + `docker compose up -d` |
 | 6 | инструментов `kd2-rules-mcp` нет в клиенте | в той же сессии, что и запись `.mcp.json`, — так и должно быть: закончить ход, человек перезапускает клиент; после перезапуска — `claude mcp list`, одобрить сервер (Cursor — настройки MCP) |
 | 6 | `structure_load_project`: «Нет каталога выгрузки» | поправить `dump`/`extensions` в `projects.yaml` (сервер перечитывает его при каждом вызове; если видит старое — редактор подменил файл: `docker compose restart`) |

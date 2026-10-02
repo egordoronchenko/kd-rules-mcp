@@ -140,6 +140,41 @@ def test_dest_without_cursor_config_writes_only_mcp_json(tmp_path: Path) -> None
     ) in report
 
 
+def test_cursor_flag_copies_http_servers_and_skips_stdio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """При создании `.cursor/mcp.json` HTTP-серверы переносятся, stdio — нет."""
+    monkeypatch.setattr(build_packs, "default_server_headers", lambda: None)
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "code": {
+                        "type": "http",
+                        "url": "http://code/mcp",
+                        "headers": {"Authorization": "Basic x"},
+                    },
+                    "meta": {"url": "http://meta/mcp"},
+                    "local-stdio": {"command": "node", "args": ["srv.js"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = build_packs.install(tmp_path, "claude", URL, cursor=True)
+    servers = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))[
+        "mcpServers"
+    ]
+    assert set(servers) == {"code", "meta", "kd2-rules-mcp"}
+    assert servers["code"] == {"url": "http://code/mcp", "headers": {"Authorization": "Basic x"}}
+    assert "type" not in servers["code"]
+    assert servers["meta"] == {"url": "http://meta/mcp"}
+    assert servers["kd2-rules-mcp"] == {"url": URL}
+    assert "local-stdio" not in servers
+    assert "перенесено серверов из .mcp.json: 2" in report
+    assert any("local-stdio" in line for line in report)
+
+
 def test_dest_cursor_flag_creates_cursor_mcp_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1,12 +1,15 @@
 """Настройка машины по projects.local.yaml: Docker и подключение агентов.
 
-Читает общий `projects.yaml` и личный `projects.local.yaml` и пишет (все три — в git не попадают):
+Читает общий `projects.yaml` и личный `projects.local.yaml` и пишет (в git не попадают):
 
+- `.env` — публикация compose: `KD2_BIND` (если задан `bind`), `KD2_PUBLISHED_PORT` (если `port`),
+  а при `instance` ещё `KD2_CONTAINER`, `KD2_CACHE_VOLUME` и `COMPOSE_PROJECT_NAME`. Нет ни одного
+  из этих полей — файла нет (и прежний сгенерированный удаляется): в `docker-compose.yml` остаются
+  умолчания;
 - `docker-compose.override.yml` — папки проектов подключаются к контейнеру только на чтение как
   `/projects/<проект>`, папки живых правил (`rules_dir`) — на запись как `/rules/<проект>`,
   переменные `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS` и `KD2_PATH_MAP` (перевод путей агента);
-  при `token` — `KD2_TOKEN`, при `bind` — публикация порта `!override` на этот интерфейс
-  (compose иначе сливает список `ports` с базовым файлом, где порт только на `127.0.0.1`);
+  при `token` — `KD2_TOKEN`. Порт сюда не пишется: его задаёт `.env`;
 - `.mcp.json` (Claude Code) и `.cursor/mcp.json` (Cursor) — наш сервер, общие серверы 1С и серверы
   поиска по коду каждого проекта с префиксом `<проект>-` и серверы данных песочниц (с
   Basic-авторизацией логином базы, если он есть); адреса берутся из `.mcp.json` проектов.
@@ -24,11 +27,13 @@ import yaml
 
 from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.projects import (
+    DEFAULT_PUBLISHED_PORT,
     Catalog,
     LocalSettings,
     base_login,
     basic_auth,
     bearer_auth,
+    compose_env,
     load_catalog,
     load_local,
     project_mcp_servers,
@@ -40,29 +45,41 @@ ROOT = Path(__file__).resolve().parents[1]
 
 SERVER = "kd2-rules-mcp"
 HEADER = "# Сгенерировано scripts/setup_local.py из projects.local.yaml — не править руками.\n"
-# Compose сливает списки ports; тег заменяет публикацию базового файла целиком.
-_OVERRIDE_TAG = "!override"
 
 
-class _PortOverride(list[str]):
-    """Список портов, который compose должен подставить вместо базового, а не дописать."""
+def _compose_bind(bind: str) -> str:
+    """Адрес для `KD2_BIND`; IPv6 — в квадратных скобках, иначе compose не разберёт публикацию."""
+    return f"[{bind}]" if ":" in bind else bind
 
 
-class _ComposeDumper(yaml.SafeDumper):
-    """SafeDumper с тегом `!override` для списка портов."""
+def render_env(local: LocalSettings) -> str | None:
+    """Текст `.env` или None, если хватает умолчаний `docker-compose.yml`.
+
+    `KD2_BIND` — только при `bind`, `KD2_PUBLISHED_PORT` — только при `port`, имена контейнера,
+    тома и проекта — только при `instance`.
+    """
+    lines: list[str] = []
+    if local.bind:
+        lines.append(f"KD2_BIND={_compose_bind(local.bind)}")
+    if local.port is not None:
+        lines.append(f"KD2_PUBLISHED_PORT={local.port}")
+    if local.instance:
+        names = compose_env(local)
+        lines.append(f"KD2_CONTAINER={names['KD2_CONTAINER']}")
+        lines.append(f"KD2_CACHE_VOLUME={names['KD2_CACHE_VOLUME']}")
+        lines.append(f"COMPOSE_PROJECT_NAME={names['COMPOSE_PROJECT_NAME']}")
+    if not lines:
+        return None
+    return HEADER + "\n".join(lines) + "\n"
 
 
-def _represent_port_override(dumper: yaml.SafeDumper, data: _PortOverride) -> yaml.Node:
-    return dumper.represent_sequence(_OVERRIDE_TAG, list(data), flow_style=True)
-
-
-_ComposeDumper.add_representer(_PortOverride, _represent_port_override)
-
-
-def _published_port(bind: str) -> str:
-    """`<bind>:8060:8060`; IPv6 — в квадратных скобках, иначе compose не разберёт адрес."""
-    host = f"[{bind}]" if ":" in bind else bind
-    return f"{host}:8060:8060"
+def write_env_file(path: Path, local: LocalSettings) -> None:
+    """Пишет `.env` или удаляет его, чтобы старые порт и имена не остались в силе."""
+    text = render_env(local)
+    if text is None:
+        path.unlink(missing_ok=True)
+        return
+    path.write_bytes(text.encode("utf-8"))
 
 
 def compose_override(catalog: Catalog, local: LocalSettings) -> str:
@@ -98,13 +115,10 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
     }
     if local.token:
         service["environment"]["KD2_TOKEN"] = local.token
-    if local.bind:
-        service["ports"] = _PortOverride([_published_port(local.bind)])
     if volumes:
         service["volumes"] = volumes
     body = yaml.dump(
         {"services": {SERVER: service}},
-        Dumper=_ComposeDumper,
         allow_unicode=True,
         sort_keys=False,
         width=1000,
@@ -186,16 +200,23 @@ def main() -> None:
     (ROOT / "docker-compose.override.yml").write_bytes(
         compose_override(catalog, local).encode("utf-8")
     )
+    write_env_file(ROOT / ".env", local)
     servers, warnings = mcp_servers(catalog, local)
     warnings += missing_rules_dirs(catalog, local)
-    url_warning = localhost_server_url_warning(local)
-    if url_warning:
-        warnings.append(url_warning)
+    for url_warning in (localhost_server_url_warning(local), server_url_port_warning(local)):
+        if url_warning:
+            warnings.append(url_warning)
     claude = {"mcpServers": {name: {"type": "http", **entry} for name, entry in servers.items()}}
     cursor = {"mcpServers": servers}
     _write_json(ROOT / ".mcp.json", claude)
     _write_json(ROOT / ".cursor" / "mcp.json", cursor)
 
+    names = compose_env(local)
+    host = _compose_bind(local.bind) if local.bind else "127.0.0.1"
+    print(
+        f"Контейнер {names['KD2_CONTAINER']}, порт {host}:{names['KD2_PUBLISHED_PORT']}, "
+        f"том {names['KD2_CACHE_VOLUME']}"
+    )
     print(f"Проекты: {', '.join(local.project_dirs) or 'нет'}")
     writable = existing_rules_dirs(catalog, local)
     if writable:
@@ -248,6 +269,19 @@ def localhost_server_url_warning(local: LocalSettings) -> str | None:
     return (
         f"bind задан ({local.bind}), а server_url остался {local.server_url} — "
         "для клиентов на других машинах укажите адрес этого интерфейса"
+    )
+
+
+def server_url_port_warning(local: LocalSettings) -> str | None:
+    """Порт в `server_url` не совпал с публикуемым — клиент подключится не туда."""
+    published = local.port if local.port is not None else DEFAULT_PUBLISHED_PORT
+    url_port = urlsplit(local.server_url).port
+    if url_port == published:
+        return None
+    shown = "не указан" if url_port is None else str(url_port)
+    return (
+        f"порт публикации {published}, а в server_url — {shown} ({local.server_url}): "
+        "укажите тот же порт"
     )
 
 

@@ -721,6 +721,190 @@ def test_structure_checks_refuse_missing_object_property_and_value(tmp_path: Pat
     _assert_sound(rules)
 
 
+def test_edit_uses_the_same_structure_checks_as_the_document(tmp_path: Path) -> None:
+    """Одноимённые ТЧ и набор движений, типы и покрытие — те же `structure.*`, что у документа."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    shared: list[Prop] = [
+        (
+            "ТабличнаяЧасть",
+            "Товары",
+            "",
+            "",
+            [("Реквизит", "Номенклатура", "", "Строка", [])],
+        ),
+        (
+            "НаборДвиженийРегистраНакопления",
+            "Товары",
+            "",
+            "",
+            [("Реквизит", "Количество", "", "Число", [])],
+        ),
+        ("Реквизит", "Владелец", "", "СправочникСсылка.Контрагенты", []),
+    ]
+    source.add("Документ", "Приход", [*shared, ("Реквизит", "Артикул", "", "Строка", [])])
+    target.add(
+        "Документ",
+        "Приход",
+        [
+            *shared,
+            ("Реквизит", "Артикул", "", "СправочникСсылка.Номенклатура", []),
+            (
+                "НаборДвиженийРегистраНакопления",
+                "Остатки",
+                "",
+                "",
+                [("Реквизит", "Сумма", "", "Число", [])],
+            ),
+        ],
+    )
+    source.add("Справочник", "Организации")
+    source.add("Перечисление", "Виды", values=(("Начисление", ""), ("Удержание", "")))
+    target.add("Перечисление", "Виды", values=(("Начисление", ""), ("Удержание", "")))
+    rules = _rules()
+    document = "ДокументСсылка.Приход"
+    create_rule(
+        rules,
+        "pko",
+        "Приход",
+        {"Источник": document, "Приемник": document},
+        source=source.conn,
+        target=target.conn,
+    )
+    create_rule(
+        rules,
+        "pks_group",
+        "Товары",
+        {
+            "Источник": _side("Товары", "ТабличнаяЧасть"),
+            "Приемник": _side("Товары", "ТабличнаяЧасть"),
+        },
+        owner="Приход",
+        source=source.conn,
+        target=target.conn,
+    )
+    tabular = create_rule(
+        rules,
+        "pks",
+        "Товары/Номенклатура",
+        _pks_sides("Номенклатура", type_name="Строка"),
+        owner="Приход",
+        source=source.conn,
+        target=target.conn,
+    )
+    assert tabular.address == "ПКО «Приход» / ПКС Товары/Номенклатура"
+
+    before = dump_rules(rules)
+    with pytest.raises(DanglingReferenceError, match=r"structure\.pks_source") as missing_group:
+        create_rule(
+            rules,
+            "pks_group",
+            "Остатки",
+            {
+                "Источник": _side("Остатки", "НаборДвиженийРегистраНакопления"),
+                "Приемник": _side("Остатки", "НаборДвиженийРегистраНакопления"),
+            },
+            owner="Приход",
+            source=source.conn,
+            target=target.conn,
+        )
+    assert "НаборДвиженийРегистраНакопления" in str(missing_group.value)
+    assert dump_rules(rules) == before
+
+    # Группа в источнике не найдена: реквизит внутри не даёт замечания источника.
+    create_rule(
+        rules,
+        "pks_group",
+        "Остатки",
+        {
+            "Источник": _side("Остатки", "НаборДвиженийРегистраНакопления"),
+            "Приемник": _side("Остатки", "НаборДвиженийРегистраНакопления"),
+        },
+        owner="Приход",
+        target=target.conn,
+    )
+    nested = create_rule(
+        rules,
+        "pks",
+        "Остатки/Сумма",
+        _pks_sides("Сумма", type_name="Число"),
+        owner="Приход",
+        source=source.conn,
+        target=target.conn,
+    )
+    assert not any(item.startswith("structure.pks_source") for item in nested.warnings)
+
+    disabled = create_rule(
+        rules,
+        "pks",
+        "НетРеквизита",
+        {"Отключить": True, **_pks_sides("НетРеквизита", type_name="Строка")},
+        owner="Приход",
+        source=source.conn,
+        target=target.conn,
+    )
+    assert disabled.warnings == []
+
+    with pytest.raises(DanglingReferenceError, match=r"structure\.pks_type"):
+        create_rule(
+            rules,
+            "pks",
+            "Артикул",
+            _pks_sides("Артикул"),
+            owner="Приход",
+            source=source.conn,
+            target=target.conn,
+        )
+    reference = create_rule(
+        rules,
+        "pks",
+        "Владелец",
+        _pks_sides("Владелец", kind="Свойство", type_name="СправочникСсылка.Контрагенты"),
+        owner="Приход",
+        source=source.conn,
+        target=target.conn,
+    )
+    assert any(item.startswith("structure.pko_missing:") for item in reference.warnings)
+
+    enum = "ПеречислениеСсылка.Виды"
+    create_rule(
+        rules,
+        "pko",
+        "Виды",
+        {"Источник": enum, "Приемник": enum},
+        source=source.conn,
+        target=target.conn,
+    )
+    covered = create_rule(
+        rules,
+        "pkz",
+        "Начисление",
+        {"Приемник": "Начисление"},
+        owner="Виды",
+        source=source.conn,
+        target=target.conn,
+    )
+    assert any(item.startswith("structure.pkz_coverage:") for item in covered.warnings)
+    assert find_rule(rules, "pkz", "Начисление", owner="Виды").get("Приемник") == "Начисление"
+
+    selection = create_rule(
+        rules,
+        "pvd",
+        "ЧужаяВыборка",
+        {
+            "ОбъектВыборки": "СправочникСсылка.Организации",
+            "КодПравилаКонвертации": "Приход",
+        },
+        source=source.conn,
+        target=target.conn,
+    )
+    assert any(item.startswith("structure.pvd_pko:") for item in selection.warnings)
+    assert find_rule(rules, "pvd", "ЧужаяВыборка").get("ОбъектВыборки") == (
+        "СправочникСсылка.Организации"
+    )
+    _assert_sound(rules)
+
+
 def test_without_structures_object_check_is_skipped_and_reported() -> None:
     rules = _rules()
     result: EditResult = create_rule(
@@ -1152,7 +1336,7 @@ def test_update_rules_unknown_key_changes_nothing() -> None:
 
 
 def test_update_rules_rolls_back_when_a_later_target_fails(tmp_path: Path) -> None:
-    """Структура принимает первые ПКС и отвергает третий: флаг не остаётся ни на одном."""
+    """Структура принимает первые ПКС и отвергает отсутствующий реквизит: флаг не остаётся."""
     source = _Builder(tmp_path / "source.sqlite")
     target = _Builder(tmp_path / "target.sqlite")
     props = [
@@ -1165,23 +1349,13 @@ def test_update_rules_rolls_back_when_a_later_target_fails(tmp_path: Path) -> No
     create_rule(rules, "pks", "КПП", _pks_sides("КПП", type_name="Строка"), owner="Организации")
     create_rule(
         rules,
-        "pks_group",
-        "Контакты",
-        {
-            "Источник": _side("Контакты", "ТабличнаяЧасть"),
-            "Приемник": _side("Контакты", "ТабличнаяЧасть"),
-        },
-        owner="Организации",
-    )
-    create_rule(
-        rules,
         "pks",
-        "Контакты/Телефон",
-        _pks_sides("Телефон", type_name="Строка"),
+        "НетРеквизита",
+        _pks_sides("НетРеквизита", type_name="Строка"),
         owner="Организации",
     )
     before = dump_rules(rules)
-    with pytest.raises(DanglingReferenceError, match=r"Контакты\.Телефон"):
+    with pytest.raises(DanglingReferenceError, match="НетРеквизита"):
         update_rules(
             rules,
             "pks",

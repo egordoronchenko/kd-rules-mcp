@@ -3,7 +3,8 @@
 Общий файл (в git) описывает проект → конфигурации (выгрузка и расширения, пути от папки проекта)
 → базы (роль, конфигурация, строка соединения), серверы кода проекта и обмены. Личный файл
 машины говорит, где лежит папка каждого проекта, и для командной установки — интерфейс
-`bind` и `token`. Общий файл одинаков у всех, а проекты могут лежать на любых дисках.
+`bind`, `token`, публикуемый `port` и суффикс второго экземпляра `instance`. Общий файл одинаков
+у всех, а проекты могут лежать на любых дисках.
 Путь выгрузки = папка проекта + путь из общего файла.
 
 Сервер в контейнере получает папки проектов переменной `KD2_PROJECT_DIRS` (`id=путь;…`),
@@ -12,6 +13,7 @@
 
 import base64
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,8 +26,15 @@ SANDBOX = "песочница"
 PRODUCTION = "боевая"
 ROLES = (SANDBOX, PRODUCTION)
 DEFAULT_SERVER_URL = "http://localhost:8060/mcp"
+# Публикуемый порт, если в projects.local.yaml нет `port`. Внутри контейнера порт другой переменной.
+DEFAULT_PUBLISHED_PORT = 8060
+DEFAULT_CONTAINER_NAME = "kd2_rules_mcp"
+DEFAULT_CACHE_VOLUME = "kd2_structures_cache"
+DEFAULT_COMPOSE_PROJECT = "kd2-rules-mcp"
 # Петля: сервер виден только своей машине. Всё остальное — внешний интерфейс, нужен token.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# Суффикс второго экземпляра: латиница, цифры, подчёркивание и дефис.
+_INSTANCE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class ProjectConfigError(Kd2Error):
@@ -138,6 +147,10 @@ class LocalSettings:
     bind: str | None = None
     # Общий секрет MCP; пусто на внешнем bind — ошибка разбора. На петле токен допустим и без bind.
     token: str | None = None
+    # Публикуемый порт хоста; None — DEFAULT_PUBLISHED_PORT. Порт процесса в контейнере не меняется.
+    port: int | None = None
+    # Суффикс второго экземпляра на машине; None — имена контейнера, тома и проекта по умолчанию.
+    instance: str | None = None
 
     def login(self, project_id: str, base_id: str) -> tuple[str, str] | None:
         """Пользователь и пароль базы, если заданы."""
@@ -179,6 +192,25 @@ def basic_auth(login: tuple[str, str]) -> dict[str, str]:
 def bearer_auth(token: str) -> dict[str, str]:
     """Заголовок Bearer для MCP-клиента (`Authorization`)."""
     return {"Authorization": f"Bearer {token}"}
+
+
+def compose_env(local: LocalSettings) -> dict[str, str]:
+    """Имена контейнера, тома кэша, проекта compose и публикуемый порт.
+
+    При `instance` к контейнеру и тому добавляется `_<instance>`, к проекту — `-<instance>`.
+    """
+    suffix = local.instance
+    published = local.port if local.port is not None else DEFAULT_PUBLISHED_PORT
+    return {
+        "KD2_CONTAINER": (
+            f"{DEFAULT_CONTAINER_NAME}_{suffix}" if suffix else DEFAULT_CONTAINER_NAME
+        ),
+        "KD2_CACHE_VOLUME": f"{DEFAULT_CACHE_VOLUME}_{suffix}" if suffix else DEFAULT_CACHE_VOLUME,
+        "COMPOSE_PROJECT_NAME": (
+            f"{DEFAULT_COMPOSE_PROJECT}-{suffix}" if suffix else DEFAULT_COMPOSE_PROJECT
+        ),
+        "KD2_PUBLISHED_PORT": str(published),
+    }
 
 
 def is_loopback_host(host: str) -> bool:
@@ -293,6 +325,8 @@ def load_local(path: Path) -> LocalSettings:
         logins=logins,
         bind=bind,
         token=token,
+        port=_optional_port(data.get("port")),
+        instance=_instance_name(data.get("instance")),
     )
 
 
@@ -300,6 +334,36 @@ def _optional_text(value: Any) -> str | None:
     """Непустая строка или None; число из YAML тоже становится строкой."""
     text = str(value or "").strip()
     return text or None
+
+
+def _optional_port(value: Any) -> int | None:
+    """Публикуемый порт 1…65535; пусто — None (compose оставит 8060)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if not text.isdecimal():
+            raise ProjectConfigError(f"port «{text}» — нужно целое от 1 до 65535")
+        number = int(text)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        number = value
+    else:
+        raise ProjectConfigError(f"port «{value}» — нужно целое от 1 до 65535")
+    if not 1 <= number <= 65535:
+        raise ProjectConfigError(f"port {number} вне диапазона 1…65535")
+    return number
+
+
+def _instance_name(value: Any) -> str | None:
+    """Суффикс второго экземпляра; пусто — None. Иначе только латиница, цифры, `_` и `-`."""
+    text = _optional_text(value)
+    if text is None:
+        return None
+    if _INSTANCE_NAME.fullmatch(text) is None:
+        raise ProjectConfigError(f"instance «{text}» — только латинские буквы, цифры, «_» и «-»")
+    return text
 
 
 def parse_project_dirs(text: str, variable: str = "KD2_PROJECT_DIRS") -> dict[str, Path]:

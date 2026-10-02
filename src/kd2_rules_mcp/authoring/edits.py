@@ -49,7 +49,8 @@ from kd2_rules_mcp.validation.address import (
     side_name,
     walk_pks,
 )
-from kd2_rules_mcp.validation.structure import SIDE_TITLES, SOURCE, TARGET, Structure, is_ref
+from kd2_rules_mcp.validation.report import Level, ValidationReport
+from kd2_rules_mcp.validation.structure import SOURCE, TARGET, check_rule, is_ref
 
 # Шаг `Порядок` автонастройки ПКС (СохранитьПравилаКС, 796 и 864).
 _ORDER_STEP = 50
@@ -116,12 +117,11 @@ class _Snap:
 
 
 @dataclass(slots=True)
-class _Sides:
-    source: Structure | None
-    target: Structure | None
+class _Inserted:
+    """Куда вставлен узел и какие пустые контейнеры появились вместе с ним."""
 
-    def of(self, side: str) -> Structure | None:
-        return self.source if side == SOURCE else self.target
+    container: Node
+    created: list[tuple[Node, str]] = field(default_factory=list)
 
 
 def create_rule(
@@ -153,17 +153,21 @@ def create_rule(
     _reject_identity_mismatch(kind_name, key, fields)
     if fields:
         _apply_fields(node, fields)
-    pko, parent, groups = _place_context(rules, kind_name, key, owner)
+    pko, parent = _place_context(rules, kind_name, key, owner)
     if kind_name in ("pks", "pks_group"):
         _assign_pks_defaults(node, pko, parent, fields)
     _reject_duplicate(rules, kind_name, key, owner, parent, node)
     if kind_name in ("pks", "pks_group"):
         _reject_segment_mismatch(node, key.rpartition("/")[2])
-    sides = _load_sides(source, target)
     _check_dangling(rules, kind_name, node)
-    _check_structure(kind_name, node, pko, groups, sides)
-    _attach(rules, kind_name, node, pko, parent, list_group)
-    return _result(kind_name, node, owner, pko, source, target)
+    inserted = _attach(rules, kind_name, node, pko, parent, list_group)
+    try:
+        result = _result(kind_name, node, owner, pko, source, target)
+        result.warnings.extend(_apply_structure(rules, kind_name, node, source, target))
+    except Exception:
+        _detach(inserted, node)
+        raise
+    return result
 
 
 def update_rule(
@@ -178,17 +182,19 @@ def update_rule(
 ) -> EditResult:
     """Меняет только переданные поля. Вложенные правила и остальные поля не трогает."""
     _require_key(kind_name, key)
-    container, node, pko, groups = _require(rules, kind_name, key, owner)
+    container, node, pko = _require(rules, kind_name, key, owner)
     old_code = node.code
     snap = _save(node)
     try:
         if fields:
             _apply_fields(node, fields)
-        _after_change(rules, kind_name, node, container, pko, groups, old_code, source, target)
+        warnings = _after_change(rules, kind_name, node, container, pko, old_code, source, target)
     except Exception:
         _restore(node, snap)
         raise
-    return _result(kind_name, node, owner, pko, source, target)
+    result = _result(kind_name, node, owner, pko, source, target)
+    result.warnings.extend(warnings)
+    return result
 
 
 def update_rules(
@@ -219,20 +225,24 @@ def update_rules(
     if not selected:
         raise RuleEditError("Нечего менять")
     loaded = [_require(rules, kind_name, key, owner) for key in selected]
-    snaps = [_save(node) for _, node, _, _ in loaded]
+    snaps = [_save(node) for _, node, _ in loaded]
     results: list[EditResult] = []
-    for index, (container, node, pko, groups) in enumerate(loaded):
+    for index, (container, node, pko) in enumerate(loaded):
         old_code = node.code
         try:
             if fields:
                 _apply_fields(node, fields)
-            _after_change(rules, kind_name, node, container, pko, groups, old_code, source, target)
+            warnings = _after_change(
+                rules, kind_name, node, container, pko, old_code, source, target
+            )
         except Exception:
             # Текущая цель могла измениться частично — её снимок тоже возвращается.
             for done in range(index + 1):
                 _restore(loaded[done][1], snaps[done])
             raise
-        results.append(_result(kind_name, node, owner, pko, source, target))
+        result = _result(kind_name, node, owner, pko, source, target)
+        result.warnings.extend(warnings)
+        results.append(result)
     return results
 
 
@@ -247,7 +257,7 @@ def delete_rule(
 ) -> EditResult:
     """Удаляет правило. ПКО, на которое ссылаются, не удаляется."""
     _require_key(kind_name, key)
-    container, node, pko, _groups = _require(rules, kind_name, key, owner)
+    container, node, pko = _require(rules, kind_name, key, owner)
     if kind_name == "pko":
         _reject_referenced(rules, node)
     result = _result(kind_name, node, owner, pko, source, target)
@@ -306,18 +316,16 @@ def create_pko_with_properties(
     node.values[TARGET] = str(target_row["type_name"])
     if fields:
         _apply_fields(node, fields)
-    _check_structure("pko", node, None, [], _load_sides(source, target))
-    container = list_group
-    if container is None:
-        container = rules.section("ПравилаКонвертацииОбъектов")
-    container.items.append(node)
+    inserted = _attach(rules, "pko", node, None, None, list_group)
     result = EditResult(rule_address(node))
     try:
+        # Сгенерированные ПКС не проверяются: ссылка без ПКО остаётся в `unresolved`.
+        result.warnings.extend(_apply_structure(rules, "pko", node, source, target))
         properties = Node.new("pks_list", "Свойства")
         node.children["Свойства"] = properties
         _fill_properties(properties, candidates, rules, "", result)
     except Exception:
-        container.items.remove(node)
+        _detach(inserted, node)
         raise
     return result
 
@@ -515,50 +523,29 @@ def _child_list(owner_node: Node, tag: str, *, create: bool) -> Node | None:
     return child
 
 
-def _group_chain(container: Node, target: Node) -> list[Node] | None:
-    """Группы ПКС от корня до `target` включительно."""
-    for item in container.items:
-        if item is target:
-            return [item] if item.is_group else []
-        if item.is_group:
-            nested = _group_chain(item, target)
-            if nested is not None:
-                return [item, *nested]
-    return None
-
-
-def _groups_above(pko: Node, parent: Node) -> list[Node]:
-    """Группы, внутри которых лежат свойства `parent` (сам `parent`, если это группа)."""
-    properties = pko.child("Свойства")
-    if properties is None or parent is properties:
-        return []
-    chain = _group_chain(properties, parent)
-    return chain or []
-
-
 def _place_context(
     rules: ExchangeRules, kind_name: str, key: str, owner: str
-) -> tuple[Node | None, Node | None, list[Node]]:
-    """ПКО-владелец, контейнер для нового правила и группы ПКС над ним.
+) -> tuple[Node | None, Node | None]:
+    """ПКО-владелец и контейнер для нового правила.
 
     Контейнер `None` у вложенного правила значит, что список (`Свойства` или `Значения`)
     ещё не создан и появится при вставке.
     """
     if kind_name in _TOP:
-        return None, None, []
+        return None, None
     pko = _require_pko(rules, owner)
     if kind_name == "pkz":
-        return pko, _child_list(pko, "Значения", create=False), []
+        return pko, _child_list(pko, "Значения", create=False)
     properties = pko.child("Свойства")
     parent_path, _, _last = key.rpartition("/")
     if not parent_path:
-        return pko, properties, []
+        return pko, properties
     if properties is None:
         raise RuleNotFoundError(f"Группа ПКС «{parent_path}» в ПКО «{pko.code}» не найдена")
     found = _find_pks(properties, parent_path)
     if found is None or not found[1].is_group:
         raise RuleNotFoundError(f"Группа ПКС «{parent_path}» в ПКО «{pko.code}» не найдена")
-    return pko, found[1], _groups_above(pko, found[1])
+    return pko, found[1]
 
 
 def _assign_pks_defaults(
@@ -626,20 +613,20 @@ def _optional_int(value: object) -> int | None:
 
 def _require(
     rules: ExchangeRules, kind_name: str, key: str, owner: str
-) -> tuple[Node, Node, Node | None, list[Node]]:
-    """Контейнер, узел, ПКО-владелец и группы ПКС над контейнером."""
+) -> tuple[Node, Node, Node | None]:
+    """Контейнер, узел и ПКО-владелец."""
     if kind_name in _TOP:
         found = _find_coded(rules, kind_name, key)
         if found is None:
             raise RuleNotFoundError(_missing(kind_name, key, owner))
-        return found[0], found[1], None, []
+        return found[0], found[1], None
     pko = _require_pko(rules, owner)
     if kind_name == "pkz":
         values = pko.child("Значения")
         found_pkz = _find_pkz(values, key) if values is not None else None
         if found_pkz is None:
             raise RuleNotFoundError(_missing(kind_name, key, owner))
-        return found_pkz[0], found_pkz[1], pko, []
+        return found_pkz[0], found_pkz[1], pko
     properties = pko.child("Свойства")
     found_pks = _find_pks(properties, key) if properties is not None else None
     if found_pks is None:
@@ -648,7 +635,7 @@ def _require(
         raise RuleNotFoundError(
             f"По пути «{key}» в ПКО «{pko.code}» находится {found_pks[1].kind.title}"
         )
-    return found_pks[0], found_pks[1], pko, _groups_above(pko, found_pks[0])
+    return found_pks[0], found_pks[1], pko
 
 
 def _nested_keys(rules: ExchangeRules, kind_name: str, owner: str) -> list[str]:
@@ -787,19 +774,39 @@ def _attach(
     pko: Node | None,
     parent: Node | None,
     list_group: Node | None,
-) -> None:
+) -> _Inserted:
+    """Вставляет узел. Пустые контейнеры, созданные ради него, запоминаются для отката."""
+    created: list[tuple[Node, str]] = []
     if kind_name in _TOP:
-        container = list_group if list_group is not None else rules.section(_TOP[kind_name][0])
+        if list_group is not None:
+            container = list_group
+        else:
+            section = _TOP[kind_name][0]
+            if rules.root.children.get(section) is None:
+                created.append((rules.root, section))
+            container = rules.section(section)
         container.items.append(node)
-        return
+        return _Inserted(container, created)
     if parent is None:
         if pko is None:
             raise RuleEditError("Некуда добавить правило")
         tag = "Значения" if kind_name == "pkz" else "Свойства"
+        if pko.child(tag) is None:
+            created.append((pko, tag))
         parent = _child_list(pko, tag, create=True)
     if parent is None:
         raise RuleEditError("Некуда добавить правило")
     parent.items.append(node)
+    return _Inserted(parent, created)
+
+
+def _detach(inserted: _Inserted, node: Node) -> None:
+    """Снимает узел и убирает контейнеры, которые появились только для этой вставки."""
+    inserted.container.items.remove(node)
+    for owner, tag in reversed(inserted.created):
+        child = owner.children.get(tag)
+        if child is not None and not child.items:
+            del owner.children[tag]
 
 
 def _after_change(
@@ -808,11 +815,10 @@ def _after_change(
     node: Node,
     container: Node,
     pko: Node | None,
-    groups: list[Node],
     old_code: str,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
-) -> None:
+) -> list[str]:
     if kind_name == "pko" and node.code != old_code:
         refs = _referrers(rules, old_code, node)
         if refs:
@@ -829,9 +835,8 @@ def _after_change(
         _reject_receiver_clash(container, node)
     if kind_name == "pkz" and pko is not None:
         _reject_pkz_clash(container, node)
-    sides = _load_sides(source, target)
     _check_dangling(rules, kind_name, node)
-    _check_structure(kind_name, node, pko, groups, sides)
+    return _apply_structure(rules, kind_name, node, source, target)
 
 
 def _reject_receiver_clash(container: Node, node: Node) -> None:
@@ -889,11 +894,41 @@ def _parameters(rules: ExchangeRules) -> list[Node]:
 # --- Висячие ссылки и структуры ---------------------------------------------------------------
 
 
-def _load_sides(source: sqlite3.Connection | None, target: sqlite3.Connection | None) -> _Sides:
-    return _Sides(
-        Structure.load(source) if source is not None else None,
-        Structure.load(target) if target is not None else None,
-    )
+def _apply_structure(
+    rules: ExchangeRules,
+    kind_name: str,
+    node: Node,
+    source: sqlite3.Connection | None,
+    target: sqlite3.Connection | None,
+) -> list[str]:
+    """Замечания `check_rule` по этому узлу. Ошибка отклоняет правку, предупреждение — нет.
+
+    Текст `report.skip` в `skipped` не кладётся: там остаются фразы `_SOURCE_SKIPPED`
+    и `_TARGET_SKIPPED`, их сравнивают тесты.
+    """
+    if kind_name not in _STRUCTURE_KINDS:
+        return []
+    return _structure_messages(check_rule(rules, node, source, target))
+
+
+def _structure_messages(report: ValidationReport) -> list[str]:
+    """Строки предупреждений. Ошибки — `DanglingReferenceError` с идентификатором проверки.
+
+    `structure.pko_missing` при правке понижается до предупреждения: ПКО ссылочного типа
+    агент часто создаёт следующим вызовом, а отказ ломал бы добавление реквизита в уже
+    существующее ПКО. `rules_validate` по документу по-прежнему считает это ошибкой.
+    """
+    warnings: list[str] = []
+    errors: list[str] = []
+    for issue in report.issues:
+        line = f"{issue.check}: {issue.message}"
+        if issue.level is Level.WARNING or issue.check == "structure.pko_missing":
+            warnings.append(line)
+        else:
+            errors.append(line)
+    if errors:
+        raise DanglingReferenceError("; ".join(errors))
+    return warnings
 
 
 def _check_dangling(rules: ExchangeRules, kind_name: str, node: Node) -> None:
@@ -932,104 +967,6 @@ def _dangling_message(field_name: str, ref: str, listed: list[Node], type_name: 
     if type_name:
         return f"«{field_name}» «{ref}» не найден. ПКО для типа «{type_name}»: {codes}"
     return f"«{field_name}» «{ref}» не найден. Существующие ПКО: {codes}"
-
-
-def _check_structure(
-    kind_name: str,
-    node: Node,
-    pko: Node | None,
-    groups: list[Node],
-    sides: _Sides,
-) -> None:
-    if kind_name not in _STRUCTURE_KINDS:
-        return
-    if kind_name == "pko":
-        _check_type(node, SOURCE, sides.source)
-        _check_type(node, TARGET, sides.target)
-    elif kind_name in ("pks", "pks_group"):
-        if pko is None:
-            raise RuleEditError("ПКС без ПКО")
-        _check_pks(pko, node, groups, sides)
-    elif kind_name == "pkz":
-        if pko is None:
-            raise RuleEditError("ПКЗ без ПКО")
-        _check_pkz(pko, node, sides)
-    elif kind_name == "pvd":
-        _check_selection(node, sides.source, "источника")
-    elif kind_name == "pod":
-        _check_selection(node, sides.target, "приёмника")
-
-
-def _check_type(node: Node, side: str, structure: Structure | None) -> None:
-    type_name = str(node.get(side)).strip()
-    if structure is None or not type_name:
-        return
-    if structure.get(type_name) is None:
-        raise DanglingReferenceError(f"Тип {SIDE_TITLES[side]} «{type_name}» не найден в структуре")
-
-
-def _prefixes(groups: list[Node]) -> tuple[dict[str, str], dict[str, str]]:
-    prefixes = {SOURCE: "", TARGET: ""}
-    parent_kinds = {SOURCE: "", TARGET: ""}
-    for group in groups:
-        for side in (SOURCE, TARGET):
-            name = side_name(group, side)
-            if not name:
-                prefixes[side] = ""
-                parent_kinds[side] = ""
-                continue
-            prefixes[side] = f"{prefixes[side]}{name}."
-            child = group.child(side)
-            parent_kinds[side] = str(child.attrs.get("Вид", "")) if child is not None else ""
-    return prefixes, parent_kinds
-
-
-def _check_pks(pko: Node, node: Node, groups: list[Node], sides: _Sides) -> None:
-    prefixes, parent_kinds = _prefixes(groups)
-    for side in (SOURCE, TARGET):
-        structure = sides.of(side)
-        name = side_name(node, side)
-        type_name = str(pko.get(side)).strip()
-        if structure is None or not name or not type_name:
-            continue
-        obj = structure.get(type_name)
-        if obj is None:
-            raise DanglingReferenceError(
-                f"Тип {SIDE_TITLES[side]} «{type_name}» не найден в структуре"
-            )
-        group_kind = ""
-        if node.is_group:
-            child = node.child(side)
-            group_kind = str(child.attrs.get("Вид", "")) if child is not None else ""
-        full = f"{prefixes[side]}{name}"
-        if structure.find(obj, full, parent_kinds[side], group_kind) is None:
-            raise DanglingReferenceError(f"Свойства {SIDE_TITLES[side]} «{full}» нет у {type_name}")
-
-
-def _check_pkz(pko: Node, node: Node, sides: _Sides) -> None:
-    for side in (SOURCE, TARGET):
-        structure = sides.of(side)
-        type_name = str(pko.get(side)).strip()
-        value = str(node.get(side)).strip()
-        if structure is None or not type_name or not value:
-            continue
-        obj = structure.get(type_name)
-        if obj is None:
-            raise DanglingReferenceError(
-                f"Тип {SIDE_TITLES[side]} «{type_name}» не найден в структуре"
-            )
-        if value not in structure.values(obj):
-            raise DanglingReferenceError(
-                f"Значения {SIDE_TITLES[side]} «{value}» нет у {type_name}"
-            )
-
-
-def _check_selection(node: Node, structure: Structure | None, title: str) -> None:
-    if structure is None:
-        return
-    selection = str(node.get("ОбъектВыборки")).strip()
-    if selection and structure.get(selection) is None:
-        raise DanglingReferenceError(f"Объект выборки «{selection}» не найден в структуре {title}")
 
 
 def _result(

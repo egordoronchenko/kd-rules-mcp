@@ -36,7 +36,7 @@
 | | `structures/store.py` | Кэш «одна структура — один файл», отпечаток выгрузки, инвалидация по хешу кода загрузчика | |
 | | `structures/queries.py` | Постраничные запросы, поиск объекта с подсказками, сравнение двух структур | |
 | Составление | `authoring/candidates.py` | Кандидаты ПКО/ПКС/ПКЗ с классом уверенности; запрет «примитив → ссылка» | автонастройка КД |
-| | `authoring/edits.py` | Создание, изменение, удаление правил по адресу; ПКО с ПКС по кандидатам; откат узла при отказе; проверка висячих ссылок и объектов по структурам | |
+| | `authoring/edits.py` | Создание, изменение, удаление правил по адресу; ПКО с ПКС по кандидатам. Объекты и свойства — через `validation/structure.check_rule`; в модуле остаются уникальность, висячие ссылки на ПКО и откат | |
 | | `authoring/workspace.py` | Рабочие проекты правил в памяти, пустые правила для пары структур, запись только в разрешённые каталоги | `ВыгрузитьКонвертацию` |
 | | `authoring/registration.py` | Правила регистрации из состава плана обмена | `ВыгрузкаРегистрации` |
 | | `authoring/correspondent.py` | Черновик правил обратного направления зеркалированием выбранных ПКО | собственное расширение (в КД механизма нет) |
@@ -209,7 +209,24 @@ uid 1000, корень нужен только точке входа, чтобы
 | `/projects/<проект>` | папка проекта из `projects.local.yaml` | только чтение |
 | `/rules/<проект>` | `rules_dir` проекта, если папка существует | **запись** |
 | `/data/workspace` | `workspace\` репозитория (рабочая папка) | **запись** |
-| `/data/cache` | именованный том `kd2_structures_cache` | запись (кэш структур) |
+| `/data/cache` | именованный том `kd2_structures_cache` (`KD2_CACHE_VOLUME`) | запись (кэш структур) |
+
+`scripts/setup_local.py` пишет `.env` в каталоге репозитория (compose читает его сам) по полям `bind`, `port` и
+`instance` в `projects.local.yaml`. Нет ни одного из них — файла нет, действуют умолчания. Внутри контейнера
+порт процесса не меняется (в образе `KD2_PORT=8060`); `port` — только публикуемый порт хоста.
+
+| Переменная | Когда пишется | Умолчание в `docker-compose.yml` |
+|---|---|---|
+| `KD2_BIND` | задан `bind` | `127.0.0.1` |
+| `KD2_PUBLISHED_PORT` | задан `port` | `8060` |
+| `KD2_CONTAINER` | задан `instance` | `kd2_rules_mcp` |
+| `KD2_CACHE_VOLUME` | задан `instance` | `kd2_structures_cache` |
+| `COMPOSE_PROJECT_NAME` | задан `instance` | `kd2-rules-mcp` |
+
+`instance` — суффикс второго экземпляра (`[A-Za-z0-9_-]+`): контейнер `kd2_rules_mcp_<instance>`, том
+`kd2_structures_cache_<instance>`, проект `kd2-rules-mcp-<instance>`. Имя проекта в файле —
+`${COMPOSE_PROJECT_NAME:-kd2-rules-mcp}`; заданная переменная его перекрывает. `port` — целое 1…65535.
+После правки — снова `setup_local.py` и `docker compose up -d`.
 
 Переменные окружения (`Settings.from_env`, `src/kd2_rules_mcp/service/paths.py:88-114`): `KD2_HOST`, `KD2_PORT`,
 `KD2_TOKEN` (общий секрет; пусто — заголовок не проверяется), `KD2_CACHE_DIR`, `KD2_WORKSPACE`,
@@ -221,8 +238,10 @@ uid 1000, корень нужен только точке входа, чтобы
 
 ### 8.2 Сеть и авторизация
 
-- `docker-compose.yml` публикует порт как `127.0.0.1:8060:8060` (`docker-compose.yml:25`): по умолчанию
-  сервер виден **только своей машине**. Клиент — `http://localhost:8060/mcp`.
+- `docker-compose.yml` публикует порт как `${KD2_BIND:-127.0.0.1}:${KD2_PUBLISHED_PORT:-8060}:8060`
+  (`docker-compose.yml:30`): по умолчанию сервер виден **только своей машине** на 8060. Клиент —
+  `http://localhost:8060/mcp`. Другой порт — `port` в `projects.local.yaml` и тот же порт в `server_url`.
+  Второй экземпляр на машине — `instance` (свои контейнер, том и проект compose, §8.1).
 - В образе `KD2_HOST=0.0.0.0` (`Dockerfile:35`) — это адрес **внутри контейнера**. Наружу порт отдаёт compose,
   не процесс. Образ ставит `KD2_IN_CONTAINER=1` (`Dockerfile:39`).
 - Проверка «хост вне петли без токена» в `main()` смотрит `KD2_HOST` только когда `KD2_IN_CONTAINER` **не**
@@ -231,10 +250,10 @@ uid 1000, корень нужен только точке входа, чтобы
   `service/paths.py:77`) и этой переменной нет: хост не петлевой (петля — `127.0.0.1`, `localhost`, `::1`)
   без `KD2_TOKEN` — `SystemExit`. Это вторая линия; `setup_local.py` такую конфигурацию не создаёт.
 - Командный сервер: в `projects.local.yaml` поля `bind` (адрес интерфейса) и `token`. `bind` вне петли без
-  `token` — `load_local` отказывает (`ProjectConfigError`). `setup_local.py` пишет в override публикацию
-  `ports: !override ["<bind>:8060:8060"]` (compose иначе сливает списки портов с базовым файлом) и переменную
-  `KD2_TOKEN`, а в `.mcp.json` и `.cursor/mcp.json` — заголовок `Authorization: Bearer <token>`. Пустой `bind`
-  с `token` допустим: токен проверяется и на петле.
+  `token` — `load_local` отказывает (`ProjectConfigError`). `setup_local.py` пишет `KD2_BIND` в `.env` и
+  переменную `KD2_TOKEN` в override, а в `.mcp.json` и `.cursor/mcp.json` — заголовок
+  `Authorization: Bearer <token>`. Пустой `bind` с `token` допустим: токен проверяется и на петле. Если порт в
+  `server_url` не равен публикуемому, скрипт предупреждает.
 - При заданном `KD2_TOKEN` запрос к `/mcp` без этого заголовка или с другим токеном — HTTP 401, тело
   `{"error": "unauthorized"}` (`create_app`, `server.py:764`). Сравнение — `hmac.compare_digest`. Пустой токен —
   проверка выключена.

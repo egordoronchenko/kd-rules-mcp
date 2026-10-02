@@ -3,6 +3,7 @@
 import base64
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from mcp import Client
 from kd2_rules_mcp.projects import (
     LocalSettings,
     ProjectConfigError,
+    compose_env,
     dev_env_login,
     load_catalog,
     load_local,
@@ -137,27 +139,58 @@ def test_load_local_bind_requires_token_off_loopback(tmp_path: Path) -> None:
     assert load_local(path).bind == "::1"
 
 
+def test_load_local_port_and_instance(tmp_path: Path) -> None:
+    """`port` и `instance` читаются; пробел в суффиксе и порт 0 — отказ."""
+    path = tmp_path / "projects.local.yaml"
+    path.write_text("port: 8061\ninstance: stand\n", encoding="utf-8")
+    settings = load_local(path)
+    assert settings.port == 8061
+    assert settings.instance == "stand"
+    assert compose_env(settings) == {
+        "KD2_CONTAINER": "kd2_rules_mcp_stand",
+        "KD2_CACHE_VOLUME": "kd2_structures_cache_stand",
+        "COMPOSE_PROJECT_NAME": "kd2-rules-mcp-stand",
+        "KD2_PUBLISHED_PORT": "8061",
+    }
+    path.write_text("projects: {}\n", encoding="utf-8")
+    bare = load_local(path)
+    assert bare.port is None
+    assert bare.instance is None
+    assert compose_env(bare)["KD2_PUBLISHED_PORT"] == "8060"
+    path.write_text("instance: a b\n", encoding="utf-8")
+    with pytest.raises(ProjectConfigError, match="instance"):
+        load_local(path)
+    path.write_text("port: 0\n", encoding="utf-8")
+    with pytest.raises(ProjectConfigError, match="1…65535"):
+        load_local(path)
+
+
 def test_compose_override_ports_and_bearer(tmp_path: Path) -> None:
-    """Без bind в override нет ports; с bind и token — !override, KD2_TOKEN и Bearer."""
+    """В override нет ports; bind уходит в .env, token — в KD2_TOKEN и Bearer."""
     catalog = load_catalog(_write_catalog(tmp_path))
     plain = LocalSettings()
-    plain_text = setup_local.compose_override(catalog, plain)
-    plain_service = yaml.safe_load(plain_text)["services"]["kd2-rules-mcp"]
+    plain_service = yaml.safe_load(setup_local.compose_override(catalog, plain))["services"][
+        "kd2-rules-mcp"
+    ]
     assert "ports" not in plain_service
     assert "KD2_TOKEN" not in plain_service["environment"]
+    assert setup_local.render_env(plain) is None
     servers, _warnings = setup_local.mcp_servers(catalog, plain)
     assert "headers" not in servers["kd2-rules-mcp"]
 
     bound = LocalSettings(
         bind="192.0.2.10", token="секрет", server_url="http://192.0.2.10:8060/mcp"
     )
-    text = setup_local.compose_override(catalog, bound)
-    assert "!override" in text
-    assert "192.0.2.10:8060:8060" in text
-    loaded = yaml.load(text, Loader=_OverrideLoader)
-    service = loaded["services"]["kd2-rules-mcp"]
-    assert service["ports"] == ["192.0.2.10:8060:8060"]
+    service = yaml.safe_load(setup_local.compose_override(catalog, bound))["services"][
+        "kd2-rules-mcp"
+    ]
+    assert "ports" not in service
     assert service["environment"]["KD2_TOKEN"] == "секрет"
+    env = setup_local.render_env(bound)
+    assert env is not None
+    assert "KD2_BIND=192.0.2.10" in env
+    assert "KD2_PUBLISHED_PORT" not in env
+    assert "KD2_CONTAINER" not in env
     servers, _warnings = setup_local.mcp_servers(catalog, bound)
     claude = {"mcpServers": {name: {"type": "http", **entry} for name, entry in servers.items()}}
     assert claude["mcpServers"]["kd2-rules-mcp"]["headers"] == {"Authorization": "Bearer секрет"}
@@ -167,15 +200,91 @@ def test_compose_override_ports_and_bearer(tmp_path: Path) -> None:
     assert setup_local.localhost_server_url_warning(loop) is not None
 
 
-class _OverrideLoader(yaml.SafeLoader):
-    """Разбирает тег compose `!override` как обычный список."""
+def test_env_file_port_instance_and_server_url_warning(tmp_path: Path) -> None:
+    """По умолчанию .env не пишется; port и instance — все переменные имён; порт URL сверяется."""
+    catalog = load_catalog(_write_catalog(tmp_path))
+    target = tmp_path / ".env"
+    target.write_text("KD2_PUBLISHED_PORT=1\n", encoding="utf-8")
+    setup_local.write_env_file(target, LocalSettings())
+    assert not target.exists()
+
+    local = LocalSettings(port=8061, instance="stand")
+    text = setup_local.render_env(local)
+    assert text is not None and "не править" in text
+    assert "KD2_BIND" not in text
+    for line in (
+        "KD2_PUBLISHED_PORT=8061",
+        "KD2_CONTAINER=kd2_rules_mcp_stand",
+        "KD2_CACHE_VOLUME=kd2_structures_cache_stand",
+        "COMPOSE_PROJECT_NAME=kd2-rules-mcp-stand",
+    ):
+        assert line in text
+    service = yaml.safe_load(setup_local.compose_override(catalog, local))["services"][
+        "kd2-rules-mcp"
+    ]
+    assert "ports" not in service
+    warning = setup_local.server_url_port_warning(local)
+    assert warning is not None and "8061" in warning and "8060" in warning
+    matched = LocalSettings(port=8061, server_url="http://localhost:8061/mcp")
+    assert setup_local.server_url_port_warning(matched) is None
+    assert setup_local.server_url_port_warning(LocalSettings()) is None
 
 
-def _construct_override(loader: yaml.SafeLoader, node: Any) -> list[object]:
-    return list(loader.construct_sequence(node))
+def test_compose_config_resolves_publication_from_env(tmp_path: Path) -> None:
+    """`docker compose config` подставляет .env; контейнер не запускается.
+
+    Имя контейнера из одного символа Compose v5 не принимает (шаблон требует два), поэтому
+    в проверке `xx`, а том `y` и проект `z` — как заданы.
+    """
+    compose = ROOT / "docker-compose.yml"
+    bare = _compose_config(tmp_path / "bare", compose)
+    bare_service = bare["services"]["kd2-rules-mcp"]
+    assert _published(bare_service) == ("127.0.0.1", "8060")
+    assert len(bare_service["ports"]) == 1
+    assert bare_service["container_name"] == "kd2_rules_mcp"
+    assert bare["volumes"]["kd2_cache"]["name"] == "kd2_structures_cache"
+    assert bare["name"] == "kd2-rules-mcp"
+
+    project = tmp_path / "with-env"
+    project.mkdir()
+    env_file = project / ".env"
+    env_file.write_text(
+        "KD2_PUBLISHED_PORT=8061\nKD2_CONTAINER=xx\nKD2_CACHE_VOLUME=y\nCOMPOSE_PROJECT_NAME=z\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    loaded = _compose_config(project, compose, env_file)
+    service = loaded["services"]["kd2-rules-mcp"]
+    assert _published(service) == ("127.0.0.1", "8061")
+    assert len(service["ports"]) == 1
+    assert service["container_name"] == "xx"
+    assert loaded["volumes"]["kd2_cache"]["name"] == "y"
+    assert loaded["name"] == "z"
 
 
-_OverrideLoader.add_constructor("!override", _construct_override)
+def _compose_config(directory: Path, compose: Path, env_file: Path | None = None) -> dict[str, Any]:
+    """Разобранный `docker compose config` без подъёма контейнера."""
+    directory.mkdir(parents=True, exist_ok=True)
+    command = [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(directory),
+        "-f",
+        str(compose),
+        "config",
+        "--format",
+        "json",
+    ]
+    if env_file is not None:
+        command[2:2] = ["--env-file", str(env_file)]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    return json.loads(completed.stdout)
+
+
+def _published(service: dict[str, Any]) -> tuple[str, str]:
+    port = service["ports"][0]
+    return str(port["host_ip"]), str(port["published"])
 
 
 def test_load_local_server_url_defaults_to_address(tmp_path: Path) -> None:

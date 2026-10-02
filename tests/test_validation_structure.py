@@ -11,7 +11,7 @@ import pytest
 from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
 from kd2_rules_mcp.structures.store import StructureStore
 from kd2_rules_mcp.validation.report import Issue, Level, ValidationReport
-from kd2_rules_mcp.validation.structure import check_structures
+from kd2_rules_mcp.validation.structure import check_rule, check_structures
 
 DUMP = Path(__file__).parent / "data" / "xmldump"
 
@@ -136,6 +136,52 @@ def test_tabular_section_paths_and_group_kind(sides: tuple[sqlite3.Connection, .
         ("structure.pks_source", "ПКО «Номенклатура» / ПКС Товары"),
     ]
     assert "«НаборДвиженийРегистраНакопления»" in report.issues[1].message
+
+
+def test_check_rule_reports_only_the_touched_node(sides: tuple[sqlite3.Connection, ...]) -> None:
+    """Группа без коллекции даёт то же замечание, что документ; реквизит внутри и ПКО — нет."""
+    group = (
+        '<Группа><Источник Имя="Товары" Вид="НаборДвиженийРегистраНакопления"/>'
+        '<Приемник Имя="Товары" Вид="ТабличнаяЧасть"/><Свойства/>'
+        + pks_xml("Номенклатура", "Номенклатура")
+        + "</Группа>"
+    )
+    rules = load_exchange_rules(
+        rules_xml(pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, group))
+    )
+    source, target = sides
+    pko = rules.pko()[0]
+    properties = pko.child("Свойства")
+    assert properties is not None
+    group_node = next(item for item in properties.items if item.is_group)
+    child = next(item for item in group_node.items if not item.is_group)
+    full = check_structures(rules, source, target)
+    group_report = check_rule(rules, group_node, source, target)
+    group_address = "ПКО «Номенклатура» / ПКС Товары"
+    assert [(i.check, i.message) for i in group_report.issues] == [
+        (i.check, i.message) for i in full.issues if i.address == group_address
+    ]
+    assert group_report.issues[0].check == "structure.pks_source"
+    child_report = check_rule(rules, child, source, target)
+    assert [i.check for i in child_report.issues if i.check == "structure.pks_source"] == []
+    pko_report = check_rule(rules, pko, source, target)
+    assert [i.check for i in pko_report.issues] == []
+
+    missing = load_exchange_rules(
+        rules_xml(
+            pko_xml(
+                "Номенклатура",
+                NOMENCLATURE,
+                NOMENCLATURE,
+                pks_xml("Владелец", "Владелец", "Свойство"),
+            )
+        )
+    )
+    owner = missing.pko()[0]
+    body = owner.child("Свойства")
+    assert body is not None
+    alone = check_rule(missing, body.items[0], source, target)
+    assert [(i.level, i.check) for i in alone.issues] == [(Level.ERROR, "structure.pko_missing")]
 
 
 def test_reference_type_without_pko(sides: tuple[sqlite3.Connection, ...]) -> None:
