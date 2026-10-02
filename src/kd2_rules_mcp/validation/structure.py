@@ -9,6 +9,7 @@
 `Реквизит`, `ТабличнаяЧасть` …), поэтому сравниваются напрямую.
 """
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -20,6 +21,7 @@ from kd2_rules_mcp.validation.address import (
     pkz_address,
     rule_address,
     side_name,
+    walk_pks,
 )
 from kd2_rules_mcp.validation.report import ValidationReport
 
@@ -67,6 +69,27 @@ _CALL_TEXTS = frozenset(
         "ПослеЗагрузкиПараметра",
         *CONVERSION_EVENTS,
     }
+)
+# Упоминание кода вне обработчиков ПКС — вызов `ВыгрузитьПоПравилу`, объект уходит целиком.
+# Те же имена у ПКО остаются в `_CALL_TEXTS`: это обработчик правила, а не ПКС.
+_WHOLE_EXPORT_TEXTS = _CALL_TEXTS - frozenset(PKS_HANDLERS)
+_PKS_KINDS = frozenset({"pks", "pks_group"})
+# `ВыгрузитьОбъект = Истина` в `ПередВыгрузкой` ПКС (БСП:12924, БСП:12949):
+# пробелы вокруг `=` и регистр не учитываются.
+_EXPORT_OBJECT_TRUE = re.compile(r"ВыгрузитьОбъект\s*=\s*Истина", re.IGNORECASE)
+# Сколько адресов ПКС попадает в текст замечания.
+_REF_ONLY_SHOWN = 3
+# Ссылочные типы объектов: значение может уйти целиком или только узлом `<Ссылка>`.
+# Перечисления и прочие типы пропускаются — целиком выгружать нечего.
+_OBJECT_REF_PREFIXES = (
+    "СправочникСсылка.",
+    "ДокументСсылка.",
+    "ПланВидовХарактеристикСсылка.",
+    "ПланСчетовСсылка.",
+    "ПланВидовРасчетаСсылка.",
+    "БизнесПроцессСсылка.",
+    "ЗадачаСсылка.",
+    "ПланОбменаСсылка.",
 )
 
 
@@ -179,6 +202,7 @@ def check_structures(
     for pod in rules.pod():
         _check_pod(context, pod)
     _check_unreachable_pko(context)
+    _check_ref_only_pko(context)
     return context.report
 
 
@@ -192,8 +216,8 @@ def check_rule(
 
     Владелец-ПКО и группы-предки ищутся обходом документа: у `Node` нет ссылки на родителя.
     Предки задают путь и вид родителя и сами замечаний не дают. Соседи и вложенные правила,
-    которых эта правка не меняла, молчат. `structure.pko_unreachable` считает весь документ
-    и здесь не выполняется.
+    которых эта правка не меняла, молчат. `structure.pko_unreachable` и `structure.pko_ref_only`
+    считают весь документ и здесь не выполняются.
     """
     context = _prepare(rules, source, target)
     place = _locate(rules, node)
@@ -665,8 +689,8 @@ def _conversion_code(node: Node) -> str:
     return str(node.get("КодПравилаКонвертации")).strip()
 
 
-def _referenced_pko_codes(rules: ExchangeRules) -> set[str]:
-    """Коды ПКО, на которые есть ссылка из включённого ПВД, ПКС, группы ПКС или ПКЗ."""
+def _pvd_pko_codes(rules: ExchangeRules) -> set[str]:
+    """Коды ПКО из `КодПравилаКонвертации` включённых ПВД."""
     codes: set[str] = set()
     for pvd in rules.pvd():
         if _disabled(pvd):
@@ -674,6 +698,12 @@ def _referenced_pko_codes(rules: ExchangeRules) -> set[str]:
         code = _conversion_code(pvd)
         if code:
             codes.add(code)
+    return codes
+
+
+def _property_pko_codes(rules: ExchangeRules) -> set[str]:
+    """Коды ПКО из `КодПравилаКонвертации` ПКС, групп ПКС и ПКЗ."""
+    codes: set[str] = set()
     for pko in rules.pko():
         for container_tag in ("Свойства", "Значения"):
             container = pko.child(container_tag)
@@ -686,6 +716,11 @@ def _referenced_pko_codes(rules: ExchangeRules) -> set[str]:
                 if code:
                     codes.add(code)
     return codes
+
+
+def _referenced_pko_codes(rules: ExchangeRules) -> set[str]:
+    """Коды ПКО, на которые есть ссылка из включённого ПВД, ПКС, группы ПКС или ПКЗ."""
+    return _pvd_pko_codes(rules) | _property_pko_codes(rules)
 
 
 def _handler_corpus(rules: ExchangeRules) -> str:
@@ -726,4 +761,115 @@ def _check_unreachable_pko(context: _Context) -> None:
             rule_address(pko),
             f"ПКО «{pko.code}» не вызывается ни из ПВД, ни из ПКС: проверьте состав"
             " плана обмена (structure_plan_content) и добавьте ПВД или ссылку из ПКС",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _PksReference:
+    """ПКС или группа ПКС, которая ссылается на код ПКО."""
+
+    address: str
+    exports_whole: bool
+
+
+def _exports_whole_object(text: str) -> bool:
+    """Текст содержит `ВыгрузитьОбъект = Истина` без учёта пробелов вокруг `=` и регистра."""
+    return _EXPORT_OBJECT_TRUE.search(text) is not None
+
+
+def _pks_handler_text(node: Node) -> str:
+    """Тексты обработчиков выгрузки ПКС или группы ПКС."""
+    return "\n".join(str(node.get(tag)) for tag in PKS_HANDLERS if node.get(tag))
+
+
+def _pks_references(rules: ExchangeRules) -> dict[str, list[_PksReference]]:
+    """ПКС и группы ПКС, ссылающиеся на код: полем `КодПравилаКонвертации` или обработчиком."""
+    codes = list(dict.fromkeys(pko.code.strip() for pko in rules.pko() if pko.code.strip()))
+    found: dict[str, list[_PksReference]] = {}
+    for owner in rules.pko():
+        properties = owner.child("Свойства")
+        if properties is None:
+            continue
+        for path, node in walk_pks(properties):
+            handlers = _pks_handler_text(node)
+            field_code = _conversion_code(node)
+            reference = _PksReference(
+                pks_address(owner.code, path),
+                _exports_whole_object(str(node.get("ПередВыгрузкой"))),
+            )
+            linked: set[str] = set()
+            if field_code:
+                linked.add(field_code)
+            if handlers:
+                linked.update(code for code in codes if code in handlers)
+            for code in linked:
+                found.setdefault(code, []).append(reference)
+    return found
+
+
+def _whole_export_corpus(rules: ExchangeRules) -> str:
+    """Тексты, откуда `ВыгрузитьПоПравилу` выгружает объект целиком.
+
+    Обработчики ПКС (`PKS_HANDLERS`) не входят: упоминание кода там — выгрузка значения
+    свойства. У ПКО те же имена тегов остаются.
+    """
+    chunks: list[str] = []
+    for node in rules.root.walk_all():
+        if node.kind.name == "algorithm":
+            text = node.get("Текст")
+            if text:
+                chunks.append(str(text))
+        tags = _WHOLE_EXPORT_TEXTS if node.kind.name in _PKS_KINDS else _CALL_TEXTS
+        for tag, value in node.values.items():
+            if tag in tags and value:
+                chunks.append(str(value))
+        loaded = node.attrs.get("ПослеЗагрузкиПараметра")
+        if loaded:
+            chunks.append(str(loaded))
+    return "\n".join(chunks)
+
+
+def _ref_only_message(code: str, addresses: str) -> str:
+    return (
+        f"ПКО «{code}» достижим только ссылкой: ПВД на него нет, ПКС {addresses} выгружают"
+        " значение без ВыгрузитьОбъект = Истина — в сообщение уходят только свойства поиска,"
+        " остальные ПКС этого ПКО не исполняются. Чтобы объект уходил целиком: ПВД и правило"
+        " регистрации на него (объект должен входить в состав плана обмена) либо"
+        " ВыгрузитьОбъект = Истина в ПередВыгрузкой ПКС, где он выгружается. Исключение —"
+        " флаг узла «при необходимости» в правилах регистрации объекта: проверьте ПРО."
+        " Для классификаторов и справочников, которые приёмник находит по полям поиска,"
+        " это штатная схема — тогда замечание можно не учитывать."
+    )
+
+
+def _check_ref_only_pko(context: _Context) -> None:
+    """ПКО ссылочного типа, которое выгружается только ссылкой.
+
+    ПКС по умолчанию ставит выгрузку ссылкой (БСП:12784, БСП:12822): в сообщение попадает
+    узел `<Ссылка>` со свойствами поиска, остальные ПКС этого ПКО не исполняются
+    (БСП:13170-13196). Целиком объект уходит, если `ПередВыгрузкой` ссылающейся ПКС ставит
+    `ВыгрузитьОбъект = Истина` (БСП:12924, БСП:12949) или код упомянут вне обработчиков ПКС.
+    Флаг узла «при необходимости» задаётся правилами регистрации (БСП:3393-3437) и отсюда
+    не виден. От загруженных структур не зависит; при правке одного правила не считается.
+    """
+    pvd_codes = _pvd_pko_codes(context.rules)
+    references = _pks_references(context.rules)
+    whole = _whole_export_corpus(context.rules)
+    for pko in context.rules.pko():
+        if _disabled(pko):
+            continue
+        source = str(pko.get(SOURCE)).strip()
+        if not source.startswith(_OBJECT_REF_PREFIXES):
+            continue
+        code = pko.code.strip()
+        if not code or code in pvd_codes or code in whole:
+            continue
+        linked = references.get(code, [])
+        if not linked or any(item.exports_whole for item in linked):
+            continue
+        shown = ", ".join(item.address for item in linked[:_REF_ONLY_SHOWN])
+        context.report.warning(
+            "structure.pko_ref_only",
+            rule_address(pko),
+            _ref_only_message(pko.code, shown),
         )

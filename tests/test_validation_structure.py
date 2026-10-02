@@ -86,7 +86,9 @@ def test_valid_rules_have_no_issues(sides: tuple[sqlite3.Connection, ...]) -> No
         pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)
         + pko_xml("Контр", "СправочникСсылка.Контрагенты", "СправочникСсылка.Контрагенты"),
         pvd="<Правило><Код>В</Код><КодПравилаКонвертации>Номенклатура</КодПравилаКонвертации>"
-        f"<ОбъектВыборки>{NOMENCLATURE}</ОбъектВыборки></Правило>",
+        f"<ОбъектВыборки>{NOMENCLATURE}</ОбъектВыборки></Правило>"
+        "<Правило><Код>К</Код><КодПравилаКонвертации>Контр</КодПравилаКонвертации>"
+        "<ОбъектВыборки>СправочникСсылка.Контрагенты</ОбъектВыборки></Правило>",
     )
     report = check(sides, xml)
     assert report.issues == []
@@ -135,6 +137,8 @@ def test_tabular_section_paths_and_group_kind(sides: tuple[sqlite3.Connection, .
         ("structure.pks_target", "ПКО «Номенклатура» / ПКС Товары#1/Аналитика"),
         # Набора движений Товары у справочника нет — его свойства в источнике не проверяются.
         ("structure.pks_source", "ПКО «Номенклатура» / ПКС Товары#2"),
+        # Своя ПКС ссылается на это ПКО, ПВД нет — выгрузка только ссылкой.
+        ("structure.pko_ref_only", "ПКО «Номенклатура»"),
     ]
     assert "«НаборДвиженийРегистраНакопления»" in report.issues[1].message
 
@@ -389,7 +393,7 @@ def _pvd(code: str, pko: str, *, disabled: bool = False) -> str:
 
 
 def test_unreachable_pko_warns(sides: tuple[sqlite3.Connection, ...]) -> None:
-    """ПКО без ПВД и без ссылок из ПКС — одно предупреждение на его адрес."""
+    """ПКО без ПВД и без ссылок из ПКС — одно предупреждение; `pko_ref_only` нет."""
     report = check(sides, rules_xml(pko_xml("Лишний", NOMENCLATURE, NOMENCLATURE)))
     assert [(i.level, i.check, i.address, i.message) for i in report.issues] == [
         (
@@ -400,6 +404,7 @@ def test_unreachable_pko_warns(sides: tuple[sqlite3.Connection, ...]) -> None:
             " (structure_plan_content) и добавьте ПВД или ссылку из ПКС",
         )
     ]
+    assert only(report, "structure.pko_ref_only") == []
 
 
 def test_pvd_makes_pko_reachable(sides: tuple[sqlite3.Connection, ...]) -> None:
@@ -492,3 +497,149 @@ def test_unreachable_pko_does_not_need_structures() -> None:
     )
     assert [i.check for i in report.issues] == ["structure.pko_unreachable"]
     assert "structure.pko_unreachable" not in {item.check for item in report.skipped}
+
+
+CONTRACTORS = "СправочникСсылка.Контрагенты"
+
+
+def _ref_rules(
+    pks_extra: str = "<КодПравилаКонвертации>Контрагенты</КодПравилаКонвертации>",
+    pvd_extra: str = "",
+    carrier_handler: str = "",
+    algorithms: str = "",
+    target: str = "",
+) -> bytes:
+    """ПКО «Номенклатура» с ПВД ссылается на ПКО «Контрагенты» без своего ПВД."""
+    body = pks_xml("Владелец", "Владелец", "Свойство", pks_extra)
+    carrier = pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)
+    if carrier_handler:
+        carrier = carrier.replace("<Свойства>", carrier_handler + "<Свойства>", 1)
+    contractors = target or pko_xml("Контрагенты", CONTRACTORS, CONTRACTORS)
+    pvd = _pvd("В", "Номенклатура") + pvd_extra
+    if not algorithms:
+        return rules_xml(carrier + contractors, pvd=pvd)
+    return (
+        "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>"
+        f"<ПравилаКонвертацииОбъектов>{carrier}{contractors}</ПравилаКонвертацииОбъектов>"
+        f"<ПравилаВыгрузкиДанных>{pvd}</ПравилаВыгрузкиДанных>"
+        f"{algorithms}</ПравилаОбмена>"
+    ).encode()
+
+
+def test_pko_reachable_only_by_reference(sides: tuple[sqlite3.Connection, ...]) -> None:
+    """ПКО без ПВД, на которое ссылается ПКС, выгружается только ссылкой."""
+    report = check(sides, _ref_rules())
+    issues = only(report, "structure.pko_ref_only")
+    assert [(i.level, i.address) for i in issues] == [
+        (Level.WARNING, "ПКО «Контрагенты»"),
+    ]
+    message = issues[0].message
+    assert "ПКО «Номенклатура» / ПКС Владелец" in message
+    assert "ВыгрузитьОбъект = Истина" in message
+    assert "ПВД" in message
+    assert "состав плана" in message
+    assert only(report, "structure.pko_unreachable") == []
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        "<ПередВыгрузкой>ВыгрузитьОбъект = Истина;</ПередВыгрузкой>",
+        "<ПередВыгрузкой>выгрузитьобъект=Истина;</ПередВыгрузкой>",
+    ],
+)
+def test_export_object_flag_is_whole_path(
+    sides: tuple[sqlite3.Connection, ...], handler: str
+) -> None:
+    """`ВыгрузитьОбъект = Истина` в `ПередВыгрузкой` ПКС — объект уходит целиком."""
+    extra = "<КодПравилаКонвертации>Контрагенты</КодПравилаКонвертации>" + handler
+    assert only(check(sides, _ref_rules(pks_extra=extra)), "structure.pko_ref_only") == []
+
+
+def test_enabled_pvd_is_not_ref_only(sides: tuple[sqlite3.Connection, ...]) -> None:
+    xml = _ref_rules(pvd_extra=_pvd("К", "Контрагенты"))
+    assert only(check(sides, xml), "structure.pko_ref_only") == []
+
+
+def test_disabled_pvd_stays_ref_only(sides: tuple[sqlite3.Connection, ...]) -> None:
+    xml = _ref_rules(pvd_extra=_pvd("К", "Контрагенты", disabled=True))
+    assert [i.address for i in only(check(sides, xml), "structure.pko_ref_only")] == [
+        "ПКО «Контрагенты»"
+    ]
+
+
+def test_pks_handler_name_without_code_is_ref_only(sides: tuple[sqlite3.Connection, ...]) -> None:
+    """Код ПКО только в `ПередВыгрузкой` ПКС, без `ВыгрузитьОбъект` — как у физлиц."""
+    extra = '<ПередВыгрузкой>ИмяПКО = "Контрагенты";</ПередВыгрузкой>'
+    report = check(sides, _ref_rules(pks_extra=extra))
+    assert [i.address for i in only(report, "structure.pko_ref_only")] == ["ПКО «Контрагенты»"]
+    assert only(report, "structure.pko_unreachable") == []
+
+
+@pytest.mark.parametrize("event", ["ПередВыгрузкой", "ПослеЗагрузки"])
+def test_pko_handler_mention_is_not_ref_only(
+    sides: tuple[sqlite3.Connection, ...], event: str
+) -> None:
+    handler = f"<{event}>ВыгрузитьПоПравилу(Контрагенты);</{event}>"
+    xml = _ref_rules(carrier_handler=handler)
+    assert only(check(sides, xml), "structure.pko_ref_only") == []
+
+
+def test_algorithm_mention_is_not_ref_only(sides: tuple[sqlite3.Connection, ...]) -> None:
+    algorithms = (
+        '<Алгоритмы><Алгоритм Имя="Вызов">'
+        "<Текст>ВыгрузитьПоПравилу(Контрагенты);</Текст></Алгоритм></Алгоритмы>"
+    )
+    assert only(check(sides, _ref_rules(algorithms=algorithms)), "structure.pko_ref_only") == []
+
+
+def test_enum_pko_referenced_by_pks_is_not_ref_only(sides: tuple[sqlite3.Connection, ...]) -> None:
+    body = pks_xml(
+        "Владелец",
+        "Владелец",
+        "Свойство",
+        "<КодПравилаКонвертации>Виды</КодПравилаКонвертации>",
+    )
+    xml = rules_xml(
+        pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)
+        + pko_xml("Виды", ENUM, ENUM, values=pkz_xml("Приход", "Приход")),
+        pvd=_pvd("В", "Номенклатура"),
+    )
+    assert only(check(sides, xml), "structure.pko_ref_only") == []
+
+
+def test_disabled_pko_is_not_ref_only(sides: tuple[sqlite3.Connection, ...]) -> None:
+    target = (
+        f'<Правило Отключить="true"><Код>Контрагенты</Код>'
+        f"<Источник>{CONTRACTORS}</Источник><Приемник>{CONTRACTORS}</Приемник></Правило>"
+    )
+    assert only(check(sides, _ref_rules(target=target)), "structure.pko_ref_only") == []
+
+
+def test_ref_only_lists_at_most_three_pks(sides: tuple[sqlite3.Connection, ...]) -> None:
+    extra = "<КодПравилаКонвертации>Контрагенты</КодПравилаКонвертации>"
+    body = "".join(pks_xml("Владелец", "Владелец", "Свойство", extra) for _ in range(4))
+    carrier = pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)
+    xml = rules_xml(
+        carrier + pko_xml("Контрагенты", CONTRACTORS, CONTRACTORS),
+        pvd=_pvd("В", "Номенклатура"),
+    )
+    issues = only(check(sides, xml), "structure.pko_ref_only")
+    assert len(issues) == 1
+    message = issues[0].message
+    assert "Владелец#1" in message and "Владелец#2" in message and "Владелец#3" in message
+    assert "Владелец#4" not in message
+
+
+def test_ref_only_does_not_need_structures() -> None:
+    """Проверка по самим правилам: без структур не пропускается."""
+    report = check_structures(load_exchange_rules(_ref_rules()), None, None)
+    assert [i.check for i in report.issues] == ["structure.pko_ref_only"]
+    assert "structure.pko_ref_only" not in {item.check for item in report.skipped}
+
+
+def test_ref_only_is_not_checked_on_edit(sides: tuple[sqlite3.Connection, ...]) -> None:
+    rules = load_exchange_rules(_ref_rules())
+    report = check_rule(rules, rules.pko()[1], sides[0], sides[1])
+    assert only(report, "structure.pko_ref_only") == []
+    assert only(check(sides, _ref_rules()), "structure.pko_ref_only")
