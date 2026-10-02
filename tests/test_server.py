@@ -70,6 +70,7 @@ EXPECTED_TOOLS = {
     "rules_pack",
     "rule_create",
     "rule_update",
+    "rule_update_many",
     "rule_delete",
     "pko_create_from_candidates",
     "rules_validate",
@@ -279,6 +280,48 @@ async def test_unknown_structure_lists_loaded(service: Kd2Service) -> None:
         error = await _error(client, "structure_objects", structure_id="missing")
     assert error["code"] == "structure_not_found"
     assert error["structures"] == ["dump"]
+
+
+async def test_rule_create_unknown_source_lists_loaded_and_opens_once(
+    service: Kd2Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Неизвестный source_structure — structure_not_found со списком загруженных.
+
+    Известная структура открывается один раз.
+    """
+    async with Client(create_server(service)) as client:
+        await _call(client, "structure_load_xml", structure_id="dump", configuration_path=str(DUMP))
+        opened = await _call(client, "rules_open", path=str(DATA / "exchange_rules.xml"))
+        error = await _error(
+            client,
+            "rule_create",
+            project_id=opened["project_id"],
+            kind="pko",
+            key="НетСтруктуры",
+            source_structure="missing",
+        )
+        assert error["code"] == "structure_not_found"
+        assert error["structures"] == ["dump"]
+        assert "dump" in error["message"]
+
+        opens: list[str] = []
+        real_open = service.store.open
+
+        def counting_open(structure_id: str):
+            opens.append(structure_id)
+            return real_open(structure_id)
+
+        monkeypatch.setattr(service.store, "open", counting_open)
+        created = await _call(
+            client,
+            "rule_create",
+            project_id=opened["project_id"],
+            kind="pko",
+            key="ОдноОткрытие",
+            source_structure="dump",
+        )
+    assert created["address"] == "ПКО «ОдноОткрытие»"
+    assert opens == ["dump"]
 
 
 async def test_missing_object_has_suggestions(service: Kd2Service) -> None:
@@ -568,6 +611,133 @@ async def test_rules_diff_project_against_file_and_errors(service: Kd2Service) -
         assert mismatch["code"] == "rejected"
         assert "правила обмена" in mismatch["message"]
         assert "правила регистрации" in mismatch["message"]
+
+
+_SIDE = {"Имя": "", "Вид": "Реквизит", "Тип": "Строка"}
+
+
+def _pks_fields(name: str) -> dict[str, dict[str, str]]:
+    return {
+        "Источник": {**_SIDE, "Имя": name},
+        "Приемник": {**_SIDE, "Имя": name},
+    }
+
+
+async def test_rule_update_many_sets_pks_flags(service: Kd2Service) -> None:
+    """Снять НеЗамещать с ПКО и поставить его на все ПКС, кроме одного, одним вызовом."""
+    source = str(DATA / "exchange_rules.xml")
+    async with Client(create_server(service)) as client:
+        opened = await _call(client, "rules_open", path=source)
+        project = opened["project_id"]
+        assert opened["modified"] is False
+        missing = await _error(
+            client,
+            "rule_update_many",
+            project_id=project,
+            kind="pks",
+            owner="Организации",
+            fields={"НеЗамещать": True},
+            keys=["НетТакого"],
+        )
+        assert missing["code"] == "rule_not_found"
+        empty = await _error(
+            client,
+            "rule_update_many",
+            project_id=project,
+            kind="pks",
+            owner="Организации",
+            fields={},
+        )
+        assert empty["code"] == "rejected"
+        assert (await _call(client, "rules_overview", project_id=project))["modified"] is False
+
+        await _call(
+            client,
+            "rule_update",
+            project_id=project,
+            kind="pko",
+            key="Организации",
+            fields={"НеЗамещать": False},
+        )
+        await _call(
+            client,
+            "rule_create",
+            project_id=project,
+            kind="pks",
+            key="КПП",
+            owner="Организации",
+            fields=_pks_fields("КПП"),
+        )
+        await _call(
+            client,
+            "rule_create",
+            project_id=project,
+            kind="pks_group",
+            key="Контакты",
+            owner="Организации",
+            fields={
+                "Источник": {"Имя": "Контакты", "Вид": "ТабличнаяЧасть"},
+                "Приемник": {"Имя": "Контакты", "Вид": "ТабличнаяЧасть"},
+            },
+        )
+        await _call(
+            client,
+            "rule_create",
+            project_id=project,
+            kind="pks",
+            key="Контакты/Телефон",
+            owner="Организации",
+            fields=_pks_fields("Телефон"),
+        )
+        await _call(client, "rules_save", project_id=project, path="out/many.xml")
+        assert (await _call(client, "rules_overview", project_id=project))["modified"] is False
+
+        updated = await _call(
+            client,
+            "rule_update_many",
+            project_id=project,
+            kind="pks",
+            owner="Организации",
+            fields={"НеЗамещать": True},
+            except_keys=["КПП"],
+        )
+        assert updated["owner"] == "Организации"
+        assert updated["kind"] == "pks"
+        assert updated["count"] == 2
+        assert [item["address"] for item in updated["updated"]] == [
+            "ПКО «Организации» / ПКС ИНН",
+            "ПКО «Организации» / ПКС Контакты/Телефон",
+        ]
+        assert (await _call(client, "rules_overview", project_id=project))["modified"] is True
+
+        pko = await _call(client, "rules_get", project_id=project, kind="pko", key="Организации")
+        assert pko["fields"]["НеЗамещать"] is False
+        inn = await _call(
+            client, "rules_get", project_id=project, kind="pks", key="ИНН", owner="Организации"
+        )
+        phone = await _call(
+            client,
+            "rules_get",
+            project_id=project,
+            kind="pks",
+            key="Контакты/Телефон",
+            owner="Организации",
+        )
+        kept = await _call(
+            client, "rules_get", project_id=project, kind="pks", key="КПП", owner="Организации"
+        )
+        group = await _call(
+            client,
+            "rules_get",
+            project_id=project,
+            kind="pks_group",
+            key="Контакты",
+            owner="Организации",
+        )
+        assert inn["fields"]["НеЗамещать"] is True
+        assert phone["fields"]["НеЗамещать"] is True
+        assert kept["fields"].get("НеЗамещать") is not True
+        assert group["fields"].get("НеЗамещать") is not True
 
 
 async def test_rules_diff_pages_large_result(service: Kd2Service) -> None:

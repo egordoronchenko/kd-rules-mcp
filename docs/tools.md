@@ -12,14 +12,14 @@
 
 <!-- tools:begin — генерирует scripts/dump_tools.py, руками не править -->
 
-Инструментов: 32.
+Инструментов: 33.
 
 | Группа | Инструменты |
 |---|---|
 | Проекты и структуры | [`project_list`](#project_list), [`structure_load_project`](#structure_load_project), [`structure_list`](#structure_list), [`structure_load_xml`](#structure_load_xml), [`structure_load_md83exp`](#structure_load_md83exp), [`structure_objects`](#structure_objects), [`structure_object`](#structure_object), [`structure_values`](#structure_values), [`structure_plan_content`](#structure_plan_content), [`structure_compare`](#structure_compare) |
 | Кандидаты сопоставления | [`match_objects`](#match_objects), [`match_properties`](#match_properties), [`match_values`](#match_values) |
 | Проекты правил | [`rules_open`](#rules_open), [`rules_create`](#rules_create), [`rules_projects`](#rules_projects), [`rules_overview`](#rules_overview), [`rules_list`](#rules_list), [`rules_get`](#rules_get), [`rules_save`](#rules_save), [`rules_close`](#rules_close), [`rules_pack`](#rules_pack) |
-| Правки | [`rule_create`](#rule_create), [`rule_update`](#rule_update), [`rule_delete`](#rule_delete), [`pko_create_from_candidates`](#pko_create_from_candidates) |
+| Правки | [`rule_create`](#rule_create), [`rule_update`](#rule_update), [`rule_update_many`](#rule_update_many), [`rule_delete`](#rule_delete), [`pko_create_from_candidates`](#pko_create_from_candidates) |
 | Проверки | [`rules_validate`](#rules_validate), [`rules_diff`](#rules_diff), [`handlers_export`](#handlers_export), [`handlers_locate`](#handlers_locate) |
 | Регистрация и корреспондент | [`registration_build`](#registration_build), [`correspondent_draft`](#correspondent_draft) |
 
@@ -309,6 +309,22 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `source_structure` | string \| null | `null` | Структура стороны для проверки объектов и свойств; без неё не проверяется |
 | `target_structure` | string \| null | `null` | Структура стороны для проверки объектов и свойств; без неё не проверяется |
 
+### `rule_update_many`
+
+Меняет переданные поля у нескольких ПКС, групп ПКС или ПКЗ одного ПКО за один вызов,
+всё или ничего.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project_id` | string | обязательный | Идентификатор рабочего проекта правил (rules_projects) |
+| `kind` | string | обязательный | Вид вложенных правил одного ПКО: pks, pks_group или pkz. Правила верхнего уровня этим инструментом не меняются |
+| `owner` | string | обязательный | Код ПКО, чьи ПКС, группы ПКС или ПКЗ меняются |
+| `fields` | object | обязательный | Поля, одинаковые для всех целей: «тег или атрибут → значение» (например {"НеЗамещать": true}); стороны ПКС — {"Источник": {"Имя": …, "Вид": …, "Тип": …}}. Пустой набор отклоняется |
+| `keys` | array of string \| null | `null` | Какие правила менять: путь ПКС `группа/…/свойство-приёмник` или имя значения источника ПКЗ. Не задано — все правила этого вида у ПКО, кроме except_keys. Неизвестный адрес — ошибка до правок |
+| `except_keys` | array of string \| null | `null` | Адреса, которые пропустить, когда keys не задан: путь ПКС или имя значения ПКЗ. Неизвестный адрес — ошибка до правок |
+| `source_structure` | string \| null | `null` | Структура стороны для проверки объектов и свойств; без неё не проверяется |
+| `target_structure` | string \| null | `null` | Структура стороны для проверки объектов и свойств; без неё не проверяется |
+
 ### `rule_delete`
 
 Удаляет правило; ПКО, на которое ссылаются, не удаляется.
@@ -482,6 +498,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `rules_save` | `project_id`, `path`, `size_bytes`, `counts`, `format_check` (`errors`, `warnings`, `skipped`, `by_check`, `text`) |
 | `rules_pack` | `path`, `size_bytes`, `load_with` (форма загрузки в БСП), `files` (`file`, `path`, `size_bytes`, `rules`), `warnings` |
 | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates` | итог правки |
+| `rule_update_many` | `owner`, `kind`, `count`, `updated` — итог правки на каждую цель |
 | `rules_validate` | `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница списка: `level`, `check`, `address`, `message`) |
 | `rules_diff` | `left`, `right` (`project_id` или `path` — путь агента), `kind` (`exchange` или `registration`), `ignored_fields` (пусто при `include_header`; иначе `ДатаВремяСоздания` и `Ид`), `summary` (только непустые разделы: `added`, `removed`, `changed`), `changes` (страница: `section`, `address`, `change`, и при изменении поля — `field`, `old`, `new`, `handler_diff`) |
 | `handlers_export` | `folder`, `count`, `removed` (число удалённых прежних обёрток), `files` (`file`, `address`, `event`), `has_more` |
@@ -500,11 +517,11 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | рабочего проекта правил нет (не открывался или закрыт `rules_close`) | `project_not_found` | все, что принимают `project_id` |
 | явный идентификатор нового проекта уже занят | `duplicate_project` | `rules_create`, `registration_build`, `correspondent_draft` |
 | путь записи вне рабочей папки и `rules_dir` | `path_outside_workspace` | `rules_save`, `rules_pack`, `handlers_export` |
-| путь чтения серверу не виден или не найден; папка проекта не задана; `handlers_locate` до `handlers_export`; отрицательное смещение; разные виды правил | `rejected` | `structure_load_*`, `rules_open`, `rules_pack`, `rules_diff`, `handlers_locate`, списки |
+| путь чтения серверу не виден или не найден; папка проекта не задана; `handlers_locate` до `handlers_export`; отрицательное смещение; разные виды правил; пустые поля `rule_update_many` | `rejected` | `structure_load_*`, `rules_open`, `rules_pack`, `rules_diff`, `handlers_locate`, `rule_update_many`, списки |
 | файл правил или снимок проекта не разбирается | `rules_format` | `rules_open`, `rules_pack`, `rules_diff`, обращение к проекту с битым снимком |
 | файл структуры не разбирается | `structure_format` | `structure_load_xml`, `structure_load_md83exp`, `structure_load_project` |
 | ошибка в `projects.yaml`, неизвестный проект, конфигурация или база | `project_config` | `project_list`, `structure_load_project` |
-| отказ правки | `unknown_field`, `duplicate_rule`, `rule_not_found`, `dangling_reference`, `edit_rejected` | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates`, `rules_get` (`rule_not_found`) |
+| отказ правки | `unknown_field`, `duplicate_rule`, `rule_not_found`, `dangling_reference`, `edit_rejected` | `rule_create`, `rule_update`, `rule_update_many`, `rule_delete`, `pko_create_from_candidates`, `rules_get` (`rule_not_found`) |
 | неизвестный уровень или класс уверенности | `invalid_argument` | `rules_validate` (`level`), `match_*` (`confidence`) |
 | непредвиденное исключение сервера (трассировка в логе сервера) | `internal` | все инструменты |
 

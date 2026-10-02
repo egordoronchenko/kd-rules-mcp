@@ -57,7 +57,13 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "rules_close",
         "rules_pack",
     ),
-    "Правки": ("rule_create", "rule_update", "rule_delete", "pko_create_from_candidates"),
+    "Правки": (
+        "rule_create",
+        "rule_update",
+        "rule_update_many",
+        "rule_delete",
+        "pko_create_from_candidates",
+    ),
     "Проверки": ("rules_validate", "rules_diff", "handlers_export", "handlers_locate"),
     "Регистрация и корреспондент": ("registration_build", "correspondent_draft"),
 }

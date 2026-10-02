@@ -41,7 +41,10 @@ def test_copies_link_only_to_pack_or_public_repo() -> None:
             assert target.partition("#")[0] in names, target
 
 
-def test_dest_claude_installs_skills_and_server(tmp_path: Path) -> None:
+def test_dest_claude_installs_skills_and_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(build_packs, "default_server_headers", lambda: None)
     (tmp_path / ".cursor").mkdir()
     other = {"mcpServers": {"proj-1c-code": {"type": "http", "url": "http://x/mcp"}}}
     (tmp_path / ".mcp.json").write_text(json.dumps(other), encoding="utf-8")
@@ -140,6 +143,7 @@ def test_dest_without_cursor_config_writes_only_mcp_json(tmp_path: Path) -> None
 def test_dest_cursor_flag_creates_cursor_mcp_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(build_packs, "default_server_headers", lambda: None)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -166,6 +170,52 @@ def test_dest_reinstall_removes_stale_files_only_in_own_skills(tmp_path: Path) -
 
 def test_default_server_url_is_an_address() -> None:
     assert build_packs.default_server_url().startswith(("http://", "https://"))
+
+
+def _mcp_server(project: Path) -> dict[str, object]:
+    config = json.loads((project / ".mcp.json").read_text(encoding="utf-8"))
+    return config["mcpServers"]["kd2-rules-mcp"]
+
+
+def test_dest_copies_authorization_header_from_local_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Токен из projects.local.yaml попадает в запись; без токена ключа headers нет."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    local = repo / "projects.local.yaml"
+    local.write_text("token: secret-token\n", encoding="utf-8")
+    original_root = build_packs.ROOT
+    real_headers = build_packs.default_server_headers
+
+    def headers() -> dict[str, str] | None:
+        # ROOT нужен сборке скиллов; подменяем его только на чтение локального токена.
+        build_packs.ROOT = repo
+        try:
+            return real_headers()
+        finally:
+            build_packs.ROOT = original_root
+
+    monkeypatch.setattr(build_packs, "default_server_headers", headers)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    bare = {"mcpServers": {"kd2-rules-mcp": {"type": "http", "url": URL}}}
+    (project / ".mcp.json").write_text(json.dumps(bare), encoding="utf-8")
+    report = build_packs.install(project, "claude", URL)
+    assert _mcp_server(project) == {
+        "type": "http",
+        "url": URL,
+        "headers": {"Authorization": "Bearer secret-token"},
+    }
+    assert "заголовок Authorization добавлен" in report
+
+    other = tmp_path / "other"
+    other.mkdir()
+    local.write_text("server_url: http://127.0.0.1:8060/mcp\n", encoding="utf-8")
+    report = build_packs.install(other, "claude", URL)
+    assert "headers" not in _mcp_server(other)
+    assert "заголовок Authorization добавлен" not in report
 
 
 def test_dest_refuses_second_package(tmp_path: Path) -> None:

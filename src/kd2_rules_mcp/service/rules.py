@@ -9,6 +9,7 @@ from kd2_rules_mcp.authoring.edits import (
     delete_rule,
     find_rule,
     update_rule,
+    update_rules,
 )
 from kd2_rules_mcp.authoring.pack import collect, pack_rules
 from kd2_rules_mcp.errors import Kd2Error
@@ -18,6 +19,7 @@ from kd2_rules_mcp.kd2.rules_io import load_rules
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.views import (
     counts,
+    edit_view,
     node_view,
     page_limit,
     report_summary,
@@ -148,6 +150,40 @@ class RulesMixin(ServiceBase):
 
     def rule_update(self, project_id: str, kind: str, key: str, **options: Any) -> dict[str, Any]:
         return self._edit(update_rule, project_id, kind, key, **options)
+
+    def rule_update_many(
+        self,
+        project_id: str,
+        kind: str,
+        owner: str,
+        fields: Mapping[str, Any],
+        keys: list[str] | None,
+        except_keys: list[str] | None,
+        source_structure: str | None,
+        target_structure: str | None,
+    ) -> dict[str, Any]:
+        """Одни поля у нескольких ПКС, групп ПКС или ПКЗ. Отказ не помечает проект изменённым."""
+        if not fields:
+            raise Kd2Error("Не переданы поля для изменения")
+        with self._lock, self._sides(source_structure, target_structure) as (source, target):
+            rules = self._exchange(project_id)
+            results = update_rules(
+                rules,
+                kind,
+                fields,
+                owner=owner,
+                keys=keys,
+                except_keys=() if except_keys is None else except_keys,
+                source=source,
+                target=target,
+            )
+            self.workspace.mark_modified(project_id)
+            return {
+                "owner": owner,
+                "kind": kind,
+                "count": len(results),
+                "updated": [edit_view(item) for item in results],
+            }
 
     def rule_delete(
         self,

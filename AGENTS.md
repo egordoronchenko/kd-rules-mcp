@@ -99,7 +99,8 @@
 - Правила: `rules_open` / `rules_create` → `rules_list`, `rules_get` → `rule_create`, `rule_update`,
   `rule_delete`, `pko_create_from_candidates` → `rules_validate` → `rules_save`; ZIP для загрузки в БСП —
   `rules_pack` (папка комплекта или файлы). Проекты правил переживают перезапуск контейнера: снимки в
-  `workspace\.projects\`, идентификатор — имя файла и хеш пути; закрыть — `rules_close`.
+  `workspace\.projects\`, идентификатор — имя файла и хеш пути; закрыть — `rules_close`. Что изменилось между
+  двумя версиями правил или проектом и файлом — `rules_diff` (по адресам правил, без шума XML).
 - Код обработчиков — `handlers_export`, синтакс-чекер, `handlers_locate`.
 - Правила регистрации — `registration_build`; черновик обратного направления — `correspondent_draft`.
 - Ошибка инструмента — JSON с полем `code`.

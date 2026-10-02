@@ -570,6 +570,65 @@ def create_server(service: Kd2Service) -> MCPServer:
         )
 
     @server.tool()
+    async def rule_update_many(
+        project_id: ProjectId,
+        kind: Annotated[
+            str,
+            Field(
+                description=(
+                    "Вид вложенных правил одного ПКО: pks, pks_group или pkz. "
+                    "Правила верхнего уровня этим инструментом не меняются"
+                )
+            ),
+        ],
+        owner: Annotated[str, Field(description="Код ПКО, чьи ПКС, группы ПКС или ПКЗ меняются")],
+        fields: Annotated[
+            dict[str, Any],
+            Field(
+                description=(
+                    "Поля, одинаковые для всех целей: «тег или атрибут → значение» "
+                    '(например {"НеЗамещать": true}); стороны ПКС — {"Источник": {"Имя": …, '
+                    '"Вид": …, "Тип": …}}. Пустой набор отклоняется'
+                )
+            ),
+        ],
+        keys: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Какие правила менять: путь ПКС `группа/…/свойство-приёмник` или имя "
+                    "значения источника ПКЗ. Не задано — все правила этого вида у ПКО, кроме "
+                    "except_keys. Неизвестный адрес — ошибка до правок"
+                )
+            ),
+        ] = None,
+        except_keys: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Адреса, которые пропустить, когда keys не задан: путь ПКС или имя значения "
+                    "ПКЗ. Неизвестный адрес — ошибка до правок"
+                )
+            ),
+        ] = None,
+        source_structure: OptionalStructure = None,
+        target_structure: OptionalStructure = None,
+    ) -> dict[str, Any]:
+        """Меняет переданные поля у нескольких ПКС, групп ПКС или ПКЗ одного ПКО за один вызов,
+        всё или ничего."""
+        return await call(
+            service.rule_update_many,
+            project_id,
+            kind,
+            owner,
+            fields,
+            keys,
+            except_keys,
+            source_structure,
+            target_structure,
+        )
+
+    @server.tool()
     async def rule_delete(
         project_id: ProjectId,
         kind: RuleKind,
@@ -877,8 +936,8 @@ def main() -> None:
     предупреждение. `create_server` логирование не настраивает.
 
     Токен `KD2_TOKEN` (если задан) проверяется на `/mcp`: заголовок
-    `Authorization: Bearer`. Хост вне петли (`127.0.0.1`, `localhost`, `::1`) без
-    токена — отказ при старте. Исключение — контейнер. В образе `KD2_HOST=0.0.0.0`:
+    `Authorization: Bearer`. Хост не петлевой (петля — `127.0.0.1`, `localhost`, `::1`)
+    без токена — отказ при старте. Исключение — контейнер. В образе `KD2_HOST=0.0.0.0`:
     это адрес внутри контейнера, наружу порт публикует compose, а не процесс.
     Dockerfile ставит `KD2_IN_CONTAINER=1`. Пока эта переменная задана, проверка
     «хост вне петли без токена» молчит — иначе контейнер не стартовал бы никогда.

@@ -15,8 +15,9 @@
    сервер `kd2-rules-mcp`, другие серверы не трогаются. В `.cursor/mcp.json` — тоже, если файл
    уже есть; `--cursor` создаёт его, когда файла нет. Без флага и без файла скрипт сообщает,
    что сервер нужно добавить в настройках MCP Cursor. Адрес — `--server-url`, по умолчанию
-   `server_url` из `projects.local.yaml` этого репозитория. Это правка чужого репозитория —
-   только с согласия человека.
+   `server_url` из `projects.local.yaml` этого репозитория. Заголовок `Authorization` — из
+   `token` того же файла, если токен задан. Это правка чужого репозитория — только с согласия
+   человека.
 
 Запуск: `uv run python scripts/build_packs.py --check` (или `--write`);
 `uv run python scripts/build_packs.py --dest <папка проекта> --client claude`
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.projects import DEFAULT_SERVER_URL, load_local
+from kd2_rules_mcp.projects import DEFAULT_SERVER_URL, bearer_auth, load_local
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / ".claude" / "skills"
@@ -148,6 +149,7 @@ def install(
     """Ставит упаковку в папку проекта; возвращает строки отчёта.
 
     `cursor` — создать `.cursor/mcp.json` с сервером, если файла ещё нет.
+    Заголовок `Authorization` берётся из `token` в `projects.local.yaml`, если токен задан.
     """
     dest = dest.resolve()
     if not dest.is_dir():
@@ -179,7 +181,12 @@ def install(
         written += 1
     report.append(f"упаковка {client}: файлов {len(files)}, записано {written}")
     url = server_url or default_server_url()
-    report.extend(add_server(path, data, url, typed=typed) for path, data, typed in loaded)
+    headers = default_server_headers()
+    report.extend(
+        add_server(path, data, url, typed=typed, headers=headers) for path, data, typed in loaded
+    )
+    if headers is not None:
+        report.append("заголовок Authorization добавлен")
     if not cursor and not cursor_config.is_file():
         report.append(
             "Cursor: `.cursor/mcp.json` в проекте нет — добавьте сервер "
@@ -206,11 +213,23 @@ def read_mcp_config(path: Path) -> dict[str, Any]:
     return data
 
 
-def add_server(path: Path, data: dict[str, Any], url: str, *, typed: bool) -> str:
-    """Добавляет или обновляет `kd2-rules-mcp` в `mcpServers`, не трогая остальные серверы."""
+def add_server(
+    path: Path,
+    data: dict[str, Any],
+    url: str,
+    *,
+    typed: bool,
+    headers: dict[str, str] | None = None,
+) -> str:
+    """Добавляет или обновляет `kd2-rules-mcp` в `mcpServers`, не трогая остальные серверы.
+
+    Сравнение «уже подключён» — по всей записи, включая `headers`.
+    """
     shown = f".cursor/{path.name}" if path.parent.name == ".cursor" else path.name
     servers = data.setdefault("mcpServers", {})
     entry: dict[str, Any] = {"type": "http", "url": url} if typed else {"url": url}
+    if headers is not None:
+        entry["headers"] = headers
     if servers.get(SERVER) == entry:
         return f"{shown}: {SERVER} уже подключён ({url})"
     action = "обновлён" if SERVER in servers else "добавлен"
@@ -224,6 +243,15 @@ def default_server_url() -> str:
     """`server_url` из `projects.local.yaml` этого репозитория, иначе адрес по умолчанию."""
     local = ROOT / "projects.local.yaml"
     return load_local(local).server_url if local.is_file() else DEFAULT_SERVER_URL
+
+
+def default_server_headers() -> dict[str, str] | None:
+    """Заголовок `Authorization: Bearer` из `token` в `projects.local.yaml`; нет токена — `None`."""
+    local = ROOT / "projects.local.yaml"
+    if not local.is_file():
+        return None
+    token = load_local(local).token
+    return bearer_auth(token) if token else None
 
 
 def _remove_stale(dest: Path, root: str, wanted: set[Path]) -> list[str]:

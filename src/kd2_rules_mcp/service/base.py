@@ -95,13 +95,17 @@ class ServiceBase:
             raise Kd2Error(f"Проект «{project_id}» — правила регистрации, а нужны правила обмена")
         return document
 
-    @contextmanager
-    def _structure(self, structure_id: str) -> Generator[sqlite3.Connection]:
+    def _require_structure(self, structure_id: str) -> None:
+        """Структура есть в кэше; иначе ошибка со списком загруженных."""
         if not self.store.exists(structure_id):
             known = ", ".join(self.store.ids()) or "кэш пуст"
             raise StructureNotFoundError(
                 f"Структура «{structure_id}» не загружена (загружены: {known})"
             )
+
+    @contextmanager
+    def _structure(self, structure_id: str) -> Generator[sqlite3.Connection]:
+        self._require_structure(structure_id)
         conn = self.store.open(structure_id)
         try:
             yield conn
@@ -126,8 +130,7 @@ class ServiceBase:
     ) -> sqlite3.Connection | None:
         if not structure_id:
             return None
-        with self._structure(structure_id):
-            pass
+        self._require_structure(structure_id)
         conn = self.store.open(structure_id)
         opened.append(conn)
         return conn

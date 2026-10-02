@@ -26,7 +26,7 @@
 """
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from kd2_rules_mcp.authoring.candidates import Candidate, Side, property_candidates
@@ -64,6 +64,8 @@ _TOP: dict[str, tuple[str, str, str]] = {
     "parameter": ("Параметры", "Параметр", "Имя"),
 }
 _NESTED_TAGS = {"pks": "Свойство", "pks_group": "Группа", "pkz": "Значение"}
+# Групповая правка — только вложенные правила одного ПКО. Верхний уровень — `rule_update`.
+_BATCH_KINDS = frozenset(_NESTED_TAGS)
 _KINDS = set(_TOP) | set(_NESTED_TAGS)
 # Группа списка при создании — только у ПКО, ПВД и ПОД. У алгоритма, запроса и параметра
 # группы в схеме есть, но параметр `group` для них не задаётся.
@@ -187,6 +189,51 @@ def update_rule(
         _restore(node, snap)
         raise
     return _result(kind_name, node, owner, pko, source, target)
+
+
+def update_rules(
+    rules: ExchangeRules,
+    kind_name: str,
+    fields: Mapping[str, FieldValue],
+    *,
+    owner: str,
+    keys: Sequence[str] | None = None,
+    except_keys: Sequence[str] = (),
+    source: sqlite3.Connection | None = None,
+    target: sqlite3.Connection | None = None,
+) -> list[EditResult]:
+    """Меняет одни и те же поля у нескольких вложенных правил одного ПКО.
+
+    Вид — `pks`, `pks_group` или `pkz`. `keys` — адреса (путь ПКС или имя значения
+    источника ПКЗ): меняются ровно они. `keys is None` — все правила этого вида у ПКО,
+    кроме `except_keys` (тогда `except_keys` и проверяется). ПКС берутся с раскрытием
+    групп (`walk_pks`); сами группы — только при виде `pks_group`. Неизвестный адрес —
+    ошибка до правок. Пустой итог — ошибка. Порядок — обход ПКО, не порядок `keys`.
+
+    Правка атомарна: снимки всех целей снимаются до изменений. Ошибка `_apply_fields`
+    или `_after_change` на любой цели возвращает уже затронутые узлы и пробрасывается.
+    """
+    if kind_name not in _BATCH_KINDS:
+        raise RuleEditError("Для правил верхнего уровня — rule_update по одному")
+    selected = _select_batch(rules, kind_name, owner, keys, except_keys)
+    if not selected:
+        raise RuleEditError("Нечего менять")
+    loaded = [_require(rules, kind_name, key, owner) for key in selected]
+    snaps = [_save(node) for _, node, _, _ in loaded]
+    results: list[EditResult] = []
+    for index, (container, node, pko, groups) in enumerate(loaded):
+        old_code = node.code
+        try:
+            if fields:
+                _apply_fields(node, fields)
+            _after_change(rules, kind_name, node, container, pko, groups, old_code, source, target)
+        except Exception:
+            # Текущая цель могла измениться частично — её снимок тоже возвращается.
+            for done in range(index + 1):
+                _restore(loaded[done][1], snaps[done])
+            raise
+        results.append(_result(kind_name, node, owner, pko, source, target))
+    return results
 
 
 def delete_rule(
@@ -602,6 +649,55 @@ def _require(
             f"По пути «{key}» в ПКО «{pko.code}» находится {found_pks[1].kind.title}"
         )
     return found_pks[0], found_pks[1], pko, _groups_above(pko, found_pks[0])
+
+
+def _nested_keys(rules: ExchangeRules, kind_name: str, owner: str) -> list[str]:
+    """Адреса вложенных правил вида `kind_name` у ПКО в порядке обхода документа.
+
+    ПКС и группы ПКС — пути `walk_pks` (группы раскрываются). ПКЗ — имя значения
+    источника, группы значений пропускаются.
+    """
+    pko = _require_pko(rules, owner)
+    if kind_name == "pkz":
+        values = pko.child("Значения")
+        if values is None:
+            return []
+        return [str(node.get(SOURCE)) for node in values.walk()]
+    properties = pko.child("Свойства")
+    if properties is None:
+        return []
+    return [path for path, item in walk_pks(properties) if item.kind.name == kind_name]
+
+
+def _select_batch(
+    rules: ExchangeRules,
+    kind_name: str,
+    owner: str,
+    keys: Sequence[str] | None,
+    except_keys: Sequence[str],
+) -> list[str]:
+    """Адреса целей в порядке обхода. Неизвестный адрес — ошибка, документ не меняется."""
+    available = _nested_keys(rules, kind_name, owner)
+    known = set(available)
+    if keys is None:
+        _reject_unknown(rules, kind_name, owner, except_keys, known)
+        excluded = set(except_keys)
+        return [key for key in available if key not in excluded]
+    _reject_unknown(rules, kind_name, owner, keys, known)
+    wanted = set(keys)
+    return [key for key in available if key in wanted]
+
+
+def _reject_unknown(
+    rules: ExchangeRules,
+    kind_name: str,
+    owner: str,
+    keys: Sequence[str],
+    known: set[str],
+) -> None:
+    for key in keys:
+        if key not in known:
+            _require(rules, kind_name, key, owner)
 
 
 def _missing(kind_name: str, key: str, owner: str) -> str:

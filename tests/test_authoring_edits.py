@@ -11,7 +11,9 @@ from kd2_rules_mcp.authoring.edits import (
     create_pko_with_properties,
     create_rule,
     delete_rule,
+    find_rule,
     update_rule,
+    update_rules,
 )
 from kd2_rules_mcp.errors import (
     DanglingReferenceError,
@@ -25,7 +27,7 @@ from kd2_rules_mcp.kd2.canonical import canonical_diff, canonical_form
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node
 from kd2_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_rules
 from kd2_rules_mcp.structures import db
-from kd2_rules_mcp.validation.address import side_name
+from kd2_rules_mcp.validation.address import side_name, walk_pks
 from kd2_rules_mcp.validation.format import check_format
 
 DATA = Path(__file__).parent / "data"
@@ -1034,6 +1036,210 @@ def test_explicit_pks_code_and_order_are_kept() -> None:
     assert pvd.values["Код"] == "Новая"
     assert "Порядок" not in pvd.values
     _assert_sound(rules)
+
+
+def _pks_with_group(rules: ExchangeRules) -> None:
+    """К ПКО «Организации» макета: ещё два ПКС и группа с двумя вложенными."""
+    create_rule(rules, "pks", "КПП", _pks_sides("КПП", type_name="Строка"), owner="Организации")
+    create_rule(
+        rules,
+        "pks",
+        "Наименование",
+        _pks_sides("Наименование", type_name="Строка"),
+        owner="Организации",
+    )
+    create_rule(
+        rules,
+        "pks_group",
+        "Контакты",
+        {
+            "Источник": _side("Контакты", "ТабличнаяЧасть"),
+            "Приемник": _side("Контакты", "ТабличнаяЧасть"),
+        },
+        owner="Организации",
+    )
+    create_rule(
+        rules,
+        "pks",
+        "Контакты/Телефон",
+        _pks_sides("Телефон", type_name="Строка"),
+        owner="Организации",
+    )
+    create_rule(
+        rules,
+        "pks",
+        "Контакты/Почта",
+        _pks_sides("Почта", type_name="Строка"),
+        owner="Организации",
+    )
+
+
+def _pks_flags(rules: ExchangeRules) -> dict[str, object]:
+    return {
+        path: node.values.get("НеЗамещать") for path, node in walk_pks(_pks(rules, "Организации"))
+    }
+
+
+def test_update_rules_sets_flag_on_every_pks_except_two() -> None:
+    """Все ПКС, кроме двух адресов, получают НеЗамещать; вложенные тоже, группа — нет."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    _pks_with_group(rules)
+    results = update_rules(
+        rules,
+        "pks",
+        {"НеЗамещать": True},
+        owner="Организации",
+        except_keys=["ИНН", "Контакты/Телефон"],
+    )
+    assert [item.address for item in results] == [
+        "ПКО «Организации» / ПКС КПП",
+        "ПКО «Организации» / ПКС Наименование",
+        "ПКО «Организации» / ПКС Контакты/Почта",
+    ]
+    assert _pks_flags(rules) == {
+        "ИНН": None,
+        "КПП": True,
+        "Наименование": True,
+        "Контакты": None,
+        "Контакты/Телефон": None,
+        "Контакты/Почта": True,
+    }
+    _assert_sound(rules)
+
+
+def test_update_rules_explicit_keys_follow_document_order() -> None:
+    """`keys` берёт ровно перечисленные ПКС, но обрабатывает их в порядке обхода ПКО."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    _pks_with_group(rules)
+    results = update_rules(
+        rules,
+        "pks",
+        {"НеЗамещать": True},
+        owner="Организации",
+        keys=["Контакты/Почта", "ИНН"],
+    )
+    assert [item.address for item in results] == [
+        "ПКО «Организации» / ПКС ИНН",
+        "ПКО «Организации» / ПКС Контакты/Почта",
+    ]
+    assert _pks_flags(rules)["КПП"] is None
+    assert _pks_flags(rules)["Контакты"] is None
+    assert _pks_flags(rules)["Контакты/Телефон"] is None
+
+
+def test_update_rules_unknown_key_changes_nothing() -> None:
+    """Неизвестный адрес в keys или except_keys — ошибка до правок."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    _pks_with_group(rules)
+    before = dump_rules(rules)
+    with pytest.raises(RuleNotFoundError):
+        update_rules(
+            rules,
+            "pks",
+            {"НеЗамещать": True},
+            owner="Организации",
+            keys=["ИНН", "НетТакого"],
+        )
+    with pytest.raises(RuleNotFoundError):
+        update_rules(
+            rules,
+            "pks",
+            {"НеЗамещать": True},
+            owner="Организации",
+            except_keys=["НетТакого"],
+        )
+    assert dump_rules(rules) == before
+
+
+def test_update_rules_rolls_back_when_a_later_target_fails(tmp_path: Path) -> None:
+    """Структура принимает первые ПКС и отвергает третий: флаг не остаётся ни на одном."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    props = [
+        ("Реквизит", "ИНН", "ИНН", "Строка", ()),
+        ("Реквизит", "КПП", "КПП", "Строка", ()),
+    ]
+    source.add("Справочник", "Организации", props)
+    target.add("Справочник", "Организации", props)
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    create_rule(rules, "pks", "КПП", _pks_sides("КПП", type_name="Строка"), owner="Организации")
+    create_rule(
+        rules,
+        "pks_group",
+        "Контакты",
+        {
+            "Источник": _side("Контакты", "ТабличнаяЧасть"),
+            "Приемник": _side("Контакты", "ТабличнаяЧасть"),
+        },
+        owner="Организации",
+    )
+    create_rule(
+        rules,
+        "pks",
+        "Контакты/Телефон",
+        _pks_sides("Телефон", type_name="Строка"),
+        owner="Организации",
+    )
+    before = dump_rules(rules)
+    with pytest.raises(DanglingReferenceError, match=r"Контакты\.Телефон"):
+        update_rules(
+            rules,
+            "pks",
+            {"НеЗамещать": True},
+            owner="Организации",
+            source=source.conn,
+            target=target.conn,
+        )
+    assert dump_rules(rules) == before
+
+
+def test_update_rules_rejects_top_level_kind() -> None:
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    before = dump_rules(rules)
+    with pytest.raises(RuleEditError, match="rule_update по одному"):
+        update_rules(rules, "pko", {"НеЗамещать": False}, owner="Организации")
+    assert dump_rules(rules) == before
+
+
+def test_update_rules_rejects_empty_selection() -> None:
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    with pytest.raises(RuleEditError, match="Нечего менять"):
+        update_rules(
+            rules,
+            "pks",
+            {"НеЗамещать": True},
+            owner="Организации",
+            except_keys=["ИНН"],
+        )
+
+
+def test_update_rules_group_kind_touches_only_groups() -> None:
+    """Вид pks_group меняет группу и не ставит флаг вложенным ПКС."""
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    _pks_with_group(rules)
+    results = update_rules(rules, "pks_group", {"НеЗамещать": True}, owner="Организации")
+    assert [item.address for item in results] == ["ПКО «Организации» / ПКС Контакты"]
+    flags = _pks_flags(rules)
+    assert flags["Контакты"] is True
+    assert flags["Контакты/Телефон"] is None
+    assert flags["ИНН"] is None
+
+
+def test_update_rules_pkz_except_one() -> None:
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    create_rule(rules, "pkz", "Удержание", {"Приемник": "Удержание"}, owner="ВидыОпераций")
+    results = update_rules(
+        rules,
+        "pkz",
+        {"Наименование": "Значение"},
+        owner="ВидыОпераций",
+        except_keys=["Начисление"],
+    )
+    assert [item.address for item in results] == ["ПКО «ВидыОпераций» / ПКЗ Удержание"]
+    kept = find_rule(rules, "pkz", "Начисление", "ВидыОпераций")
+    changed = find_rule(rules, "pkz", "Удержание", "ВидыОпераций")
+    assert "Наименование" not in kept.values
+    assert changed.values["Наименование"] == "Значение"
 
 
 def test_pks_code_and_order_round_trip() -> None:
