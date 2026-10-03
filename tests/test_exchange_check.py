@@ -65,6 +65,8 @@ def test_snippets_quote_values_and_payloads() -> None:
     assert '"Правила.zip"' in snippets["load_rules"]
     assert "ВоВременноеХранилище( " in snippets["export_object"]
     assert 'МенеджерОбъектаПоПолномуИмени("Документ.Заказ")' in snippets["export_object"]
+    export = snippets["export_object"]
+    assert export.index("УдалитьРегистрациюИзменений") < export.index("ЗарегистрироватьИзменения")
 
 
 def test_short_error_drops_code_echo_and_stack() -> None:
@@ -255,9 +257,11 @@ def test_run_protocol(
     expected: list[str],
 ) -> None:
     monkeypatch.setattr(ec, "RUNS", tmp_path)
+    rules = tmp_path / "rules.zip"
+    rules.write_bytes(b"PK\x03\x04")
     message = base64.b64encode("<ФайлОбмена/>".encode()).decode()
-    source = _Scripted("a.src", ["OK KD2S", "OK", f"OK {message}"])
-    target = _Scripted("a.dst", ["OK KD2T", imported, found])
+    source = _Scripted("a.src", ["OK KD2S", "OK", "OK", f"OK {message}"])
+    target = _Scripted("a.dst", ["OK KD2T", "OK", imported, found])
     args = ec.parse_args(
         [
             "run",
@@ -271,6 +275,10 @@ def test_run_protocol(
             "Документ.З",
             "--ref",
             "0a",
+            "--source-rules",
+            str(rules),
+            "--target-rules",
+            str(rules),
             "--query",
             "ВЫБРАТЬ 1",
             "--expect-rows",
@@ -281,6 +289,10 @@ def test_run_protocol(
     assert ec.run(args, source, target, lines) is ok
     text = "\n".join(lines)
     assert "ИСТОЧНИК a.src (KD2S) → ПРИЕМНИК a.dst (KD2T)" in text
+    sostav = f"СОСТАВ Документ.З входит в план обмена {PLAN} в a.src"
+    assert sostav in text
+    assert text.index(sostav) < text.index("ПРАВИЛА")
+    assert "РЕГИСТРАЦИЯ узла KD2T в источнике очищена, зарегистрирован Документ.З" in text
     assert all(item in text for item in expected), text
     assert (next(tmp_path.glob("exchange-*")) / "message.xml").read_text("utf-8") == "<ФайлОбмена/>"
 

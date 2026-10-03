@@ -36,10 +36,13 @@
 `available` — папка проекта подключена к серверу; `structure_id` — под каким именем
 `structure_load_project` загружает конфигурацию; `rules_dir` — папка живых правил проекта
 (`writable` — туда можно сохранять `rules_save`). `folder` — папка проекта путём агента,
-если она задана на сервере; иначе ключа нет. `code_mcp`/`data_mcp` — имена как в
-`.mcp.json` проекта (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` —
-с префиксом проекта (работа из папки сервера). В корне ответа: `workspace` — рабочая
-папка путём агента, `shared_mcp` — общие серверы без префикса.
+если она задана на сервере; иначе ключа нет. У каждой базы `login` — задан ли логин
+(`true` или `false`): пара из `logins` в `projects.local.yaml` или `IB_USER` в `.dev.env`;
+имя и пароль в ответ не попадают. Если сервер не видит `projects.local.yaml`, признак
+считается только по `.dev.env`. `code_mcp`/`data_mcp` — имена как в `.mcp.json` проекта
+(работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` — с префиксом проекта
+(работа из папки сервера). В корне ответа: `workspace` — рабочая папка путём агента,
+`shared_mcp` — общие серверы без префикса.
 
 Параметров нет.
 
@@ -491,7 +494,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 
 | Инструмент | Ключи ответа |
 |---|---|
-| `project_list` | `workspace` — рабочая папка путём агента; `shared_mcp` — общие серверы без префикса; `projects` — по проекту: `project`, `name`, `available`, `folder` — папка проекта путём агента, если задана на сервере (иначе ключа нет), `configurations` (`structure_id`, `dump`, `extensions`), `bases` (`role`, `configuration`, у песочницы — `data_mcp` и `data_mcp_server`), `code_mcp`, `code_mcp_server`, `rules_dir` (`path`, `writable`) — если задан; `exchanges` — `plan`, `projects`. `code_mcp`/`data_mcp` — имена как в `.mcp.json` проекта (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` — с префиксом проекта (работа из папки сервера) |
+| `project_list` | `workspace` — рабочая папка путём агента; `shared_mcp` — общие серверы без префикса; `projects` — по проекту: `project`, `name`, `available`, `folder` — папка проекта путём агента, если задана на сервере (иначе ключа нет), `configurations` (`structure_id`, `dump`, `extensions`), `bases` (`role`, `configuration`, `login` — `true`, если логин задан в `logins` или `.dev.env`, иначе `false`; имя и пароль не отдаются; сервер не видит `projects.local.yaml` — признак только по `.dev.env`; у песочницы — `data_mcp` и `data_mcp_server`), `code_mcp`, `code_mcp_server`, `rules_dir` (`path`, `writable`) — если задан; `exchanges` — `plan`, `projects`. `code_mcp`/`data_mcp` — имена как в `.mcp.json` проекта (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` — с префиксом проекта (работа из папки сервера) |
 | `structure_load_project` | как у `structure_load_xml` + `project`, `configuration` |
 | `structure_list` | `structures` — `structure_id`, `configuration`, `synonym`, `version`, `source`, `source_path`, `extensions`, `loaded_at` |
 | `structure_load_xml`, `structure_load_md83exp` | `structure_id`, `reused`, `counts`, `elapsed_s`, `message`; при неразрешённых типах — `unresolved_total`, `unresolved_top` (до 20) |

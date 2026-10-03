@@ -39,3 +39,6 @@ tmp/
 /course/
 # worktree субагентов Claude Code (создаются на время задачи)
 /.claude/worktrees/
+
+# Кэш uv для воркера Codex в worktree (скилл codex-delegate)
+/.uv-cache/

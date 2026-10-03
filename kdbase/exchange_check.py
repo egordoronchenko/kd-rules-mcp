@@ -16,9 +16,10 @@
   заданный не меняется), узел корреспондента в каждой базе, признак «настройка завершена», сверка
   идентификаторов узлов.
 - `run --plan … --source … --target … --object <Документ.Имя> --ref <уникальный идентификатор>` —
-  до загрузки правил проверяется состав плана обмена;
+  до загрузки правил проверяется состав плана обмена (успех — строка `СОСТАВ` в протоколе);
   `--source-rules` / `--target-rules` (ZIP комплекта из трёх файлов; без них — правила баз),
-  выгрузка, загрузка, `--query <запрос к приёмнику>` и `--expect-rows N`. Протокол — в stdout,
+  снятие регистраций узла и регистрация объекта (строка `РЕГИСТРАЦИЯ`), выгрузка, загрузка,
+  `--query <запрос к приёмнику>` и `--expect-rows N`. Протокол — в stdout,
   сообщение обмена — в `kdbase\\run\\exchange-<время>\\`. Код выхода 0 — «ИТОГ OK», 1 — ошибка.
 
 Точки входа БСП (3.1.12): `ОбменДаннымиСервер` —
@@ -108,7 +109,7 @@ def plan_content_check(plan: str, full_name: str) -> str:
 
 
 def export_object(plan: str, node_code: str, full_name: str, ref: str) -> str:
-    """Регистрация одного объекта на узле и выгрузка; «OK <сообщение в base64>»."""
+    """Снятие регистраций узла, регистрация одного объекта и выгрузка; «OK <сообщение в base64>»."""
     return guarded(
         f"""Узел = ПланыОбмена[{bsl(plan)}].НайтиПоКоду({bsl(node_code)});
         Если Узел.Пустая() Тогда
@@ -209,6 +210,7 @@ def run(args: argparse.Namespace, source: DataServer, target: DataServer, lines:
     if answer != "OK":
         detail = short_error(answer) if answer else "пустой ответ сервера данных"
         raise ExchangeCheckError(f"{source.label}: проверка состава плана: {detail}")
+    lines.append(f"СОСТАВ {args.object} входит в план обмена {args.plan} в {source.label}")
     for label, server, archive in (
         ("ИСТОЧНИКА", source, args.source_rules),
         ("ПРИЕМНИКА", target, args.target_rules),
@@ -218,6 +220,9 @@ def run(args: argparse.Namespace, source: DataServer, target: DataServer, lines:
             lines.append(f"ПРАВИЛА {label} {archive}: загружены")
     lines.append(f"ОБЪЕКТ {args.object} {args.ref}")
     exported = source.run(export_object(args.plan, target_code, args.object, args.ref))
+    lines.append(
+        f"РЕГИСТРАЦИЯ узла {target_code} в источнике очищена, зарегистрирован {args.object}"
+    )
     message = base64.b64decode(exported)
     run_dir = RUNS / f"exchange-{datetime.now():%Y%m%d-%H%M%S-%f}"
     run_dir.mkdir(parents=True)

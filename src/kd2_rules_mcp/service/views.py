@@ -1,6 +1,7 @@
 """Представления ответов инструментов: страницы, строки правил, итоги проверок и правок."""
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from kd2_rules_mcp.authoring.candidates import Candidate, Confidence
@@ -13,6 +14,7 @@ from kd2_rules_mcp.authoring.registration import (
 from kd2_rules_mcp.errors import Kd2Error, ObjectNotFoundError
 from kd2_rules_mcp.kd2.diff import TEXT_LIMIT, clip
 from kd2_rules_mcp.kd2.model import Node, RegistrationRules, RulesDocument
+from kd2_rules_mcp.projects import Base, LocalSettings, base_login, dev_env_login, resolve
 from kd2_rules_mcp.structures.queries import MAX_LIMIT, NotFound, Page
 from kd2_rules_mcp.validation.address import rule_address, side_name, walk_pks
 from kd2_rules_mcp.validation.report import ValidationReport
@@ -61,6 +63,42 @@ _KIND_SECTIONS = {
 def project_structure_id(project_id: str, configuration_id: str) -> str:
     """Идентификатор структуры конфигурации проекта: `<проект>-<конфигурация>`."""
     return f"{project_id}-{configuration_id}"
+
+
+def project_base_view(
+    project_id: str,
+    base: Base,
+    local: LocalSettings | None,
+    project_dir: Path | None,
+) -> dict[str, Any]:
+    """Строка базы в `project_list`: роль, признак логина и сервер данных песочницы.
+
+    `login` — задана ли пара пользователя (`logins` личного файла или `IB_USER` в `.dev.env`).
+    Личный файл серверу не виден — признак только по `.dev.env`. Имя и пароль не отдаются.
+    """
+    row: dict[str, Any] = {
+        "role": base.role,
+        "configuration": base.configuration,
+        "login": _base_login_set(project_id, base, local, project_dir),
+    }
+    if base.data_mcp and base.is_sandbox:
+        row["data_mcp"] = base.data_mcp
+        row["data_mcp_server"] = f"{project_id}-{base.data_mcp}"
+    return row
+
+
+def _base_login_set(
+    project_id: str,
+    base: Base,
+    local: LocalSettings | None,
+    project_dir: Path | None,
+) -> bool:
+    """Есть ли логин базы. Личные настройки недоступны — смотрим только `.dev.env`."""
+    if local is not None:
+        return base_login(local, project_id, base) is not None
+    if project_dir is None or not base.dev_env:
+        return False
+    return dev_env_login(resolve(project_dir, base.dev_env)) is not None
 
 
 def note_private(view: dict[str, Any], private: bool) -> dict[str, Any]:

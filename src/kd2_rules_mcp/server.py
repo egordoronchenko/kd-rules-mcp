@@ -186,10 +186,13 @@ def create_server(service: Kd2Service) -> MCPServer:
         `available` — папка проекта подключена к серверу; `structure_id` — под каким именем
         `structure_load_project` загружает конфигурацию; `rules_dir` — папка живых правил проекта
         (`writable` — туда можно сохранять `rules_save`). `folder` — папка проекта путём агента,
-        если она задана на сервере; иначе ключа нет. `code_mcp`/`data_mcp` — имена как в
-        `.mcp.json` проекта (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` —
-        с префиксом проекта (работа из папки сервера). В корне ответа: `workspace` — рабочая
-        папка путём агента, `shared_mcp` — общие серверы без префикса.
+        если она задана на сервере; иначе ключа нет. У каждой базы `login` — задан ли логин
+        (`true` или `false`): пара из `logins` в `projects.local.yaml` или `IB_USER` в `.dev.env`;
+        имя и пароль в ответ не попадают. Если сервер не видит `projects.local.yaml`, признак
+        считается только по `.dev.env`. `code_mcp`/`data_mcp` — имена как в `.mcp.json` проекта
+        (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` — с префиксом проекта
+        (работа из папки сервера). В корне ответа: `workspace` — рабочая папка путём агента,
+        `shared_mcp` — общие серверы без префикса.
         """
         return await call(service.project_list)
 

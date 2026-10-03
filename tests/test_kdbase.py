@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT / "kdbase"))
 import bsp_check  # noqa: E402 — скрипт из kdbase/, не пакет
 import bsp_load  # noqa: E402 — скрипт из kdbase/, не пакет
 import exchange_check  # noqa: E402 — скрипт из kdbase/, не пакет
+import kd_check  # noqa: E402 — скрипт из kdbase/, не пакет
 
 _needs_base = pytest.mark.skipif(
     os.environ.get("KD2_KDBASE_CHECK") != "1",
@@ -147,6 +148,32 @@ def test_bsp_accepts_real_rules_pair() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ИТОГ OK" in result.stdout
+
+
+def test_check_without_base_prints_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Нет `1Cv8.1CD` — протокол с ошибкой, без трассировки и без запуска 1С."""
+    rules = tmp_path / "rules.xml"
+    rules.write_text(
+        "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата></ПравилаОбмена>",
+        encoding="utf-8",
+    )
+    empty = tmp_path / "empty-base"
+    empty.mkdir()
+    monkeypatch.setattr(kd_check, "BASE", empty)
+    monkeypatch.setattr(kd_check, "RUNS", tmp_path / "run")
+    code = kd_check.check(rules)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert (
+        "ОШИБКА нет базы КД: создайте файловую базу «Конвертация данных 2.1» "
+        "в base\\ и выполните kd_check.py prepare"
+    ) in out
+    assert "ИТОГ ОШИБКА" in out
+    assert out.rstrip().endswith("КОНЕЦ")
+    assert "Traceback" not in out
+    assert not (tmp_path / "run").exists()
 
 
 def test_require_login_refuses_client_server_without_user(monkeypatch: pytest.MonkeyPatch) -> None:

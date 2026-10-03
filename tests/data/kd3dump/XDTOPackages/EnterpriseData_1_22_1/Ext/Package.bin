@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://v8.1c.ru/8.1/xdto" targetNamespace="http://v8.1c.ru/edi/edi_stnd/EnterpriseData/1.22">
+  <objectType name="Справочник.Товары"/>
+  <valueType name="ВидыТоваров"/>
+</package>

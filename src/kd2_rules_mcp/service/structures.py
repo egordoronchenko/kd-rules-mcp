@@ -6,7 +6,13 @@ from typing import Any
 from kd2_rules_mcp.errors import Kd2Error
 from kd2_rules_mcp.projects import resolve
 from kd2_rules_mcp.service.base import ServiceBase
-from kd2_rules_mcp.service.views import page_limit, page_view, project_structure_id, require_found
+from kd2_rules_mcp.service.views import (
+    page_limit,
+    page_view,
+    project_base_view,
+    project_structure_id,
+    require_found,
+)
 from kd2_rules_mcp.structures.queries import (
     compare_structures,
     describe_object,
@@ -40,6 +46,7 @@ class StructuresMixin(ServiceBase):
     def project_list(self) -> dict[str, Any]:
         catalog = self._catalog()
         writable = self.rules_dirs()
+        local = self._local_settings()
         projects = []
         for project in catalog.projects.values():
             folder = self.settings.project_dirs.get(project.id)
@@ -57,18 +64,7 @@ class StructuresMixin(ServiceBase):
                     for config in project.configurations.values()
                 },
                 "bases": {
-                    base.id: {
-                        "role": base.role,
-                        "configuration": base.configuration,
-                        **(
-                            {
-                                "data_mcp": base.data_mcp,
-                                "data_mcp_server": f"{project.id}-{base.data_mcp}",
-                            }
-                            if base.data_mcp and base.is_sandbox
-                            else {}
-                        ),
-                    }
+                    base.id: project_base_view(project.id, base, local, folder)
                     for base in project.bases.values()
                 },
                 "code_mcp": list(project.code_mcp),

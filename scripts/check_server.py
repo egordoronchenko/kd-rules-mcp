@@ -5,6 +5,7 @@
 Запуск: `uv run python scripts/check_server.py [адрес]`; код выхода 0 — всё в порядке.
 """
 
+import argparse
 import asyncio
 import json
 import sys
@@ -20,10 +21,15 @@ from kd2_rules_mcp.projects import LocalSettings, load_local
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def server_url() -> str:
+def server_url(argv: list[str] | None = None) -> str:
     """Адрес из аргумента, иначе из projects.local.yaml, иначе адрес по умолчанию."""
-    if len(sys.argv) > 1:
-        return sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("url", nargs="?", help="адрес сервера")
+    args = parser.parse_args(argv)
+    if args.url is not None:
+        return args.url
     local = ROOT / "projects.local.yaml"
     return (load_local(local) if local.is_file() else LocalSettings()).server_url
 
@@ -35,6 +41,11 @@ async def check(url: str) -> int:
         print(f"Сервер {url}: {len(items)} инструментов")
         result = await client.call_tool("project_list", {})
         data = _payload(result)
+    return print_projects(data)
+
+
+def print_projects(data: Any) -> int:
+    """Печатает проекты из ответа `project_list`; код 1 — ни одна папка не видна."""
     projects = data.get("projects", []) if isinstance(data, dict) else []
     if not projects:
         print("  проектов нет — опишите их в projects.yaml и перезапустите контейнер")
@@ -50,11 +61,25 @@ async def check(url: str) -> int:
                 f"  {project['project']}: папка НЕ видна — проверьте projects.local.yaml, "
                 "setup_local.py, docker compose up -d"
             )
+        _print_bases(project.get("bases"))
         rules = project.get("rules_dir")
         if rules:
             state = "запись есть" if rules.get("writable") else "НЕ подключена на запись"
             print(f"    папка правил {rules.get('path')}: {state}")
     return 1 if hidden == len(projects) else 0
+
+
+def _print_bases(bases: Any) -> None:
+    """Строка на базу: логин есть или нет, сервер данных — имя или «нет»."""
+    if not isinstance(bases, dict):
+        return
+    for base_id, base in bases.items():
+        if not isinstance(base, dict):
+            continue
+        login = "есть" if base.get("login") else "нет"
+        server = base.get("data_mcp_server") or base.get("data_mcp") or "нет"
+        role = base.get("role") or ""
+        print(f"    база {base_id} ({role}): логин {login}, сервер данных: {server}")
 
 
 def _payload(result: Any) -> Any:

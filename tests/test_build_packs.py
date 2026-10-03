@@ -171,8 +171,132 @@ def test_cursor_flag_copies_http_servers_and_skips_stdio(
     assert servers["meta"] == {"url": "http://meta/mcp"}
     assert servers["kd2-rules-mcp"] == {"url": URL}
     assert "local-stdio" not in servers
-    assert "перенесено серверов из .mcp.json: 2" in report
-    assert any("local-stdio" in line for line in report)
+    assert "перенесено серверов из .mcp.json: 2 (новых: code, meta)" in report
+    assert "не перенесены: local-stdio" in report
+
+
+def test_cursor_flag_adds_missing_servers_to_existing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Существующий файл: недостающие HTTP дописываются, свои записи и заголовки нет."""
+    headers = {"Authorization": "Bearer kept"}
+    monkeypatch.setattr(build_packs, "default_server_headers", lambda: headers)
+    kd2 = {"url": URL, "headers": headers}
+    kept = {"url": "http://old/mcp", "headers": {"X-Custom": "1"}}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "code": {
+                        "type": "http",
+                        "url": "http://code/mcp",
+                        "headers": {"Authorization": "Basic x"},
+                    },
+                    "kept-1c": {"url": "http://new/mcp"},
+                    "meta": {"url": "http://meta/mcp"},
+                    "local-stdio": {"command": "node", "args": ["srv.js"]},
+                    "kd2-rules-mcp": {
+                        "type": "http",
+                        "url": "http://other/mcp",
+                        "headers": {"Authorization": "Basic from-mcp"},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"kd2-rules-mcp": kd2, "kept-1c": kept}}),
+        encoding="utf-8",
+    )
+
+    report = build_packs.install(tmp_path, "claude", URL, cursor=True)
+
+    servers = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))[
+        "mcpServers"
+    ]
+    assert servers["kd2-rules-mcp"] == kd2
+    assert servers["kept-1c"] == kept
+    assert servers["code"] == {"url": "http://code/mcp", "headers": {"Authorization": "Basic x"}}
+    assert "type" not in servers["code"]
+    assert servers["meta"] == {"url": "http://meta/mcp"}
+    assert "local-stdio" not in servers
+    assert "перенесено серверов из .mcp.json: 2 (новых: code, meta)" in report
+    assert "не перенесены: local-stdio" in report
+
+
+def test_cursor_flag_keeps_edited_url_and_reports_nothing_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Запись сервера 1С с другим url не заменяется; переносить нечего — отдельная строка."""
+    monkeypatch.setattr(build_packs, "default_server_headers", lambda: None)
+    kept = {"url": "http://old/mcp"}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "code": {"type": "http", "url": "http://new/mcp"},
+                    "local-stdio": {"command": "node", "args": ["srv.js"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"kd2-rules-mcp": {"url": URL}, "code": kept}}),
+        encoding="utf-8",
+    )
+
+    report = build_packs.install(tmp_path, "claude", URL, cursor=True)
+
+    servers = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))[
+        "mcpServers"
+    ]
+    assert servers["code"] == kept
+    assert servers["kd2-rules-mcp"] == {"url": URL}
+    assert "серверы 1С в `.cursor/mcp.json` уже есть" in report
+    assert "не перенесены: local-stdio" in report
+    assert not any(line.startswith("перенесено серверов") for line in report)
+
+
+def test_existing_cursor_without_flag_names_missing_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без --cursor существующий файл не пополняется, недостающие серверы 1С называются."""
+    monkeypatch.setattr(build_packs, "default_server_headers", lambda: None)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "code": {"type": "http", "url": "http://code/mcp"},
+                    "meta": {"url": "http://meta/mcp"},
+                    "local-stdio": {"command": "node", "args": ["srv.js"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"kd2-rules-mcp": {"url": URL}}}),
+        encoding="utf-8",
+    )
+
+    report = build_packs.install(tmp_path, "claude", URL)
+
+    servers = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))[
+        "mcpServers"
+    ]
+    assert set(servers) == {"kd2-rules-mcp"}
+    assert servers["kd2-rules-mcp"] == {"url": URL}
+    assert (
+        "Cursor: в `.cursor/mcp.json` нет серверов 1С: code, meta — "
+        "запустите с `--cursor` или добавьте их в настройках MCP Cursor"
+    ) in report
+    hint = next(line for line in report if "нет серверов 1С" in line)
+    assert "local-stdio" not in hint
 
 
 def test_dest_cursor_flag_creates_cursor_mcp_json(

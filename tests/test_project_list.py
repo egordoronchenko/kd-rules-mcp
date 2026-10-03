@@ -97,6 +97,7 @@ async def test_project_list_reports_agent_paths_and_server_names(tmp_path: Path)
     sandbox = by_id["alpha"]["bases"]["sandbox"]
     assert sandbox["data_mcp"] == "data-a"
     assert sandbox["data_mcp_server"] == "alpha-data-a"
+    assert sandbox["login"] is False
     assert by_id["alpha"]["folder"] == HOST_PROJECT
     assert "folder" not in by_id["beta"]
 
@@ -129,3 +130,82 @@ async def test_project_list_server_names_match_setup_local(tmp_path: Path) -> No
     assert set(prefixed) <= servers.keys()
     assert set(plain).isdisjoint(servers.keys())
     assert set(listed["shared_mcp"]) <= servers.keys()
+
+
+USER_LOGIN = "СекретныйАгент"
+USER_ENV = "ПользовательСреды"
+SECRET = "ПарольКоторыйНельзя"
+
+LOGIN_CATALOG = """
+projects:
+  alpha:
+    name: Альфа
+    configurations:
+      full: {dump: main}
+    bases:
+      with_login:
+        {role: песочница, configuration: full, connection: 'File="C:\\\\A";'}
+      from_env:
+        {role: песочница, configuration: full, connection: 'File="C:\\\\B";', dev_env: .dev.env}
+      plain:
+        {role: боевая, configuration: full, connection: 'File="C:\\\\C";'}
+"""
+
+
+def _login_settings(tmp_path: Path, *, with_local: bool) -> Settings:
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    (alpha / ".dev.env").write_text(f"IB_USER={USER_ENV}\nIB_PASSWORD={SECRET}\n", encoding="utf-8")
+    catalog = tmp_path / "projects.yaml"
+    catalog.write_text(LOGIN_CATALOG, encoding="utf-8")
+    if with_local:
+        (tmp_path / "projects.local.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "projects": {"alpha": str(alpha)},
+                    "logins": {"alpha.with_login": {"user": USER_LOGIN, "password": SECRET}},
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+    return Settings(
+        cache_dir=tmp_path / "cache",
+        workspace=tmp_path / "ws",
+        projects_file=catalog,
+        project_dirs={"alpha": alpha},
+    )
+
+
+@pytest.mark.anyio
+async def test_project_list_login_flag_hides_credentials(tmp_path: Path) -> None:
+    """`logins` и `IB_USER` дают `login: true`; значения в ответ не попадают."""
+    settings = _login_settings(tmp_path, with_local=True)
+    async with Client(create_server(Kd2Service(settings))) as client:
+        listed = (await client.call_tool("project_list", {})).structured_content
+    assert listed is not None
+    bases = {item["project"]: item for item in listed["projects"]}["alpha"]["bases"]
+    assert bases["with_login"]["login"] is True
+    assert bases["from_env"]["login"] is True
+    assert bases["plain"]["login"] is False
+    assert all("login" in base for base in bases.values())
+    text = json.dumps(listed, ensure_ascii=False)
+    assert USER_LOGIN not in text
+    assert USER_ENV not in text
+    assert SECRET not in text
+
+
+@pytest.mark.anyio
+async def test_project_list_login_flag_without_local_file_uses_dev_env(tmp_path: Path) -> None:
+    """Нет `projects.local.yaml` — признак только по `.dev.env`, `logins` не видны."""
+    settings = _login_settings(tmp_path, with_local=False)
+    async with Client(create_server(Kd2Service(settings))) as client:
+        listed = (await client.call_tool("project_list", {})).structured_content
+    assert listed is not None
+    bases = {item["project"]: item for item in listed["projects"]}["alpha"]["bases"]
+    assert bases["with_login"]["login"] is False
+    assert bases["from_env"]["login"] is True
+    assert bases["plain"]["login"] is False
+    text = json.dumps(listed, ensure_ascii=False)
+    assert USER_ENV not in text
+    assert SECRET not in text

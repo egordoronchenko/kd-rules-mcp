@@ -16,7 +16,13 @@ from kd2_rules_mcp.errors import (
     WorkspacePathError,
 )
 from kd2_rules_mcp.kd2.model import ExchangeRules, RegistrationRules, RulesDocument
-from kd2_rules_mcp.projects import Catalog, load_catalog, project_rules_dirs
+from kd2_rules_mcp.projects import (
+    Catalog,
+    LocalSettings,
+    load_catalog,
+    load_local,
+    project_rules_dirs,
+)
 from kd2_rules_mcp.service.paths import Settings, _is_absolute
 from kd2_rules_mcp.service.views import counts, edit_view
 from kd2_rules_mcp.structures.store import LoadResult, StructureStore
@@ -74,6 +80,13 @@ class ServiceBase:
 
     def _catalog(self) -> Catalog:
         return load_catalog(self.settings.projects_file)
+
+    def _local_settings(self) -> LocalSettings | None:
+        """Личный `projects.local.yaml` рядом с общим файлом; сервер его не видит — `None`."""
+        path = self.settings.projects_file.with_name("projects.local.yaml")
+        if not path.is_file():
+            return None
+        return load_local(path)
 
     def rules_dirs(self) -> dict[str, Path]:
         """Папки живых правил проектов на сервере (запись разрешена): `KD2_RULES_DIRS` или
