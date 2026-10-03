@@ -1,4 +1,4 @@
-"""Границы пятнадцати проверок связности: нарушение, чистый пример, пропуски."""
+"""Границы шестнадцати проверок связности: нарушение, чистый пример, пропуски."""
 
 import re
 from pathlib import Path
@@ -50,9 +50,19 @@ def _pko_procedure(name: str, procedure: str | None = None) -> str:
     )
 
 
-HANDLER_MISSING = (
-    "Для события «{event}» правило называет «{name}», "
-    "но ветка диспетчера не найдена: обработчик не будет вызван."
+HANDLER_PRESENT = (
+    "Для события «{event}» правило называет «{name}»: "
+    "ветки диспетчера нет, процедура в модуле есть. "
+    "Добавьте ветку диспетчера. Обработчик не будет вызван."
+)
+HANDLER_ABSENT = (
+    "Для события «{event}» правило называет «{name}»: "
+    "нет ни ветки диспетчера, ни процедуры. "
+    "Правило называет обработчик, которого нет. Обработчик не будет вызван."
+)
+HANDLER_DEFERRED = (
+    "Для события «{event}» правило называет «{name}»: "
+    "{gap}. Обмен не прерывается, объект записывается повторно."
 )
 
 
@@ -162,7 +172,7 @@ def test_handler_missing_is_error_until_branch_exists(version):
     issue = only(report, "ed.handler.missing")
     assert issue.level.value == "ошибка"
     assert issue.address == "ПКО/Товар"
-    assert issue.message == HANDLER_MISSING.format(event="ПриОтправкеДанных", name="Обработать")
+    assert issue.message == HANDLER_PRESENT.format(event="ПриОтправкеДанных", name="Обработать")
     linked = put(
         text,
         "proc",
@@ -177,6 +187,32 @@ def test_missing_branch_is_not_also_a_missing_target():
     text = put(module_text(), "pko", 'ПравилоКонвертации.ПриОтправкеДанных = "Обработать";')
     _document, _references, report = analyze(text)
     assert checks(report) == ["ed.handler.missing"]
+    assert report.issues[0].message == HANDLER_ABSENT.format(
+        event="ПриОтправкеДанных", name="Обработать"
+    )
+
+
+def test_deferred_handler_missing_names_rewrite_and_keeps_resolution():
+    absent = put(module_text(), "pko", 'ПравилоКонвертации.ПослеЗагрузкиВсехДанных = "Отложенно";')
+    document, _references, report = analyze(absent)
+    issue = only(report, "ed.handler.missing")
+    binding = next(item for item in document.pko[0].events if item.target_name == "Отложенно")
+    assert binding.resolution == "missing"
+    assert issue.message == HANDLER_DEFERRED.format(
+        event="ПослеЗагрузкиВсехДанных",
+        name="Отложенно",
+        gap="нет ни ветки диспетчера, ни процедуры. Правило называет обработчик, которого нет",
+    )
+    present = absent + "\nПроцедура Отложенно(Объект)\nКонецПроцедуры\n"
+    document, _references, report = analyze(present)
+    issue = only(report, "ed.handler.missing")
+    binding = next(item for item in document.pko[0].events if item.target_name == "Отложенно")
+    assert binding.resolution == "resolved"
+    assert issue.message == HANDLER_DEFERRED.format(
+        event="ПослеЗагрузкиВсехДанных",
+        name="Отложенно",
+        gap="ветки диспетчера нет, процедура в модуле есть. Добавьте ветку диспетчера",
+    )
 
 
 def test_handler_ambiguous_counts_branches_inside_one_dispatcher():
@@ -331,8 +367,8 @@ def test_extended_request_event_is_skipped_and_object_events_are_checked():
     _document, _references, report = analyze(text)
     assert checks(report) == ["ed.handler.missing", "ed.handler.missing"]
     assert [issue.message for issue in report.issues] == [
-        HANDLER_MISSING.format(event="ПослеКонвертацииОбъекта", name="ПослеОбъекта"),
-        HANDLER_MISSING.format(event="ПриУдаленииОбъектаИБ", name="УдалитьОбъект"),
+        HANDLER_ABSENT.format(event="ПослеКонвертацииОбъекта", name="ПослеОбъекта"),
+        HANDLER_ABSENT.format(event="ПриУдаленииОбъектаИБ", name="УдалитьОбъект"),
     ]
     assert "Подобрать" not in " ".join(issue.message for issue in report.issues)
     assert (
@@ -432,6 +468,57 @@ def test_code_rule_missing_forms(snippet, kind, label):
     assert issue.message == (
         f"Строка {ref.span.line_start}: {label} ссылается на отсутствующее правило «НетПравила»."
     )
+
+
+def _pod_handler(body: str, base: str | None = None) -> str:
+    text = put(base or module_text(), "pod", 'ПравилоОбработки.ПриОбработке = "ОбработатьПОД";')
+    text = put(
+        text,
+        "proc",
+        """Если ИмяПроцедуры = "ОбработатьПОД" Тогда
+        ОбработатьПОД(Параметры);
+    КонецЕсли;""",
+    )
+    return text + (
+        "\nПроцедура ОбработатьПОД(ДанныеИБ, ИспользованиеПКО, КомпонентыОбмена)\n"
+        f"    {body}\n"
+        "КонецПроцедуры\n"
+    )
+
+
+def test_pod_usage_key_missing_is_separate_from_code_rule():
+    _document, _references, report = analyze(_pod_handler("ИспользованиеПКО.НетПравила = Ложь;"))
+    issue = only(report, "ed.reference.pod_usage_key_missing")
+    assert issue.level.value == "предупреждение"
+    assert issue.address == "Обработчик/ОбработатьПОД"
+    assert "ключ «НетПравила»" in issue.message
+    assert "ПОД «Товары»" in issue.message
+    assert "ПКО с именем «НетПравила» в модуле нет" in issue.message
+    assert "отказ по объекту" in issue.message
+    assert "обмен продолжается с ошибками" in issue.message
+    assert "ed.reference.code_rule_missing" not in checks(report)
+
+    defined = analyze(
+        _pod_handler("ИспользованиеПКО.Виды = Ложь;") + "\n" + _pko_procedure("Виды")
+    )[2]
+    issue = only(defined, "ed.reference.pod_usage_key_missing")
+    assert "ПКО с именем «Виды» в модуле есть" in issue.message
+
+    listed = analyze(_pod_handler("ИспользованиеПКО.товар = Ложь;"))[2]
+    assert listed.issues == []
+
+    base = module_text().replace(
+        'ПравилоОбработки.ИспользуемыеПКО.Добавить("Товар");',
+        'ПравилоОбработки.ИспользуемыеПКО.Добавить("НетПравила");',
+        1,
+    )
+    # Ключ есть в ИспользуемыеПКО: это не новый идентификатор, а прежние две проверки.
+    both = analyze(_pod_handler("ИспользованиеПКО.НетПравила = Ложь;", base))[2]
+    assert "ed.reference.pod_usage_key_missing" not in checks(both)
+    assert checks(both) == [
+        "ed.reference.pod_pko_missing",
+        "ed.reference.code_rule_missing",
+    ]
 
 
 def test_known_literal_and_computed_name_are_not_missing_rules():

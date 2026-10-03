@@ -1,6 +1,7 @@
 """Контракт сервиса ED на синтетических менеджерах, без изменения пакета чтения."""
 
 import hashlib
+import json
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -523,22 +524,22 @@ def test_validate_clean_base_and_existing_modules(service, tmp_path):
         "coverage",
     }
     assert report["summary"]["errors"] == 0 and report["summary"]["warnings"] == 0
-    assert report["skipped"] == [
-        {"check": "ed.schema", "reason": SCHEMA},
-        {
-            "check": "ed.structure",
-            "reason": "Структура конфигурации не передана: проверки по структуре не выполнялись",
-        },
-    ]
+    assert report["skipped"] == {
+        "total": 2,
+        "by_check": {"ed.schema": 1, "ed.structure": 1},
+    }
+    assert "reason" not in json.dumps(report["skipped"], ensure_ascii=False)
+    assert SCHEMA not in json.dumps(report["skipped"], ensure_ascii=False)
     assert report["summary"]["skipped"] == 2
     assert "ed.schema" in report["summary"]["text"]
+    assert "результат неполный" in report["summary"]["text"]
     assert_page(report["issues"], total=0)
     assert set(report["references"]["unparsed_by_kind"]) == REFERENCE_KINDS
     assert report["references"]["deferred_argument_unparsed"] == 0
     for version in (2, 3):
         opened_id = opened(service, version)
         existing = service.ed_validate(opened_id)
-        assert any(item["check"] == "ed.schema" for item in existing["skipped"])
+        assert existing["skipped"]["by_check"].get("ed.schema", 0) >= 1
         assert existing["issues"]["total"] == (
             existing["summary"]["errors"] + existing["summary"]["warnings"]
         )
@@ -585,19 +586,31 @@ def test_validate_profile_inputs_and_filters(service, tmp_path):
         },
     }
     assert result["coverage"]["checked"] > 0
+    nested = service.ed_validate(
+        project, schema_id=schema, structure_id=structure, address_prefix="ПКО/Тест"
+    )
+    assert nested["issues"]["items"] == result["issues"]["items"]
+    assert (
+        service.ed_validate(
+            project, schema_id=schema, structure_id=structure, address_prefix="ПКО/ТестПрочее"
+        )["issues"]["total"]
+        == 0
+    )
     filtered = service.ed_validate(
         project, schema_id=schema, structure_id=structure, check_prefix="ed.structure.", limit=1
     )
     assert not filtered["issues"]["items"] and filtered["summary"] == result["summary"]
     assert filtered["coverage"] == result["coverage"] and filtered["skipped"] == result["skipped"]
-    schema_only = service.ed_validate(project, schema_id=schema)
-    assert {s["check"] for s in schema_only["skipped"]} >= {
+    schema_only = service.ed_validate(project, schema_id=schema, section="skipped", limit=200)
+    assert {s["check"] for s in schema_only["skipped"]["items"]} >= {
         "ed.structure",
         "ed.schema.type_incompatible",
     }
-    structure_only = service.ed_validate(project, structure_id=structure)
-    assert any(s["check"] == "ed.schema" for s in structure_only["skipped"])
-    assert not any(s["check"] == "ed.structure" for s in structure_only["skipped"])
+    structure_only = service.ed_validate(
+        project, structure_id=structure, section="skipped", limit=200
+    )
+    assert any(s["check"] == "ed.schema" for s in structure_only["skipped"]["items"])
+    assert not any(s["check"] == "ed.structure" for s in structure_only["skipped"]["items"])
     path.write_text("не читается повторно", encoding="utf-8")
     assert service.ed_validate(project, schema_id=schema, structure_id=structure) == result
 
@@ -630,17 +643,21 @@ def test_validate_without_schema_keeps_version_condition_unknown(service, tmp_pa
     structure = service.structure_load_md83exp("synthetic", str(SCHEMA_DATA / "structure.xml"))[
         "structure_id"
     ]
-    unknown = service.ed_validate(project, structure_id=structure)
+    unknown = service.ed_validate(project, structure_id=structure, section="skipped", limit=200)
     assert any(
         s["check"] == "ed.structure.property_missing"
         and s["reason"].startswith("opaque_condition:")
-        for s in unknown["skipped"]
+        for s in unknown["skipped"]["items"]
     )
     assert unknown["coverage"]["opaque_conditions"] > 0
     schema = service.ed_schema_open("1.2", path=str(SCHEMA_DATA / "validation.bin"))["schema_id"]
-    known = service.ed_validate(project, schema_id=schema, structure_id=structure)
+    known = service.ed_validate(
+        project, schema_id=schema, structure_id=structure, section="skipped", limit=200
+    )
     assert known["coverage"]["opaque_conditions"] == 0
-    assert not [s for s in known["skipped"] if s["check"] == "ed.structure.property_missing"]
+    assert not [
+        s for s in known["skipped"]["items"] if s["check"] == "ed.structure.property_missing"
+    ]
 
 
 def test_validate_caches_structure_input_and_releases_general_lock(service, tmp_path, monkeypatch):
@@ -750,13 +767,10 @@ def test_validate_filters_pages_and_keeps_full_summary(service, tmp_path):
         "ed.handler.missing": 1,
         "ed.reference.code_rule_missing": 1,
     }
-    assert full["skipped"] == [
-        {"check": "ed.schema", "reason": SCHEMA},
-        {
-            "check": "ed.structure",
-            "reason": "Структура конфигурации не передана: проверки по структуре не выполнялись",
-        },
-    ]
+    assert full["skipped"] == {
+        "total": 2,
+        "by_check": {"ed.schema": 1, "ed.structure": 1},
+    }
     assert_page(full["issues"], total=2)
     errors = service.ed_validate(project, level="ошибка")
     warnings = service.ed_validate(project, level="предупреждение")
@@ -775,6 +789,71 @@ def test_validate_filters_pages_and_keeps_full_summary(service, tmp_path):
     page = service.ed_validate(project, offset=1, limit=1)
     assert_page(page["issues"], total=2, offset=1, limit=1)
     assert page["summary"]["by_check"] == full["summary"]["by_check"]
+    by_address = service.ed_validate(project, address_prefix="ПКО/Товар")
+    assert [item["check"] for item in by_address["issues"]["items"]] == ["ed.handler.missing"]
+    assert by_address["issues"]["items"][0]["address"] == "ПКО/Товар"
+    folded = service.ed_validate(project, address_prefix="пко/товар")
+    assert folded["issues"]["items"] == by_address["issues"]["items"]
+    child = service.ed_validate(project, address_prefix="ПКО/Товар/ПКС")
+    assert child["issues"]["items"] == []
+    other = service.ed_validate(project, address_prefix="ПКО/ТоварПрочее")
+    assert other["issues"]["total"] == 0 and other["summary"] == full["summary"]
+    both = service.ed_validate(project, level="ошибка", address_prefix="ПКО/Товар")
+    assert [item["check"] for item in both["issues"]["items"]] == ["ed.handler.missing"]
+    handler = service.ed_validate(project, address_prefix="Обработчик")
+    assert [item["check"] for item in handler["issues"]["items"]] == [
+        "ed.reference.code_rule_missing"
+    ]
+    skipped = service.ed_validate(project, section="skipped", limit=1)
+    assert "issues" not in skipped and skipped["summary"] == full["summary"]
+    assert_page(skipped["skipped"], total=2, limit=1)
+    assert skipped["skipped"]["items"] == [{"check": "ed.schema", "reason": SCHEMA}]
+    schema_only = service.ed_validate(project, section="skipped", check_prefix="ed.schema")
+    assert [item["check"] for item in schema_only["skipped"]["items"]] == ["ed.schema"]
+    # У группового пропуска адреса нет: отбор по адресу его не включает.
+    no_address = service.ed_validate(project, section="skipped", address_prefix="ПКО/Товар")
+    assert no_address["skipped"]["items"] == [] and no_address["summary"]["skipped"] == 2
+    with pytest.raises(ValueError):
+        service.ed_validate(project, section="summary")
+
+
+def test_rules_report_view_keeps_full_skipped_list() -> None:
+    """Общий вид отчёта rules_validate не сворачивает пропуски."""
+    from kd2_rules_mcp.service.views import report_view
+    from kd2_rules_mcp.validation.report import ValidationReport
+
+    report = ValidationReport()
+    report.warning("format.unknown_tag", "ПКО/Товар", "неизвестный тег")
+    report.skip("structure.target", "нет структуры приёмника: длинная причина")
+    view = report_view(report, None, None, 0, 50)
+    assert view["skipped"] == [
+        {"check": "structure.target", "reason": "нет структуры приёмника: длинная причина"}
+    ]
+    assert view["issues"]["items"][0]["address"] == "ПКО/Товар"
+
+
+def test_handler_resolution_already_separates_missing_procedure(service, tmp_path):
+    """Поле resolution не смешивает два случая: процедура есть — resolved, нет — missing."""
+    missing_path = tmp_path / "missing.bsl"
+    missing_path.write_bytes(checks_file(tmp_path, one_issue_text()).read_bytes())
+    # checks_file пишет checks.bsl; для второго снимка нужен другой путь.
+    present_text = one_issue_text() + (
+        "\nПроцедура Обработать(ДанныеИБ, ДанныеXDTO, КомпонентыОбмена, СтекВыгрузки)\n"
+        "КонецПроцедуры\n"
+    )
+    present_path = tmp_path / "present.bsl"
+    helpers = checks_file(tmp_path, present_text).read_text(encoding="utf-8")
+    present_path.write_text(helpers, encoding="utf-8", newline="\n")
+    missing = service.ed_open(str(missing_path))["project_id"]
+    present = service.ed_open(str(present_path))["project_id"]
+
+    def resolution(project_id: str) -> str:
+        children = service.ed_get(project_id, "ПКО/Товар", children_kind="binding")
+        address = children["children"]["items"][0]["address"]
+        return service.ed_get(project_id, address)["fields"]["resolution"]
+
+    assert resolution(missing) == "missing"
+    assert resolution(present) == "resolved"
 
 
 @pytest.mark.parametrize("arguments", [{"limit": 0}, {"limit": 201}, {"limit": True}])

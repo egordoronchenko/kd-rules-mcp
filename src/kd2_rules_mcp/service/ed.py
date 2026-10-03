@@ -25,12 +25,11 @@ from kd2_rules_mcp.service import ed_views as views
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.ed_schema import SchemaProject
 from kd2_rules_mcp.service.paths import Settings
-from kd2_rules_mcp.service.views import report_view
 from kd2_rules_mcp.validation.ed_links import validate_links
 from kd2_rules_mcp.validation.ed_schema import validate_schema
 from kd2_rules_mcp.validation.ed_structure import validate_structure
 from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
-from kd2_rules_mcp.validation.report import Issue
+from kd2_rules_mcp.validation.report import Issue, Level
 
 
 @dataclass(frozen=True)
@@ -418,11 +417,17 @@ class EdMixin(ServiceBase):
         schema_id: str | None = None,
         structure_id: str | None = None,
         direction: str = "both",
+        section: str = "issues",
+        address_prefix: str | None = None,
     ) -> dict[str, Any]:
         """Связность и профильные проверки открытых снимков; BSL не исполняется."""
         views.validate_page(offset, limit)
         if direction not in ("send", "receive", "both"):
             raise ValueError("Направление: send, receive или both")
+        if section not in ("issues", "skipped"):
+            raise ValueError("Раздел отчёта: issues или skipped")
+        if level:
+            Level(level)
         with self._lock:
             project, references = self._ensure_references(project_id)
             schema_project = None
@@ -486,7 +491,9 @@ class EdMixin(ServiceBase):
         report.skipped.sort(key=lambda item: (item.check, item.reason))
         return {
             "project_id": project_id,
-            **report_view(report, level, check_prefix, offset, limit),
+            **views.validation_view(
+                report, level, check_prefix, address_prefix, section, offset, limit
+            ),
             "references": views.references_summary(references),
             "profile": {
                 "schema_id": schema_id,

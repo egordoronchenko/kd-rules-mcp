@@ -109,7 +109,8 @@ async def test_ed_tools(service: Kd2Service) -> None:
         assert located["classification"] == "trivia"
         report = await _call(client, "ed_validate", project_id=project)
         assert report["summary"]["skipped"] >= 1
-        assert any(item["check"] == "ed.schema" for item in report["skipped"])
+        assert report["skipped"]["by_check"].get("ed.schema", 0) >= 1
+        assert "reason" not in report["skipped"]
         error = await _error(client, "ed_validate", project_id="missing")
         assert error["code"] == "project_not_found"
         error = await _error(client, "ed_validate", project_id=project, level="нет")

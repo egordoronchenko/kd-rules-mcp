@@ -1,5 +1,6 @@
 """Компактные проекции ED: скаляры, страницы и ограниченный исходный текст."""
 
+import re
 from collections import Counter
 from dataclasses import fields
 from typing import Any
@@ -8,7 +9,8 @@ from kd2_rules_mcp import ed
 from kd2_rules_mcp.ed.address import AddressIndex, escape_segment
 from kd2_rules_mcp.ed.refs import KINDS as REFERENCE_KINDS
 from kd2_rules_mcp.ed.refs import EdReference, ReferenceIndex
-from kd2_rules_mcp.service.views import slice_rows
+from kd2_rules_mcp.service.views import report_summary, slice_rows
+from kd2_rules_mcp.validation.report import Level, Skipped, ValidationReport
 
 KINDS = frozenset(
     [
@@ -286,3 +288,70 @@ def summary(document: ed.EdDocument) -> dict[str, Any]:
         "code": dict(Counter(d.code for d in document.diagnostics)),
         "severity": dict(Counter(d.severity for d in document.diagnostics)),
     }
+
+
+# Адрес в тексте пропуска: у модели Skipped отдельного поля нет, адреса лежат в причине.
+_SKIPPED_ADDRESS = re.compile(
+    r"(?<![\w/])(?:Конвертация\b|"
+    r"(?:ПКО|ПОД|ПКПД|Параметр|Алгоритм|Обработчик|Служебный|Диспетчер|Событие|Неизвестное)"
+    r"(?:/[^,\s;]+)+)"
+)
+
+
+def address_matches(address: str, prefix: str) -> bool:
+    """Адрес равен префиксу или продолжается через «/». Регистр не различается."""
+    folded = address.casefold()
+    head = prefix.casefold()
+    return folded == head or folded.startswith(head + "/")
+
+
+def skipped_addresses(reason: str) -> tuple[str, ...]:
+    """Адреса, которые удалось прочитать из текста причины пропуска."""
+    return tuple(_SKIPPED_ADDRESS.findall(reason))
+
+
+def _skipped_matches(item: Skipped, check_prefix: str | None, address_prefix: str | None) -> bool:
+    if check_prefix and not item.check.startswith(check_prefix):
+        return False
+    if not address_prefix:
+        return True
+    found = skipped_addresses(item.reason)
+    return bool(found) and any(address_matches(address, address_prefix) for address in found)
+
+
+def validation_view(
+    report: ValidationReport,
+    level: str | None,
+    check_prefix: str | None,
+    address_prefix: str | None,
+    section: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Отчёт ed_validate. Итог — по всему отчёту; отборы меняют только запрошенный раздел.
+
+    `issues` отдаёт страницу замечаний и сводку пропусков без текстов причин.
+    `skipped` отдаёт страницу пропусков и не отдаёт замечания.
+    """
+    view: dict[str, Any] = {"summary": report_summary(report)}
+    if section == "skipped":
+        rows = [
+            item.to_dict()
+            for item in report.skipped
+            if _skipped_matches(item, check_prefix, address_prefix)
+        ]
+        view["skipped"] = slice_rows(rows, offset, limit)
+        return view
+    issues = [issue.to_dict() for issue in report.issues]
+    if level:
+        issues = [issue for issue in issues if issue["level"] == Level(level).value]
+    if check_prefix:
+        issues = [issue for issue in issues if issue["check"].startswith(check_prefix)]
+    if address_prefix:
+        issues = [issue for issue in issues if address_matches(issue["address"], address_prefix)]
+    by_check: dict[str, int] = {}
+    for item in report.skipped:
+        by_check[item.check] = by_check.get(item.check, 0) + 1
+    view["skipped"] = {"total": len(report.skipped), "by_check": by_check}
+    view["issues"] = slice_rows(issues, offset, limit)
+    return view

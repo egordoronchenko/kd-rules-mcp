@@ -16,6 +16,7 @@ from kd2_rules_mcp.ed.model import (
     EdDocument,
     Entity,
     ObjectRule,
+    ProcessingRule,
     PropertyRule,
     Routine,
     SourceSpan,
@@ -72,7 +73,7 @@ def validate_links(
     addresses: AddressIndex,
     references: ReferenceIndex,
 ) -> ValidationReport:
-    """Пятнадцать проверок одного снимка. Чтения файлов и модели КД 2 нет."""
+    """Шестнадцать проверок одного снимка. Чтения файлов и модели КД 2 нет."""
     rows: list[_Row] = []
     skips: dict[tuple[str, str], None] = {}
 
@@ -190,10 +191,10 @@ def validate_links(
                     emit(
                         "ed.handler.missing",
                         binding,
-                        (
-                            f"Для события «{binding.event}» правило называет "
-                            f"«{binding.target_name}», но ветка диспетчера не найдена: "
-                            "обработчик не будет вызван."
+                        _handler_missing_message(
+                            binding.event,
+                            binding.target_name,
+                            bool(routines.get(binding.target_name.casefold())),
                         ),
                         owner_address,
                     )
@@ -404,9 +405,46 @@ def validate_links(
                 ),
             )
 
+    pods_by_handler: dict[str, list[ProcessingRule]] = defaultdict(list)
+    used_pko_names = {
+        rule.entity_id: {norm_name(item.name) for item in rule.used_pko if item.name.strip()}
+        for rule in document.pod
+    }
+    for rule in document.pod:
+        seen_targets: set[str] = set()
+        for binding in rule.events:
+            if binding.target_id and binding.target_id not in seen_targets:
+                seen_targets.add(binding.target_id)
+                pods_by_handler[binding.target_id].append(rule)
+
     for ref in references.entries:
         if ref.kind not in _CODE_KINDS or ref.name is None or not ref.name.strip():
             continue
+        # XDTO:8402–8414 — ключи ИспользованиеПКО берутся только из ИспользуемыеПКО этого ПОД.
+        # XDTO:8450–8466 — ошибка ПриОбработке ставит отказ по объекту, обмен идёт дальше.
+        if ref.kind == "pod_use":
+            owners = pods_by_handler.get(ref.owner_id, [])
+            absent = [
+                pod for pod in owners if norm_name(ref.name) not in used_pko_names[pod.entity_id]
+            ]
+            if absent:
+                owner = by_entity.get(ref.owner_id)
+                presence = "есть" if norm_name(ref.name) in pko_names else "нет"
+                for pod in absent:
+                    emit_at(
+                        "ed.reference.pod_usage_key_missing",
+                        ref.span.file_id,
+                        ref.span.line_start,
+                        _address(addresses, owner) if owner is not None else "",
+                        (
+                            f"Строка {ref.span.line_start}: ключ «{ref.name}» отсутствует "
+                            f"в ИспользуемыеПКО ПОД «{pod.name}». "
+                            f"ПКО с именем «{ref.name}» в модуле {presence}. "
+                            "При выполнении этой строки — ошибка в обработчике, отказ по объекту, "
+                            "обмен продолжается с ошибками."
+                        ),
+                    )
+                continue
         pool = rule_names if ref.kind == "instruction_rule" else pko_names
         if norm_name(ref.name) in pool:
             continue
@@ -453,6 +491,23 @@ def validate_links(
     for check, reason in sorted(skips):
         report.skip(check, reason)
     return report
+
+
+def _handler_missing_message(event: str, name: str, procedure_exists: bool) -> str:
+    """Ветки нет. Процедура в модуле и её отсутствие — разные исправления.
+
+    Для «ПослеЗагрузкиВсехДанных» вызов проходит вхолостую, признак изменения
+    остаётся включённым, и объект записывается ещё раз (XDTO:7196–7207).
+    """
+    if procedure_exists:
+        gap = "ветки диспетчера нет, процедура в модуле есть. Добавьте ветку диспетчера"
+    else:
+        gap = "нет ни ветки диспетчера, ни процедуры. Правило называет обработчик, которого нет"
+    if event.casefold() == "послезагрузкивсехданных":
+        effect = "Обмен не прерывается, объект записывается повторно."
+    else:
+        effect = "Обработчик не будет вызван."
+    return f"Для события «{event}» правило называет «{name}»: {gap}. {effect}"
 
 
 def _order(item: _Row) -> tuple[str, int, str, str, str]:

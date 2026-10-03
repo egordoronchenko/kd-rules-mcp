@@ -524,8 +524,10 @@ complete означает структурную полноту чтения, а
 Ошибка связности — обработчик не будет вызван или модуль не скомпилируется;
 ошибка структуры — статическая ссылка на метаданные отсутствует.
 Для проверок формата передайте schema_id; для стороны конфигурации — structure_id.
-Сопоставление типов требует оба снимка. skipped означает непроверенные группы или
+Сопоставление типов требует оба снимка. Пропуски — непроверенные группы или
 непрозрачные условия/источники, поэтому отсутствие замечаний не доказывает полноту.
+summary считается до отборов и называет, что не проверено. В разделе issues сводка
+skipped — только числа, без текстов причин; тексты — в разделе skipped.
 Версия и активные пространства имён берутся из открытой схемы. BSL не исполняется.
 
 | Параметр | Тип | По умолчанию | Описание |
@@ -533,6 +535,8 @@ complete означает структурную полноту чтения, а
 | `project_id` | string | обязательный | Идентификатор снимка из ed_open |
 | `level` | string \| null | `null` | Только «ошибка» или только «предупреждение» |
 | `check_prefix` | string \| null | `null` | Префикс идентификатора проверки, например ed.handler.; пустая строка — без отбора |
+| `address_prefix` | string \| null | `null` | Префикс адреса: запись проходит, если адрес равен префиксу или начинается с него и «/» (ПКО/Товар отбирает ПКО/Товар/ПКС/Код и не отбирает ПКО/ТоварПрочее). Без учёта регистра; пустая строка — без отбора |
+| `section` | string | `"issues"` | Раздел: issues (по умолчанию) — страница замечаний и краткая сводка пропусков без текстов причин; skipped — страница записей «не проверено» без страницы замечаний |
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
 | `schema_id` | string \| null | `null` | Снимок из ed_schema_open: проверяет имена, пути и значения в выбранной версии формата |
@@ -745,12 +749,15 @@ XML и имя, под которым свойство пишут в правил
 Повторный `ed_open` возвращает прежний снимок
 с `reused: true`; `source_changed` сравнивает текущие байты файла с хешем снимка.
 
-После `ed_open` вызовите `ed_validate(project_id)`: `summary` относится ко всему отчёту,
-`level` и `check_prefix` фильтруют страницу `issues` с `offset`/`limit`/`has_more`.
+После `ed_open` вызовите `ed_validate(project_id)`: `summary` относится ко всему отчёту до отборов
+и называет непроверенные группы. `level`, `check_prefix` и `address_prefix` фильтруют страницу
+`issues` с `offset`/`limit`/`has_more`. Раздел `issues` (по умолчанию) отдаёт краткую сводку
+`skipped` — `total` и `by_check`, без текстов причин. Раздел `skipped` отдаёт страницу записей
+«не проверено» и не отдаёт замечания; `address_prefix` применяется к записи, у которой в причине есть адрес.
 Связи из непрозрачного текста доступны у метода через `ed_get(children_kind="reference")`;
 вычисляемые имена учитываются отдельно и не считаются ошибками.
 Диагностики `ed_overview` описывают полноту чтения, а замечания `ed_validate` — связность и декларации модуля.
-`skipped` явно сообщает о неполном чтении и невыполненных проверках схемы и структуры.
+Краткая сводка пропусков не означает, что проверено всё: тексты причин — в разделе `skipped`.
 Перечитать файл — `ed_close` и `ed_open`. После перезапуска сервера нужен новый `ed_open`.
 Идентификатор — `ed-<имя модуля>-<12 знаков sha256 пути на сервере>`; имя модуля — каталог над
 `Ext/Module.bsl` в выгрузке конфигурации, иначе имя файла без расширения;
@@ -789,7 +796,7 @@ XML и имя, под которым свойство пишут в правил
 | `ed_list` | Page; элемент: `address,kind,name,file_id,line_start,line_end,status`; у правил — известные `configuration_object,format_object`; у ПКС и ПКТЧ — `configuration_property,format_property` (объект правила — в адресе); при наличии детей — `child_count` |
 | `ed_get` | `address,kind,fields,span`; страницы `regions,tags,guards,children,diagnostics`; при `include_text: true` — `text: TextPage` |
 | `ed_locate` | `file_id,line,classification,matches: Page`; совпадение: `address,kind,span,relation` (`innermost`, `ancestor`, `associated`) |
-| `ed_validate` | `project_id`, `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница: `level`, `check`, `address`, `message`), `references` (`known`, `unparsed`, `unparsed_by_kind` — все семь видов, `deferred_argument_unparsed`), `profile` (`schema_id`, `structure_id`, `format_version`, `active_namespaces`, `direction`), `coverage` (`checked`, `not_applicable`, `opaque_conditions`, `handler_may_supply`, `unresolved_schema`) |
+| `ed_validate` | `project_id`, `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`) всего отчёта до отборов. Раздел `issues` (по умолчанию): `skipped` — сводка `{total, by_check}` без текстов причин, `issues` — страница (`level`, `check`, `address`, `message`). Раздел `skipped`: страница `{items,total,offset,limit,has_more}` записей `check`, `reason`, без ключа `issues`. `references` (`known`, `unparsed`, `unparsed_by_kind` — все семь видов, `deferred_argument_unparsed`), `profile` (`schema_id`, `structure_id`, `format_version`, `active_namespaces`, `direction`, `fingerprints`), `coverage` (`checked`, `not_applicable`, `opaque_conditions`, `handler_may_supply`, `unresolved_schema`) |
 | `ed_close` | `project_id,closed: true` |
 | `ed_routes` | `summary`: `profile_id`, `source` (`kind`, `path`, `fingerprint`, у проекта ещё `project` и `configuration`), `configuration_name`, `status` (полнота чтения: `complete`/`partial`), `counts`, `node_state` (`unknown`), `extension_policy` (`base_only`), `available_sections`, `reused`, `stale`. Остальные разделы — страница плюс `profile_id`, `reused`, `stale`, `section` |
 | `ed_route_compare` | `left_profile_id`, `right_profile_id`, `profile` (`context`, `status` пары: `statically_compatible`/`blocked`/`unknown`, `quality`, планы, `negotiated_candidate`, `actual_node_version` всегда null, `empty_node_fallback`, `common_versions`, `tied_maxima`, `selected`), `summary` всего отчёта. `issues`/`versions`/`schema_diff` — страница запрошенного раздела; `skipped` — полный список, а при `section=skipped` — его страница |
@@ -904,9 +911,10 @@ structure_id, direction="both")`. Каждый вход необязателен
 `coverage` содержит `checked`, `not_applicable`, `opaque_conditions`, `handler_may_supply`,
 `unresolved_schema`. `both` объединяет одинаковые замечания; счётчики покрытия и причин пропусков
 считают уникальные экземпляры «проверка × декларация», повтор направления их не удваивает.
-В агрегированном `skipped.reason` — код причины, число и до пяти адресов. Неизвестные условия,
+В агрегированном `skipped.reason` раздела `skipped` — код причины, число и до пяти адресов. Неизвестные условия,
 динамические выражения и возможные источники из обработчиков дают пропуски. `summary` и `coverage`
-относятся ко всему отчёту; отбор `level`/`check_prefix` и страницы меняют только `issues`.
+относятся ко всему отчёту; в разделе `issues` отбор `level`/`check_prefix`/`address_prefix` меняет только
+страницу замечаний, сводка пропусков остаётся полной и без текстов причин.
 Фасеты и значения сохраняют повторы и пустые строки; регулярные выражения не исполняются.
 `ed_schema_close` возвращает `schema_id`, `closed`; повторный close — false.
 
