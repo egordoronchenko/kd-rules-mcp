@@ -2,6 +2,7 @@
 
 import difflib
 import hashlib
+import json
 import re
 import shutil
 import sys
@@ -459,6 +460,122 @@ def test_broken_snapshot_does_not_block_other_projects(tmp_path: Path) -> None:
     assert str(bad.source_path) in text
     loaded = restored.get(good.id)
     assert isinstance(loaded.document, ExchangeRules)
+
+
+def test_private_copies_differ_from_shared_and_each_other(tmp_path: Path) -> None:
+    """Две приватные копии — `-p1` и `-p2`; правки не видны в общем проекте и наоборот."""
+    workspace = RulesWorkspace(tmp_path / "ws")
+    source = DATA / "exchange_rules.xml"
+    shared = workspace.open_rules(source)
+    first = workspace.open_rules(source, private=True)
+    second = workspace.open_rules(source, private=True)
+    base = shared.project.id
+    assert first.reused is False and first.source_changed is False
+    assert second.reused is False and second.source_changed is False
+    assert first.project.id == f"{base}-p1"
+    assert second.project.id == f"{base}-p2"
+    assert first.project.private is True and second.project.private is True
+    assert shared.project.private is False
+    assert first.project.source_path == shared.project.source_path
+
+    shared_doc = shared.project.document
+    first_doc = first.project.document
+    second_doc = second.project.document
+    assert isinstance(shared_doc, ExchangeRules)
+    assert isinstance(first_doc, ExchangeRules)
+    assert isinstance(second_doc, ExchangeRules)
+    original = shared_doc.root.get("Наименование")
+    first_doc.root.values["Наименование"] = "только-копия"
+    assert shared_doc.root.get("Наименование") == original
+    assert second_doc.root.get("Наименование") == original
+    shared_doc.root.values["Наименование"] = "только-общий"
+    assert first_doc.root.get("Наименование") == "только-копия"
+    assert second_doc.root.get("Наименование") == original
+
+    again = workspace.open_rules(source)
+    assert again.reused is True
+    assert again.project is shared.project
+    assert again.project.id == base
+
+    workspace.close(first.project.id)
+    kept = workspace.open_rules(source)
+    assert kept.reused is True
+    assert kept.project is shared.project
+
+
+def test_open_without_private_creates_shared_beside_copies(tmp_path: Path) -> None:
+    """Копии не занимают путь: первое открытие без флага — новый общий проект без суффикса."""
+    workspace = RulesWorkspace(tmp_path / "ws")
+    source = DATA / "exchange_rules.xml"
+    first = workspace.open_rules(source, private=True).project
+    second = workspace.open_rules(source, private=True).project
+    shared = workspace.open_rules(source)
+    assert shared.reused is False
+    assert shared.source_changed is False
+    assert re.fullmatch(r".*-p\d+", shared.project.id) is None
+    assert first.id == f"{shared.project.id}-p1"
+    assert second.id == f"{shared.project.id}-p2"
+    assert shared.project.private is False
+    again = workspace.open_rules(source)
+    assert again.reused is True
+    assert again.project is shared.project
+
+
+def test_private_snapshot_restores_same_id(tmp_path: Path) -> None:
+    """Снимок копии восстанавливается с private и тем же идентификатором; номер учитывает его."""
+    root = tmp_path / "ws"
+    workspace = RulesWorkspace(root)
+    source = DATA / "exchange_rules.xml"
+    shared = workspace.open_rules(source).project
+    opened = workspace.open_rules(source, private=True)
+    assert isinstance(opened.project.document, ExchangeRules)
+    opened.project.document.root.values["Наименование"] = "копия-снимка"
+    workspace.mark_modified(opened.project.id)
+    meta = json.loads(
+        (root / ".projects" / opened.project.id / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["private"] is True
+    assert meta["id"] == opened.project.id
+    shared_meta = json.loads(
+        (root / ".projects" / shared.id / "meta.json").read_text(encoding="utf-8")
+    )
+    assert "private" not in shared_meta
+
+    restored = RulesWorkspace(root)
+    assert opened.project.id in restored.ids()
+    loaded = restored.get(opened.project.id)
+    assert loaded.private is True
+    assert loaded.id == opened.project.id
+    assert isinstance(loaded.document, ExchangeRules)
+    assert loaded.document.root.get("Наименование") == "копия-снимка"
+    again = restored.open_rules(source)
+    assert again.reused is True
+    assert again.project.id == shared.id
+    assert again.project.private is False
+    nxt = restored.open_rules(source, private=True)
+    assert nxt.reused is False
+    assert nxt.project.id == f"{shared.id}-p2"
+    assert nxt.project.private is True
+
+
+def test_private_number_skips_live_projects(tmp_path: Path) -> None:
+    """После close новый private занимает свободный номер и не повторяет живой."""
+    workspace = RulesWorkspace(tmp_path / "ws")
+    source = DATA / "exchange_rules.xml"
+    shared = workspace.open_rules(source).project
+    first = workspace.open_rules(source, private=True).project
+    second = workspace.open_rules(source, private=True).project
+    assert first.id == f"{shared.id}-p1"
+    assert second.id == f"{shared.id}-p2"
+    assert workspace.close(first.id) is True
+    third = workspace.open_rules(source, private=True)
+    assert third.reused is False
+    assert third.project.id == f"{shared.id}-p1"
+    assert third.project.id != second.id
+    assert second.id in workspace.ids()
+    kept = workspace.open_rules(source)
+    assert kept.reused is True
+    assert kept.project is shared
 
 
 def test_close_removes_snapshot_and_keeps_saved_file(tmp_path: Path) -> None:

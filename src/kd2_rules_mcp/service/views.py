@@ -63,6 +63,13 @@ def project_structure_id(project_id: str, configuration_id: str) -> str:
     return f"{project_id}-{configuration_id}"
 
 
+def note_private(view: dict[str, Any], private: bool) -> dict[str, Any]:
+    """Ключ `private` есть только у приватной копии проекта."""
+    if private:
+        view["private"] = True
+    return view
+
+
 def page_limit(limit: int) -> int:
     if limit < 1:
         raise Kd2Error(f"Размер страницы должен быть положительным: {limit}")

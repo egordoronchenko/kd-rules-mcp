@@ -63,6 +63,7 @@ class RulesProject:
     `normalized_path` — ключ исходного файла (`identity_path`); `source_mtime_ns` и
     `source_size` — его время и размер на момент открытия.
     `handlers` — карта строк последнего `handlers_export`.
+    `private` — копия по запросу: свой документ того же файла, путь общего проекта не занимает.
     """
 
     id: str
@@ -75,6 +76,7 @@ class RulesProject:
     source_mtime_ns: int | None = None
     source_size: int | None = None
     handlers: HandlerExport | None = None
+    private: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +84,9 @@ class OpenedProject:
     """Результат `open_rules`: проект и признаки повторного открытия.
 
     `reused` — тот же нормализованный путь уже открыт, документ с диска не читался.
+    У приватной копии всегда ложь: файл читается заново.
     `source_changed` — у файла изменились время или размер с момента открытия;
-    смотреть вместе с `reused`.
+    смотреть вместе с `reused`. У приватной копии всегда ложь.
     """
 
     project: RulesProject
@@ -102,11 +105,12 @@ class RulesWorkspace:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._projects: dict[str, RulesProject] = {}
-        # Нормализованный путь исходного файла → идентификатор проекта.
+        # Нормализованный путь исходного файла → идентификатор общего проекта.
+        # Приватные копии тот же путь не занимают.
         self._by_source: dict[str, str] = {}
         self._restore()
 
-    def open_rules(self, path: Path | str) -> OpenedProject:
+    def open_rules(self, path: Path | str, *, private: bool = False) -> OpenedProject:
         """Открывает правила обмена или регистрации из XML по любому читаемому пути.
 
         Идентификатор — `<stem>-<hash>`: `stem` — имя файла без расширения, если оно
@@ -116,16 +120,24 @@ class RulesWorkspace:
         пути сервера (`identity_path`); если идентификатор уже занят другим путём —
         6, затем 8 знаков. Повтор того же пути возвращает тот же проект, файл не
         перечитывается.
+
+        `private=True` всегда читает файл заново и создаёт новый проект
+        `<обычный идентификатор>-p<N>`: `N` — первое свободное число с 1, с учётом
+        уже открытых и восстановленных проектов. Копия не занимает путь, поэтому
+        открытие без флага её не находит и не переиспользует.
         """
         source = Path(path)
         source_key = identity_path(source)
-        existing_id = self._by_source.get(source_key)
-        if existing_id is not None:
-            project = self.get(existing_id)
-            return OpenedProject(project, True, _source_changed(project, source))
+        if not private:
+            existing_id = self._by_source.get(source_key)
+            if existing_id is not None:
+                project = self.get(existing_id)
+                return OpenedProject(project, True, _source_changed(project, source))
         document = load_rules(source)
         kind = _document_kind(document)
         project_id = self._file_id(_file_stem(source, kind), source_key)
+        if private:
+            project_id = self._private_id(project_id)
         mtime_ns, size = _source_stat(source)
         project = self._remember(
             document,
@@ -135,6 +147,7 @@ class RulesWorkspace:
             normalized_path=source_key,
             source_mtime_ns=mtime_ns,
             source_size=size,
+            private=private,
         )
         return OpenedProject(project, False, False)
 
@@ -270,6 +283,8 @@ class RulesWorkspace:
         """
         project = self._lookup(project_id)
         self._projects.pop(project.id)
+        # Путь снимается только у проекта, который его занимает. Приватная копия
+        # в `_by_source` не входит, поэтому её закрытие общий проект не забывает.
         if (
             project.normalized_path is not None
             and self._by_source.get(project.normalized_path) == project.id
@@ -295,6 +310,7 @@ class RulesWorkspace:
         normalized_path: str | None = None,
         source_mtime_ns: int | None = None,
         source_size: int | None = None,
+        private: bool = False,
     ) -> RulesProject:
         project = RulesProject(
             project_id,
@@ -304,9 +320,10 @@ class RulesWorkspace:
             normalized_path=normalized_path,
             source_mtime_ns=source_mtime_ns,
             source_size=source_size,
+            private=private,
         )
         self._projects[project.id] = project
-        if normalized_path is not None:
+        if normalized_path is not None and not private:
             self._by_source[normalized_path] = project.id
         self.snapshot(project.id)
         return project
@@ -355,6 +372,13 @@ class RulesWorkspace:
         while f"{candidate}-{number}" in self._projects:
             number += 1
         return f"{candidate}-{number}"
+
+    def _private_id(self, base: str) -> str:
+        """Первый свободный идентификатор копии `<base>-p<N>`, `N` с 1."""
+        number = 1
+        while f"{base}-p{number}" in self._projects:
+            number += 1
+        return f"{base}-p{number}"
 
     def _snapshot_dir(self, project_id: str) -> Path:
         return self.root / _PROJECTS_DIR / project_id
@@ -412,6 +436,7 @@ class RulesWorkspace:
             return
         source_path = _meta_path(payload.get("source_path"))
         normalized = identity_path(source_path) if source_path is not None else None
+        private = payload.get("private") is True
         project = RulesProject(
             directory.name,
             None,
@@ -422,9 +447,11 @@ class RulesWorkspace:
             normalized_path=normalized,
             source_mtime_ns=_meta_int(payload.get("source_mtime_ns")),
             source_size=_meta_int(payload.get("source_size")),
+            private=private,
         )
         self._projects[project.id] = project
-        if normalized is None:
+        # Копия делит путь с общим проектом и не должна подменять его в `_by_source`.
+        if normalized is None or private:
             return
         previous = self._by_source.get(normalized)
         if previous is not None and previous != project.id:
@@ -546,17 +573,19 @@ def _meta_int(value: object) -> int | None:
 
 
 def _dump_meta(project: RulesProject) -> bytes:
-    payload = {
+    payload: dict[str, object] = {
         "version": _META_VERSION,
         "id": project.id,
         "kind": project.kind,
         "source_path": os.fspath(project.source_path) if project.source_path else None,
         "saved_path": os.fspath(project.saved_path) if project.saved_path else None,
         "modified": project.modified,
-        "source_mtime_ns": project.source_mtime_ns,
-        "source_size": project.source_size,
-        "updated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if project.private:
+        payload["private"] = True
+    payload["source_mtime_ns"] = project.source_mtime_ns
+    payload["source_size"] = project.source_size
+    payload["updated_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return _json_bytes(payload)
 
 

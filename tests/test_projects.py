@@ -204,8 +204,13 @@ def test_env_file_port_instance_and_server_url_warning(tmp_path: Path) -> None:
     """По умолчанию .env не пишется; port и instance — все переменные имён; порт URL сверяется."""
     catalog = load_catalog(_write_catalog(tmp_path))
     target = tmp_path / ".env"
-    target.write_text("KD2_PUBLISHED_PORT=1\n", encoding="utf-8")
-    setup_local.write_env_file(target, LocalSettings())
+    # Чужой .env (без заголовка скрипта — ручные переменные второго экземпляра) остаётся на месте.
+    target.write_text("COMPOSE_PROJECT_NAME=other\n", encoding="utf-8")
+    assert setup_local.write_env_file(target, LocalSettings()) is True
+    assert target.read_text(encoding="utf-8") == "COMPOSE_PROJECT_NAME=other\n"
+    # Свой прежний .env удаляется, чтобы старые порт и имена не остались в силе.
+    target.write_text(setup_local.HEADER + "KD2_PUBLISHED_PORT=1\n", encoding="utf-8")
+    assert setup_local.write_env_file(target, LocalSettings()) is False
     assert not target.exists()
 
     local = LocalSettings(port=8061, instance="stand")

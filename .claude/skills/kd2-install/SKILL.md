@@ -226,9 +226,13 @@ uv run python kdbase/kd_check.py check tests/data/exchange_rules.xml
    `kd2-rules-mcp-kd2-rules-mcp`, при `instance` — `kd2-rules-mcp-<суффикс>-kd2-rules-mcp`. Затем `docker image tag <образ>:latest <образ>:prev`; записать текущий
    коммит: `git rev-parse --short HEAD`.
 3. **Обновить:** в папке сервера `git pull` → `uv sync` → `uv run python scripts/setup_local.py` →
-   `docker compose up -d --build`. `setup_local.py` — после каждого обновления: новая версия может добавить папки,
-   переменные или серверы; он переписывает `docker-compose.override.yml`, `.env`, `.mcp.json`, `.cursor/mcp.json`
-   целиком (ручные правки в них не сохранять). `projects*.yaml` обновление не трогает; новые поля — смотреть
+   `docker compose config` → `docker compose up -d --build`. `setup_local.py` — после каждого обновления: новая
+   версия может добавить папки, переменные или серверы; он переписывает `docker-compose.override.yml`, `.mcp.json`,
+   `.cursor/mcp.json` целиком и свой `.env` (с заголовком «Сгенерировано scripts/setup_local.py»); `.env`,
+   написанный не им, остаётся как есть, и скрипт об этом предупреждает. **Перед `up` сверить `docker compose
+   config`** с тем, что было до обновления: имя контейнера, порт, том — те же, что у этого экземпляра; расхождение
+   (например, вместо `kd2_rules_mcp_<суффикс>` появился `kd2_rules_mcp`) — **закончить ход** и показать человеку,
+   иначе `up` пересоздаст чужой контейнер. `projects*.yaml` обновление не трогает; новые поля — смотреть
    `git diff <прежний коммит> -- projects.example.yaml` и спросить человека, нужны ли они.
 4. **Проверить:** `docker compose ps` — `running`; `uv run python scripts/check_server.py` — код 0, «папка видна»
    у проектов; затем `project_list` и `structure_load_project` для одного проекта. Изменился код загрузчика

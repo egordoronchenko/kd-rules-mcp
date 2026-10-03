@@ -73,13 +73,23 @@ def render_env(local: LocalSettings) -> str | None:
     return HEADER + "\n".join(lines) + "\n"
 
 
-def write_env_file(path: Path, local: LocalSettings) -> None:
-    """Пишет `.env` или удаляет его, чтобы старые порт и имена не остались в силе."""
+def write_env_file(path: Path, local: LocalSettings) -> bool:
+    """Пишет `.env` или удаляет свой прежний, чтобы старые порт и имена не остались в силе.
+
+    Чужой `.env` (без `HEADER`, то есть написанный не этим скриптом — например, ручные
+    `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE` второго экземпляра) не трогается: иначе compose
+    вернулся бы к именам по умолчанию и пересоздал бы контейнер другого клона. Возвращает,
+    остался ли на месте чужой файл, когда свой писать нечего.
+    """
     text = render_env(local)
     if text is None:
+        own = HEADER.rstrip("\n").encode("utf-8")  # концы строк файла могут быть любыми
+        if path.is_file() and not path.read_bytes().startswith(own):
+            return True
         path.unlink(missing_ok=True)
-        return
+        return False
     path.write_bytes(text.encode("utf-8"))
+    return False
 
 
 def compose_override(catalog: Catalog, local: LocalSettings) -> str:
@@ -200,9 +210,14 @@ def main() -> None:
     (ROOT / "docker-compose.override.yml").write_bytes(
         compose_override(catalog, local).encode("utf-8")
     )
-    write_env_file(ROOT / ".env", local)
+    foreign_env = write_env_file(ROOT / ".env", local)
     servers, warnings = mcp_servers(catalog, local)
     warnings += missing_rules_dirs(catalog, local)
+    if foreign_env:
+        warnings.append(
+            ".env написан не этим скриптом и оставлен как есть: имена контейнера и тома берутся "
+            "из него — сверьте `docker compose config` перед `up`"
+        )
     for url_warning in (localhost_server_url_warning(local), server_url_port_warning(local)):
         if url_warning:
             warnings.append(url_warning)

@@ -189,9 +189,13 @@
 
 Открывает правила из XML в рабочий проект; ответ — идентификатор и сводка.
 
+С `private: true` всегда создаётся новый проект `<идентификатор файла>-p<N>`
+(`reused: false`), общий проект того же файла не переиспользуется и не меняется.
+
 | Параметр | Тип | По умолчанию | Описание |
 |---|---|---|---|
 | `path` | string | обязательный | Файл правил обмена или регистрации (XML) |
+| `private` | boolean | `false` | Своя копия: всегда новый проект из файла, общий проект того же пути не меняется и повторное открытие без флага его не находит. Для параллельной работы двух агентов над одним файлом |
 
 ### `rules_create`
 
@@ -472,9 +476,11 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 `project_id`, `kind` (`exchange` или `registration`), `source_path`, `saved_path`, `modified` (документ менялся
 после открытия, создания или последнего сохранения), `counts` (число правил по разделам: `pko`, `pvd`, `pod`,
 `algorithms`, `queries`, `parameters` или `registration_rules`), `name`; у правил обмена — `source`, `target`;
-у правил регистрации — `exchange_plan`. У `rules_open` дополнительно `reused`; при `reused: true` ещё
+у правил регистрации — `exchange_plan`. У приватной копии (`rules_open` с `private: true`) в ответе
+`rules_open` и в элементе списка `rules_projects` есть ключ `private: true`; у общего проекта ключа нет.
+У `rules_open` дополнительно `reused`; при `reused: true` ещё
 `source_changed` (у файла на диске изменились время или размер с момента открытия; перечитать — `rules_close`
-и снова `rules_open`).
+и снова `rules_open`). У приватной копии `reused` всегда `false`, ключа `source_changed` нет.
 
 **Итог правки** — `edit_view` (`src/kd2_rules_mcp/service/views.py:273`): `address` и, если не пусто, `warnings`,
 `skipped`, `not_applied`, `unresolved`, `disabled` (до 200 строк, при большем числе — ещё `<ключ>_total`).
@@ -491,10 +497,10 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `structure_compare` | `counts`, `limit`, `added_objects`, `removed_objects`, `added_properties`, `removed_properties`, `changed_properties`, `added_values`, `removed_values` (каждый список — до `limit`) |
 | `match_objects` | страница списка: элементы — `confidence`, `auto`, `source`, `target` (`Вид.Имя`), `synonym`, `note` |
 | `match_properties`, `match_values` | страница списка: элементы — `confidence`, `auto`, `source`, `target` (`name`, `kind`, `path`, `synonym`, `types` — до пяти), `path` (путь ПКС), `note` |
-| `rules_open` | проект правил, `reused`; при повторном открытии — `source_changed` |
+| `rules_open` | проект правил, `reused`; при повторном открытии — `source_changed`; у приватной копии — `private: true` и `reused: false` |
 | `rules_create` | проект правил |
 | `rules_overview` | проект правил; `groups` — только разделы, где есть группы (`pko`, `pvd`, `pod`, `algorithms`, `queries`, у регистрации `registration_rules`): список `{path, count}` в порядке документа, `count` — число правил непосредственно в группе |
-| `rules_projects` | `projects` — список проектов правил |
+| `rules_projects` | `projects` — список проектов правил; у приватной копии в элементе ключ `private: true` |
 | `rules_close` | `project_id`, `closed`, `snapshot_removed` |
 | `rules_list` | страница списка: элементы — `address`, `code`, `group` (путь групп через `/`, только если правило внутри группы), заполненные поля строки правила (код в `КодПравилаКонвертации` без хвостовых пробелов), флаги `Отключить`, `ИспользуетсяПриЗагрузке`, `pks_count` |
 | `rules_get` | `kind`, `title`, `group` (путь групп через `/`, только если не пуст), `attrs` (код в `ПравилоКонвертации` без хвостовых пробелов), `fields` (тексты длиннее 2000 символов обрезаны; код в `КодПравилаКонвертации` без хвостовых пробелов), `sides` (ПКС), `properties` (`total`, `items`, у ПКС `conversion` без хвостовых пробелов; у ПКО всегда, без контейнера `Свойства` — `total` 0) и `address` (у ПКО всегда), `values` (`total`, `items`), `nested` |

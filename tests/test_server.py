@@ -82,6 +82,17 @@ EXPECTED_TOOLS = {
 }
 
 
+async def test_rules_open_schema_has_private(service: Kd2Service) -> None:
+    """Параметр private виден в схеме rules_open и не обязателен."""
+    async with Client(create_server(service)) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    private = tools["rules_open"].input_schema["properties"]["private"]
+    assert private["type"] == "boolean"
+    assert private["default"] is False
+    assert private.get("description")
+    assert "private" not in tools["rules_open"].input_schema.get("required", [])
+
+
 async def test_tools_have_descriptions_and_parameter_schemas(service: Kd2Service) -> None:
     async with Client(create_server(service)) as client:
         tools = (await client.list_tools()).tools

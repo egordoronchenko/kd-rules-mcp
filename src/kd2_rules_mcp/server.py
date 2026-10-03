@@ -398,9 +398,23 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def rules_open(
         path: Annotated[str, Field(description="Файл правил обмена или регистрации (XML)")],
+        private: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Своя копия: всегда новый проект из файла, общий проект того же пути "
+                    "не меняется и повторное открытие без флага его не находит. Для параллельной "
+                    "работы двух агентов над одним файлом"
+                )
+            ),
+        ] = False,
     ) -> dict[str, Any]:
-        """Открывает правила из XML в рабочий проект; ответ — идентификатор и сводка."""
-        return await call(service.rules_open, path)
+        """Открывает правила из XML в рабочий проект; ответ — идентификатор и сводка.
+
+        С `private: true` всегда создаётся новый проект `<идентификатор файла>-p<N>`
+        (`reused: false`), общий проект того же файла не переиспользуется и не меняется.
+        """
+        return await call(service.rules_open, path, private)
 
     @server.tool()
     async def rules_create(

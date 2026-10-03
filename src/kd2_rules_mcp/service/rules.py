@@ -22,6 +22,7 @@ from kd2_rules_mcp.service.views import (
     edit_view,
     listed_rule_rows,
     node_view,
+    note_private,
     overview_groups,
     page_limit,
     report_summary,
@@ -34,14 +35,14 @@ from kd2_rules_mcp.validation.format import check_format
 class RulesMixin(ServiceBase):
     """Открытие проектов правил, чтение разделов и правки по адресу."""
 
-    def rules_open(self, path: str) -> dict[str, Any]:
+    def rules_open(self, path: str, private: bool = False) -> dict[str, Any]:
         with self._lock:
-            opened = self.workspace.open_rules(self._read_path(path))
+            opened = self.workspace.open_rules(self._read_path(path), private=private)
             view = self._project_view(opened.project)
             view["reused"] = opened.reused
             if opened.reused:
                 view["source_changed"] = opened.source_changed
-            return view
+            return note_private(view, opened.project.private)
 
     def rules_create(
         self, source_structure: str, target_structure: str, project_id: str | None = None
@@ -55,7 +56,10 @@ class RulesMixin(ServiceBase):
     def rules_projects(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "projects": [self._project_view(item) for item in self.workspace.iter_projects()]
+                "projects": [
+                    note_private(self._project_view(item), item.private)
+                    for item in self.workspace.iter_projects()
+                ]
             }
 
     def rules_close(self, project_id: str) -> dict[str, Any]:

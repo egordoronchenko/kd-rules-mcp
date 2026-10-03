@@ -263,13 +263,18 @@ docker image tag kd2-rules-mcp-kd2-rules-mcp:latest kd2-rules-mcp-kd2-rules-mcp:
 git pull
 uv sync
 uv run python scripts/setup_local.py
+docker compose config                              # те же имя контейнера, порт и том, что были
 docker compose up -d --build
 uv run python scripts/check_server.py
 ```
 
 - `setup_local.py` запускайте после каждого обновления: новая версия может добавить в `docker-compose.override.yml`
   и `.mcp.json` папки, переменные или серверы. Он переписывает эти файлы целиком — ручные правки в них теряются
-  (они генерируются; правьте `projects*.yaml`).
+  (они генерируются; правьте `projects*.yaml`). Свой `.env` (с заголовком «Сгенерировано scripts/setup_local.py»)
+  он тоже переписывает или удаляет; `.env`, написанный не им, оставляет и предупреждает об этом.
+- Перед `up` сверьте `docker compose config`: имя контейнера, порт и том должны быть те же, что у этого
+  экземпляра. Если на машине два экземпляра (`instance` в `projects.local.yaml` или ручной `.env`) и имена вдруг
+  стали «по умолчанию» (`kd2_rules_mcp`, 8060), `up` пересоздаст чужой контейнер — остановитесь и разберитесь.
 - **Кэш структур** (том `kd2_structures_cache`) переживает обновление. Если в новой версии изменился код
   загрузчика структур, сохранённая структура при следующем `structure_load_project` (или `structure_load_xml`,
   `structure_load_md83exp`) собирается заново сама — ключ кэша включает хеш кода загрузчика
