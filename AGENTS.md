@@ -18,7 +18,7 @@
 
 | Путь | Что это | В git |
 |---|---|---|
-| `src/kd2_rules_mcp/` | сервер: `kd2/` (модель и чтение/запись правил), `ed/` (чтение модуля менеджера обмена EnterpriseData), `structures/` (структуры метаданных), `validation/`, `authoring/`, `service/`, `server.py` | да |
+| `src/kd2_rules_mcp/` | сервер: `kd2/` (модель и чтение/запись правил), `ed/` (чтение модуля менеджера обмена EnterpriseData и схемы формата), `structures/` (структуры метаданных), `validation/`, `authoring/`, `service/`, `server.py` | да |
 | `kdbase/` | финальные проверки: `kd_check.py` (база КД), `bsp_check.py` (загрузка правил БСП), `exchange_check.py` (живой обмен между песочницами), исходники EPF | да |
 | `scripts/setup_local.py` | настройка машины по `projects.local.yaml` | да |
 | `scripts/dump_tools.py` | генерирует справочник `docs/tools.md` из сервера (`--write`; `--check` — устарел ли) | да |
@@ -104,9 +104,12 @@
   двумя версиями правил или проектом и файлом — `rules_diff` (по адресам правил, без шума XML).
 - Код обработчиков — `handlers_export`, синтакс-чекер, `handlers_locate`.
 - Правила регистрации — `registration_build`; черновик обратного направления — `correspondent_draft`.
-- Обмен через универсальный формат (правила КД 3) — пока только чтение: `ed_open` → `ed_overview` →
-  `ed_list`, `ed_get`, `ed_locate`, `ed_close`. Модуль менеджера обмена читается без исполнения BSL; формы
-  генератора — `src/kd2_rules_mcp/ed/forms.py` со ссылками `reference/kd3-cfg/…:N`.
+- Обмен через универсальный формат (правила КД 3) — пока только чтение и проверка: `ed_open` → `ed_overview` →
+  `ed_list`, `ed_get`, `ed_locate` → `ed_validate` (связность модуля: обработчики, ветки диспетчера, ссылки
+  правил) → `ed_close`. Модуль менеджера обмена читается без исполнения BSL; формы генератора —
+  `src/kd2_rules_mcp/ed/forms.py` со ссылками `reference/kd3-cfg/…:N`; исполнитель — общий модуль
+  `ОбменДаннымиXDTOСервер` БСП (ссылки `XDTO:N`, обозначения — `docs/checks.md`). Схема формата — пакеты XDTO
+  выгрузки: `ed_schema_open` → `ed_schema_types`, `ed_schema_type` → `ed_schema_close`.
 - Ошибка инструмента — JSON с полем `code`.
 
 MCP-серверы 1С (код и метаданные проектов, граф, справка, БСП, шаблоны, проверка кода, сервер данных базы) —

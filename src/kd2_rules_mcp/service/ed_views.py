@@ -6,6 +6,8 @@ from typing import Any
 
 from kd2_rules_mcp import ed
 from kd2_rules_mcp.ed.address import AddressIndex, escape_segment
+from kd2_rules_mcp.ed.refs import KINDS as REFERENCE_KINDS
+from kd2_rules_mcp.ed.refs import EdReference, ReferenceIndex
 from kd2_rules_mcp.service.views import slice_rows
 
 KINDS = frozenset(
@@ -26,6 +28,8 @@ KINDS = frozenset(
     ]
 )
 ROLES = frozenset(["algorithm", "handler", "dispatcher", "support"])
+CODE_REFERENCE_ROLES = frozenset({"handler", "algorithm", "event"})
+_RAW_LIMIT = 160
 
 
 def validate_page(offset: int, limit: int, maximum: int = 200) -> None:
@@ -193,7 +197,7 @@ def direct_children(
         "search_sets": "search",
         "events": "binding",
         "extensions": "extension",
-        "used_pko": "reference",
+        "used_pko": "used_pko",
         "mappings": "value",
         "entrypoints": "entrypoint",
         "format_version_mentions": "version",
@@ -243,6 +247,38 @@ def child_view(
             },
         }
     return {"kind": kind, "value": scalar(item)}
+
+
+def accepts_code_references(entity: ed.Entity) -> bool:
+    """Ссылки из кода показываются у обработчика, алгоритма и события."""
+    return isinstance(entity, ed.Routine) and bool(entity.roles & CODE_REFERENCE_ROLES)
+
+
+def reference_row(item: EdReference) -> dict[str, Any]:
+    """Строка ссылки: у вычисляемого имени — признак и короткий исходный фрагмент."""
+    row: dict[str, Any] = {
+        "kind": item.kind,
+        "name": item.name,
+        "form": item.form,
+        "access": item.access,
+        "direction": item.direction,
+        "line_start": item.span.line_start,
+        "line_end": item.span.line_end,
+    }
+    if item.name is None:
+        row["unparsed"] = True
+        row["raw"] = item.raw[:_RAW_LIMIT]
+    return row
+
+
+def references_summary(index: ReferenceIndex) -> dict[str, Any]:
+    """Счётчики индекса: все семь видов, включая нули."""
+    return {
+        "known": index.known,
+        "unparsed": index.unparsed,
+        "unparsed_by_kind": {kind: index.unparsed_by_kind[kind] for kind in REFERENCE_KINDS},
+        "deferred_argument_unparsed": index.deferred_argument_unparsed,
+    }
 
 
 def summary(document: ed.EdDocument) -> dict[str, Any]:

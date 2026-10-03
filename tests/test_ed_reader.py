@@ -359,6 +359,66 @@ def test_reordered_independent_fields_and_routines_mixed_case():
     assert doc.counts["handlers"] == 5
 
 
+def test_link_gaps_keep_resolution_without_read_diagnostics():
+    """Обрыв связи больше не диагностика чтения: модуль без иных проблем — complete."""
+    text = fixture_text().replace(
+        'ПравилоКонвертации.ПриОтправкеДанных = "ПКО_Товар_ПриОтправкеДанных";',
+        'ПравилоКонвертации.ПриОтправкеДанных = "НетМетода";',
+        1,
+    )
+    text = text.replace(
+        'ПравилоОбработки.ИспользуемыеПКО.Добавить("Товар");',
+        'ПравилоОбработки.ИспользуемыеПКО.Добавить("НетПКО");',
+        1,
+    )
+    text = text.replace(
+        "ДобавитьПКО_Заказ(ПравилаКонвертации);",
+        "ДобавитьПКО_НетПроцедуры(ПравилаКонвертации);",
+        1,
+    )
+    text += """
+#Область Алгоритмы
+Процедура Двойной()
+КонецПроцедуры
+Процедура Двойной()
+КонецПроцедуры
+#КонецОбласти
+"""
+    text = text.replace(
+        'ПравилоКонвертации.ПриКонвертацииДанныхXDTO = "ПКО_Товар_ПриКонвертацииДанныхXDTO";',
+        'ПравилоКонвертации.ПриКонвертацииДанныхXDTO = "Двойной";',
+        1,
+    )
+    doc = read_manager_text(text)
+    missing = next(item for item in doc.pko[0].events if item.target_name == "НетМетода")
+    ambiguous = next(item for item in doc.pko[0].events if item.target_name == "Двойной")
+    assert missing.resolution == "missing" and missing.target_id is None
+    assert ambiguous.resolution == "ambiguous" and ambiguous.target_id is None
+    ref = doc.pod[0].used_pko[0]
+    assert ref.name == "НетПКО" and ref.resolution == "missing" and ref.target_id is None
+    use = next(item for item in doc.rule_uses if item.target_name == "ДобавитьПКО_НетПроцедуры")
+    assert use.rule_id is None
+    assert not {
+        "handler_missing",
+        "handler_ambiguous",
+        "pko_reference_unresolved",
+        "rule_reference_unresolved",
+    } & {item.code for item in doc.diagnostics}
+    # В v2 остаётся неизвестный оператор РучнаяВставка; сами связи чтение не портят.
+    without_unknown = text.replace(
+        "    ПравилоКонвертации.РучнаяВставка = ВычислитьЗначение();\n", ""
+    )
+    clean = read_manager_text(without_unknown)
+    assert clean.unknown == ()
+    assert clean.parse_status == "complete"
+    assert not {
+        "handler_missing",
+        "handler_ambiguous",
+        "pko_reference_unresolved",
+        "rule_reference_unresolved",
+    } & {item.code for item in clean.diagnostics}
+
+
 def test_tag_ranges_and_conversion_header():
     text = "// Менеджер обмена через универсальный формат (Пример от 03.10.2026)\n" + fixture_text()
     doc = read_manager_text(text)

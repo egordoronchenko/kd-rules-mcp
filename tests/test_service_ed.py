@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from kd2_rules_mcp import ed
+from kd2_rules_mcp.ed import forms
 from kd2_rules_mcp.errors import (
     AmbiguousAddressError,
     EdFormatError,
@@ -459,3 +460,185 @@ def test_short_id_collision(service, tmp_path):
         assert left["project_id"] == "ed-manager-" + "a" * 12
         assert right["project_id"] == "ed-manager-" + "a" * 12 + "c" * 52
         assert service.ed_open(str(second))["project_id"] == right["project_id"]
+
+
+SCHEMA = "Схема формата и структура конфигурации не переданы: проверки по схеме не выполнялись"
+REFERENCE_KINDS = {
+    "pko_lookup",
+    "instruction_rule",
+    "pod_use",
+    "additional_key",
+    "parameter",
+    "format_property",
+    "received_property",
+}
+
+
+def base_text() -> str:
+    return (DATA / "checks_base.bsl").read_text(encoding="utf-8")
+
+
+def checks_file(tmp_path: Path, text: str | None = None) -> Path:
+    source = base_text() if text is None else text
+    helpers = "\n".join(forms.helper_forms(name, 2)[0] for name in ("ДобавитьПКС", "ДобавитьПКТЧ"))
+    path = tmp_path / "checks.bsl"
+    path.write_text(source + "\n" + helpers + "\n", encoding="utf-8", newline="\n")
+    return path
+
+
+def one_issue_text() -> str:
+    return base_text().replace(
+        "// <pko>",
+        'ПравилоКонвертации.ПриОтправкеДанных = "Обработать";',
+    )
+
+
+def two_issues_text() -> str:
+    return one_issue_text().replace(
+        "// <event>",
+        'ОбменДаннымиXDTOСервер.ПКОПоИмени(КомпонентыОбмена, "НетПравила");',
+    )
+
+
+def references_text() -> str:
+    long_name = "И" * 180
+    return base_text().replace(
+        "// <event>",
+        'ОбменДаннымиXDTOСервер.ПКОПоИмени(КомпонентыОбмена, "Товар");\n'
+        f"    ОбменДаннымиXDTOСервер.ПКОПоИмени(КомпонентыОбмена, {long_name});",
+    )
+
+
+def test_validate_clean_base_and_existing_modules(service, tmp_path):
+    project = service.ed_open(str(checks_file(tmp_path)))["project_id"]
+    report = service.ed_validate(project)
+    assert set(report) == {"project_id", "summary", "skipped", "issues", "references"}
+    assert report["summary"]["errors"] == 0 and report["summary"]["warnings"] == 0
+    assert report["skipped"] == [{"check": "ed.schema", "reason": SCHEMA}]
+    assert report["summary"]["skipped"] == 1
+    assert "ed.schema" in report["summary"]["text"]
+    assert_page(report["issues"], total=0)
+    assert set(report["references"]["unparsed_by_kind"]) == REFERENCE_KINDS
+    assert report["references"]["deferred_argument_unparsed"] == 0
+    for version in (2, 3):
+        opened_id = opened(service, version)
+        existing = service.ed_validate(opened_id)
+        assert any(item["check"] == "ed.schema" for item in existing["skipped"])
+        assert existing["issues"]["total"] == (
+            existing["summary"]["errors"] + existing["summary"]["warnings"]
+        )
+
+
+def test_validate_filters_pages_and_keeps_full_summary(service, tmp_path):
+    project = service.ed_open(str(checks_file(tmp_path, two_issues_text())))["project_id"]
+    full = service.ed_validate(project)
+    assert full["summary"]["errors"] == 1 and full["summary"]["warnings"] == 1
+    assert full["summary"]["by_check"] == {
+        "ed.handler.missing": 1,
+        "ed.reference.code_rule_missing": 1,
+    }
+    assert full["skipped"] == [{"check": "ed.schema", "reason": SCHEMA}]
+    assert_page(full["issues"], total=2)
+    errors = service.ed_validate(project, level="ошибка")
+    warnings = service.ed_validate(project, level="предупреждение")
+    assert errors["summary"] == full["summary"] and warnings["summary"] == full["summary"]
+    assert errors["skipped"] == full["skipped"] and warnings["references"] == full["references"]
+    assert [item["check"] for item in errors["issues"]["items"]] == ["ed.handler.missing"]
+    assert [item["level"] for item in warnings["issues"]["items"]] == ["предупреждение"]
+    prefixed = service.ed_validate(project, check_prefix="ed.handler")
+    assert prefixed["issues"]["total"] == 1
+    assert prefixed["issues"]["items"][0]["check"] == "ed.handler.missing"
+    assert prefixed["summary"] == full["summary"]
+    assert service.ed_validate(project, check_prefix="")["issues"] == full["issues"]
+    unknown = service.ed_validate(project, check_prefix="ed.no.such")
+    assert unknown["issues"]["items"] == [] and unknown["issues"]["total"] == 0
+    assert unknown["summary"] == full["summary"]
+    page = service.ed_validate(project, offset=1, limit=1)
+    assert_page(page["issues"], total=2, offset=1, limit=1)
+    assert page["summary"]["by_check"] == full["summary"]["by_check"]
+
+
+@pytest.mark.parametrize("arguments", [{"limit": 0}, {"limit": 201}, {"limit": True}])
+def test_validate_page_limits(service, tmp_path, arguments):
+    project = service.ed_open(str(checks_file(tmp_path)))["project_id"]
+    with pytest.raises(ValueError):
+        service.ed_validate(project, **arguments)
+
+
+def test_validate_unknown_project_and_level(service):
+    with pytest.raises(ProjectNotFoundError):
+        service.ed_validate("missing")
+    project = opened(service)
+    with pytest.raises(ValueError):
+        service.ed_validate(project, level="error")
+
+
+def test_validate_repeat_does_not_change_snapshot(service, tmp_path):
+    project = service.ed_open(str(checks_file(tmp_path, one_issue_text())))["project_id"]
+    stored = service._ed_projects[project]
+    overview = service.ed_overview(project)
+    first = service.ed_validate(project)
+    assert service.ed_overview(project) == overview
+    assert service._ed_projects[project].document is stored.document
+    assert service._ed_projects[project].index is stored.index
+    assert service._ed_projects[project].document.files[0].sha256 == stored.document.files[0].sha256
+    cached = service._ed_projects[project].references
+    assert cached is not None
+    assert service.ed_validate(project) == first
+    assert service._ed_projects[project].references is cached
+    assert first["summary"]["errors"] == 1 and first["summary"]["warnings"] == 0
+    assert first["issues"]["items"][0]["check"] == "ed.handler.missing"
+    service.ed_close(project)
+    with pytest.raises(ProjectNotFoundError):
+        service.ed_validate(project)
+
+
+def test_get_code_references(service, tmp_path):
+    project = opened(service)
+    handler = service.ed_get(
+        project, "Обработчик/ПКО_Товар_ПриОтправкеДанных", children_kind="reference"
+    )
+    assert_page(handler["children"], total=1)
+    row = handler["children"]["items"][0]
+    assert set(row) == {
+        "kind",
+        "name",
+        "form",
+        "access",
+        "direction",
+        "line_start",
+        "line_end",
+    }
+    assert row["kind"] == "format_property" and row["name"] == "Code"
+    assert row["form"] == "call" and row["access"] == "write"
+    assert row["direction"] in {"send", "receive", "both", None}
+    assert "unparsed" not in row and "text" not in handler
+    plain = service.ed_get(project, "Обработчик/ПКО_Товар_ПриОтправкеДанных")
+    assert all("form" not in item for item in plain["children"]["items"])
+    used = service.ed_get(project, "ПОД/Товары", children_kind="used_pko")
+    assert used["children"]["items"][0]["kind"] == "used_pko"
+    for address in (
+        "ПКО/Товар",
+        "ПОД/Товары",
+        "Диспетчер/ВыполнитьПроцедуруМодуляМенеджера",
+        "Служебный/ЗаполнитьПараметрыКонвертации",
+    ):
+        with pytest.raises(ValueError):
+            service.ed_get(project, address, children_kind="reference")
+    algorithm = service.ed_get(project, "Алгоритм/ЗавершитьТовар", children_kind="reference")
+    assert_page(algorithm["children"], total=0)
+
+    linked = service.ed_open(str(checks_file(tmp_path, references_text())))["project_id"]
+    page = service.ed_get(linked, "Событие/ПередКонвертацией", children_kind="reference", limit=1)
+    assert_page(page["children"], total=2, limit=1)
+    assert page["children"]["items"][0]["name"] == "Товар"
+    assert "unparsed" not in page["children"]["items"][0]
+    rest = service.ed_get(
+        linked, "Событие/ПередКонвертацией", children_kind="reference", offset=1, limit=1
+    )
+    computed = rest["children"]["items"][0]
+    assert computed["name"] is None and computed["unparsed"] is True
+    assert len(computed["raw"]) == 160 and computed["raw"] == "И" * 160
+    cached = service._ed_projects[linked].references
+    service.ed_validate(linked)
+    assert service._ed_projects[linked].references is cached

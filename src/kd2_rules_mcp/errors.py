@@ -8,6 +8,38 @@ class Kd2Error(Exception):
     """Базовая ошибка сервера правил КД 2."""
 
 
+class EdSchemaNotFoundError(Kd2Error):
+    """Схема формата не открыта."""
+
+
+class EdSchemaTypeNotFoundError(Kd2Error):
+    """Тип отсутствует в открытой схеме."""
+
+
+class EdSchemaReadError(Kd2Error):
+    """Файл пакета XDTO недоступен."""
+
+
+class EdSchemaFormatError(Kd2Error):
+    """Повреждённый XML или неподдержанный формат пакета."""
+
+
+class EdSchemaConflictError(Kd2Error):
+    """Один QName имеет разные определения."""
+
+
+class EdSchemaAmbiguousImportError(Kd2Error):
+    """Несколько описаний пакетов имеют одинаковый URI импорта."""
+
+
+class EdSchemaProfileMismatchError(Kd2Error):
+    """Версия, описание пакета или расширение не согласованы с базовым пакетом."""
+
+
+class EdSchemaResourceLimitError(Kd2Error):
+    """Превышен лимит чтения или хранения схем."""
+
+
 class EdReadError(Kd2Error):
     """Файл менеджера ED недоступен или имеет неподдержанную кодировку."""
 

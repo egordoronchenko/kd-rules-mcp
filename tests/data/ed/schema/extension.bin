@@ -1,0 +1,4 @@
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:extension">
+  <import namespace="urn:test:base"/>
+  <objectType name="Item"><property name="Extra" type="xs:string"/></objectType>
+</package>

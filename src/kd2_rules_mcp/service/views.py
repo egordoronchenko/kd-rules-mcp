@@ -17,7 +17,7 @@ from kd2_rules_mcp.kd2.model import Node, RegistrationRules, RulesDocument
 from kd2_rules_mcp.projects import Base, LocalSettings, base_login, dev_env_login, resolve
 from kd2_rules_mcp.structures.queries import MAX_LIMIT, NotFound, Page
 from kd2_rules_mcp.validation.address import rule_address, side_name, walk_pks
-from kd2_rules_mcp.validation.report import ValidationReport
+from kd2_rules_mcp.validation.report import Level, ValidationReport
 
 __all__ = ["TEXT_LIMIT", "clip"]
 
@@ -427,6 +427,26 @@ def report_summary(report: ValidationReport) -> dict[str, Any]:
         "skipped": len(report.skipped),
         "by_check": by_check,
         "text": report.summary(),
+    }
+
+
+def report_view(
+    report: ValidationReport,
+    level: str | None,
+    check_prefix: str | None,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Итог и пропуски — по всему отчёту; уровень и префикс отбирают только страницу замечаний."""
+    issues = [issue.to_dict() for issue in report.issues]
+    if level:
+        issues = [issue for issue in issues if issue["level"] == Level(level).value]
+    if check_prefix:
+        issues = [issue for issue in issues if issue["check"].startswith(check_prefix)]
+    return {
+        "summary": report_summary(report),
+        "skipped": [item.to_dict() for item in report.skipped],
+        "issues": slice_rows(issues, offset, limit),
     }
 
 

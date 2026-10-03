@@ -35,3 +35,6 @@ from .model import ValueMapping as ValueMapping
 from .model import VersionMention as VersionMention
 from .reader import read_manager as read_manager
 from .reader import read_manager_text as read_manager_text
+from .refs import EdReference as EdReference
+from .refs import ReferenceIndex as ReferenceIndex
+from .refs import build_references as build_references

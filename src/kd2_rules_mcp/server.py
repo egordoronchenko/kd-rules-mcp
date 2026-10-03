@@ -39,6 +39,14 @@ from kd2_rules_mcp.errors import (
     EdFormatError,
     EdReadError,
     EdResourceLimitError,
+    EdSchemaAmbiguousImportError,
+    EdSchemaConflictError,
+    EdSchemaFormatError,
+    EdSchemaNotFoundError,
+    EdSchemaProfileMismatchError,
+    EdSchemaReadError,
+    EdSchemaResourceLimitError,
+    EdSchemaTypeNotFoundError,
     Kd2Error,
     ObjectNotFoundError,
     ProjectNotFoundError,
@@ -57,6 +65,14 @@ logger = logging.getLogger("kd2_rules_mcp")
 
 # Код ошибки по классу; порядок важен — подклассы раньше базовых.
 ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (EdSchemaNotFoundError, "ed_schema_not_found"),
+    (EdSchemaTypeNotFoundError, "ed_schema_type_not_found"),
+    (EdSchemaReadError, "ed_schema_read_error"),
+    (EdSchemaFormatError, "ed_schema_format"),
+    (EdSchemaConflictError, "ed_schema_conflict"),
+    (EdSchemaAmbiguousImportError, "ed_schema_ambiguous_import"),
+    (EdSchemaProfileMismatchError, "ed_schema_profile_mismatch"),
+    (EdSchemaResourceLimitError, "ed_schema_resource_limit"),
     (EdResourceLimitError, "ed_resource_limit"),
     (EdFormatError, "ed_format"),
     (EdReadError, "ed_read_error"),
@@ -91,8 +107,11 @@ registration_build, черновик обратного направления �
 Смысловые решения принимает агент.
 Списки постраничные (offset, limit ≤ 200, has_more). Ошибки — JSON с полем code.
 Сервер читает модуль менеджера обмена через универсальный формат EnterpriseData только для чтения.
-Порядок: ed_open → ed_overview → ed_list / ed_get / ed_locate.
-Снимки ED живут в памяти; перечитать изменённый файл — ed_close и ed_open."""
+Порядок: ed_open → ed_overview → ed_list / ed_get / ed_locate → ed_validate.
+Снимки ED живут в памяти; перечитать изменённый файл — ed_close и ed_open.
+Схема формата XDTO: ed_schema_open с явной версией → ed_schema_types / ed_schema_type.
+Схемы только в памяти; перечитать пакет — ed_schema_close и ed_schema_open.
+XSD не поддерживается."""
 
 StructureId = Annotated[
     str, Field(description="Идентификатор структуры в кэше (structure_list), например `zup-full`")
@@ -951,7 +970,13 @@ def create_server(service: Kd2Service) -> MCPServer:
             str, Field(description="Адрес ED из ed_list; конфликт уточняется суффиксом #1, #2")
         ],
         children_kind: Annotated[
-            str | None, Field(description="Вид непосредственных детей; null — все виды")
+            str | None,
+            Field(
+                description=(
+                    "Вид непосредственных детей; null — все виды. "
+                    "reference — ссылки из кода обработчика, алгоритма или события"
+                )
+            ),
         ] = None,
         offset: Offset = 0,
         limit: Limit = 50,
@@ -994,11 +1019,138 @@ def create_server(service: Kd2Service) -> MCPServer:
         return await call(service.ed_locate, project_id, line, offset, limit)
 
     @server.tool()
+    async def ed_validate(
+        project_id: Annotated[str, Field(description="Идентификатор снимка из ed_open")],
+        level: Annotated[
+            str | None, Field(description="Только «ошибка» или только «предупреждение»")
+        ] = None,
+        check_prefix: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Префикс идентификатора проверки, например ed.handler.; "
+                    "пустая строка — без отбора"
+                )
+            ),
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Проверяет связность уже открытого модуля менеджера: обработчики, ветки и ссылки правил.
+
+        Ошибка — обработчик не будет вызван или модуль не скомпилируется.
+        skipped — проверки, которые не выполнялись. Схема формата здесь не проверяется.
+        """
+        return await call(service.ed_validate, project_id, level, check_prefix, offset, limit)
+
+    @server.tool()
     async def ed_close(
         project_id: Annotated[str, Field(description="Идентификатор снимка из ed_open")],
     ) -> dict[str, Any]:
         """Удаляет снимок ED из памяти; исходный файл остаётся неизменным."""
         return await call(service.ed_close, project_id)
+
+    @server.tool()
+    async def ed_schema_open(
+        format_version: Annotated[
+            str,
+            Field(
+                description="Версия формата обмена, например `1.8`: сверяется с URI пакета; "
+                "это не редакция из имени пакета (`1_8_6`)"
+            ),
+        ],
+        path: Annotated[
+            str | None,
+            Field(
+                description="Путь к пакету XDTO из выгрузки: `XDTOPackages/<имя>/Ext/Package.bin` "
+                "или описание `XDTOPackages/<имя>.xml`; вместо project и package"
+            ),
+        ] = None,
+        project: Annotated[
+            str | None, Field(description="Проект из project_list; вместе с package, вместо path")
+        ] = None,
+        configuration: Annotated[
+            str, Field(description="Конфигурация проекта из project_list")
+        ] = "full",
+        package: Annotated[
+            str | None,
+            Field(
+                description="Точное имя пакета XDTO в выгрузке проекта, например "
+                "`EnterpriseData_1_8_6`; подходящая версия сама не подбирается"
+            ),
+        ] = None,
+        imports: Annotated[
+            dict[str, str] | None,
+            Field(
+                description="Импорты, которые не нашлись сами: URI пространства имён → путь пакета "
+                "(для project импорты ищутся среди пакетов той же конфигурации)"
+            ),
+        ] = None,
+        extensions: Annotated[
+            list[str] | None,
+            Field(
+                description="Пути пакетов расширений формата по порядку; каждый должен "
+                "импортировать базовый пакет"
+            ),
+        ] = None,
+    ) -> dict[str, Any]:
+        """Открывает схему формата обмена — пакет XDTO из выгрузки конфигурации — и возвращает
+        schema_id, счётчики и статус (partial — часть типов или импортов не разрешена, подробности
+        в diagnostics_summary). Только чтение; файлы XSD не поддерживаются."""
+        return await call(
+            service.ed_schema_open,
+            format_version,
+            path,
+            project,
+            configuration,
+            package,
+            imports,
+            extensions,
+        )
+
+    @server.tool()
+    async def ed_schema_types(
+        schema_id: Annotated[str, Field(description="Идентификатор ed_schema_open")],
+        namespace: Annotated[str | None, Field(description="Точный URI типов")] = None,
+        kind: Annotated[str | None, Field(description="Вид типа: object или value")] = None,
+        text: Annotated[
+            str | None, Field(description="Подстрока имени типа без учёта регистра")
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Страница именованных типов схемы: объекты формата (`Справочник.…`, `Документ.…`),
+        ключевые свойства, перечисления; отбор по URI, виду и подстроке имени."""
+        return await call(service.ed_schema_types, schema_id, namespace, kind, text, offset, limit)
+
+    @server.tool()
+    async def ed_schema_type(
+        schema_id: Annotated[str, Field(description="Идентификатор ed_schema_open")],
+        qname: Annotated[
+            str,
+            Field(
+                description="Имя типа: `Справочник.Валюты` (ищется в базовом пакете и "
+                "расширениях), полное `{URI}Имя` из ed_schema_types или идентификатор "
+                "локального типа"
+            ),
+        ],
+        section: Annotated[
+            str, Field(description="Раздел: properties, values или facets")
+        ] = "properties",
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Один тип схемы: свойства (вместе с развёрнутыми ключевыми и общими свойствами — путь в
+        XML и имя, под которым свойство пишут в правиле), значения перечисления или фасеты;
+        у свойства — тип, границы, признаки ссылки и табличной части, происхождение."""
+        return await call(service.ed_schema_type, schema_id, qname, section, offset, limit)
+
+    @server.tool()
+    async def ed_schema_close(
+        schema_id: Annotated[str, Field(description="Идентификатор ed_schema_open")],
+    ) -> dict[str, Any]:
+        """Удаляет снимок схемы из памяти; повторное закрытие возвращает closed=false."""
+        return await call(service.ed_schema_close, schema_id)
 
     return server
 

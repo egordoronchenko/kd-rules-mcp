@@ -2,7 +2,7 @@
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,8 @@ from kd2_rules_mcp.errors import (
 from kd2_rules_mcp.service import ed_views as views
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.paths import Settings
+from kd2_rules_mcp.service.views import report_view
+from kd2_rules_mcp.validation.ed_links import validate_links
 
 
 @dataclass(frozen=True)
@@ -29,10 +31,11 @@ class EdProject:
     index: addresses.AddressIndex
     entities: dict[str, ed.Entity]
     by_address: dict[str, ed.Entity]
+    references: ed.ReferenceIndex | None = None
 
 
 class EdMixin(ServiceBase):
-    """Шесть инструментов только для чтения неизменяемых снимков ED."""
+    """Чтение неизменяемых снимков ED и проверка связности открытого модуля."""
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
@@ -42,6 +45,17 @@ class EdMixin(ServiceBase):
         if project_id not in self._ed_projects:
             raise ProjectNotFoundError(f"Проект ED «{project_id}» не открыт")
         return self._ed_projects[project_id]
+
+    def _ensure_references(self, project_id: str) -> tuple[EdProject, ed.ReferenceIndex]:
+        """Индекс ссылок строится один раз и хранится рядом со снимком."""
+        project = self._ed_project(project_id)
+        cached = project.references
+        if cached is not None:
+            return project, cached
+        cached = ed.build_references(project.document)
+        project = replace(project, references=cached)
+        self._ed_projects[project_id] = project
+        return project, cached
 
     def ed_open(self, path: str) -> dict[str, Any]:
         if not isinstance(path, str) or not path.strip():
@@ -219,16 +233,28 @@ class EdMixin(ServiceBase):
             entity = project.by_address.get(address.casefold())
             if entity is None:
                 raise RuleNotFoundError(f"Сущность ED не найдена: {address}")
-            children, kinds = views.direct_children(entity, project.entities)
-            if children_kind is not None:
-                if children_kind not in kinds:
-                    raise ValueError(f"Вид детей {children_kind} недоступен для {entity.kind}")
-                children = [pair for pair in children if pair[0] == children_kind]
-            selected = views.page(children, offset, limit)
-            selected["items"] = [
-                views.child_view(k, item, project.index, project.entities)
-                for k, item in selected["items"]
-            ]
+            if children_kind == "reference" and views.accepts_code_references(entity):
+                project, references = self._ensure_references(project_id)
+                selected = views.page(
+                    [
+                        views.reference_row(item)
+                        for item in references.entries
+                        if item.owner_id == entity.entity_id
+                    ],
+                    offset,
+                    limit,
+                )
+            else:
+                children, kinds = views.direct_children(entity, project.entities)
+                if children_kind is not None:
+                    if children_kind not in kinds:
+                        raise ValueError(f"Вид детей {children_kind} недоступен для {entity.kind}")
+                    children = [pair for pair in children if pair[0] == children_kind]
+                selected = views.page(children, offset, limit)
+                selected["items"] = [
+                    views.child_view(k, item, project.index, project.entities)
+                    for k, item in selected["items"]
+                ]
             doc = project.document
             result = {
                 "address": next(
@@ -353,6 +379,25 @@ class EdMixin(ServiceBase):
                 "classification": doc.coverage.classify_line(line).value,
                 "matches": views.page(matches, offset, limit),
             }
+
+    def ed_validate(
+        self,
+        project_id: str,
+        level: str | None = None,
+        check_prefix: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Связность открытого снимка. Файл модуля повторно не читается."""
+        views.validate_page(offset, limit)
+        with self._lock:
+            project, references = self._ensure_references(project_id)
+            report = validate_links(project.document, project.index, references)
+        return {
+            "project_id": project_id,
+            **report_view(report, level, check_prefix, offset, limit),
+            "references": views.references_summary(references),
+        }
 
     def ed_close(self, project_id: str) -> dict[str, Any]:
         with self._lock:

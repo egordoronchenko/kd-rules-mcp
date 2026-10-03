@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:b="urn:test:base" xmlns:m="urn:test:message" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:base">
+  <import namespace="urn:test:message"/>
+  <objectType name="Keys"><property name="Code" type="xs:string"/></objectType>
+  <objectType name="ОбщиеСвойстваItem"><property name="Title" type="xs:string" lowerBound="0"/></objectType>
+  <objectType name="Row"><property name="Quantity" type="xs:decimal"/></objectType>
+  <objectType name="Rows"><property name="Строка" type="b:Row" upperBound="-1"/></objectType>
+  <objectType name="Item" base="m:Object" open="true">
+    <property name="КлючевыеСвойства" type="b:Keys"/>
+    <property name="Code" type="xs:string"/>
+    <property name="Data" type="b:ОбщиеСвойстваItem"/>
+    <property name="Lines" type="b:Rows"/>
+    <property name="Link" type="b:ItemRef" nillable="true"/>
+  </objectType>
+  <valueType name="ItemRef" base="m:Ref"/>
+  <valueType name="Choice" base="xs:string"><enumeration>A</enumeration><enumeration/><enumeration>A</enumeration></valueType>
+</package>

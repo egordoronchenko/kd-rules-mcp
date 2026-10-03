@@ -1,0 +1,5 @@
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:facets">
+  <valueType name="Number" base="xs:decimal" totalDigits="10" fractionDigits="2"/>
+  <valueType name="Text" base="xs:string" length="5" minLength="1" maxLength="20" whiteSpace="collapse"><pattern>[a-z]+</pattern><pattern>[A-Z]+</pattern></valueType>
+  <valueType name="Union" variety="Union" memberTypes="{http://www.w3.org/2001/XMLSchema}string xs:decimal"/>
+</package>

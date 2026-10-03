@@ -1,0 +1,5 @@
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.3/common">
+  <XDTOPackage uuid="00000000-0000-0000-0000-000000000001"><Properties>
+    <Name>TestPackage</Name><Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>1.2.3</v8:content></v8:item></Synonym><Comment/><Namespace>urn:test:base</Namespace>
+  </Properties></XDTOPackage>
+</MetaDataObject>

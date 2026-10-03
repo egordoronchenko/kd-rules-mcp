@@ -1,0 +1,4 @@
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:message">
+  <valueType name="Ref" base="xs:string"/>
+  <objectType name="Object" abstract="true"><property name="AdditionalInfo" type="xs:string" lowerBound="0" upperBound="100"/></objectType>
+</package>

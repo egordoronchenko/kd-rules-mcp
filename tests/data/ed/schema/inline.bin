@@ -1,0 +1,5 @@
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:inline">
+  <objectType name="Envelope">
+    <property name="Local"><typeDef xsi:type="ObjectType"><property name="Value"><typeDef xsi:type="ValueType" base="xs:string"><enumeration>One</enumeration></typeDef></property></typeDef></property>
+  </objectType>
+</package>

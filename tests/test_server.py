@@ -46,11 +46,16 @@ async def _error(client: Client, tool: str, /, **arguments: Any) -> dict[str, An
 
 
 EXPECTED_TOOLS = {
+    "ed_schema_open",
+    "ed_schema_types",
+    "ed_schema_type",
+    "ed_schema_close",
     "ed_open",
     "ed_overview",
     "ed_list",
     "ed_get",
     "ed_locate",
+    "ed_validate",
     "ed_close",
     "project_list",
     "structure_load_project",
@@ -100,6 +105,13 @@ async def test_ed_tools(service: Kd2Service) -> None:
         assert result["kind"] == "pko" and "text" not in result
         located = await _call(client, "ed_locate", project_id=project, line=1)
         assert located["classification"] == "trivia"
+        report = await _call(client, "ed_validate", project_id=project)
+        assert report["summary"]["skipped"] >= 1
+        assert any(item["check"] == "ed.schema" for item in report["skipped"])
+        error = await _error(client, "ed_validate", project_id="missing")
+        assert error["code"] == "project_not_found"
+        error = await _error(client, "ed_validate", project_id=project, level="нет")
+        assert error["code"] == "invalid_argument"
         error = await _error(client, "ed_get", project_id=project, address="ПКО/Нет")
         assert error["code"] == "rule_not_found"
         error = await _error(client, "ed_open", path=str(DATA / "ed/missing.bsl"))
@@ -110,6 +122,27 @@ async def test_ed_tools(service: Kd2Service) -> None:
         assert closed["closed"] is True
         error = await _error(client, "ed_overview", project_id=project)
         assert error["code"] == "project_not_found"
+
+
+async def test_ed_schema_tools(service: Kd2Service) -> None:
+    async with Client(create_server(service)) as client:
+        opened = await _call(
+            client,
+            "ed_schema_open",
+            format_version="1.2",
+            path=str((DATA / "ed/schema/base.bin").resolve()),
+        )
+        ident = opened["schema_id"]
+        listed = await _call(client, "ed_schema_types", schema_id=ident, limit=1)
+        assert len(listed["items"]) == 1 and listed["has_more"]
+        detail = await _call(client, "ed_schema_type", schema_id=ident, qname="{urn:test:base}Item")
+        assert detail["properties"]["total"] > 0
+        failure = await _error(
+            client, "ed_schema_type", schema_id=ident, qname="{urn:test:base}Missing"
+        )
+        assert failure["code"] == "ed_schema_type_not_found"
+        assert (await _call(client, "ed_schema_close", schema_id=ident))["closed"]
+        assert not (await _call(client, "ed_schema_close", schema_id=ident))["closed"]
 
 
 async def test_rules_open_schema_has_private(service: Kd2Service) -> None:

@@ -334,11 +334,10 @@ class _Reader:
                 matches = by_name.get(routed[0].target.raw.casefold(), [])
             state = "resolved" if len(matches) == 1 else "ambiguous" if matches else "missing"
             target_id = matches[0].entity_id if len(matches) == 1 else None
+            # Отсутствие и неоднозначность ветки — проверка связности, не дефект чтения.
             resolved[binding.entity_id] = replace(binding, target_id=target_id, resolution=state)
             if target_id:
                 callback_ids.add(target_id)
-            else:
-                self.diagnostic("handler_" + state, binding)
         # Непрефиксный обработчик тоже становится известным после разрешения ссылки.
         for case in self.cases:
             matches = by_name.get(case.target.raw.casefold(), [])
@@ -381,8 +380,6 @@ class _Reader:
                         else "missing",
                     )
                 )
-                if len(matches_pko) != 1:
-                    self.diagnostic("pko_reference_unresolved", ref.span)
             pod[index] = replace(processing_rule, used_pko=tuple(refs))
         rule_names: dict[str, list[Entity]] = defaultdict(list)
         for rule in (*pko, *pod):
@@ -391,8 +388,6 @@ class _Reader:
         for use in self.uses:
             targets = rule_names.get(use.target_name.casefold(), [])
             uses.append(replace(use, rule_id=targets[0].entity_id if len(targets) == 1 else None))
-            if len(targets) != 1:
-                self.diagnostic("rule_reference_unresolved", use)
         mentions = self.version_mentions()
         whole = self.source.span(0, len(self.source.text))
         # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:951.

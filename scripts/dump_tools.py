@@ -72,7 +72,14 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "ed_list",
         "ed_get",
         "ed_locate",
+        "ed_validate",
         "ed_close",
+    ),
+    "Схема формата EnterpriseData": (
+        "ed_schema_open",
+        "ed_schema_types",
+        "ed_schema_type",
+        "ed_schema_close",
     ),
 }
 

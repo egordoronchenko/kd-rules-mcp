@@ -5,12 +5,11 @@ from typing import Any
 from kd2_rules_mcp.errors import Kd2Error
 from kd2_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
 from kd2_rules_mcp.service.base import ServiceBase
-from kd2_rules_mcp.service.views import page_limit, report_summary, slice_rows
+from kd2_rules_mcp.service.views import page_limit, report_view
 from kd2_rules_mcp.validation.algorithms import check_algorithm_refs
 from kd2_rules_mcp.validation.format import check_format
 from kd2_rules_mcp.validation.handlers import export_handlers, locate
 from kd2_rules_mcp.validation.registration import check_registration
-from kd2_rules_mcp.validation.report import Level
 from kd2_rules_mcp.validation.search import check_search_params
 from kd2_rules_mcp.validation.structure import check_structures
 
@@ -37,16 +36,7 @@ class ChecksMixin(ServiceBase):
                 report.extend(check_search_params(document))
             elif isinstance(document, RegistrationRules):
                 report.extend(check_registration(document, source))
-        issues = [issue.to_dict() for issue in report.issues]
-        if level:
-            issues = [issue for issue in issues if issue["level"] == Level(level).value]
-        if check_prefix:
-            issues = [issue for issue in issues if issue["check"].startswith(check_prefix)]
-        return {
-            "summary": report_summary(report),
-            "skipped": [item.to_dict() for item in report.skipped],
-            "issues": slice_rows(issues, offset, limit),
-        }
+        return report_view(report, level, check_prefix, offset, limit)
 
     def handlers_export(self, project_id: str, folder: str, limit: int) -> dict[str, Any]:
         with self._lock:

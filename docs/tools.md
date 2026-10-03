@@ -12,7 +12,7 @@
 
 <!-- tools:begin — генерирует scripts/dump_tools.py, руками не править -->
 
-Инструментов: 39.
+Инструментов: 44.
 
 | Группа | Инструменты |
 |---|---|
@@ -22,7 +22,8 @@
 | Правки | [`rule_create`](#rule_create), [`rule_update`](#rule_update), [`rule_update_many`](#rule_update_many), [`rule_delete`](#rule_delete), [`pko_create_from_candidates`](#pko_create_from_candidates) |
 | Проверки | [`rules_validate`](#rules_validate), [`rules_diff`](#rules_diff), [`handlers_export`](#handlers_export), [`handlers_locate`](#handlers_locate) |
 | Регистрация и корреспондент | [`registration_build`](#registration_build), [`correspondent_draft`](#correspondent_draft) |
-| Чтение EnterpriseData | [`ed_open`](#ed_open), [`ed_overview`](#ed_overview), [`ed_list`](#ed_list), [`ed_get`](#ed_get), [`ed_locate`](#ed_locate), [`ed_close`](#ed_close) |
+| Чтение EnterpriseData | [`ed_open`](#ed_open), [`ed_overview`](#ed_overview), [`ed_list`](#ed_list), [`ed_get`](#ed_get), [`ed_locate`](#ed_locate), [`ed_validate`](#ed_validate), [`ed_close`](#ed_close) |
+| Схема формата EnterpriseData | [`ed_schema_open`](#ed_schema_open), [`ed_schema_types`](#ed_schema_types), [`ed_schema_type`](#ed_schema_type), [`ed_schema_close`](#ed_schema_close) |
 
 ## Проекты и структуры
 
@@ -489,7 +490,7 @@ complete означает структурную полноту чтения, а
 |---|---|---|---|
 | `project_id` | string | обязательный | Идентификатор снимка из ed_open |
 | `address` | string | обязательный | Адрес ED из ed_list; конфликт уточняется суффиксом #1, #2 |
-| `children_kind` | string \| null | `null` | Вид непосредственных детей; null — все виды |
+| `children_kind` | string \| null | `null` | Вид непосредственных детей; null — все виды. reference — ссылки из кода обработчика, алгоритма или события |
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
 | `include_text` | boolean | `false` | Включить страницу исходного текста сущности |
@@ -507,6 +508,21 @@ complete означает структурную полноту чтения, а
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
 
+### `ed_validate`
+
+Проверяет связность уже открытого модуля менеджера: обработчики, ветки и ссылки правил.
+
+Ошибка — обработчик не будет вызван или модуль не скомпилируется.
+skipped — проверки, которые не выполнялись. Схема формата здесь не проверяется.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project_id` | string | обязательный | Идентификатор снимка из ed_open |
+| `level` | string \| null | `null` | Только «ошибка» или только «предупреждение» |
+| `check_prefix` | string \| null | `null` | Префикс идентификатора проверки, например ed.handler.; пустая строка — без отбора |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+
 ### `ed_close`
 
 Удаляет снимок ED из памяти; исходный файл остаётся неизменным.
@@ -515,12 +531,74 @@ complete означает структурную полноту чтения, а
 |---|---|---|---|
 | `project_id` | string | обязательный | Идентификатор снимка из ed_open |
 
+## Схема формата EnterpriseData
+
+### `ed_schema_open`
+
+Открывает схему формата обмена — пакет XDTO из выгрузки конфигурации — и возвращает
+schema_id, счётчики и статус (partial — часть типов или импортов не разрешена, подробности
+в diagnostics_summary). Только чтение; файлы XSD не поддерживаются.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `format_version` | string | обязательный | Версия формата обмена, например `1.8`: сверяется с URI пакета; это не редакция из имени пакета (`1_8_6`) |
+| `path` | string \| null | `null` | Путь к пакету XDTO из выгрузки: `XDTOPackages/<имя>/Ext/Package.bin` или описание `XDTOPackages/<имя>.xml`; вместо project и package |
+| `project` | string \| null | `null` | Проект из project_list; вместе с package, вместо path |
+| `configuration` | string | `"full"` | Конфигурация проекта из project_list |
+| `package` | string \| null | `null` | Точное имя пакета XDTO в выгрузке проекта, например `EnterpriseData_1_8_6`; подходящая версия сама не подбирается |
+| `imports` | object \| null | `null` | Импорты, которые не нашлись сами: URI пространства имён → путь пакета (для project импорты ищутся среди пакетов той же конфигурации) |
+| `extensions` | array of string \| null | `null` | Пути пакетов расширений формата по порядку; каждый должен импортировать базовый пакет |
+
+### `ed_schema_types`
+
+Страница именованных типов схемы: объекты формата (`Справочник.…`, `Документ.…`),
+ключевые свойства, перечисления; отбор по URI, виду и подстроке имени.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `schema_id` | string | обязательный | Идентификатор ed_schema_open |
+| `namespace` | string \| null | `null` | Точный URI типов |
+| `kind` | string \| null | `null` | Вид типа: object или value |
+| `text` | string \| null | `null` | Подстрока имени типа без учёта регистра |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+
+### `ed_schema_type`
+
+Один тип схемы: свойства (вместе с развёрнутыми ключевыми и общими свойствами — путь в
+XML и имя, под которым свойство пишут в правиле), значения перечисления или фасеты;
+у свойства — тип, границы, признаки ссылки и табличной части, происхождение.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `schema_id` | string | обязательный | Идентификатор ed_schema_open |
+| `qname` | string | обязательный | Имя типа: `Справочник.Валюты` (ищется в базовом пакете и расширениях), полное `{URI}Имя` из ed_schema_types или идентификатор локального типа |
+| `section` | string | `"properties"` | Раздел: properties, values или facets |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+
+### `ed_schema_close`
+
+Удаляет снимок схемы из памяти; повторное закрытие возвращает closed=false.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `schema_id` | string | обязательный | Идентификатор ed_schema_open |
+
 ## Коды ошибок
 
 Ошибка инструмента — JSON `{"code", "message", …}` в тексте ошибки MCP; код — по первому подходящему классу исключения (порядок строк важен: подклассы раньше базовых).
 
 | Код | Класс | Когда | Дополнительные поля |
 |---|---|---|---|
+| `ed_schema_not_found` | `EdSchemaNotFoundError` | Схема формата не открыта. | — |
+| `ed_schema_type_not_found` | `EdSchemaTypeNotFoundError` | Тип отсутствует в открытой схеме. | — |
+| `ed_schema_read_error` | `EdSchemaReadError` | Файл пакета XDTO недоступен. | — |
+| `ed_schema_format` | `EdSchemaFormatError` | Повреждённый XML или неподдержанный формат пакета. | — |
+| `ed_schema_conflict` | `EdSchemaConflictError` | Один QName имеет разные определения. | — |
+| `ed_schema_ambiguous_import` | `EdSchemaAmbiguousImportError` | Несколько описаний пакетов имеют одинаковый URI импорта. | — |
+| `ed_schema_profile_mismatch` | `EdSchemaProfileMismatchError` | Версия, описание пакета или расширение не согласованы с базовым пакетом. | — |
+| `ed_schema_resource_limit` | `EdSchemaResourceLimitError` | Превышен лимит чтения или хранения схем. | — |
 | `ed_resource_limit` | `EdResourceLimitError` | Менеджер ED превышает предел размера или числа строк. | — |
 | `ed_format` | `EdFormatError` | Модуль не соответствует безопасно читаемому формату менеджера ED. | — |
 | `ed_read_error` | `EdReadError` | Файл менеджера ED недоступен или имеет неподдержанную кодировку. | — |
@@ -596,10 +674,19 @@ complete означает структурную полноту чтения, а
 
 ## EnterpriseData: порядок, адреса и ответы
 
-Порядок: `ed_open(path)` → `ed_overview(project_id)` → `ed_list` / `ed_get` / `ed_locate`.
+Порядок: `ed_open(path)` → `ed_overview(project_id)` → `ed_list` / `ed_get` / `ed_locate` → `ed_validate`.
 Это чтение одного UTF-8 модуля менеджера, без исполнения BSL, обхода соседних модулей и записи.
-Снимок и индекс адресов хранятся только в памяти. Повторный `ed_open` возвращает прежний снимок
+Снимок, индекс адресов и индекс ссылок хранятся только в памяти. Индекс ссылок строится один раз
+при первом `ed_validate` или `ed_get` со ссылками из кода и живёт рядом со снимком до `ed_close`.
+Повторный `ed_open` возвращает прежний снимок
 с `reused: true`; `source_changed` сравнивает текущие байты файла с хешем снимка.
+
+После `ed_open` вызовите `ed_validate(project_id)`: `summary` относится ко всему отчёту,
+`level` и `check_prefix` фильтруют страницу `issues` с `offset`/`limit`/`has_more`.
+Связи из непрозрачного текста доступны у метода через `ed_get(children_kind="reference")`;
+вычисляемые имена учитываются отдельно и не считаются ошибками.
+Диагностики `ed_overview` описывают полноту чтения, а замечания `ed_validate` — связность модуля.
+`skipped` явно сообщает о неполном чтении и невыполненных проверках схемы.
 Перечитать файл — `ed_close` и `ed_open`. После перезапуска сервера нужен новый `ed_open`.
 Идентификатор — `ed-<имя модуля>-<12 знаков sha256 пути на сервере>`; имя модуля — каталог над
 `Ext/Module.bsl` в выгрузке конфигурации, иначе имя файла без расширения;
@@ -638,6 +725,7 @@ complete означает структурную полноту чтения, а
 | `ed_list` | Page; элемент: `address,kind,name,file_id,line_start,line_end,status`; у правил — известные `configuration_object,format_object`; у ПКС и ПКТЧ — `configuration_property,format_property` (объект правила — в адресе); при наличии детей — `child_count` |
 | `ed_get` | `address,kind,fields,span`; страницы `regions,tags,guards,children,diagnostics`; при `include_text: true` — `text: TextPage` |
 | `ed_locate` | `file_id,line,classification,matches: Page`; совпадение: `address,kind,span,relation` (`innermost`, `ancestor`, `associated`) |
+| `ed_validate` | `project_id`, `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница: `level`, `check`, `address`, `message`), `references` (`known`, `unparsed`, `unparsed_by_kind` — все семь видов, `deferred_argument_unparsed`) |
 | `ed_close` | `project_id,closed: true` |
 
 `counts`: `pko,pod,pkpd,pks,pktch,search_sets,parameters,algorithms,handlers,dispatchers,support,unknown`.
@@ -658,9 +746,13 @@ complete означает структурную полноту чтения, а
 В `ed_get` поля скалярные и короткие, дети — только непосредственные.
 Компактный ребёнок-сущность: `address,kind,name`; его поля доступны через отдельный `ed_get`.
 `children_kind` выбирает вид детей: `pks,pktch,search,binding,extension` у ПКО; `pks` у ПКТЧ;
-`binding,reference` у ПОД; `value` у ПКПД; `binding,entrypoint,version` у конвертации;
+`binding,used_pko` у ПОД; `value` у ПКПД; `binding,entrypoint,version` у конвертации;
 `formal_parameter` у метода; `field` у набора поиска; `argument,argument_presence` у ПКС.
 У диспетчера также `case`; у правила или метода — принадлежащие ему `unknown`.
+У обработчика, алгоритма и события `reference` — ссылки из кода:
+`kind`, `name`, `form`, `access`, `direction`, `line_start`, `line_end`;
+у вычисляемого имени ещё `unparsed: true` и `raw` не длиннее 160 знаков.
+Для остальных сущностей `reference` — `invalid_argument`.
 Недоступный для родителя вид — `invalid_argument`.
 Регионы — строки, теги — `name,span`, условия и диагностики — компактные строки сущностей;
 все пять коллекций используют одинаковые offset/limit.
@@ -699,8 +791,48 @@ text_offset=0, text_limit=2000, 1≤text_limit≤8000. Без `include_text` и�
 | файл структуры не разбирается | `structure_format` | `structure_load_xml`, `structure_load_md83exp`, `structure_load_project` |
 | ошибка в `projects.yaml`, неизвестный проект, конфигурация или база | `project_config` | `project_list`, `structure_load_project` |
 | отказ правки | `unknown_field`, `duplicate_rule`, `ambiguous_address`, `rule_not_found`, `dangling_reference`, `edit_rejected` | `rule_create`, `rule_update`, `rule_update_many`, `rule_delete`, `pko_create_from_candidates`, `rules_get` (`rule_not_found`, `ambiguous_address`) |
-| неизвестный уровень или класс уверенности | `invalid_argument` | `rules_validate` (`level`), `match_*` (`confidence`) |
+| неизвестный уровень или класс уверенности | `invalid_argument` | `rules_validate` и `ed_validate` (`level`), `match_*` (`confidence`) |
 | непредвиденное исключение сервера (трассировка в логе сервера) | `internal` | все инструменты |
+
+## Схема формата EnterpriseData
+
+Порядок: `ed_schema_open` → `ed_schema_types` → `ed_schema_type` → `ed_schema_close`.
+Открытие принимает ровно один режим: `path` к `Package.bin` или описанию пакета `.xml`, либо
+`project` + точное имя `package`. `configuration` по умолчанию `full`; расширения конфигурации
+не накладываются. `format_version` обязателен и проверяется против версии стандартного URI ED.
+Имя пакета, подпись редакции и URI формата не подменяют друг друга. XSD не поддерживается.
+`imports` — явный каталог URI → локальный путь, в проектном режиме дополненный описаниями пакетов
+выбранной конфигурации. URI не скачиваются. `extensions` — упорядоченные пути активных расширений
+формата, каждое импортирует выбранную базу; простой import не активирует расширение.
+
+`ed_schema_open` возвращает `schema_id`, `base_namespace`, `format_version`, `package` (имя из
+описания либо null), `counts` (счётчики XML-конструкций всего замыкания, включая локальные типы),
+`status` (`complete`/`partial`), `diagnostics_summary`, `reused`, `source_changed`.
+Снимки только в памяти: изменённые файлы не обновляют ранее открытый снимок; перечитать — close/open.
+Отсутствующий import даёт partial и `unresolved_import`, повреждённый предоставленный XML — отказ.
+
+`ed_schema_types` возвращает страницу `items`, `total`, `offset`, `limit`, `has_more`; фильтры
+`namespace`, `kind` (`object`/`value`), `text`. Строка содержит `qname`, `kind`, `base`,
+`property_count` (с наследованием), `enum_count`, `status`.
+`ed_schema_type` принимает короткое имя типа (ищется в базовом пакете и активных расширениях; тип
+импортированного пакета — только полным именем), Clark-имя `{URI}Имя` или идентификатор локального
+типа из поля `type`.
+Возвращает данные типа, `origin` и выбранную страницу `properties`, `values` или `facets`.
+Свойства содержат `physical_path`, `effective_path`, `type`, `lower`, `upper` (null — без ограничения),
+`nillable`, `form`, `explicit_attributes`, `status`, `reference`, `table_row`, `origin`.
+Происхождение свойств представлено номерами узлов общего `origin_graph` страницы; узел хранит
+`role`, `namespace`, `span` (`source_id`, `line`, `xpath`), `via`. Все физические кандидаты сохранены.
+Страница содержит максимум `limit` строк (1–200), дополнительно ограничена 20000 байтами UTF-8 JSON.
+Продолжение: увеличить `offset` на фактическое число полученных строк, пока `has_more=true`.
+Фасеты и значения сохраняют повторы и пустые строки; регулярные выражения не исполняются.
+`ed_schema_close` возвращает `schema_id`, `closed`; повторный close — false.
+
+Коды отказов: `ed_schema_not_found`, `ed_schema_type_not_found`, `ed_schema_read_error`,
+`ed_schema_format` (включая XSD, DTD, entities, XInclude), `ed_schema_conflict`,
+`ed_schema_ambiguous_import` (несколько описаний одного URI; исправляется явным imports),
+`ed_schema_profile_mismatch`, `ed_schema_resource_limit`, `invalid_argument`, `project_config`.
+Лимиты сервера: 32 MiB на файл, 128 MiB/128 файлов на схему, 200000 типов/2000000 свойств,
+глубина XML и разрешения 128; в реестре 256 схем/512 MiB исходных байтов, без вытеснения.
 
 Аргумент вне схемы (например, `limit` больше 200 или пропущен обязательный параметр) отклоняет сам MCP SDK до
 вызова сервиса: ответ — текст ошибки проверки аргументов (`validation error … Input should be less than or equal

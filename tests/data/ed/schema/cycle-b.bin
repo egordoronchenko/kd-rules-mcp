@@ -1,0 +1,4 @@
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:a="urn:test:a" targetNamespace="urn:test:b">
+  <import namespace="urn:test:a"/>
+  <objectType name="B" base="a:A"/>
+</package>
