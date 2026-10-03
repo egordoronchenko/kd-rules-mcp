@@ -212,6 +212,11 @@ def test_mass_pks_follows_kd_autosetup(tmp_path: Path) -> None:
     assert pko.get("Комментарий") == "черновик"
     assert pko.get("Источник") == "ДокументСсылка.Ведомость"
     assert pko.get("Приемник") == "ДокументСсылка.Ведомость"
+    assert pko.get("СинхронизироватьПоИдентификатору") is True
+    assert any(
+        item.startswith("СинхронизироватьПоИдентификатору включено по умолчанию")
+        for item in result.warnings
+    )
     props = _pks(rules, "Ведомость")
     found = _by_target(props)
     assert list(found) == [
@@ -1087,6 +1092,262 @@ def test_create_pko_with_properties_lands_in_group(tmp_path: Path) -> None:
             "Справочник.Контрагенты",
             group="Справочники",
         )
+
+
+# --- Умолчания КД ------------------------------------------------------------------------------
+
+_HIERARCHY_ATTRS = '{"Иерархический": "true", "ВидИерархии": "ИерархияГруппИЭлементов"}'
+_SYNC_NOTE = (
+    "СинхронизироватьПоИдентификатору включено по умолчанию: ссылочный приёмник, не перечисление"
+)
+
+
+def _mandatory_note(path: str) -> str:
+    return f"ПКС «{path}»: Обязательное включено по умолчанию"
+
+
+def _hierarchical_catalog(path: Path) -> _Builder:
+    """Справочник с иерархией групп и элементов: свойства, как их пишет MD83Exp."""
+    builder = _Builder(path)
+    props: list[Prop] = [
+        ("Свойство", "Родитель", "Родитель", "СправочникСсылка.Номенклатура", []),
+        ("Свойство", "ЭтоГруппа", "Это группа", "Булево", []),
+        ("Свойство", "МоёЭтоГруппа", "", "Булево", []),
+        ("Свойство", "Группа", "", "Булево", []),
+        ("Реквизит", "Наименование", "", "Строка", []),
+    ]
+    builder.add("Справочник", "Номенклатура", props, synonym="Номенклатура")
+    builder.conn.execute(
+        "UPDATE objects SET attrs = ? WHERE name = ?", (_HIERARCHY_ATTRS, "Номенклатура")
+    )
+    return builder
+
+
+def test_kd_defaults_for_reference_pko_and_group_property(tmp_path: Path) -> None:
+    """Ссылочное ПКО синхронизируется по идентификатору, ПКС «ЭтоГруппа» обязательна.
+
+    Перечисление и регистр флаг не получают. Имя приёмника — как `ПОДОБНО "%ЭтоГруппа%"`:
+    подстрока подходит, голое «Группа» — нет. Оба признака переживают запись и чтение.
+    """
+    source = _hierarchical_catalog(tmp_path / "source.sqlite")
+    target = _hierarchical_catalog(tmp_path / "target.sqlite")
+    source.add("Перечисление", "Статусы", values=(("Черновик", ""),))
+    target.add("Перечисление", "Статусы", values=(("Черновик", ""),))
+    source.add("РегистрСведений", "Цены")
+    target.add("РегистрСведений", "Цены")
+    source.add("Константа", "ВалютаУчета")
+    target.add("Константа", "ВалютаУчета")
+    rules = _rules()
+
+    result = create_pko_with_properties(
+        rules,
+        "Номенклатура",
+        source.conn,
+        target.conn,
+        "Справочник.Номенклатура",
+        "Справочник.Номенклатура",
+    )
+
+    pko = next(item for item in rules.pko() if item.code == "Номенклатура")
+    assert pko.get("СинхронизироватьПоИдентификатору") is True
+    props = _by_target(_pks(rules, "Номенклатура"))
+    assert props["ЭтоГруппа"].attrs.get("Обязательное") is True
+    assert props["МоёЭтоГруппа"].attrs.get("Обязательное") is True
+    assert "Обязательное" not in props["Группа"].attrs
+    assert "Обязательное" not in props["Наименование"].attrs
+    assert result.warnings == [
+        _SYNC_NOTE,
+        _mandatory_note("ЭтоГруппа"),
+        _mandatory_note("МоёЭтоГруппа"),
+    ]
+
+    raw = dump_rules(rules)
+    rule = next(
+        item
+        for item in etree.fromstring(raw).iter("Правило")
+        if item.findtext("Код") == "Номенклатура"
+    )
+    assert rule.findtext("СинхронизироватьПоИдентификатору") == "true"
+    assert _property_element(raw, "Номенклатура", "ЭтоГруппа").get("Обязательное") == "true"
+    assert _property_element(raw, "Номенклатура", "МоёЭтоГруппа").get("Обязательное") == "true"
+    assert _property_element(raw, "Номенклатура", "Группа").get("Обязательное") is None
+    loaded = load_rules(raw)
+    assert isinstance(loaded, ExchangeRules)
+    again = next(item for item in loaded.pko() if item.code == "Номенклатура")
+    assert again.get("СинхронизироватьПоИдентификатору") is True
+    again_props = again.child("Свойства")
+    assert again_props is not None
+    restored = _by_target(again_props)
+    assert restored["ЭтоГруппа"].attrs.get("Обязательное") is True
+    assert restored["МоёЭтоГруппа"].attrs.get("Обязательное") is True
+
+    enum = create_pko_with_properties(
+        rules,
+        "Статусы",
+        source.conn,
+        target.conn,
+        "Перечисление.Статусы",
+        "Перечисление.Статусы",
+    )
+    enum_pko = next(item for item in rules.pko() if item.code == "Статусы")
+    assert "СинхронизироватьПоИдентификатору" not in enum_pko.values
+    assert _SYNC_NOTE not in enum.warnings
+
+    register = create_pko_with_properties(
+        rules, "Цены", source.conn, target.conn, "РегистрСведений.Цены", "РегистрСведений.Цены"
+    )
+    register_pko = next(item for item in rules.pko() if item.code == "Цены")
+    assert "СинхронизироватьПоИдентификатору" not in register_pko.values
+    assert _SYNC_NOTE not in register.warnings
+
+    constant = create_pko_with_properties(
+        rules, "Валюта", source.conn, target.conn, "Константа.ВалютаУчета", "Константа.ВалютаУчета"
+    )
+    constant_pko = next(item for item in rules.pko() if item.code == "Валюта")
+    assert "СинхронизироватьПоИдентификатору" not in constant_pko.values
+    assert _SYNC_NOTE not in constant.warnings
+    _assert_sound(rules)
+
+
+def test_explicit_fields_override_kd_defaults(tmp_path: Path) -> None:
+    """Явное значение в `fields`, в том числе ложь, не заменяется умолчанием КД."""
+    source = _hierarchical_catalog(tmp_path / "source.sqlite")
+    target = _hierarchical_catalog(tmp_path / "target.sqlite")
+    source.add("Перечисление", "Статусы")
+    target.add("Перечисление", "Статусы")
+    rules = _rules()
+
+    kept_false = create_pko_with_properties(
+        rules,
+        "Номенклатура",
+        source.conn,
+        target.conn,
+        "Справочник.Номенклатура",
+        "Справочник.Номенклатура",
+        {"СинхронизироватьПоИдентификатору": False},
+    )
+    pko = next(item for item in rules.pko() if item.code == "Номенклатура")
+    assert pko.values["СинхронизироватьПоИдентификатору"] is False
+    assert _SYNC_NOTE not in kept_false.warnings
+    raw = dump_rules(rules)
+    rule = next(
+        item
+        for item in etree.fromstring(raw).iter("Правило")
+        if item.findtext("Код") == "Номенклатура"
+    )
+    assert rule.find("СинхронизироватьПоИдентификатору") is None
+    # ПКС «ЭтоГруппа» умолчание всё равно получает: его в fields ПКО не передавали.
+    assert _property_element(raw, "Номенклатура", "ЭтоГруппа").get("Обязательное") == "true"
+
+    kept_true = create_pko_with_properties(
+        rules,
+        "Статусы",
+        source.conn,
+        target.conn,
+        "Перечисление.Статусы",
+        "Перечисление.Статусы",
+        {"СинхронизироватьПоИдентификатору": True},
+    )
+    enum_pko = next(item for item in rules.pko() if item.code == "Статусы")
+    assert enum_pko.get("СинхронизироватьПоИдентификатору") is True
+    assert _SYNC_NOTE not in kept_true.warnings
+
+    created = create_rule(
+        rules,
+        "pks",
+        "ЭТОГРУППА",
+        _pks_sides("ЭТОГРУППА", "Свойство", "Булево"),
+        owner="Номенклатура",
+    )
+    assert created.warnings == [_mandatory_note("ЭТОГРУППА")]
+    upper = _by_target(_pks(rules, "Номенклатура"))["ЭТОГРУППА"]
+    assert upper.attrs.get("Обязательное") is True
+
+    plain = create_rule(
+        rules,
+        "pks",
+        "ГруппаСвоя",
+        _pks_sides("ГруппаСвоя", "Реквизит", "Булево"),
+        owner="Номенклатура",
+    )
+    assert _mandatory_note("ГруппаСвоя") not in plain.warnings
+    assert "Обязательное" not in _by_target(_pks(rules, "Номенклатура"))["ГруппаСвоя"].attrs
+
+    forced_off = create_rule(
+        rules,
+        "pks",
+        "СуффиксЭтоГруппа",
+        {**_pks_sides("СуффиксЭтоГруппа", "Свойство", "Булево"), "Обязательное": False},
+        owner="Номенклатура",
+    )
+    assert _mandatory_note("СуффиксЭтоГруппа") not in forced_off.warnings
+    off = _by_target(_pks(rules, "Номенклатура"))["СуффиксЭтоГруппа"]
+    assert off.attrs.get("Обязательное") is False
+
+    group = create_rule(
+        rules,
+        "pks_group",
+        "ЭтоГруппаТЧ",
+        {
+            "Источник": _side("ЭтоГруппаТЧ", "ТабличнаяЧасть"),
+            "Приемник": _side("ЭтоГруппаТЧ", "ТабличнаяЧасть"),
+        },
+        owner="Номенклатура",
+    )
+    assert not any("Обязательное" in item for item in group.warnings)
+    tabular = _by_target(_pks(rules, "Номенклатура"))["ЭтоГруппаТЧ"]
+    assert "Обязательное" not in tabular.attrs
+
+    raw = dump_rules(rules)
+    assert _property_element(raw, "Номенклатура", "ЭТОГРУППА").get("Обязательное") == "true"
+    assert _property_element(raw, "Номенклатура", "СуффиксЭтоГруппа").get("Обязательное") is None
+    loaded = load_rules(raw)
+    assert isinstance(loaded, ExchangeRules)
+    restored = _by_target(_pks(loaded, "Номенклатура"))
+    assert restored["ЭТОГРУППА"].attrs.get("Обязательное") is True
+    assert restored["ЭтоГруппа"].attrs.get("Обязательное") is True
+    _assert_sound(rules)
+
+
+def test_create_rule_pko_gets_identifier_sync_default() -> None:
+    """ПКО, созданное напрямую, получает то же умолчание, что и ПКО из кандидатов.
+
+    КД ставит флаг любому новому ПКО (`ПриемникПриИзмененииПКО`), вид приёмника здесь
+    берётся из имени типа: структура стороны может быть не передана.
+    """
+    rules = _rules()
+
+    def sides(type_name: str) -> dict[str, str]:
+        return {"Источник": type_name, "Приемник": type_name}
+
+    catalog = create_rule(rules, "pko", "Валюты", sides("СправочникСсылка.Валюты"))
+    assert _SYNC_NOTE in catalog.warnings
+    enum = create_rule(rules, "pko", "Статусы", sides("ПеречислениеСсылка.Статусы"))
+    assert _SYNC_NOTE not in enum.warnings
+    register = create_rule(rules, "pko", "Цены", sides("РегистрСведенийЗапись.Цены"))
+    assert _SYNC_NOTE not in register.warnings
+    no_target = create_rule(rules, "pko", "БезПриемника", {"Источник": "СправочникСсылка.Валюты"})
+    assert _SYNC_NOTE not in no_target.warnings
+    forced_off = create_rule(
+        rules,
+        "pko",
+        "Банки",
+        {**sides("СправочникСсылка.Банки"), "СинхронизироватьПоИдентификатору": False},
+    )
+    assert _SYNC_NOTE not in forced_off.warnings
+
+    flags = {item.code: item.get("СинхронизироватьПоИдентификатору") for item in rules.pko()}
+    assert flags["Валюты"] is True
+    assert not flags["Статусы"]
+    assert not flags["Цены"]
+    assert not flags["БезПриемника"]
+    assert flags["Банки"] is False
+    # Правка существующего ПКО умолчание не подставляет: КД делает это только для нового.
+    updated = update_rule(rules, "pko", "Статусы", {"Приемник": "СправочникСсылка.Статусы"})
+    assert _SYNC_NOTE not in updated.warnings
+    assert not next(item for item in rules.pko() if item.code == "Статусы").get(
+        "СинхронизироватьПоИдентификатору"
+    )
 
 
 # --- Код и Порядок ПКС -------------------------------------------------------------------------

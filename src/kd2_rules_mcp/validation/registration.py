@@ -46,6 +46,8 @@ _STRUCTURE_CHECKS = (
 )
 
 _NO_STRUCTURE = "структура конфигурации-источника не загружена"
+_NO_PLAN_CONTENT = "в менеджере регистрации нет состава плана обмена"
+_NO_OBJECT_SETTINGS = "объект настройки менеджера регистрации недоступен"
 
 
 @dataclass(slots=True)
@@ -128,18 +130,30 @@ class _Index:
 
 
 def check_registration(
-    rules: RegistrationRules, structure: sqlite3.Connection | None
+    rules: RegistrationRules,
+    structure: sqlite3.Connection | None,
+    *,
+    has_plan_content: bool = True,
+    has_object_settings: bool = True,
 ) -> ValidationReport:
     """Проверяет правила регистрации против структуры источника.
 
     `structure` — соединение структуры конфигурации, где живёт план обмена.
     Без структуры проверки по структуре пропускаются и итог не говорит «ошибок нет»
     без оговорки (спецификация, «Отчёт проверки»).
+
+    `has_plan_content` — в правилах есть достоверный блок `СоставПланаОбмена`.
+    `has_object_settings` — `ОбъектНастройки` можно проверять. В менеджере регистрации
+    объекта настройки нет, адаптер передаёт False. По умолчанию оба флага сохраняют
+    проверку обычного файла `ПравилаРегистрации`.
     """
     report = ValidationReport()
     if structure is None:
         for check in _STRUCTURE_CHECKS:
             report.skip(check, _NO_STRUCTURE)
+        if not has_object_settings:
+            report.skip("registration.settings_type", _NO_OBJECT_SETTINGS)
+            return report
         # Согласованность ОбъектНастройки с видом не требует базы: её задаёт писатель.
         for rule in rules.rules():
             if _loaded(rule):
@@ -148,18 +162,23 @@ def check_registration(
 
     index = _Index(structure)
     plan = _load_plan(report, rules.exchange_plan, index, structure)
-    if plan is not None:
+    if plan is not None and has_plan_content:
         _check_plan_content(report, rules, plan)
+    elif plan is not None:
+        report.skip("registration.plan_content", _NO_PLAN_CONTENT)
     for rule in rules.rules():
         if not _loaded(rule):
             continue
         obj = _check_object(report, rule, index, plan)
-        _check_settings(report, rule, obj)
+        if has_object_settings:
+            _check_settings(report, rule, obj)
         if plan is not None:
             _check_plan_filters(report, rule, plan, obj, index)
             _check_unload_mode(report, rule, plan)
         if obj is not None:
             _check_object_filters(report, rule, obj, index)
+    if not has_object_settings:
+        report.skip("registration.settings_type", _NO_OBJECT_SETTINGS)
     return report
 
 

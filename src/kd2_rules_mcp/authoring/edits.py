@@ -23,6 +23,15 @@
 (`АвтонастройкаПравилКонвертацииОбъектов/Ext/ObjectModule.bsl`, `СохранитьПравила`, 227–234;
 `ОбщегоНазначения/Ext/Module.bsl`, `глНаименованиеПКО`, 113). В XML это имена типов
 (`ВыгрузкаКонвертации/Ext/ObjectModule.bsl`, 842–846).
+
+То же создание ставит `СинхронизироватьПоИдентификатору`, если приёмник ссылочный и не
+перечисление (`ОбщегоНазначения/Ext/Module.bsl`, `ОпределитьНужнаСинхронизацияПоИдентификатору`,
+1907–1924). Обе стороны — приложения 8: структуры сервера собраны из выгрузок 8.3, отдельной
+проверки приложения нет. ПКС, у которого имя приёмника подобно `%ЭтоГруппа%`, получает
+`Обязательное` (`ВыгрузкаКонвертации/Ext/ObjectModule.bsl`, 1214–1216 и 627) — и по кандидатам,
+и в `create_rule`, если поле не передано. Явное значение в `fields`, в том числе ложь, сильнее.
+Оба умолчания попадают в `warnings` ответа, чтобы их было видно вместе с прочими сведениями
+о созданных ПКС.
 """
 
 import sqlite3
@@ -56,6 +65,28 @@ from kd2_rules_mcp.validation.structure import SOURCE, TARGET, check_rule, is_re
 
 # Шаг `Порядок` автонастройки ПКС (СохранитьПравилаКС, 796 и 864).
 _ORDER_STEP = 50
+# Ссылочные виды, у которых `глЕстьСсылка` возвращает Истина, кроме перечисления
+# (ОбщегоНазначения, 350–370 и 1907–1924).
+_SYNC_REFERENCE_KINDS = frozenset(
+    {
+        "БизнесПроцесс",
+        "Документ",
+        "Задача",
+        "ПланВидовРасчета",
+        "ПланВидовХарактеристик",
+        "ПланОбмена",
+        "ПланСчетов",
+        "Справочник",
+        "ТочкаМаршрутаБизнесПроцесса",
+    }
+)
+_SYNC_BY_ID = "СинхронизироватьПоИдентификатору"
+_MANDATORY = "Обязательное"
+# Фрагмент шаблона `ПОДОБНО "%ЭтоГруппа%"` (ВыгрузкаКонвертации, 1214–1216).
+_GROUP_PROPERTY_MARK = "этогруппа"
+_SYNC_DEFAULT_NOTE = (
+    "СинхронизироватьПоИдентификатору включено по умолчанию: ссылочный приёмник, не перечисление"
+)
 
 # Вид верхнего уровня: раздел, тег элемента, поле-адрес.
 _TOP: dict[str, tuple[str, str, str]] = {
@@ -97,6 +128,8 @@ class EditResult:
 
     `skipped` заполняется у ПКО, ПКС, ПКЗ, ПВД и ПОД, когда структура стороны не передана:
     проверка объектов, свойств и значений тогда не выполняется.
+    `warnings` — замечания проверки и заметки об умолчаниях КД, которые создание подставило само
+    (`_SYNC_DEFAULT_NOTE`, `_mandatory_default_note`).
     """
 
     address: str
@@ -146,7 +179,11 @@ def create_rule(
     У ПКС и группы ПКС `Код` и `Порядок`, которых нет в `fields`, подставляются как у
     соседей (`_assign_pks_defaults`). В пустом контейнере `Порядок` равен 0 — как у
     первой строки `_fill_properties`, а не шаг 50: иначе нумерация разошлась бы с
-    автонастройкой.
+    автонастройкой. ПКС без явного `Обязательное` получает этот атрибут, если имя приёмника
+    подобно `%ЭтоГруппа%`; ПКО со ссылочным приёмником, кроме перечисления, без явного
+    `СинхронизироватьПоИдентификатору` получает этот флаг (КД ставит его любому новому ПКО:
+    `ОбщегоНазначения/Ext/Module.bsl`, `ПриемникПриИзмененииПКО`, 1876–1884). Заметки об
+    обоих умолчаниях попадают в `warnings`.
     """
     _require_key(kind_name, key)
     list_group = _list_group(rules, kind_name, group)
@@ -155,6 +192,9 @@ def create_rule(
     _reject_identity_mismatch(kind_name, key, fields)
     if fields:
         _apply_fields(node, fields)
+    sync_by_id = kind_name == "pko" and _apply_identifier_sync(
+        node, _reference_kind(node.values.get(TARGET)), fields
+    )
     pko, parent = _place_context(rules, kind_name, key, owner)
     if kind_name in ("pks", "pks_group"):
         _assign_pks_defaults(node, pko, parent, fields)
@@ -166,6 +206,10 @@ def create_rule(
     try:
         result = _result(kind_name, node, owner, pko, source, target)
         result.warnings.extend(_apply_structure(rules, kind_name, node, source, target))
+        if sync_by_id:
+            result.warnings.append(_SYNC_DEFAULT_NOTE)
+        if _mandatory_default_applied(kind_name, node, fields):
+            result.warnings.append(_mandatory_default_note(key))
     except Exception:
         _detach(inserted, node)
         raise
@@ -303,8 +347,10 @@ def create_pko_with_properties(
     `auto = False` и «по синониму» не создаются и попадают в `not_applied`. Для ссылочного
     типа приёмника `КодПравилаКонвертации` заполняется, если в правилах ровно одно ПКО
     с такими типами источника и приёмника; иначе поле пустое, а свойство — в `unresolved`.
-    `group` — путь кодов групп списка ПКО через `/`; пусто — корень списка. Группа должна
-    уже существовать.
+    Ссылочный приёмник, кроме перечисления, получает `СинхронизироватьПоИдентификатору`,
+    если этого поля нет в `fields`. ПКС с именем приёмника `%ЭтоГруппа%` получает `Обязательное`.
+    Обе подстановки видны в `warnings`. `group` — путь кодов групп списка ПКО через `/`;
+    пусто — корень списка. Группа должна уже существовать.
     """
     if not code:
         raise RuleEditError("Пустой адрес правила")
@@ -330,11 +376,14 @@ def create_pko_with_properties(
     node.values[TARGET] = str(target_row["type_name"])
     if fields:
         _apply_fields(node, fields)
+    sync_by_id = _apply_identifier_sync(node, str(target_row["kind"]), fields)
     inserted = _attach(rules, "pko", node, None, None, list_group)
     result = EditResult(rule_address(node))
     try:
         # Сгенерированные ПКС не проверяются: ссылка без ПКО остаётся в `unresolved`.
         result.warnings.extend(_apply_structure(rules, "pko", node, source, target))
+        if sync_by_id:
+            result.warnings.append(_SYNC_DEFAULT_NOTE)
         properties = Node.new("pks_list", "Свойства")
         node.children["Свойства"] = properties
         _fill_properties(properties, candidates, rules, "", result)
@@ -582,7 +631,7 @@ def _assign_pks_defaults(
     parent: Node | None,
     fields: Mapping[str, FieldValue] | None,
 ) -> None:
-    """Подставляет `Код` и `Порядок` ПКС, если этих полей нет в `fields`.
+    """Подставляет `Код`, `Порядок` и `Обязательное` ПКС, если этих полей нет в `fields`.
 
     `Порядок` — среди прямых ПКС и групп того же контейнера (`Свойства` или группа):
     максимум плюс `_ORDER_STEP`. Пустой контейнер и контейнер, где `Порядок` ни у кого
@@ -591,12 +640,77 @@ def _assign_pks_defaults(
     `Код` — наибольшее целое среди всех ПКС ПКО (`walk_pks` раскрывает группы) плюс 1;
     нечисловые коды пропускаются; если целых нет — 1. В модель код пишется строкой,
     как поле схемы и как `<Код>1</Код>` в выгрузке.
+    `Обязательное` — у ПКС (не у группы), если имя приёмника подобно `%ЭтоГруппа%`.
     """
     given = fields or {}
     if "Порядок" not in given:
         node.values["Порядок"] = _next_pks_order(parent)
     if "Код" not in given:
         node.values["Код"] = str(_next_pks_code(pko))
+    if _MANDATORY not in given:
+        _apply_group_mandatory(node)
+
+
+def _apply_identifier_sync(
+    node: Node, target_kind: str, fields: Mapping[str, FieldValue] | None
+) -> bool:
+    """Ставит синхронизацию по идентификатору, если поле не задано явно.
+
+    Условие КД (`ОпределитьНужнаСинхронизацияПоИдентификатору`, 1907–1924): обе стороны —
+    приложения 8 (для структур сервера это так), приёмник ссылочный и не перечисление
+    (`глЕстьСсылка`, 350–370). Возвращает истину, только если умолчание подставлено.
+    """
+    if fields and _SYNC_BY_ID in fields:
+        return False
+    if target_kind not in _SYNC_REFERENCE_KINDS:
+        return False
+    node.values[_SYNC_BY_ID] = True
+    return True
+
+
+def _reference_kind(type_name: object) -> str:
+    """Вид объекта по имени ссылочного типа: `СправочникСсылка.Валюты` → `Справочник`.
+
+    Для `create_rule`, где приёмник задан именем типа в `fields`, а структуры может не быть.
+    Нессылочный тип (`РегистрСведенийЗапись.Цены`, `Строка`) и пустое значение дают пустую строку.
+    """
+    if not isinstance(type_name, str):
+        return ""
+    kind, mark, _ = type_name.partition("Ссылка.")
+    return kind if mark else ""
+
+
+def _apply_group_mandatory(node: Node) -> bool:
+    """Атрибут `Обязательное`, если имя приёмника ПОДОБНО «%ЭтоГруппа%» (ВК:1214–1216, 627).
+
+    Группа ПКС атрибута не имеет: писатель выставляет его только у свойства (ВК:617–628).
+    Сравнение без учёта регистра, как `ПОДОБНО` в запросе КД.
+    """
+    if node.kind.name != "pks":
+        return False
+    if not _is_group_property_name(side_name(node, TARGET)):
+        return False
+    node.attrs[_MANDATORY] = True
+    return True
+
+
+def _is_group_property_name(name: str) -> bool:
+    """Имя свойства приёмника содержит «ЭтоГруппа» (`ПОДОБНО "%ЭтоГруппа%"`, ВК:1214–1216)."""
+    return _GROUP_PROPERTY_MARK in name.casefold()
+
+
+def _mandatory_default_applied(
+    kind_name: str, node: Node, fields: Mapping[str, FieldValue] | None
+) -> bool:
+    """Умолчание `Обязательное` подставлено, а не передано в `fields`."""
+    if kind_name != "pks" or (fields and _MANDATORY in fields):
+        return False
+    return node.attrs.get(_MANDATORY) is True
+
+
+def _mandatory_default_note(path: str) -> str:
+    """Заметка ответа: у созданной ПКС включено `Обязательное`."""
+    return f"ПКС «{path}»: Обязательное включено по умолчанию"
 
 
 def _next_pks_order(parent: Node | None) -> int:
@@ -1091,6 +1205,8 @@ def _fill_properties(
         node = _property_rule(candidate, group)
         node.values["Порядок"] = order
         order += _ORDER_STEP
+        if not group and _apply_group_mandatory(node):
+            result.warnings.append(_mandatory_default_note(path))
         if candidate.source is None:
             node.attrs["Отключить"] = True
             result.disabled.append(path)
