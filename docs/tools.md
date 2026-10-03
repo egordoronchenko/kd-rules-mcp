@@ -12,7 +12,7 @@
 
 <!-- tools:begin — генерирует scripts/dump_tools.py, руками не править -->
 
-Инструментов: 33.
+Инструментов: 39.
 
 | Группа | Инструменты |
 |---|---|
@@ -22,6 +22,7 @@
 | Правки | [`rule_create`](#rule_create), [`rule_update`](#rule_update), [`rule_update_many`](#rule_update_many), [`rule_delete`](#rule_delete), [`pko_create_from_candidates`](#pko_create_from_candidates) |
 | Проверки | [`rules_validate`](#rules_validate), [`rules_diff`](#rules_diff), [`handlers_export`](#handlers_export), [`handlers_locate`](#handlers_locate) |
 | Регистрация и корреспондент | [`registration_build`](#registration_build), [`correspondent_draft`](#correspondent_draft) |
+| Чтение EnterpriseData | [`ed_open`](#ed_open), [`ed_overview`](#ed_overview), [`ed_list`](#ed_list), [`ed_get`](#ed_get), [`ed_locate`](#ed_locate), [`ed_close`](#ed_close) |
 
 ## Проекты и структуры
 
@@ -442,12 +443,87 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `limit` | integer ≥ 1 | `50` | Сколько обработчиков и ПКС перечислить |
 | `new_project_id` | string \| null | `null` | Свой идентификатор нового проекта правил; пусто — выводится из источника и вида |
 
+## Чтение EnterpriseData
+
+### `ed_open`
+
+Открывает неизменяемый снимок менеджера EnterpriseData только в памяти.
+
+Повторное открытие возвращает прежний снимок и source_changed; перечитать — ed_close/open.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `path` | string | обязательный | Путь к модулю менеджера обмена (`…/CommonModules/<Имя>/Ext/Module.bsl`), как на машине агента |
+
+### `ed_overview`
+
+Обзор ED: счётчики, покрытие, упоминания версий и сводка диагностик.
+
+complete означает структурную полноту чтения, а не корректность обмена.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project_id` | string | обязательный | Идентификатор снимка из ed_open |
+
+### `ed_list`
+
+Страница сущностей ED в порядке исходника; фильтры сторон объединяются AND.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project_id` | string | обязательный | Идентификатор снимка из ed_open |
+| `kind` | string | обязательный | Вид: pko, pks, pktch, pod, pkpd, parameter, algorithm, handler, dispatcher, support, unknown, version, diagnostic |
+| `text` | string \| null | `null` | Подстрока в имени, адресе и сторонах; без поиска в теле кода |
+| `format_object` | string \| null | `null` | Точное имя объекта формата; для ПКС наследуется от ПКО |
+| `metadata_object` | string \| null | `null` | Точное имя метаданных (Вид.Имя); для ПКС наследуется от ПКО |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+
+### `ed_get`
+
+Поля и страницы детей, областей, тегов, условий и диагностик сущности ED.
+
+По умолчанию исходного текста нет. ПКС группы доступны через отдельный get группы.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project_id` | string | обязательный | Идентификатор снимка из ed_open |
+| `address` | string | обязательный | Адрес ED из ed_list; конфликт уточняется суффиксом #1, #2 |
+| `children_kind` | string \| null | `null` | Вид непосредственных детей; null — все виды |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+| `include_text` | boolean | `false` | Включить страницу исходного текста сущности |
+| `text_offset` | integer ≥ 0 | `0` | Смещение текста в символах Unicode |
+| `text_limit` | integer 1…8000 | `2000` | Размер страницы текста, от 1 до 8000 символов |
+
+### `ed_locate`
+
+Классификация строки ED и страница сущностей: внутренняя, предки, связанные правила.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project_id` | string | обязательный | Идентификатор снимка из ed_open |
+| `line` | integer ≥ 1 | обязательный | Номер физической строки единственного файла, начиная с 1 |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+
+### `ed_close`
+
+Удаляет снимок ED из памяти; исходный файл остаётся неизменным.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project_id` | string | обязательный | Идентификатор снимка из ed_open |
+
 ## Коды ошибок
 
 Ошибка инструмента — JSON `{"code", "message", …}` в тексте ошибки MCP; код — по первому подходящему классу исключения (порядок строк важен: подклассы раньше базовых).
 
 | Код | Класс | Когда | Дополнительные поля |
 |---|---|---|---|
+| `ed_resource_limit` | `EdResourceLimitError` | Менеджер ED превышает предел размера или числа строк. | — |
+| `ed_format` | `EdFormatError` | Модуль не соответствует безопасно читаемому формату менеджера ED. | — |
+| `ed_read_error` | `EdReadError` | Файл менеджера ED недоступен или имеет неподдержанную кодировку. | — |
 | `structure_not_found` | `StructureNotFoundError` | Структуры с таким идентификатором нет в кэше. | `structures` — загруженные структуры |
 | `object_not_found` | `ObjectNotFoundError` | Объекта метаданных нет в структуре; `suggestions` — похожие имена. | `suggestions` — похожие имена объектов |
 | `project_not_found` | `ProjectNotFoundError` | Рабочего проекта с таким идентификатором нет. | — |
@@ -518,7 +594,96 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `registration_build` | проект правил + `warnings` |
 | `correspondent_draft` | проект правил + `draft`, `missing`, `notes`, `handlers_total`, `handlers` (`address`, `event`, `note`, `code`), `disabled_total`, `disabled` (`address`, `reason`) |
 
-## Ошибки по инструментам
+## EnterpriseData: порядок, адреса и ответы
+
+Порядок: `ed_open(path)` → `ed_overview(project_id)` → `ed_list` / `ed_get` / `ed_locate`.
+Это чтение одного UTF-8 модуля менеджера, без исполнения BSL, обхода соседних модулей и записи.
+Снимок и индекс адресов хранятся только в памяти. Повторный `ed_open` возвращает прежний снимок
+с `reused: true`; `source_changed` сравнивает текущие байты файла с хешем снимка.
+Перечитать файл — `ed_close` и `ed_open`. После перезапуска сервера нужен новый `ed_open`.
+Идентификатор — `ed-<имя модуля>-<12 знаков sha256 пути на сервере>`; имя модуля — каталог над
+`Ext/Module.bsl` в выгрузке конфигурации, иначе имя файла без расширения;
+при коллизии короткого идентификатора используется полный хеш пути.
+
+### Адреса ED
+
+| Сущность | Адрес |
+|---|---|
+| Конвертация, ПКО, ПОД, ПКПД | `Конвертация`, `ПКО/<Имя>`, `ПОД/<Имя>`, `ПКПД/<Имя>` |
+| ПКС шапки | `ПКО/<Имя>/ПКС/<Свойство>` |
+| ПКТЧ и её ПКС | `ПКО/<Имя>/ПКТЧ/<Группа>`, `ПКО/<Имя>/ПКТЧ/<Группа>/ПКС/<Свойство>` |
+| Поиск и значения ПКПД | `ПКО/<Имя>/Поиск/<номер>`, `ПКПД/<Имя>/Значение/<номер>`; номер с 1 |
+| Код | `Алгоритм/<Имя>`, `Обработчик/<Имя>`, `Служебный/<Имя>`, `Диспетчер/<Имя>`, `Событие/<Имя>`; метод может иметь несколько адресов |
+| Параметр и неизвестное | `Параметр/<Имя>`, `Неизвестное/<file_id>/<строка начала>-<строка конца>-<символьное начало>` |
+| Упоминание версии и диагностика | `Версия/<entity_id>`, `Диагностика/<entity_id>` |
+
+Имя ПКО/ПОД берётся из литерала присваивания; если литерала нет — временное имя процедуры
+с диагностикой. Для свойства и группы выбирается непустое имя стороны формата, затем
+конфигурации, затем маркер `~empty`. Символы `% / # ~` и управляющие символы сегмента
+экранируются percent-encoding UTF-8, остальной Unicode сохраняется.
+После casefold совпадающие адреса получают все суффиксы `#1`, `#2`, … в порядке исходника.
+Неквалифицированный конфликт даёт `ambiguous_address` и `candidates: Page`, без выбора первого.
+Суффиксы устойчивы только в пределах неизменного снимка. Служебные дети (привязки событий,
+условия) используют `<kind>/<entity_id>`; адрес из ответа можно передать в `ed_get`.
+
+### Ответы ED
+
+`Page = {items,total,offset,limit,has_more}`. По умолчанию offset=0, limit=50;
+1≤limit≤200, offset≥0. Порядок сущностей — порядок исходника. Неверные пределы не зажимаются.
+
+| Инструмент | Ключи ответа |
+|---|---|
+| `ed_open` | `project_id`, `kind: "ed"`, `source_files` (`file_id,path,sha256,lines`, путь агента), `manager_version`, `parse_status`, `counts`, `reused`, `source_changed`, `diagnostics_summary` |
+| `ed_overview` | `project_id`, `manager_version`, `format_versions` (`status: "mentions_only",items,total,has_more`; до 20 элементов `value,span,context`), `counts`, `coverage`, `parse_status`, `diagnostics_summary` |
+| `ed_list` | Page; элемент: `address,kind,name,file_id,line_start,line_end,status`; у правил — известные `configuration_object,format_object`; у ПКС и ПКТЧ — `configuration_property,format_property` (объект правила — в адресе); при наличии детей — `child_count` |
+| `ed_get` | `address,kind,fields,span`; страницы `regions,tags,guards,children,diagnostics`; при `include_text: true` — `text: TextPage` |
+| `ed_locate` | `file_id,line,classification,matches: Page`; совпадение: `address,kind,span,relation` (`innermost`, `ancestor`, `associated`) |
+| `ed_close` | `project_id,closed: true` |
+
+`counts`: `pko,pod,pkpd,pks,pktch,search_sets,parameters,algorithms,handlers,dispatchers,support,unknown`.
+Счётчики алгоритмов и обработчиков считают роли методов. `diagnostics_summary` — словари
+счётчиков `code` и `severity`; подробности через `ed_list(kind="diagnostic")` и `ed_get`.
+`coverage`: `total_lines`, `declarative_lines`, `opaque_code_lines`, `trivia_lines`, `unknown_lines`,
+`entity_covered_lines`, `coverage_ratio`, `classified_ratio` (отношения округлены до 6 знаков).
+`complete` означает структурную полноту принятого подмножества, а не правильность обмена.
+
+Виды списка: `pko,pks,pktch,pod,pkpd,parameter,algorithm,handler,dispatcher,support,unknown,version,diagnostic`.
+`text` — casefold-подстрока в имени, адресе и сторонах, без поиска в теле BSL.
+Фильтры `format_object` и `metadata_object` объединяются AND, сравнивают точные имена
+без внешних пробелов и без учёта регистра. Ссылки `Метаданные.Справочники.Имя`
+нормализуются в `Справочник.Имя` (аналогично другим видам метаданных).
+ПКС и ПКТЧ наследуют стороны ПКО. Неизвестная сторона не совпадает с фильтром;
+алгоритм без стороны правила под фильтр сторон не попадает.
+
+В `ed_get` поля скалярные и короткие, дети — только непосредственные.
+Компактный ребёнок-сущность: `address,kind,name`; его поля доступны через отдельный `ed_get`.
+`children_kind` выбирает вид детей: `pks,pktch,search,binding,extension` у ПКО; `pks` у ПКТЧ;
+`binding,reference` у ПОД; `value` у ПКПД; `binding,entrypoint,version` у конвертации;
+`formal_parameter` у метода; `field` у набора поиска; `argument,argument_presence` у ПКС.
+У диспетчера также `case`; у правила или метода — принадлежащие ему `unknown`.
+Недоступный для родителя вид — `invalid_argument`.
+Регионы — строки, теги — `name,span`, условия и диагностики — компактные строки сущностей;
+все пять коллекций используют одинаковые offset/limit.
+`span = {file_id,line_start,line_end,char_start,char_end}`; строки с 1, символьные позиции с 0.
+Текст тега не раскрывается автоматически вместе с окружающим правилом.
+`TextPage = {text,total_chars,offset,limit,has_more}` по символам Unicode, по умолчанию
+text_offset=0, text_limit=2000, 1≤text_limit≤8000. Без `include_text` исходного текста нет.
+Длинное скалярное поле (более 2000 символов): `{preview,truncated:true,total_chars}`,
+для raw выражения дополнительно `span`.
+
+На строке ПКС `ed_locate` сначала возвращает ПКС, затем группу и ПКО; на строке кода —
+метод и связанные правила с `associated`. Комментарий вне сущности даёт пустую страницу
+и `classification: "trivia"`. Номер строки должен быть в пределах единственного файла;
+параметр `file_id` не требуется.
+
+Ошибки ED: `ed_read_error` — файл отсутствует, недоступен, является каталогом или имеет
+неподдержанную кодировку; `ed_format` — пустой/чужой модуль или небезопасные границы BSL;
+`ed_resource_limit` — более 32 MiB или 1 000 000 строк.
+Общие ошибки: `project_not_found`, `rule_not_found`, `ambiguous_address`, `invalid_argument`.
+Разделённый на несколько файлов менеджер не поддерживается: его признак в одиночном модуле —
+диагностика `split_module_required` и статус `partial`.
+
+## Ошибки по инструментам КД 2
 
 Какой код когда возникает — по коду `Kd2Service` и модулей слоёв (вывод по коду, не полный перебор тестами):
 

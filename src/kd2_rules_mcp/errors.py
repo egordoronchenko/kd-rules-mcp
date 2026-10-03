@@ -1,10 +1,23 @@
 """Типизированные ошибки сервера (сообщения — на русском)."""
 
 from collections.abc import Sequence
+from typing import Any
 
 
 class Kd2Error(Exception):
     """Базовая ошибка сервера правил КД 2."""
+
+
+class EdReadError(Kd2Error):
+    """Файл менеджера ED недоступен или имеет неподдержанную кодировку."""
+
+
+class EdFormatError(Kd2Error):
+    """Модуль не соответствует безопасно читаемому формату менеджера ED."""
+
+
+class EdResourceLimitError(Kd2Error):
+    """Менеджер ED превышает предел размера или числа строк."""
 
 
 class RulesFormatError(Kd2Error):
@@ -57,6 +70,11 @@ class RuleNotFoundError(RuleEditError):
 
 class AmbiguousAddressError(RuleNotFoundError):
     """Адрес ПКС совпал с несколькими правилами одного контейнера."""
+
+    def __init__(self, message: str, candidates: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.candidates = list(candidates)
+        self.candidate_page: dict[str, Any] | None = None
 
 
 class DanglingReferenceError(RuleEditError):

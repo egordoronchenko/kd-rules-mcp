@@ -66,6 +66,14 @@ GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "Проверки": ("rules_validate", "rules_diff", "handlers_export", "handlers_locate"),
     "Регистрация и корреспондент": ("registration_build", "correspondent_draft"),
+    "Чтение EnterpriseData": (
+        "ed_open",
+        "ed_overview",
+        "ed_list",
+        "ed_get",
+        "ed_locate",
+        "ed_close",
+    ),
 }
 
 # Что значат дополнительные поля JSON ошибки (`error_payload` в server.py).

@@ -1,0 +1,37 @@
+"""Чтение неизменяемого снимка менеджера EnterpriseData, без инфраструктурных зависимостей."""
+
+from .errors import EdFormatError as EdFormatError
+from .errors import EdReadError as EdReadError
+from .errors import EdResourceLimitError as EdResourceLimitError
+from .model import Classification as Classification
+from .model import Conversion as Conversion
+from .model import Coverage as Coverage
+from .model import CoverageSegment as CoverageSegment
+from .model import Diagnostic as Diagnostic
+from .model import DispatcherCase as DispatcherCase
+from .model import EdDocument as EdDocument
+from .model import Entity as Entity
+from .model import Expr as Expr
+from .model import Field as Field
+from .model import FormalParameter as FormalParameter
+from .model import Guard as Guard
+from .model import HandlerBinding as HandlerBinding
+from .model import ObjectRule as ObjectRule
+from .model import Parameter as Parameter
+from .model import ParseStatus as ParseStatus
+from .model import PredefinedRule as PredefinedRule
+from .model import ProcessingRule as ProcessingRule
+from .model import PropertyGroup as PropertyGroup
+from .model import PropertyRule as PropertyRule
+from .model import Routine as Routine
+from .model import RuleRef as RuleRef
+from .model import RuleUse as RuleUse
+from .model import SearchSet as SearchSet
+from .model import SourceFile as SourceFile
+from .model import SourceSpan as SourceSpan
+from .model import SourceTag as SourceTag
+from .model import UnknownFragment as UnknownFragment
+from .model import ValueMapping as ValueMapping
+from .model import VersionMention as VersionMention
+from .reader import read_manager as read_manager
+from .reader import read_manager_text as read_manager_text

@@ -46,6 +46,12 @@ async def _error(client: Client, tool: str, /, **arguments: Any) -> dict[str, An
 
 
 EXPECTED_TOOLS = {
+    "ed_open",
+    "ed_overview",
+    "ed_list",
+    "ed_get",
+    "ed_locate",
+    "ed_close",
     "project_list",
     "structure_load_project",
     "structure_list",
@@ -80,6 +86,30 @@ EXPECTED_TOOLS = {
     "registration_build",
     "correspondent_draft",
 }
+
+
+async def test_ed_tools(service: Kd2Service) -> None:
+    async with Client(create_server(service)) as client:
+        opened = await _call(client, "ed_open", path=str((DATA / "ed/manager_v2.bsl").resolve()))
+        project = opened["project_id"]
+        overview = await _call(client, "ed_overview", project_id=project)
+        assert overview["counts"]["pks"] == 4
+        listed = await _call(client, "ed_list", project_id=project, kind="pks", limit=1)
+        assert listed["total"] == 4 and len(listed["items"]) == 1
+        result = await _call(client, "ed_get", project_id=project, address="ПКО/Товар")
+        assert result["kind"] == "pko" and "text" not in result
+        located = await _call(client, "ed_locate", project_id=project, line=1)
+        assert located["classification"] == "trivia"
+        error = await _error(client, "ed_get", project_id=project, address="ПКО/Нет")
+        assert error["code"] == "rule_not_found"
+        error = await _error(client, "ed_open", path=str(DATA / "ed/missing.bsl"))
+        assert error["code"] == "ed_read_error"
+        error = await _error(client, "ed_list", project_id=project, kind="invalid")
+        assert error["code"] == "invalid_argument"
+        closed = await _call(client, "ed_close", project_id=project)
+        assert closed["closed"] is True
+        error = await _error(client, "ed_overview", project_id=project)
+        assert error["code"] == "project_not_found"
 
 
 async def test_rules_open_schema_has_private(service: Kd2Service) -> None:

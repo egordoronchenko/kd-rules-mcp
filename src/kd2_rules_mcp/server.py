@@ -36,6 +36,9 @@ from kd2_rules_mcp.errors import (
     DanglingReferenceError,
     DuplicateProjectError,
     DuplicateRuleError,
+    EdFormatError,
+    EdReadError,
+    EdResourceLimitError,
     Kd2Error,
     ObjectNotFoundError,
     ProjectNotFoundError,
@@ -54,6 +57,9 @@ logger = logging.getLogger("kd2_rules_mcp")
 
 # Код ошибки по классу; порядок важен — подклассы раньше базовых.
 ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (EdResourceLimitError, "ed_resource_limit"),
+    (EdFormatError, "ed_format"),
+    (EdReadError, "ed_read_error"),
     (StructureNotFoundError, "structure_not_found"),
     (ObjectNotFoundError, "object_not_found"),
     (ProjectNotFoundError, "project_not_found"),
@@ -83,7 +89,10 @@ structure_load_xml / structure_load_md83exp по путям) →
 удалить его снимок — rules_close (файлы rules_save остаются). Правила регистрации —
 registration_build, черновик обратного направления — correspondent_draft.
 Смысловые решения принимает агент.
-Списки постраничные (offset, limit ≤ 200, has_more). Ошибки — JSON с полем code."""
+Списки постраничные (offset, limit ≤ 200, has_more). Ошибки — JSON с полем code.
+Сервер читает модуль менеджера обмена через универсальный формат EnterpriseData только для чтения.
+Порядок: ed_open → ed_overview → ed_list / ed_get / ed_locate.
+Снимки ED живут в памяти; перечитать изменённый файл — ed_close и ed_open."""
 
 StructureId = Annotated[
     str, Field(description="Идентификатор структуры в кэше (structure_list), например `zup-full`")
@@ -152,6 +161,8 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
         payload["structures"] = service.store.ids()
     if isinstance(error, ObjectNotFoundError):
         payload["suggestions"] = error.suggestions
+    if isinstance(error, AmbiguousAddressError) and error.candidate_page is not None:
+        payload["candidates"] = error.candidate_page
     if isinstance(error, WorkspacePathError) and service is not None:
         payload["workspace"] = service.settings.path_map.to_host(service.workspace.root.resolve())
         payload["writable"] = service.writable_dirs()
@@ -871,6 +882,123 @@ def create_server(service: Kd2Service) -> MCPServer:
             limit,
             new_project_id,
         )
+
+    # --- EnterpriseData ----------------------------------------------------------------------
+
+    @server.tool()
+    async def ed_open(
+        path: Annotated[
+            str,
+            Field(
+                description=(
+                    "Путь к модулю менеджера обмена (`…/CommonModules/<Имя>/Ext/Module.bsl`), "
+                    "как на машине агента"
+                )
+            ),
+        ],
+    ) -> dict[str, Any]:
+        """Открывает неизменяемый снимок менеджера EnterpriseData только в памяти.
+
+        Повторное открытие возвращает прежний снимок и source_changed; перечитать — ed_close/open.
+        """
+        return await call(service.ed_open, path)
+
+    @server.tool()
+    async def ed_overview(
+        project_id: Annotated[str, Field(description="Идентификатор снимка из ed_open")],
+    ) -> dict[str, Any]:
+        """Обзор ED: счётчики, покрытие, упоминания версий и сводка диагностик.
+
+        complete означает структурную полноту чтения, а не корректность обмена.
+        """
+        return await call(service.ed_overview, project_id)
+
+    @server.tool()
+    async def ed_list(
+        project_id: Annotated[str, Field(description="Идентификатор снимка из ed_open")],
+        kind: Annotated[
+            str,
+            Field(
+                description=(
+                    "Вид: pko, pks, pktch, pod, pkpd, parameter, algorithm, handler, "
+                    "dispatcher, support, unknown, version, diagnostic"
+                )
+            ),
+        ],
+        text: Annotated[
+            str | None,
+            Field(description="Подстрока в имени, адресе и сторонах; без поиска в теле кода"),
+        ] = None,
+        format_object: Annotated[
+            str | None, Field(description="Точное имя объекта формата; для ПКС наследуется от ПКО")
+        ] = None,
+        metadata_object: Annotated[
+            str | None,
+            Field(description="Точное имя метаданных (Вид.Имя); для ПКС наследуется от ПКО"),
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Страница сущностей ED в порядке исходника; фильтры сторон объединяются AND."""
+        return await call(
+            service.ed_list, project_id, kind, text, format_object, metadata_object, offset, limit
+        )
+
+    @server.tool()
+    async def ed_get(
+        project_id: Annotated[str, Field(description="Идентификатор снимка из ed_open")],
+        address: Annotated[
+            str, Field(description="Адрес ED из ed_list; конфликт уточняется суффиксом #1, #2")
+        ],
+        children_kind: Annotated[
+            str | None, Field(description="Вид непосредственных детей; null — все виды")
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+        include_text: Annotated[
+            bool, Field(description="Включить страницу исходного текста сущности")
+        ] = False,
+        text_offset: Annotated[
+            int, Field(description="Смещение текста в символах Unicode", ge=0)
+        ] = 0,
+        text_limit: Annotated[
+            int, Field(description="Размер страницы текста, от 1 до 8000 символов", ge=1, le=8000)
+        ] = 2000,
+    ) -> dict[str, Any]:
+        """Поля и страницы детей, областей, тегов, условий и диагностик сущности ED.
+
+        По умолчанию исходного текста нет. ПКС группы доступны через отдельный get группы.
+        """
+        return await call(
+            service.ed_get,
+            project_id,
+            address,
+            children_kind,
+            offset,
+            limit,
+            include_text,
+            text_offset,
+            text_limit,
+        )
+
+    @server.tool()
+    async def ed_locate(
+        project_id: Annotated[str, Field(description="Идентификатор снимка из ed_open")],
+        line: Annotated[
+            int, Field(description="Номер физической строки единственного файла, начиная с 1", ge=1)
+        ],
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Классификация строки ED и страница сущностей: внутренняя, предки, связанные правила."""
+        return await call(service.ed_locate, project_id, line, offset, limit)
+
+    @server.tool()
+    async def ed_close(
+        project_id: Annotated[str, Field(description="Идентификатор снимка из ed_open")],
+    ) -> dict[str, Any]:
+        """Удаляет снимок ED из памяти; исходный файл остаётся неизменным."""
+        return await call(service.ed_close, project_id)
 
     return server
 
