@@ -1,0 +1,23 @@
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:example:ed/1.8" targetNamespace="urn:example:ed/1.8">
+  <import namespace="http://www.1c.ru/SSL/Exchange/Message"/>
+  <objectType name="Item" base="t:Base">
+    <property name="Code" type="xs:string" lowerBound="0" upperBound="1"/>
+    <property name="Mark" type="xs:string" nillable="false"/>
+  </objectType>
+  <objectType name="Base">
+    <property name="Title" type="xs:string"/>
+  </objectType>
+  <objectType name="Envelope" ordered="true">
+    <property name="Head" type="xs:string"/>
+    <property name="Body">
+      <typeDef xsi:type="ObjectType">
+        <property name="Value" type="xs:string"/>
+      </typeDef>
+    </property>
+  </objectType>
+  <objectType name="Bag" ordered="false">
+    <property name="Beta" type="xs:string"/>
+    <property name="Alpha" type="xs:string"/>
+  </objectType>
+  <valueType name="CodeName" base="xs:string" length="5"/>
+</package>

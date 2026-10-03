@@ -52,6 +52,22 @@ class EdResourceLimitError(Kd2Error):
     """Менеджер ED превышает предел размера или числа строк."""
 
 
+class EdRouteProfileNotFoundError(Kd2Error):
+    """Неизвестный или вытесненный снимок маршрутов."""
+
+
+class EdRouteReadError(Kd2Error):
+    """Выгрузка маршрутов недоступна по пути или корень не прочитать."""
+
+
+class EdRouteFormatError(Kd2Error):
+    """Это не полная XML-выгрузка конфигурации или повреждён Configuration.xml."""
+
+
+class EdRouteResourceLimitError(Kd2Error):
+    """Превышен лимит чтения выгрузки или хранения снимков маршрутов."""
+
+
 class RulesFormatError(Kd2Error):
     """Файл правил не разбирается или не соответствует формату КД 2."""
 

@@ -50,6 +50,8 @@ EXPECTED_TOOLS = {
     "ed_schema_types",
     "ed_schema_type",
     "ed_schema_close",
+    "ed_routes",
+    "ed_route_compare",
     "ed_open",
     "ed_overview",
     "ed_list",

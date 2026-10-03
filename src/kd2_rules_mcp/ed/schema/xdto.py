@@ -218,9 +218,14 @@ def read_package(path: Path, role: str = "base") -> SchemaPackage:
                 type_ref = ref(child, child.get("type"))
                 if len(inline_nodes) > 1 or (inline_nodes and child.get("type")):
                     diagnostic("ambiguous_property_type", child, "Одновременно type и typeDef")
-                form = child.get("form")
-                if form not in (None, "element", "attribute", "text"):
-                    diagnostic("unsupported_form", child, f"Неизвестная форма: {form}")
+                raw_form = child.get("form")
+                folded = raw_form.casefold() if raw_form is not None else None
+                if folded not in (None, "element", "attribute", "text"):
+                    diagnostic("unsupported_form", child, f"Неизвестная форма: {raw_form}")
+                    form = raw_form
+                else:
+                    # В пакетах БСП form пишут с заглавной буквы; храним одно написание.
+                    form = folded
                 for attr, value in child.attrib.items():
                     if attr not in {"name", "type", "lowerBound", "upperBound", "nillable", "form"}:
                         diagnostic("unsupported_attribute", child, f"Атрибут {attr}={value}")

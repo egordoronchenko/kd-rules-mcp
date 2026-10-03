@@ -39,6 +39,10 @@ from kd2_rules_mcp.errors import (
     EdFormatError,
     EdReadError,
     EdResourceLimitError,
+    EdRouteFormatError,
+    EdRouteProfileNotFoundError,
+    EdRouteReadError,
+    EdRouteResourceLimitError,
     EdSchemaAmbiguousImportError,
     EdSchemaConflictError,
     EdSchemaFormatError,
@@ -76,6 +80,10 @@ ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (EdResourceLimitError, "ed_resource_limit"),
     (EdFormatError, "ed_format"),
     (EdReadError, "ed_read_error"),
+    (EdRouteProfileNotFoundError, "ed_route_profile_not_found"),
+    (EdRouteReadError, "ed_route_read_error"),
+    (EdRouteFormatError, "ed_route_format"),
+    (EdRouteResourceLimitError, "ed_route_resource_limit"),
     (StructureNotFoundError, "structure_not_found"),
     (ObjectNotFoundError, "object_not_found"),
     (ProjectNotFoundError, "project_not_found"),
@@ -111,7 +119,8 @@ registration_build, черновик обратного направления �
 Снимки ED живут в памяти; перечитать изменённый файл — ed_close и ed_open.
 Схема формата XDTO: ed_schema_open с явной версией → ed_schema_types / ed_schema_type.
 Схемы только в памяти; перечитать пакет — ed_schema_close и ed_schema_open.
-XSD не поддерживается."""
+XSD не поддерживается.
+Маршруты версий формата: ed_routes двух выгрузок → ed_route_compare."""
 
 StructureId = Annotated[
     str, Field(description="Идентификатор структуры в кэше (structure_list), например `zup-full`")
@@ -1196,6 +1205,140 @@ def create_server(service: Kd2Service) -> MCPServer:
     ) -> dict[str, Any]:
         """Удаляет снимок схемы из памяти; повторное закрытие возвращает closed=false."""
         return await call(service.ed_schema_close, schema_id)
+
+    # --- Маршруты EnterpriseData -------------------------------------------------------------
+
+    @server.tool()
+    async def ed_routes(
+        project: Annotated[
+            str | None,
+            Field(description="Проект из project_list; вместо path и profile_id"),
+        ] = None,
+        configuration: Annotated[
+            str,
+            Field(
+                description="Конфигурация проекта; выбирает основную выгрузку, расширения не "
+                "накладываются. С path и profile_id допустимо только значение full"
+            ),
+        ] = "full",
+        path: Annotated[
+            str | None,
+            Field(
+                description="Путь к корню XML-выгрузки конфигурации (каталог с Configuration.xml), "
+                "как на машине агента; вместо project и profile_id"
+            ),
+        ] = None,
+        profile_id: Annotated[
+            str | None,
+            Field(
+                description="Снимок из ed_routes; вместо project и path, без force. "
+                "После вытеснения или перезапуска откройте выгрузку снова"
+            ),
+        ] = None,
+        section: Annotated[
+            str,
+            Field(
+                description="Раздел: summary, plans, versions, variants, packages или skipped. "
+                "summary — шапка снимка; остальные — страница"
+            ),
+        ] = "summary",
+        plan: Annotated[
+            str | None,
+            Field(
+                description="Имя плана обмена для страниц plans, versions и variants, без учёта "
+                "регистра; в ответе — написание из конфигурации. Без имени страница не сужается "
+                "до одного плана"
+            ),
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+        force: Annotated[
+            bool,
+            Field(
+                description="Прочитать выгрузку заново. Прежний идентификатор сохраняется, пока "
+                "его не вытеснит давность; при тех же байтах идентификатор не меняется"
+            ),
+        ] = False,
+    ) -> dict[str, Any]:
+        """Читает маршруты версий формата одной основной выгрузки.
+
+        Ровно один источник: project, path или profile_id. Снимок только в памяти.
+        Повтор без force возвращает прежний и помечает stale, если файлы изменились.
+        """
+        return await call(
+            service.ed_routes,
+            project,
+            configuration,
+            path,
+            profile_id,
+            section,
+            plan,
+            offset,
+            limit,
+            force,
+        )
+
+    @server.tool()
+    async def ed_route_compare(
+        left_profile_id: Annotated[str, Field(description="Левый снимок из ed_routes")],
+        right_profile_id: Annotated[str, Field(description="Правый снимок из ed_routes")],
+        left_plan: Annotated[
+            str | None,
+            Field(
+                description="Имя плана слева, без учёта регистра. Обязательно, если планов "
+                "через универсальный формат несколько; в ответе — написание из конфигурации"
+            ),
+        ] = None,
+        right_plan: Annotated[
+            str | None,
+            Field(description="Имя плана справа, те же правила, что у left_plan"),
+        ] = None,
+        context: Annotated[
+            str,
+            Field(
+                description="plan — карта узла; without_node — глобальная карта, "
+                "планы не задаются, URI сообщения неизвестен"
+            ),
+        ] = "plan",
+        section: Annotated[
+            str,
+            Field(
+                description="Страница: issues, versions, schema_diff или skipped. "
+                "summary и пропуски относятся ко всему отчёту"
+            ),
+        ] = "issues",
+        level: Annotated[
+            str | None,
+            Field(description="Отбор страницы issues: «ошибка» или «предупреждение»"),
+        ] = None,
+        check_prefix: Annotated[
+            str | None,
+            Field(
+                description="Префикс идентификатора проверки для страницы issues, например "
+                "ed.route. Неизвестный префикс даёт пустую страницу, итог не меняется"
+            ),
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Сравнивает два снимка маршрутов и возвращает статическую совместимость.
+
+        Планы укажите явно, если их несколько. Поля ed_open и ed_schema_open — готовые
+        аргументы, когда путь или пакет определён однозначно; иначе null и причина.
+        """
+        return await call(
+            service.ed_route_compare,
+            left_profile_id,
+            right_profile_id,
+            left_plan,
+            right_plan,
+            context,
+            section,
+            level,
+            check_prefix,
+            offset,
+            limit,
+        )
 
     return server
 

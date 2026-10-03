@@ -231,6 +231,7 @@ def test_version_comparator_and_tied_minimum():
     assert beta is not None and beta < 0
     assert release is not None and release > 0
     assert compare_versions("abc", "1.2") is None
+    assert compare_versions("1.²", "1.3") is None
     profile = load("tied")
     plan = plan_named(profile)
     assert set(plan.effective_map()) == {"1.20", "1.20.2"}
@@ -239,6 +240,45 @@ def test_version_comparator_and_tied_minimum():
     assert any(
         item.code == "ed.route.node_state" and item.reason == NODE for item in profile.skipped
     )
+
+
+def test_unsupported_key_does_not_confirm_minimum(tmp_path: Path):
+    profile = read_routes(
+        assemble(
+            tmp_path / "mix",
+            "Процедура ПриПолученииНастроек(Настройки) Экспорт\n"
+            "    Настройки.ЭтоПланОбменаXDTO = Истина;\n"
+            "    ВерсииФормата = Новый Соответствие;\n"
+            '    ВерсииФормата.Вставить("1.3", М);\n'
+            '    ВерсииФормата.Вставить("1.2.x", М);\n'
+            "    Настройки.ВерсииФорматаОбмена = ВерсииФормата;\n"
+            "КонецПроцедуры\n",
+        )
+    )
+    plan = _plan_of(profile)
+    assert plan.status == "complete"
+    assert plan.effective_map() == {"1.3": "М", "1.2.x": "М"}
+    assert plan.empty_node_fallback is None
+    assert plan.empty_node_tied_minima == ()
+
+
+def test_non_ascii_digit_key_is_unsupported_form(tmp_path: Path):
+    profile = read_routes(
+        assemble(
+            tmp_path / "digit",
+            "Процедура ПриПолученииНастроек(Настройки) Экспорт\n"
+            "    Настройки.ЭтоПланОбменаXDTO = Истина;\n"
+            "    ВерсииФормата = Новый Соответствие;\n"
+            '    ВерсииФормата.Вставить("1.²", М);\n'
+            '    ВерсииФормата.Вставить("1.3", М);\n'
+            "    Настройки.ВерсииФорматаОбмена = ВерсииФормата;\n"
+            "КонецПроцедуры\n",
+        )
+    )
+    plan = _plan_of(profile)
+    assert plan.status == "complete"
+    assert "1.²" in plan.effective_map()
+    assert plan.empty_node_fallback is None
 
 
 def _xml_object(kind: str, name: str, body: str = "") -> str:

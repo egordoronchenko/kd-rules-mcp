@@ -16,7 +16,7 @@
 
 <!-- tools:begin — генерирует scripts/dump_tools.py, руками не править -->
 
-Инструментов: 44.
+Инструментов: 46.
 
 | Группа | Инструменты |
 |---|---|
@@ -28,6 +28,7 @@
 | Регистрация и корреспондент | [`registration_build`](#registration_build), [`correspondent_draft`](#correspondent_draft) |
 | Чтение EnterpriseData | [`ed_open`](#ed_open), [`ed_overview`](#ed_overview), [`ed_list`](#ed_list), [`ed_get`](#ed_get), [`ed_locate`](#ed_locate), [`ed_validate`](#ed_validate), [`ed_close`](#ed_close) |
 | Схема формата EnterpriseData | [`ed_schema_open`](#ed_schema_open), [`ed_schema_types`](#ed_schema_types), [`ed_schema_type`](#ed_schema_type), [`ed_schema_close`](#ed_schema_close) |
+| Маршруты EnterpriseData | [`ed_routes`](#ed_routes), [`ed_route_compare`](#ed_route_compare) |
 
 ## Проекты и структуры
 
@@ -598,6 +599,47 @@ XML и имя, под которым свойство пишут в правил
 |---|---|---|---|
 | `schema_id` | string | обязательный | Идентификатор ed_schema_open |
 
+## Маршруты EnterpriseData
+
+### `ed_routes`
+
+Читает маршруты версий формата одной основной выгрузки.
+
+Ровно один источник: project, path или profile_id. Снимок только в памяти.
+Повтор без force возвращает прежний и помечает stale, если файлы изменились.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project` | string \| null | `null` | Проект из project_list; вместо path и profile_id |
+| `configuration` | string | `"full"` | Конфигурация проекта; выбирает основную выгрузку, расширения не накладываются. С path и profile_id допустимо только значение full |
+| `path` | string \| null | `null` | Путь к корню XML-выгрузки конфигурации (каталог с Configuration.xml), как на машине агента; вместо project и profile_id |
+| `profile_id` | string \| null | `null` | Снимок из ed_routes; вместо project и path, без force. После вытеснения или перезапуска откройте выгрузку снова |
+| `section` | string | `"summary"` | Раздел: summary, plans, versions, variants, packages или skipped. summary — шапка снимка; остальные — страница |
+| `plan` | string \| null | `null` | Имя плана обмена для страниц plans, versions и variants, без учёта регистра; в ответе — написание из конфигурации. Без имени страница не сужается до одного плана |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+| `force` | boolean | `false` | Прочитать выгрузку заново. Прежний идентификатор сохраняется, пока его не вытеснит давность; при тех же байтах идентификатор не меняется |
+
+### `ed_route_compare`
+
+Сравнивает два снимка маршрутов и возвращает статическую совместимость.
+
+Планы укажите явно, если их несколько. Поля ed_open и ed_schema_open — готовые
+аргументы, когда путь или пакет определён однозначно; иначе null и причина.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `left_profile_id` | string | обязательный | Левый снимок из ed_routes |
+| `right_profile_id` | string | обязательный | Правый снимок из ed_routes |
+| `left_plan` | string \| null | `null` | Имя плана слева, без учёта регистра. Обязательно, если планов через универсальный формат несколько; в ответе — написание из конфигурации |
+| `right_plan` | string \| null | `null` | Имя плана справа, те же правила, что у left_plan |
+| `context` | string | `"plan"` | plan — карта узла; without_node — глобальная карта, планы не задаются, URI сообщения неизвестен |
+| `section` | string | `"issues"` | Страница: issues, versions, schema_diff или skipped. summary и пропуски относятся ко всему отчёту |
+| `level` | string \| null | `null` | Отбор страницы issues: «ошибка» или «предупреждение» |
+| `check_prefix` | string \| null | `null` | Префикс идентификатора проверки для страницы issues, например ed.route. Неизвестный префикс даёт пустую страницу, итог не меняется |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+
 ## Коды ошибок
 
 Ошибка инструмента — JSON `{"code", "message", …}` в тексте ошибки MCP; код — по первому подходящему классу исключения (порядок строк важен: подклассы раньше базовых).
@@ -615,6 +657,10 @@ XML и имя, под которым свойство пишут в правил
 | `ed_resource_limit` | `EdResourceLimitError` | Менеджер ED превышает предел размера или числа строк. | — |
 | `ed_format` | `EdFormatError` | Модуль не соответствует безопасно читаемому формату менеджера ED. | — |
 | `ed_read_error` | `EdReadError` | Файл менеджера ED недоступен или имеет неподдержанную кодировку. | — |
+| `ed_route_profile_not_found` | `EdRouteProfileNotFoundError` | Неизвестный или вытесненный снимок маршрутов. | — |
+| `ed_route_read_error` | `EdRouteReadError` | Выгрузка маршрутов недоступна по пути или корень не прочитать. | — |
+| `ed_route_format` | `EdRouteFormatError` | Это не полная XML-выгрузка конфигурации или повреждён Configuration.xml. | — |
+| `ed_route_resource_limit` | `EdRouteResourceLimitError` | Превышен лимит чтения выгрузки или хранения снимков маршрутов. | — |
 | `structure_not_found` | `StructureNotFoundError` | Структуры с таким идентификатором нет в кэше. | `structures` — загруженные структуры |
 | `object_not_found` | `ObjectNotFoundError` | Объекта метаданных нет в структуре; `suggestions` — похожие имена. | `suggestions` — похожие имена объектов |
 | `project_not_found` | `ProjectNotFoundError` | Рабочего проекта с таким идентификатором нет. | — |
@@ -740,6 +786,8 @@ XML и имя, под которым свойство пишут в правил
 | `ed_locate` | `file_id,line,classification,matches: Page`; совпадение: `address,kind,span,relation` (`innermost`, `ancestor`, `associated`) |
 | `ed_validate` | `project_id`, `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница: `level`, `check`, `address`, `message`), `references` (`known`, `unparsed`, `unparsed_by_kind` — все семь видов, `deferred_argument_unparsed`), `profile` (`schema_id`, `structure_id`, `format_version`, `active_namespaces`, `direction`), `coverage` (`checked`, `not_applicable`, `opaque_conditions`, `handler_may_supply`, `unresolved_schema`) |
 | `ed_close` | `project_id,closed: true` |
+| `ed_routes` | `summary`: `profile_id`, `source` (`kind`, `path`, `fingerprint`, у проекта ещё `project` и `configuration`), `configuration_name`, `status` (полнота чтения: `complete`/`partial`), `counts`, `node_state` (`unknown`), `extension_policy` (`base_only`), `available_sections`, `reused`, `stale`. Остальные разделы — страница плюс `profile_id`, `reused`, `stale`, `section` |
+| `ed_route_compare` | `left_profile_id`, `right_profile_id`, `profile` (`context`, `status` пары: `statically_compatible`/`blocked`/`unknown`, `quality`, планы, `negotiated_candidate`, `actual_node_version` всегда null, `empty_node_fallback`, `common_versions`, `tied_maxima`, `selected`), `summary` всего отчёта. `issues`/`versions`/`schema_diff` — страница запрошенного раздела; `skipped` — полный список, а при `section=skipped` — его страница |
 
 `counts`: `pko,pod,pkpd,pks,pktch,search_sets,parameters,algorithms,handlers,dispatchers,support,unknown`.
 Счётчики алгоритмов и обработчиков считают роли методов. `diagnostics_summary` — словари
@@ -869,3 +917,23 @@ structure_id, direction="both")`. Каждый вход необязателен
 to 200`), без JSON с `code` (проверено вызовом через клиент MCP 01.10.2026). Любое другое исключение внутри
 инструмента сервер оборачивает в JSON: `Kd2Error` и `ValueError` — кодом из таблицы выше, прочие — кодом
 `internal` и текстом исключения; трассировка пишется в лог сервера.
+
+## Маршруты версий формата EnterpriseData
+
+Откройте основные выгрузки через `ed_routes` и передайте их `profile_id` в `ed_route_compare`.
+Выберите планы явно, если их несколько. Страницы `versions` показывают ключ версии, менеджер,
+пакет и происхождение настройки; `schema_diff` — различия схем одного URI, не больше 20 изменений
+в строке, с полными счётчиками `added_total`, `removed_total`, `changed_total`, `changes_total`.
+Поля `ed_open` и `ed_schema_open` содержат готовые аргументы для перехода к правилам и схеме,
+когда путь или пакет определён однозначно; иначе значение `null` и причина.
+Имя пакета, ключ карты и интерфейс менеджера — отдельные поля.
+`status` у `ed_routes` — полнота чтения снимка. `profile.status` у `ed_route_compare` —
+`statically_compatible`, `blocked` или `unknown`; пропущенная проверка не даёт статус совместимости.
+Summary относится ко всему отчёту, фильтры и `offset`/`limit` — к запрошенной странице.
+Снимки хранятся только в памяти; после перезапуска или вытеснения откройте их повторно.
+Отдельного закрытия нет: в реестре до 32 снимков и 128 МиБ, старые вытесняются по давности.
+
+Коды отказов: `invalid_argument` (селектор, раздел, контекст, имя плана, страница),
+`ed_route_profile_not_found`, `ed_route_read_error`, `ed_route_format`, `ed_route_resource_limit`,
+`rejected` (проект или конфигурация не найдены). Ошибка чтения схемы выбранного URI в сравнение
+не попадает: соответствующая проверка уходит в `skipped`, статус пары — `unknown`.

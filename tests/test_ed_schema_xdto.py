@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from kd2_rules_mcp.ed.schema import xdto
+from kd2_rules_mcp.ed.schema import load_schema, xdto
 from kd2_rules_mcp.ed.schema.errors import EdSchemaFormatError, EdSchemaResourceLimitError
 from kd2_rules_mcp.ed.schema.model import QName
 
@@ -130,6 +130,32 @@ def test_ambiguous_type_and_unknown_attributes(tmp_path):
         "unsupported_node",
     }
     assert any("raw" in d.message for d in package.diagnostics)
+
+
+def test_capitalized_property_form_is_complete(tmp_path):
+    path = tmp_path / "form.bin"
+    path.write_text(
+        '<package xmlns="http://v8.1c.ru/8.1/xdto" '
+        'xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:form">'
+        '<objectType name="Item">'
+        '<property name="Code" type="xs:string" form="Attribute"/>'
+        '<property name="Name" type="xs:string" form="Element"/>'
+        '<property name="Body" type="xs:string" form="Text"/>'
+        '<property name="Note" type="xs:string" form="attribute"/>'
+        "</objectType></package>",
+        encoding="utf-8",
+    )
+    package = xdto.read_package(path)
+    assert [prop.form for prop in package.types[0].properties] == [
+        "attribute",
+        "element",
+        "text",
+        "attribute",
+    ]
+    assert package.types[0].status == "complete"
+    assert package.diagnostics == ()
+    schema = load_schema(path)
+    assert schema.status == "complete"
 
 
 def test_metadata_rejects_path_components(tmp_path):

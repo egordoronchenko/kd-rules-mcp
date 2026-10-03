@@ -252,13 +252,18 @@ def compare_versions(left: str, right: str) -> int | None:
     return 0
 
 
+def _ascii_digits(part: str) -> bool:
+    """Только цифры ASCII: `isdigit` принимает «²», а `int` на ней падает."""
+    return bool(part) and part.isascii() and part.isdigit()
+
+
 def _version_parts(value: str) -> tuple[str, ...] | None:
     parts = tuple(piece.strip() for piece in value.strip().split("."))
     if len(parts) not in (2, 3):
         return None
-    if not parts[0].isdigit() or not parts[1].isdigit():
+    if not _ascii_digits(parts[0]) or not _ascii_digits(parts[1]):
         return None
-    if len(parts) == 3 and parts[2] != "beta" and not parts[2].isdigit():
+    if len(parts) == 3 and parts[2] != "beta" and not _ascii_digits(parts[2]):
         return None
     return parts
 
@@ -2119,17 +2124,21 @@ def _setting_source(settings: _Settings, name: str) -> RouteSource | None:
 
 
 def _min_version(entries: Sequence[RouteEntry]) -> tuple[str | None, tuple[str, ...]]:
+    """Минимум пустого узла. Неподдержанная форма ключа — минимум не подтверждён.
+
+    Ключ сохраняется в карте как есть: версию не «чинят» и не выбрасывают из сравнения
+    исполнителя (спецификация §1.2).
+    """
     keys = []
     seen: set[str] = set()
     for entry in entries:
         if entry.state == "effective" and entry.key not in seen:
             seen.add(entry.key)
             keys.append(entry.key)
-    supported = [key for key in keys if _version_parts(key) is not None]
-    if not supported:
+    if not keys or any(_version_parts(key) is None for key in keys):
         return None, ()
-    minima = [supported[0]]
-    for key in supported[1:]:
+    minima = [keys[0]]
+    for key in keys[1:]:
         compared = compare_versions(key, minima[0])
         if compared is None:
             continue
