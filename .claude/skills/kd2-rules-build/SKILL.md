@@ -104,8 +104,9 @@ description: Построить, доработать или проверить 
    - `registration_build(structure_id источника, exchange_plan, rules_project_id=…)` — объекты из ПВД, или явный
      список `objects` с отборами (`plan_filters`, `object_filters`); объект вне состава — предупреждение;
    - `rules_validate(project_id ПРО, source_structure=<структура источника>)` — приёмник не нужен;
-     затем `rules_save` (`RegistrationRules.xml`). Группы отборов и обработчики инструмент не пишет — правкой
-     файла по `references/pro.md`.
+     затем `rules_save` (`RegistrationRules.xml`). Группы отборов, `Вид` и обработчики инструмент не пишет —
+     правкой файла по `references/pro.md`, «Ручная правка файла» (порядок элементов, `Валидное="true"`, булевы
+     `true`/`false`, без CDATA и комментариев, побайтово); правила конвертации руками не правятся.
 6. **Обратное направление** — `correspondent_draft(project_id, codes, target_structure=<структура источника
    исходных правил>)`: только черновик; что делать с `handlers`, `disabled`, `notes` — `references/correspondent.md`.
 
