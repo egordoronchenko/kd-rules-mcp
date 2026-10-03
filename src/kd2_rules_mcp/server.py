@@ -137,7 +137,11 @@ ObjectName = Annotated[
 RuleKind = Annotated[
     str,
     Field(
-        description=("Вид правила: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter")
+        description=(
+            "Вид правила: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, "
+            "conversion. conversion — события конвертации, один экземпляр на файл; "
+            "rule_create и rule_delete для него отклоняются"
+        )
     ),
 ]
 RuleKey = Annotated[
@@ -146,7 +150,8 @@ RuleKey = Annotated[
         description=(
             "Адрес правила: код (ПКО, ПВД, ПОД), имя (алгоритм, запрос, параметр), путь ПКС "
             "`группа/…/свойство-приёмник` или имя значения источника ПКЗ. При совпадении имён "
-            "в одном контейнере к звену ПКС добавляются квалификаторы `[поиск]` и `#N`"
+            "в одном контейнере к звену ПКС добавляются квалификаторы `[поиск]` и `#N`. "
+            "Для conversion — пустая строка или `Конвертация` (в ответах адрес `Конвертация`)"
         )
     ),
 ]
@@ -166,7 +171,8 @@ Fields = Annotated[
         description=(
             'Поля правила «тег или атрибут → значение» (например {"Наименование": "…", '
             '"ПриВыгрузке": "код"}); стороны ПКС — {"Источник": {"Имя": …, "Вид": …, '
-            '"Тип": …}}. Меняются только переданные поля'
+            '"Тип": …}}. Меняются только переданные поля. У conversion — имя события → текст; '
+            "пустая строка удаляет событие; поля заголовка отклоняются"
         )
     ),
 ]
@@ -482,7 +488,8 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def rules_overview(project_id: ProjectId) -> dict[str, Any]:
-        """Сводка проекта: вид, источник и приёмник, число правил по разделам, пути."""
+        """Сводка проекта: вид, источник и приёмник, число правил по разделам, пути.
+        У правил обмена `counts.conversion` — число заполненных событий конвертации."""
         return await call(service.rules_overview, project_id)
 
     @server.tool()
@@ -492,8 +499,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             str,
             Field(
                 description=(
-                    "Раздел: pko, pvd, pod, algorithms, queries, parameters; "
-                    "у правил регистрации — registration"
+                    "Раздел: pko, pvd, pod, algorithms, queries, parameters, conversion; "
+                    "у правил регистрации — registration. conversion — одна строка, "
+                    "события конвертации"
                 )
             ),
         ],
@@ -512,7 +520,11 @@ def create_server(service: Kd2Service) -> MCPServer:
         owner: Owner = "",
         limit: Annotated[int, Field(description="Сколько ПКС и ПКЗ показать", ge=1)] = 100,
     ) -> dict[str, Any]:
-        """Одно правило правил обмена: поля, стороны, список ПКС и ПКЗ; длинный код обрезается."""
+        """Одно правило правил обмена: поля, стороны, список ПКС и ПКЗ; длинный код обрезается.
+
+        Вид conversion — заполненные события конвертации (имя, число строк, текст с тем же
+        пределом, что у других обработчиков) и реквизиты заголовка, которые уже лежат в модели.
+        """
         return await call(service.rules_get, project_id, kind, key, owner, limit)
 
     @server.tool()
@@ -594,7 +606,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         group: RuleGroup = "",
     ) -> dict[str, Any]:
         """Создаёт правило; висячие ссылки на ПКО и отсутствующие объекты отклоняются.
-        У ПКС `Код` и `Порядок` без явных значений подставляются как у соседей."""
+        У ПКС `Код` и `Порядок` без явных значений подставляются как у соседей.
+        Вид conversion отклоняется: экземпляр один и создаётся вместе с правилами."""
         return await call(
             service.rule_create,
             project_id,
@@ -617,7 +630,9 @@ def create_server(service: Kd2Service) -> MCPServer:
         source_structure: OptionalStructure = None,
         target_structure: OptionalStructure = None,
     ) -> dict[str, Any]:
-        """Меняет только переданные поля правила; при отказе правило остаётся прежним."""
+        """Меняет только переданные поля правила; при отказе правило остаётся прежним.
+        У conversion — только тексты событий; пустая строка удаляет событие;
+        поля заголовка отклоняются."""
         return await call(
             service.rule_update,
             project_id,
@@ -699,7 +714,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         source_structure: OptionalStructure = None,
         target_structure: OptionalStructure = None,
     ) -> dict[str, Any]:
-        """Удаляет правило; ПКО, на которое ссылаются, не удаляется."""
+        """Удаляет правило; ПКО, на которое ссылаются, не удаляется.
+        Вид conversion отклоняется: чтобы убрать событие, передайте в rule_update пустую строку."""
         return await call(
             service.rule_delete,
             project_id,

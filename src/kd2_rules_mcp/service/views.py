@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from kd2_rules_mcp.authoring.candidates import Candidate, Confidence
-from kd2_rules_mcp.authoring.edits import EditResult
+from kd2_rules_mcp.authoring.edits import CONVERSION_KIND, EditResult
 from kd2_rules_mcp.authoring.registration import (
     ObjectFilter,
     PlanFilter,
@@ -13,10 +13,11 @@ from kd2_rules_mcp.authoring.registration import (
 )
 from kd2_rules_mcp.errors import Kd2Error, ObjectNotFoundError
 from kd2_rules_mcp.kd2.diff import TEXT_LIMIT, clip
-from kd2_rules_mcp.kd2.model import Node, RegistrationRules, RulesDocument
+from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument
+from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS
 from kd2_rules_mcp.projects import Base, LocalSettings, base_login, dev_env_login, resolve
 from kd2_rules_mcp.structures.queries import MAX_LIMIT, NotFound, Page
-from kd2_rules_mcp.validation.address import rule_address, side_name, walk_pks
+from kd2_rules_mcp.validation.address import CONVERSION_ADDRESS, rule_address, side_name, walk_pks
 from kd2_rules_mcp.validation.report import Level, ValidationReport
 
 __all__ = ["TEXT_LIMIT", "clip"]
@@ -222,7 +223,7 @@ def list_section(document: RulesDocument, section: str) -> Node | None:
         return section_node(document, "ПравилаРегистрацииОбъектов")
     tag = EXCHANGE_SECTIONS.get(section)
     if tag is None:
-        known = ", ".join(EXCHANGE_SECTIONS)
+        known = ", ".join((*EXCHANGE_SECTIONS, CONVERSION_KIND))
         raise Kd2Error(f"Неизвестный раздел «{section}»; разделы правил обмена: {known}")
     return section_node(document, tag)
 
@@ -268,6 +269,10 @@ def rule_group(document: RulesDocument, node: Node) -> str:
 
 def listed_rule_rows(document: RulesDocument, section: str) -> list[dict[str, Any]]:
     """Строки `rules_list`. Ключ `group` есть только у правила внутри группы."""
+    if section == CONVERSION_KIND:
+        if isinstance(document, RegistrationRules):
+            raise Kd2Error(f"У правил регистрации один раздел: «{REGISTRATION_SECTION}»")
+        return [_conversion_row(document.root)]
     container = list_section(document, section)
     paths = group_paths(container) if container is not None else {}
     return [rule_row(node, paths.get(id(node), "")) for node in section_rules(document, section)]
@@ -414,7 +419,73 @@ def counts(document: RulesDocument) -> dict[str, int]:
     counts["parameters"] = (
         sum(1 for item in parameters.items if item.kind.name == "parameter") if parameters else 0
     )
+    counts[CONVERSION_KIND] = len(filled_conversion_events(document.root))
     return counts
+
+
+def filled_conversion_events(root: Node) -> list[tuple[str, str]]:
+    """Непустые события конвертации в порядке писателя КД. Пробельный текст — пустое."""
+    found: list[tuple[str, str]] = []
+    for name in CONVERSION_EVENTS:
+        value = root.values.get(name)
+        if isinstance(value, str) and value.strip():
+            found.append((name, value))
+    return found
+
+
+def conversion_view(rules: ExchangeRules) -> dict[str, Any]:
+    """События конвертации и реквизиты заголовка, которые модель уже хранит рядом.
+
+    Текст события обрезается так же, как текст обработчика в `rules_get` (`clip`).
+    Число строк — по полному тексту. Версии конфигураций в ответ не копируются:
+    показываются имена источника и приёмника, версия формата и дата.
+    """
+    events = [
+        {"name": name, "lines": len(text.splitlines()) or 1, "text": clip(text)}
+        for name, text in filled_conversion_events(rules.root)
+    ]
+    return {
+        "kind": CONVERSION_KIND,
+        "address": CONVERSION_ADDRESS,
+        "title": "события конвертации",
+        "events": events,
+        "header": _conversion_header(rules),
+    }
+
+
+def _conversion_row(root: Node) -> dict[str, Any]:
+    names = [name for name, _text in filled_conversion_events(root)]
+    row: dict[str, Any] = {"address": CONVERSION_ADDRESS, "events": len(names)}
+    if names:
+        row["names"] = names
+    return row
+
+
+def _conversion_header(rules: ExchangeRules) -> dict[str, Any]:
+    """Реквизиты заголовка, которые безопасно показать рядом с событиями."""
+    root = rules.root
+    header: dict[str, Any] = {}
+    version = root.child("ВерсияФормата")
+    if version is not None and version.text:
+        header["ВерсияФормата"] = version.text
+        mode = version.attrs.get("РежимСовместимости")
+        if isinstance(mode, str) and mode.strip():
+            header["РежимСовместимости"] = mode
+    for tag in ("Ид", "Наименование", "ДатаВремяСоздания", "Комментарий"):
+        raw = root.values.get(tag)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        # Писатель дополняет `Ид` пробелами; в ответ — без хвостовых, как коды правил.
+        shown = raw.rstrip() if tag == "Ид" else raw
+        header[tag] = clip(shown)
+    if rules.source_name:
+        header["Источник"] = rules.source_name
+    if rules.target_name:
+        header["Приемник"] = rules.target_name
+    flag = "УдалятьСопоставленныеОбъектыВПриемникеПриИхУдаленииВИсточнике"
+    if root.values.get(flag) is True:
+        header[flag] = True
+    return header
 
 
 def report_summary(report: ValidationReport) -> dict[str, Any]:

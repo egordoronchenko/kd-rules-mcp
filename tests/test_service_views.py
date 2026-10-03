@@ -120,6 +120,7 @@ def test_counts_sections_of_sample_exchange() -> None:
         "algorithms": 1,
         "queries": 0,
         "parameters": 1,
+        "conversion": 1,
     }
 
 

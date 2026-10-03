@@ -49,9 +49,10 @@ from kd2_rules_mcp.errors import (
     UnknownFieldError,
 )
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node
-from kd2_rules_mcp.kd2.schema import Scalar, ValueType
+from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS, Scalar, ValueType
 from kd2_rules_mcp.structures.queries import NotFound, find_object
 from kd2_rules_mcp.validation.address import (
+    CONVERSION_ADDRESS,
     pks_address,
     pks_base_segment,
     pks_candidates,
@@ -87,6 +88,27 @@ _GROUP_PROPERTY_MARK = "этогруппа"
 _SYNC_DEFAULT_NOTE = (
     "СинхронизироватьПоИдентификатору включено по умолчанию: ссылочный приёмник, не перечисление"
 )
+
+# События конвертации — одно правило на файл, ключ пустой или `Конвертация`.
+CONVERSION_KIND = "conversion"
+# Реквизиты заголовка: rule_update вида conversion их не меняет.
+_CONVERSION_HEADER = frozenset(
+    {
+        "ВерсияФормата",
+        "РежимСовместимости",
+        "Ид",
+        "Наименование",
+        "ДатаВремяСоздания",
+        "Источник",
+        "Приемник",
+        "ВерсияПлатформы",
+        "ВерсияКонфигурации",
+        "СинонимКонфигурации",
+        "УдалятьСопоставленныеОбъектыВПриемникеПриИхУдаленииВИсточнике",
+        "Комментарий",
+    }
+)
+_CONVERSION_EVENTS = frozenset(CONVERSION_EVENTS)
 
 # Вид верхнего уровня: раздел, тег элемента, поле-адрес.
 _TOP: dict[str, tuple[str, str, str]] = {
@@ -176,6 +198,7 @@ def create_rule(
     через `/` (`Справочники` или `Справочники/Подгруппа`); пусто — корень списка.
     Только для ПКО, ПВД и ПОД, группа должна уже существовать. `source` и `target` —
     структуры сторон; без них проверка объектов, свойств и значений не выполняется.
+    Вид `conversion` не создаётся: экземпляр один и появляется вместе с правилами.
     У ПКС и группы ПКС `Код` и `Порядок`, которых нет в `fields`, подставляются как у
     соседей (`_assign_pks_defaults`). В пустом контейнере `Порядок` равен 0 — как у
     первой строки `_fill_properties`, а не шаг 50: иначе нумерация разошлась бы с
@@ -185,6 +208,12 @@ def create_rule(
     `ОбщегоНазначения/Ext/Module.bsl`, `ПриемникПриИзмененииПКО`, 1876–1884). Заметки об
     обоих умолчаниях попадают в `warnings`.
     """
+    if kind_name == CONVERSION_KIND:
+        raise RuleEditError(
+            "События конвертации не создаются отдельно: экземпляр один на файл правил "
+            "и появляется вместе с ними. Текст события задаёт rule_update; "
+            "пустая строка удаляет событие."
+        )
     _require_key(kind_name, key)
     list_group = _list_group(rules, kind_name, group)
     node = Node.new(kind_name, _tag(kind_name))
@@ -226,7 +255,14 @@ def update_rule(
     source: sqlite3.Connection | None = None,
     target: sqlite3.Connection | None = None,
 ) -> EditResult:
-    """Меняет только переданные поля. Вложенные правила и остальные поля не трогает."""
+    """Меняет только переданные поля. Вложенные правила и остальные поля не трогает.
+
+    Вид `conversion` меняет только тексты событий. Пустая строка удаляет событие.
+    Поля заголовка (версия формата, имена конфигураций, дата и остальные реквизиты)
+    этим вызовом не правятся.
+    """
+    if kind_name == CONVERSION_KIND:
+        return _update_conversion(rules, key, fields)
     _require_key(kind_name, key)
     container, node, pko = _require(rules, kind_name, key, owner)
     old_code = node.code
@@ -268,6 +304,8 @@ def update_rules(
     Правка атомарна: снимки всех целей снимаются до изменений. Ошибка `_apply_fields`
     или `_after_change` на любой цели возвращает уже затронутые узлы и пробрасывается.
     """
+    if kind_name == CONVERSION_KIND:
+        raise RuleEditError("События конвертации меняются вызовом rule_update, не пакетом")
     if kind_name not in _BATCH_KINDS:
         raise RuleEditError("Для правил верхнего уровня — rule_update по одному")
     selected = _select_batch(rules, kind_name, owner, keys, except_keys)
@@ -313,7 +351,15 @@ def delete_rule(
     source: sqlite3.Connection | None = None,
     target: sqlite3.Connection | None = None,
 ) -> EditResult:
-    """Удаляет правило. ПКО, на которое ссылаются, не удаляется."""
+    """Удаляет правило. ПКО, на которое ссылаются, не удаляется.
+
+    Вид `conversion` не удаляется: экземпляр один. Событие убирает пустая строка в `rule_update`.
+    """
+    if kind_name == CONVERSION_KIND:
+        raise RuleEditError(
+            "События конвертации не удаляются как правило: экземпляр один на файл. "
+            "Чтобы убрать событие, передайте в rule_update пустую строку."
+        )
     _require_key(kind_name, key)
     container, node, pko = _require(rules, kind_name, key, owner)
     if kind_name == "pko":
@@ -324,7 +370,13 @@ def delete_rule(
 
 
 def find_rule(rules: ExchangeRules, kind_name: str, key: str, owner: str = "") -> Node:
-    """Правило по адресу (Д6); нет такого — `RuleNotFoundError`. Документ не меняется."""
+    """Правило по адресу (Д6); нет такого — `RuleNotFoundError`. Документ не меняется.
+
+    Вид `conversion` — корень правил. Ключ пустой или `Конвертация`.
+    """
+    if kind_name == CONVERSION_KIND:
+        _require_conversion_key(key)
+        return rules.root
     _require_key(kind_name, key)
     return _require(rules, kind_name, key, owner)[1]
 
@@ -391,6 +443,60 @@ def create_pko_with_properties(
         _detach(inserted, node)
         raise
     return result
+
+
+# --- События конвертации -----------------------------------------------------------------------
+
+
+def _require_conversion_key(key: str) -> None:
+    """Ключ единственного правила событий: пустая строка или `Конвертация`."""
+    if key in ("", CONVERSION_ADDRESS):
+        return
+    raise RuleNotFoundError(
+        f"События конвертации адресуются как «{CONVERSION_ADDRESS}» или пустым ключом"
+    )
+
+
+def _update_conversion(
+    rules: ExchangeRules,
+    key: str,
+    fields: Mapping[str, FieldValue] | None,
+) -> EditResult:
+    """Меняет тексты событий корня. Пустая строка снимает событие. Заголовок не трогает."""
+    _require_conversion_key(key)
+    if fields:
+        _apply_conversion_fields(rules.root, fields)
+    return EditResult(CONVERSION_ADDRESS)
+
+
+def _apply_conversion_fields(root: Node, fields: Mapping[str, FieldValue]) -> None:
+    """Проверяет имена до записи: неизвестное событие и поле заголовка отклоняют весь вызов."""
+    unknown = [
+        name for name in fields if name not in _CONVERSION_EVENTS and name not in _CONVERSION_HEADER
+    ]
+    if unknown:
+        allowed = ", ".join(CONVERSION_EVENTS)
+        names = ", ".join(f"«{name}»" for name in unknown)
+        noun = "событие" if len(unknown) == 1 else "события"
+        raise ValueError(f"Неизвестное {noun} конвертации: {names}. Допустимые: {allowed}")
+    header = [name for name in fields if name in _CONVERSION_HEADER]
+    if header:
+        names = ", ".join(f"«{name}»" for name in header)
+        raise RuleEditError(
+            f"Поля заголовка правил {names} этим инструментом не правятся "
+            "(версия формата, имена конфигураций, дата и остальные реквизиты конвертации). "
+            "rule_update вида conversion меняет только тексты событий; "
+            "пустая строка удаляет событие."
+        )
+    for name, value in fields.items():
+        if not isinstance(value, str):
+            raise ValueError(
+                f"Текст события «{name}» должен быть строкой; пустая строка удаляет событие"
+            )
+        if value == "":
+            root.values.pop(name, None)
+        else:
+            root.values[name] = value
 
 
 # --- Поля --------------------------------------------------------------------------------------

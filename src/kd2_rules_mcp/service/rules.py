@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from kd2_rules_mcp.authoring.edits import (
+    CONVERSION_KIND,
     create_pko_with_properties,
     create_rule,
     delete_rule,
@@ -18,6 +19,7 @@ from kd2_rules_mcp.kd2.model import RulesDocument
 from kd2_rules_mcp.kd2.rules_io import load_rules
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.views import (
+    conversion_view,
     counts,
     edit_view,
     listed_rule_rows,
@@ -94,6 +96,10 @@ class RulesMixin(ServiceBase):
     ) -> dict[str, Any]:
         with self._lock:
             rules = self._exchange(project_id)
+            if kind == CONVERSION_KIND:
+                page_limit(limit)
+                find_rule(rules, kind, key, owner)
+                return conversion_view(rules)
             node = find_rule(rules, kind, key, owner)
             return node_view(node, page_limit(limit), rule_group(rules, node))
 
