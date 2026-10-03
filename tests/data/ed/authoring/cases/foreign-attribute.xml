@@ -1,0 +1,5 @@
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+  <Catalog><Properties><Name>Товары</Name></Properties><ChildObjects>
+    <Attribute><Properties><Name>доп_Заметка</Name></Properties></Attribute>
+  </ChildObjects></Catalog>
+</MetaDataObject>

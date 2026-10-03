@@ -12,6 +12,10 @@
 
 ### Добавлено
 
+- `rules_validate`: предупреждения формы поиска объекта в приёмнике — `search.no_keys`,
+  `search.only_group_key`, `search.group_flag`, `search.owner_key`, `search.name_not_search_prop`,
+  `search.unreachable_handler`, `search.continue_without_fields`. Без структуры приёмника иерархия
+  и владелец пропускаются; имя свойств поиска, собранное кодом, — тоже пропуск.
 - События конвертации правил обмена читаются и правятся как правило вида `conversion`
   (адрес `Конвертация`): `rules_get`, `rule_update`, счётчик в `rules_overview`, строка в `rules_list`.
   Пустая строка удаляет событие; заголовок правил и создание или удаление экземпляра этим видом не меняются.

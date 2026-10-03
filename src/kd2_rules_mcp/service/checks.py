@@ -10,7 +10,7 @@ from kd2_rules_mcp.validation.algorithms import check_algorithm_refs
 from kd2_rules_mcp.validation.format import check_format
 from kd2_rules_mcp.validation.handlers import export_handlers, locate
 from kd2_rules_mcp.validation.registration import check_registration
-from kd2_rules_mcp.validation.search import check_search_params
+from kd2_rules_mcp.validation.search import check_search_objects, check_search_params
 from kd2_rules_mcp.validation.structure import check_structures
 
 
@@ -34,6 +34,7 @@ class ChecksMixin(ServiceBase):
                 report.extend(check_structures(document, source, target))
                 report.extend(check_algorithm_refs(document))
                 report.extend(check_search_params(document))
+                report.extend(check_search_objects(document, target))
             elif isinstance(document, RegistrationRules):
                 report.extend(check_registration(document, source))
         return report_view(report, level, check_prefix, offset, limit)

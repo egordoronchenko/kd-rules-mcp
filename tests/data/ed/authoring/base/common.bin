@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:fiction:common">
+  <objectType name="ОбщиеСвойстваОбъектовФормата">
+    <property name="Комментарий" type="xs:string" lowerBound="0"/>
+  </objectType>
+</package>

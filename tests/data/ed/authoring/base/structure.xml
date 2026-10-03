@@ -1,0 +1,13 @@
+<Конфигурация Имя="Вымышленная">
+  <CatalogObject.Конфигурации><Ref>config</Ref><Имя>Вымышленная</Имя></CatalogObject.Конфигурации>
+  <CatalogObject.Объекты><Ref>string</Ref><Description>Строка</Description><Имя>Строка</Имя><Тип>Строка</Тип></CatalogObject.Объекты>
+  <CatalogObject.Объекты><Ref>number</Ref><Description>Число</Description><Имя>Число</Имя><Тип>Число</Тип></CatalogObject.Объекты>
+  <CatalogObject.Объекты><Ref>date</Ref><Description>Дата</Description><Имя>Дата</Имя><Тип>Дата</Тип></CatalogObject.Объекты>
+  <CatalogObject.Объекты><Ref>bool</Ref><Description>Булево</Description><Имя>Булево</Имя><Тип>Булево</Тип></CatalogObject.Объекты>
+  <CatalogObject.Объекты><Ref>item</Ref><Description>СправочникСсылка.Товары</Description><Имя>Товары</Имя><Тип>Справочник</Тип></CatalogObject.Объекты>
+  <CatalogObject.Свойства><Ref>code</Ref><Owner>item</Owner><Вид>Реквизит</Вид><Типы><Row><Тип>string</Тип></Row></Типы><Description>Код</Description></CatalogObject.Свойства>
+  <CatalogObject.Свойства><Ref>note</Ref><Owner>item</Owner><Вид>Реквизит</Вид><КвалификаторыСтроки_Длина>150</КвалификаторыСтроки_Длина><Типы><Row><Тип>string</Тип></Row></Типы><Description>Заметка</Description></CatalogObject.Свойства>
+  <CatalogObject.Объекты><Ref>order</Ref><Description>ДокументСсылка.Заказ</Description><Имя>Заказ</Имя><Тип>Документ</Тип></CatalogObject.Объекты>
+  <CatalogObject.Свойства><Ref>order-code</Ref><Owner>order</Owner><Вид>Реквизит</Вид><Типы><Row><Тип>string</Тип></Row></Типы><Description>Код</Description></CatalogObject.Свойства>
+  <CatalogObject.Свойства><Ref>order-note</Ref><Owner>order</Owner><Вид>Реквизит</Вид><КвалификаторыСтроки_Длина>150</КвалификаторыСтроки_Длина><Типы><Row><Тип>string</Тип></Row></Типы><Description>Заметка</Description></CatalogObject.Свойства>
+</Конфигурация>

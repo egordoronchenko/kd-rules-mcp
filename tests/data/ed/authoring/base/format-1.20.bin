@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:t="urn:fiction:1.20" xmlns:c="urn:fiction:common" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:fiction:1.20">
+  <import namespace="urn:fiction:common"/>
+  <objectType name="Ключ"><property name="Код" type="xs:string"/></objectType>
+  <valueType name="Строка50" base="xs:string"><maxLength>50</maxLength></valueType>
+  <valueType name="Число10" base="xs:decimal"><totalDigits>10</totalDigits><fractionDigits>2</fractionDigits></valueType>
+  <valueType name="Выбор" base="xs:string"><enumeration>А</enumeration></valueType>
+  <valueType name="Составной" variety="Union" memberTypes="xs:string xs:decimal"/>
+  <objectType name="СтрокаТЧ"><property name="Значение" type="xs:string" lowerBound="0"/></objectType>
+  <objectType name="Таблица"><property name="Строка" type="t:СтрокаТЧ" upperBound="-1"/></objectType>
+  <objectType name="Справочник.Товары">
+    <property name="КлючевыеСвойства" type="t:Ключ"/>
+    <property name="ОбщиеСвойстваОбъектовФормата" type="c:ОбщиеСвойстваОбъектовФормата" lowerBound="0"/>
+    <property name="ВнешнийКод" type="xs:string" lowerBound="0"/>
+    <property name="Короткий" type="t:Строка50" lowerBound="0"/>
+    <property name="Число" type="t:Число10" lowerBound="0"/>
+    <property name="Дата" type="xs:dateTime" lowerBound="0"/>
+    <property name="День" type="xs:date" lowerBound="0"/>
+    <property name="Время" type="xs:time" lowerBound="0"/>
+    <property name="Булево" type="xs:boolean" lowerBound="0"/>
+    <property name="Выбор" type="t:Выбор" lowerBound="0"/>
+    <property name="Составной" type="t:Составной" lowerBound="0"/>
+    <property name="Повторы" type="xs:string" lowerBound="0" upperBound="-1"/>
+    <property name="Строки" type="t:Таблица" lowerBound="0"/>
+  </objectType>
+  <objectType name="Документ.Заказ" base="t:Справочник.Товары"/>
+</package>
