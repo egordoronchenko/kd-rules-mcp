@@ -2,26 +2,35 @@
 
 import hashlib
 import re
+import threading
+from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from kd2_rules_mcp import ed
 from kd2_rules_mcp.ed import address as addresses
+from kd2_rules_mcp.ed.schema.profile import ValidationProfile
 from kd2_rules_mcp.errors import (
     AmbiguousAddressError,
     EdFormatError,
     EdReadError,
     EdResourceLimitError,
+    EdSchemaNotFoundError,
     Kd2Error,
     ProjectNotFoundError,
     RuleNotFoundError,
 )
 from kd2_rules_mcp.service import ed_views as views
 from kd2_rules_mcp.service.base import ServiceBase
+from kd2_rules_mcp.service.ed_schema import SchemaProject
 from kd2_rules_mcp.service.paths import Settings
 from kd2_rules_mcp.service.views import report_view
 from kd2_rules_mcp.validation.ed_links import validate_links
+from kd2_rules_mcp.validation.ed_schema import validate_schema
+from kd2_rules_mcp.validation.ed_structure import validate_structure
+from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+from kd2_rules_mcp.validation.report import Issue
 
 
 @dataclass(frozen=True)
@@ -37,9 +46,28 @@ class EdProject:
 class EdMixin(ServiceBase):
     """Чтение неизменяемых снимков ED и проверка связности открытого модуля."""
 
+    _ed_schemas: dict[str, SchemaProject]
+
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
         self._ed_projects: dict[str, EdProject] = {}
+        self._ed_structure_snapshots: dict[str, tuple[tuple[str, str, str], StructureSnapshot]] = {}
+        self._ed_structure_snapshot_lock = threading.Lock()
+
+    def _ed_structure_snapshot(self, structure_id: str) -> tuple[StructureSnapshot, str | None]:
+        """DTO кэшируется по входу; тяжёлое чтение не держит общую блокировку сервиса."""
+        with self._structure(structure_id) as connection:
+            meta = dict(connection.execute("SELECT key, value FROM meta"))
+            fingerprint = tuple(
+                meta.get(k, "") for k in ("input_hash", "loader_version", "schema_version")
+            )
+            with self._ed_structure_snapshot_lock:
+                cached = self._ed_structure_snapshots.get(structure_id)
+                if cached and cached[0] == fingerprint:
+                    return cached[1], meta.get("input_hash")
+                snapshot = StructureSnapshot.load(connection)
+                self._ed_structure_snapshots[structure_id] = (fingerprint, snapshot)
+            return snapshot, meta.get("input_hash")
 
     def _ed_project(self, project_id: str) -> EdProject:
         if project_id not in self._ed_projects:
@@ -387,16 +415,109 @@ class EdMixin(ServiceBase):
         check_prefix: str | None = None,
         offset: int = 0,
         limit: int = 50,
+        schema_id: str | None = None,
+        structure_id: str | None = None,
+        direction: str = "both",
     ) -> dict[str, Any]:
-        """Связность открытого снимка. Файл модуля повторно не читается."""
+        """Связность и профильные проверки открытых снимков; BSL не исполняется."""
         views.validate_page(offset, limit)
+        if direction not in ("send", "receive", "both"):
+            raise ValueError("Направление: send, receive или both")
         with self._lock:
             project, references = self._ensure_references(project_id)
-            report = validate_links(project.document, project.index, references)
+            schema_project = None
+            if schema_id is not None:
+                schema_project = self._ed_schemas.get(schema_id)
+                if schema_project is None:
+                    raise EdSchemaNotFoundError("Схема формата не открыта")
+        snapshot, structure_fingerprint = (
+            self._ed_structure_snapshot(structure_id) if structure_id is not None else (None, None)
+        )
+        profile = ValidationProfile.build(
+            schema_project.schema if schema_project else None,
+            schema_project.format_version if schema_project else None,
+            direction,
+        )
+        coverage: Counter[str] = Counter()
+        report = validate_links(project.document, project.index, references)
+        if schema_project:
+            report.extend(
+                validate_schema(
+                    project.document,
+                    schema_project.schema,
+                    project.index,
+                    profile,
+                    snapshot,
+                    coverage,
+                )
+            )
+            if snapshot is None:
+                report.skip(
+                    "ed.schema.type_incompatible",
+                    "Структура конфигурации не передана: сопоставление типов не выполнялось",
+                )
+        else:
+            report.skip(
+                "ed.schema",
+                "Схема формата и структура конфигурации не переданы: "
+                "проверки по схеме не выполнялись",
+            )
+        if snapshot:
+            report.extend(
+                validate_structure(project.document, snapshot, project.index, profile, coverage)
+            )
+        else:
+            report.skip(
+                "ed.structure",
+                "Структура конфигурации не передана: проверки по структуре не выполнялись",
+            )
+        report.issues = list(dict.fromkeys(report.issues))
+
+        def issue_key(issue: Issue) -> tuple[str, int, str, str]:
+            entity = project.index.by_address.get(issue.address)
+            return (
+                entity.span.file_id if entity else project.document.files[0].file_id,
+                entity.span.char_start if entity else len(project.document.files[0].text),
+                issue.check,
+                issue.message,
+            )
+
+        report.issues.sort(key=issue_key)
+        report.skipped.sort(key=lambda item: (item.check, item.reason))
         return {
             "project_id": project_id,
             **report_view(report, level, check_prefix, offset, limit),
             "references": views.references_summary(references),
+            "profile": {
+                "schema_id": schema_id,
+                "structure_id": structure_id,
+                "format_version": profile.format_version or None,
+                "active_namespaces": list(profile.active_namespaces),
+                "direction": direction,
+                "fingerprints": {
+                    "module": project.document.files[0].sha256,
+                    "schema": hashlib.sha256(
+                        "".join(
+                            source.sha256
+                            for package in schema_project.schema.packages
+                            for source in package.sources
+                        ).encode("ascii")
+                    ).hexdigest()
+                    if schema_project
+                    else None,
+                    "structure": structure_fingerprint,
+                },
+            },
+            "coverage": {
+                key: coverage[key]
+                for key in (
+                    "checked",
+                    "not_applicable",
+                    "opaque_conditions",
+                    "handler_may_supply",
+                    "unresolved_schema",
+                )
+            },
         }
 
     def ed_close(self, project_id: str) -> dict[str, Any]:

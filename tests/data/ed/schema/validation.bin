@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:t="urn:test:validation" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:validation">
+  <objectType name="Keys"><property name="Код" type="xs:string"/></objectType>
+  <objectType name="ОбщиеСвойстваТест"><property name="Название" type="xs:string" lowerBound="0"/></objectType>
+  <objectType name="Row"><property name="Количество" type="xs:decimal" lowerBound="0"/></objectType>
+  <objectType name="Rows"><property name="Строка" type="t:Row" upperBound="-1"/></objectType>
+  <objectType name="BadRows"><property name="Строка" type="t:Row" upperBound="-1"/><property name="Итог" type="xs:decimal"/></objectType>
+  <valueType name="Смешанный" variety="Union" memberTypes="xs:decimal xs:dateTime"/>
+  <objectType name="Справочник.Тест">
+    <property name="КлючевыеСвойства" type="t:Keys"/>
+    <property name="Общие" type="t:ОбщиеСвойстваТест" lowerBound="0"/>
+    <property name="Номер" type="xs:string" lowerBound="0"/>
+    <property name="Дата" type="xs:dateTime" lowerBound="0"/>
+    <property name="Товары" type="t:Rows" lowerBound="0"/>
+    <property name="Плохие" type="t:BadRows" lowerBound="0"/>
+    <property name="Перечисление" type="t:Выбор" lowerBound="0"/>
+    <property name="Объединение" type="t:Смешанный" lowerBound="0"/>
+    <property name="Произвольный" type="xs:anyType" lowerBound="0"/>
+  </objectType>
+  <valueType name="Выбор" base="xs:string"><enumeration>A</enumeration><enumeration>B</enumeration></valueType>
+  <valueType name="НаследованныйВыбор" base="t:Выбор"/>
+  <valueType name="Свободный" base="xs:string"/>
+</package>

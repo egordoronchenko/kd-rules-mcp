@@ -32,6 +32,8 @@ MCP-сервер `kd2-rules-mcp` разбирает, правит и прове�
   сокращения (ПКО, ПКС, ПВД, БСП…) — `references/glossary.md`.
 - Жалоба на живой обмен (задвоился, не нашёл существующий, не выгрузился) —
   `.agents/skills/kd2-exchange-pitfalls/SKILL.md`.
+- Обмен через универсальный формат (правила — код модуля менеджера обмена; сервер их читает и проверяет:
+  `ed_open` → `ed_validate`, схема — `ed_schema_open`) — `.agents/skills/kd2-ed-rules/SKILL.md`.
 - Установить или обновить сервер, подключить ещё проект — `.agents/skills/kd2-install/SKILL.md`.
 
 ## Серверы MCP для 1С

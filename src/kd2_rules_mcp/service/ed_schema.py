@@ -212,6 +212,7 @@ class EdSchemaMixin(ServiceBase):
         section: str = "properties",
         offset: int = 0,
         limit: int = 50,
+        include_origin: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             schema = self._schema_project(schema_id).schema
@@ -235,7 +236,7 @@ class EdSchemaMixin(ServiceBase):
                 typ = found[0] if found else None
         if typ is None:
             raise EdSchemaTypeNotFoundError("Тип не найден в схеме")
-        return views.type_view(schema, typ, section, offset, limit)
+        return views.type_view(schema, typ, section, offset, limit, include_origin)
 
     def ed_schema_close(self, schema_id: str) -> dict[str, Any]:
         with self._lock:

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+  <Configuration uuid="00000000-0000-0000-0000-000000000001">
+    <Properties><Name>ВымышленнаяКонфигурация</Name></Properties>
+    <ChildObjects>
+      <ExchangePlan>ПланФормата</ExchangePlan>
+      <ExchangePlan>ПланБезМодуля</ExchangePlan>
+      <CommonModule>ОбменДаннымиПереопределяемый</CommonModule>
+      <CommonModule>ОбщегоНазначенияПереопределяемый</CommonModule>
+      <CommonModule>ПоставщикВерсий</CommonModule>
+      <CommonModule>ОбёрткаМаршрута</CommonModule>
+      <CommonModule>МенеджерОбменаПример</CommonModule>
+      <CommonModule>ДругойМенеджер</CommonModule>
+      <Subsystem>Приложения</Subsystem>
+      <XDTOPackage>ПакетФормата</XDTOPackage>
+      <XDTOPackage>ПакетЛишний</XDTOPackage>
+      <XDTOPackage>ДвойникА</XDTOPackage>
+      <XDTOPackage>ДвойникБ</XDTOPackage>
+      <XDTOPackage>СообщениеОбмена</XDTOPackage>
+    </ChildObjects>
+  </Configuration>
+</MetaDataObject>

@@ -1035,13 +1035,48 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         offset: Offset = 0,
         limit: Limit = 50,
+        schema_id: Annotated[
+            str | None,
+            Field(
+                description="Снимок из ed_schema_open: проверяет имена, пути и значения "
+                "в выбранной версии формата"
+            ),
+        ] = None,
+        structure_id: Annotated[
+            str | None,
+            Field(
+                description="Структура из structure_load_project/xml/md83exp: проверяет "
+                "объекты, реквизиты и типы конфигурации"
+            ),
+        ] = None,
+        direction: Annotated[
+            str,
+            Field(
+                description="Направление проверки: send, receive или both; both объединяет "
+                "замечания двух проходов"
+            ),
+        ] = "both",
     ) -> dict[str, Any]:
-        """Проверяет связность уже открытого модуля менеджера: обработчики, ветки и ссылки правил.
+        """Проверяет открытый модуль менеджера: связность, со схемой и структурой — декларации.
 
-        Ошибка — обработчик не будет вызван или модуль не скомпилируется.
-        skipped — проверки, которые не выполнялись. Схема формата здесь не проверяется.
+        Ошибка связности — обработчик не будет вызван или модуль не скомпилируется;
+        ошибка структуры — статическая ссылка на метаданные отсутствует.
+        Для проверок формата передайте schema_id; для стороны конфигурации — structure_id.
+        Сопоставление типов требует оба снимка. skipped означает непроверенные группы или
+        непрозрачные условия/источники, поэтому отсутствие замечаний не доказывает полноту.
+        Версия и активные пространства имён берутся из открытой схемы. BSL не исполняется.
         """
-        return await call(service.ed_validate, project_id, level, check_prefix, offset, limit)
+        return await call(
+            service.ed_validate,
+            project_id,
+            level,
+            check_prefix,
+            offset,
+            limit,
+            schema_id,
+            structure_id,
+            direction,
+        )
 
     @server.tool()
     async def ed_close(
@@ -1139,11 +1174,21 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = "properties",
         offset: Offset = 0,
         limit: Limit = 50,
+        include_origin: Annotated[
+            bool,
+            Field(
+                description="Добавить происхождение типа, свойств и общий граф страницы; "
+                "по умолчанию они опущены"
+            ),
+        ] = False,
     ) -> dict[str, Any]:
         """Один тип схемы: свойства (вместе с развёрнутыми ключевыми и общими свойствами — путь в
         XML и имя, под которым свойство пишут в правиле), значения перечисления или фасеты;
-        у свойства — тип, границы, признаки ссылки и табличной части, происхождение."""
-        return await call(service.ed_schema_type, schema_id, qname, section, offset, limit)
+        у свойства — тип, границы, признаки ссылки и табличной части.
+        Происхождение добавляется только при include_origin=true."""
+        return await call(
+            service.ed_schema_type, schema_id, qname, section, offset, limit, include_origin
+        )
 
     @server.tool()
     async def ed_schema_close(

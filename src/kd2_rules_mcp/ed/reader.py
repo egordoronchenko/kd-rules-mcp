@@ -885,6 +885,9 @@ class _Reader:
     def predefined_rules(self, block: _RoutineBlock) -> list[PredefinedRule]:
         result: list[PredefinedRule] = []
         starts = [i for i, st in enumerate(block.body) if self.is_initialization(st, "pkpd")]
+        if not starts:
+            # Процедура без единого ПКПД (пустая или с одной преамбулой) — допустимая форма.
+            return result
         ends = [*starts[1:], len(block.body)]
         for start, end in zip(starts, ends, strict=True):
             statements = block.body[start:end]

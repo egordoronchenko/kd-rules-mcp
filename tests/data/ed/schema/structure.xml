@@ -1,0 +1,18 @@
+<Конфигурация Имя="Синтетическая">
+  <CatalogObject.Конфигурации><Ref>config</Ref><Имя>Синтетическая</Имя></CatalogObject.Конфигурации>
+  <CatalogObject.Объекты><Ref>string</Ref><Description>Строка</Description><Имя>Строка</Имя><Тип>Строка</Тип></CatalogObject.Объекты>
+  <CatalogObject.Объекты><Ref>number</Ref><Description>Число</Description><Имя>Число</Имя><Тип>Число</Тип></CatalogObject.Объекты>
+  <CatalogObject.Объекты><Ref>date</Ref><Description>Дата</Description><Имя>Дата</Имя><Тип>Дата</Тип></CatalogObject.Объекты>
+  <CatalogObject.Объекты><Ref>bool</Ref><Description>Булево</Description><Имя>Булево</Имя><Тип>Булево</Тип></CatalogObject.Объекты>
+  <CatalogObject.Объекты><Ref>item</Ref><Description>СправочникСсылка.Тест</Description><Имя>Тест</Имя><Тип>Справочник</Тип></CatalogObject.Объекты>
+  <CatalogObject.Свойства><Ref>code</Ref><Owner>item</Owner><Вид>Реквизит</Вид><КвалификаторыСтроки_Длина>12</КвалификаторыСтроки_Длина><Типы><Row><Тип>string</Тип></Row></Типы><Description>Код</Description></CatalogObject.Свойства>
+  <CatalogObject.Свойства><Ref>date-field</Ref><Owner>item</Owner><Вид>Реквизит</Вид><Типы><Row><Тип>date</Тип></Row></Типы><Description>Дата</Description></CatalogObject.Свойства>
+  <CatalogObject.Свойства><Ref>flag</Ref><Owner>item</Owner><Вид>Реквизит</Вид><Типы><Row><Тип>bool</Тип></Row></Типы><Description>Флаг</Description></CatalogObject.Свойства>
+  <CatalogObject.Свойства><Ref>table</Ref><Owner>item</Owner><Вид>ТабличнаяЧасть</Вид><Description>Товары</Description></CatalogObject.Свойства>
+  <CatalogObject.Свойства><Ref>quantity</Ref><Owner>item</Owner><Parent>table</Parent><Вид>Реквизит</Вид><КвалификаторыЧисла_Длина>15</КвалификаторыЧисла_Длина><КвалификаторыЧисла_Точность>3</КвалификаторыЧисла_Точность><Типы><Row><Тип>number</Тип></Row></Типы><Description>Количество</Description></CatalogObject.Свойства>
+  <CatalogObject.Свойства><Ref>link</Ref><Owner>item</Owner><Вид>Реквизит</Вид><Типы><Row><Тип>item</Тип></Row></Типы><Description>Ссылка</Description></CatalogObject.Свойства>
+  <CatalogObject.Свойства><Ref>unknown</Ref><Owner>item</Owner><Вид>Реквизит</Вид><Типы><Row><Тип>unknown-type</Тип></Row></Типы><Description>Неполный</Description></CatalogObject.Свойства>
+  <CatalogObject.Объекты><Ref>enum</Ref><Description>ПеречислениеСсылка.Выбор</Description><Имя>Выбор</Имя><Тип>Перечисление</Тип></CatalogObject.Объекты>
+  <CatalogObject.Значения><Ref>value-a</Ref><Owner>enum</Owner><Description>А</Description></CatalogObject.Значения>
+  <CatalogObject.Значения><Ref>value-b</Ref><Owner>enum</Owner><Description>Б</Description></CatalogObject.Значения>
+</Конфигурация>

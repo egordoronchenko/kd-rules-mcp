@@ -1,6 +1,7 @@
 """Контракт сервиса ED на синтетических менеджерах, без изменения пакета чтения."""
 
 import hashlib
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -512,10 +513,24 @@ def references_text() -> str:
 def test_validate_clean_base_and_existing_modules(service, tmp_path):
     project = service.ed_open(str(checks_file(tmp_path)))["project_id"]
     report = service.ed_validate(project)
-    assert set(report) == {"project_id", "summary", "skipped", "issues", "references"}
+    assert set(report) == {
+        "project_id",
+        "summary",
+        "skipped",
+        "issues",
+        "references",
+        "profile",
+        "coverage",
+    }
     assert report["summary"]["errors"] == 0 and report["summary"]["warnings"] == 0
-    assert report["skipped"] == [{"check": "ed.schema", "reason": SCHEMA}]
-    assert report["summary"]["skipped"] == 1
+    assert report["skipped"] == [
+        {"check": "ed.schema", "reason": SCHEMA},
+        {
+            "check": "ed.structure",
+            "reason": "Структура конфигурации не передана: проверки по структуре не выполнялись",
+        },
+    ]
+    assert report["summary"]["skipped"] == 2
     assert "ed.schema" in report["summary"]["text"]
     assert_page(report["issues"], total=0)
     assert set(report["references"]["unparsed_by_kind"]) == REFERENCE_KINDS
@@ -529,6 +544,204 @@ def test_validate_clean_base_and_existing_modules(service, tmp_path):
         )
 
 
+def test_validate_profile_inputs_and_filters(service, tmp_path):
+    from tests.test_ed_profile import BASE, document
+    from tests.test_ed_profile import DATA as SCHEMA_DATA
+
+    # Только одна профильная проблема, направление и обязательные источники чистые.
+    text = BASE.replace("// <properties>", 'ДобавитьПКС(СвойстваШапки, "Код", "Нет", 0);')
+    path = tmp_path / "profile.bsl"
+    path.write_text(document(text).files[0].text, encoding="utf-8")
+    project = service.ed_open(str(path))["project_id"]
+    schema = service.ed_schema_open("1.2", path=str(SCHEMA_DATA / "validation.bin"))["schema_id"]
+    structure = service.structure_load_md83exp("synthetic", str(SCHEMA_DATA / "structure.xml"))[
+        "structure_id"
+    ]
+    result = service.ed_validate(project, schema_id=schema, structure_id=structure)
+    assert result["summary"]["by_check"] == {"ed.schema.property_missing": 1}
+    assert result["issues"]["items"] == [
+        {
+            "level": "предупреждение",
+            "check": "ed.schema.property_missing",
+            "address": "ПКО/Тест/ПКС/Нет",
+            "message": "Свойство формата «Нет» отсутствует в выбранном профиле; "
+            "проверьте версию и обработчик.",
+        }
+    ]
+    assert result["profile"] == {
+        "schema_id": schema,
+        "structure_id": structure,
+        "format_version": "1.2",
+        "active_namespaces": ["urn:test:validation"],
+        "direction": "both",
+        "fingerprints": {
+            "module": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "schema": hashlib.sha256(
+                hashlib.sha256((SCHEMA_DATA / "validation.bin").read_bytes())
+                .hexdigest()
+                .encode("ascii")
+            ).hexdigest(),
+            "structure": service.store.meta(structure)["input_hash"],
+        },
+    }
+    assert result["coverage"]["checked"] > 0
+    filtered = service.ed_validate(
+        project, schema_id=schema, structure_id=structure, check_prefix="ed.structure.", limit=1
+    )
+    assert not filtered["issues"]["items"] and filtered["summary"] == result["summary"]
+    assert filtered["coverage"] == result["coverage"] and filtered["skipped"] == result["skipped"]
+    schema_only = service.ed_validate(project, schema_id=schema)
+    assert {s["check"] for s in schema_only["skipped"]} >= {
+        "ed.structure",
+        "ed.schema.type_incompatible",
+    }
+    structure_only = service.ed_validate(project, structure_id=structure)
+    assert any(s["check"] == "ed.schema" for s in structure_only["skipped"])
+    assert not any(s["check"] == "ed.structure" for s in structure_only["skipped"])
+    path.write_text("не читается повторно", encoding="utf-8")
+    assert service.ed_validate(project, schema_id=schema, structure_id=structure) == result
+
+
+def test_validate_profile_input_errors(service, tmp_path):
+    from kd2_rules_mcp.errors import EdSchemaNotFoundError, StructureNotFoundError
+
+    project = service.ed_open(str(checks_file(tmp_path)))["project_id"]
+    with pytest.raises(EdSchemaNotFoundError):
+        service.ed_validate(project, schema_id="missing")
+    with pytest.raises(StructureNotFoundError):
+        service.ed_validate(project, structure_id="missing")
+    with pytest.raises(ValueError):
+        service.ed_validate(project, direction="other")
+
+
+def test_validate_without_schema_keeps_version_condition_unknown(service, tmp_path):
+    from tests.test_ed_profile import BASE, document
+    from tests.test_ed_profile import DATA as SCHEMA_DATA
+
+    call = "    ДобавитьПКО_Тест(ПравилаКонвертации);"
+    text = BASE.replace(
+        call,
+        'Если КомпонентыОбмена.ВерсияФорматаОбмена = "1.2" Тогда\n' + call + "\nКонецЕсли;",
+        1,
+    )
+    path = tmp_path / "version.bsl"
+    path.write_text(document(text).files[0].text, encoding="utf-8")
+    project = service.ed_open(str(path))["project_id"]
+    structure = service.structure_load_md83exp("synthetic", str(SCHEMA_DATA / "structure.xml"))[
+        "structure_id"
+    ]
+    unknown = service.ed_validate(project, structure_id=structure)
+    assert any(
+        s["check"] == "ed.structure.property_missing"
+        and s["reason"].startswith("opaque_condition:")
+        for s in unknown["skipped"]
+    )
+    assert unknown["coverage"]["opaque_conditions"] > 0
+    schema = service.ed_schema_open("1.2", path=str(SCHEMA_DATA / "validation.bin"))["schema_id"]
+    known = service.ed_validate(project, schema_id=schema, structure_id=structure)
+    assert known["coverage"]["opaque_conditions"] == 0
+    assert not [s for s in known["skipped"] if s["check"] == "ed.structure.property_missing"]
+
+
+def test_validate_caches_structure_input_and_releases_general_lock(service, tmp_path, monkeypatch):
+    from kd2_rules_mcp.service import ed as service_ed
+    from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+    from tests.test_ed_profile import BASE, document
+    from tests.test_ed_profile import DATA as SCHEMA_DATA
+
+    path = tmp_path / "profile.bsl"
+    path.write_text(document(BASE).files[0].text, encoding="utf-8")
+    project = service.ed_open(str(path))["project_id"]
+    schema = service.ed_schema_open("1.2", path=str(SCHEMA_DATA / "validation.bin"))["schema_id"]
+    structure_path = tmp_path / "structure.xml"
+    structure_text = (SCHEMA_DATA / "structure.xml").read_text(encoding="utf-8")
+    structure_path.write_text(structure_text, encoding="utf-8")
+    structure = service.structure_load_md83exp("synthetic", str(structure_path))["structure_id"]
+    loaded = []
+
+    def assert_general_lock_available():
+        # RLock в вызывающем потоке дал бы ложное подтверждение отсутствия блокировки.
+        acquired = []
+
+        def probe():
+            available = service._lock.acquire(timeout=1)
+            acquired.append(available)
+            if available:
+                service._lock.release()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join(timeout=2)
+        assert acquired == [True]
+
+    original_load = StructureSnapshot.load
+
+    def observed_load(connection):
+        assert_general_lock_available()
+        snapshot = original_load(connection)
+        loaded.append(snapshot)
+        return snapshot
+
+    monkeypatch.setattr(StructureSnapshot, "load", staticmethod(observed_load))
+
+    def unlocked_validator(original):
+        def validate(*args, **kwargs):
+            assert_general_lock_available()
+            return original(*args, **kwargs)
+
+        return validate
+
+    for name in ("validate_links", "validate_schema", "validate_structure"):
+        monkeypatch.setattr(service_ed, name, unlocked_validator(getattr(service_ed, name)))
+    first = service.ed_validate(project, schema_id=schema, structure_id=structure)
+    assert service.ed_validate(project, schema_id=schema, structure_id=structure) == first
+    assert len(loaded) == 1
+    structure_path.write_text(structure_text.replace(">Код<", ">ДругойКод<"), encoding="utf-8")
+    assert (
+        service.structure_load_md83exp("synthetic", str(structure_path))["structure_id"]
+        == structure
+    )
+    changed = service.ed_validate(project, schema_id=schema, structure_id=structure)
+    assert len(loaded) == 2 and loaded[0] is not loaded[1]
+    assert (
+        changed["profile"]["fingerprints"]["structure"]
+        != first["profile"]["fingerprints"]["structure"]
+    )
+    assert service.ed_validate(project, schema_id=schema, structure_id=structure) == changed
+    assert len(loaded) == 2
+
+
+def test_validate_sorts_reference_with_stub_address(service, tmp_path, monkeypatch):
+    from kd2_rules_mcp.service import ed as service_ed
+    from tests.test_ed_profile import BASE, document
+
+    text = BASE + (
+        "\nПроцедура Помощник(КомпонентыОбмена)\n"
+        '    ОбменДаннымиXDTOСервер.ПКОПоИмени(КомпонентыОбмена, "НетПравила");\n'
+        "КонецПроцедуры\n"
+    )
+    path = tmp_path / "stub.bsl"
+    path.write_text(document(text).files[0].text, encoding="utf-8")
+    project = service.ed_open(str(path))["project_id"]
+    original_validate = service_ed.validate_links
+
+    def with_stub(*args):
+        report = original_validate(*args)
+        report.warning(
+            "ed.reference.code_rule_missing",
+            "Служебный/Помощник",
+            "Поиск ПКО ссылается на отсутствующее правило «НетПравила».",
+        )
+        return report
+
+    monkeypatch.setattr(service_ed, "validate_links", with_stub)
+    result = service.ed_validate(project)
+    assert result["summary"]["by_check"] == {"ed.reference.code_rule_missing": 1}
+    issue = result["issues"]["items"][0]
+    assert issue["address"] not in service._ed_projects[project].index.by_address
+    assert service.ed_validate(project) == result
+
+
 def test_validate_filters_pages_and_keeps_full_summary(service, tmp_path):
     project = service.ed_open(str(checks_file(tmp_path, two_issues_text())))["project_id"]
     full = service.ed_validate(project)
@@ -537,7 +750,13 @@ def test_validate_filters_pages_and_keeps_full_summary(service, tmp_path):
         "ed.handler.missing": 1,
         "ed.reference.code_rule_missing": 1,
     }
-    assert full["skipped"] == [{"check": "ed.schema", "reason": SCHEMA}]
+    assert full["skipped"] == [
+        {"check": "ed.schema", "reason": SCHEMA},
+        {
+            "check": "ed.structure",
+            "reason": "Структура конфигурации не передана: проверки по структуре не выполнялись",
+        },
+    ]
     assert_page(full["issues"], total=2)
     errors = service.ed_validate(project, level="ошибка")
     warnings = service.ed_validate(project, level="предупреждение")

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+  <Configuration uuid="00000000-0000-0000-0000-000000000001">
+    <Properties><Name>ВымышленнаяКонфигурация</Name></Properties>
+    <ChildObjects>
+      <ExchangePlan>ПланФормата</ExchangePlan>
+      <CommonModule>ОбменДаннымиПереопределяемый</CommonModule>
+      <CommonModule>МенеджерОбменаПример</CommonModule>
+      <CommonModule>Шаг1</CommonModule>
+      <CommonModule>Шаг2</CommonModule>
+      <CommonModule>Шаг3</CommonModule>
+      <CommonModule>Шаг4</CommonModule>
+    </ChildObjects>
+  </Configuration>
+</MetaDataObject>

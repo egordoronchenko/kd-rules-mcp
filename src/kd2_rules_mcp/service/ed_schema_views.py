@@ -69,7 +69,7 @@ def types_page(
 
 
 def property_row(
-    schema: EdSchema, prop: SchemaProperty, physical: tuple[str, ...]
+    schema: EdSchema, prop: SchemaProperty, physical: tuple[str, ...], include_origin: bool = False
 ) -> dict[str, Any]:
     target = property_type(schema, prop)
     return {
@@ -87,19 +87,23 @@ def property_row(
         "table_row": ((row.qname and str(row.qname)) or row.id)
         if (row := table_row(schema, prop))
         else None,
-        "origin": origin_view(prop.origin),
+        **({"origin": origin_view(prop.origin)} if include_origin else {}),
     }
 
 
 def type_view(
-    schema: EdSchema, typ: SchemaType, section: str, offset: int, limit: int
+    schema: EdSchema,
+    typ: SchemaType,
+    section: str,
+    offset: int,
+    limit: int,
+    include_origin: bool = False,
 ) -> dict[str, Any]:
     validate_page(offset, limit)
     if section not in ("properties", "values", "facets"):
         raise ValueError("Раздел типа: properties, values или facets")
     result = type_row(schema, typ)
     result.update(
-        origin=origin_view(typ.origin),
         open=typ.open,
         abstract=typ.abstract,
         ordered=typ.ordered,
@@ -108,20 +112,28 @@ def type_view(
         members=[str(q) for q in typ.members],
         explicit_attributes=sorted(typ.explicit_attributes),
     )
+    if include_origin:
+        result["origin"] = origin_view(typ.origin)
     if section == "properties":
         pairs = effective_properties(schema, typ)
         selected = pairs[offset : offset + limit]
-        rows = [property_row(schema, p, tuple(q.local for q in path)) for p, path in selected]
+        rows = [
+            property_row(schema, p, tuple(q.local for q in path), include_origin)
+            for p, path in selected
+        ]
         # Происхождение — общий граф страницы, свойства ссылаются на номера его узлов.
         graph: list[dict[str, Any]] = []
         for row in rows:
+            if not include_origin:
+                continue
             indices = []
             for step in row["origin"]:
                 if step not in graph:
                     graph.append(step)
                 indices.append(graph.index(step))
             row["origin"] = indices
-        result["origin_graph"] = graph
+        if include_origin:
+            result["origin_graph"] = graph
         result[section] = {
             "items": rows,
             "total": len(pairs),
@@ -150,7 +162,7 @@ def type_view(
             raise EdSchemaResourceLimitError("Одна строка схемы превышает бюджет ответа 20 КБ")
         page["items"].pop()
         page["has_more"] = offset + len(page["items"]) < page["total"]
-        if section == "properties":
+        if section == "properties" and include_origin:
             used = sorted({i for row in page["items"] for i in row["origin"]})
             graph = result["origin_graph"]
             result["origin_graph"] = [graph[i] for i in used]

@@ -55,7 +55,7 @@ SKIP_PARTS = {"__pycache__"}
 # Тексты, которые работают в папке проекта 1С без этого репозитория: его путей в них быть не должно.
 # kd2-install не входит — он ведёт установку из клона сервера. Копии справочников сервера
 # (checks, tools, glossary) описывают сам сервер и оговаривают в шапке, что пути — от клона.
-PORTABLE_SKILLS = {"kd2-rules-build", "kd2-exchange-pitfalls"}
+PORTABLE_SKILLS = {"kd2-rules-build", "kd2-exchange-pitfalls", "kd2-ed-rules"}
 SERVER_DOCS = {"checks.md", "tools.md", "glossary.md"}
 REPO_PATHS = {
     "setup_local.py": re.compile(r"setup_local"),

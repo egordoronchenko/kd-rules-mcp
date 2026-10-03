@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -393,6 +393,9 @@ def resolve_property(
     path: str,
     *,
     table: str | None = None,
+    effective_index: Mapping[str, tuple[tuple[SchemaProperty, tuple[QName, ...]], ...]]
+    | None = None,
+    property_index: Mapping[str, SchemaProperty] | None = None,
 ) -> ResolvedProperty:
     """Разрешает ПКС относительно шапки или строки указанной ПКТЧ."""
     typ = schema.types.get(owner) if isinstance(owner, QName) else schema.by_id.get(owner)
@@ -404,11 +407,20 @@ def resolve_property(
     initial_path: tuple[QName, ...] = ()
     initial_origin: tuple[OriginStep, ...] = ()
     if table is not None:
-        group = resolve_property(schema, owner, table)
+        group = resolve_property(
+            schema, owner, table, effective_index=effective_index, property_index=property_index
+        )
         if group.status != "resolved":
             return replace(group, effective_path=parts)
-        prop = next(
-            p for t in schema.by_id.values() for p in t.properties if p.id == group.property_ids[0]
+        prop = (
+            property_index[group.property_ids[0]]
+            if property_index is not None
+            else next(
+                p
+                for t in schema.by_id.values()
+                for p in t.properties
+                if p.id == group.property_ids[0]
+            )
         )
         container = property_type(schema, prop)
         typ = table_row(schema, prop)
@@ -427,7 +439,11 @@ def resolve_property(
         for current, prefix, origin in states:
             candidates = [
                 (p, physical)
-                for p, physical in effective_properties(schema, current)
+                for p, physical in (
+                    effective_index[current.id]
+                    if effective_index is not None
+                    else effective_properties(schema, current)
+                )
                 if p.name.local == part
             ]
             if not candidates and current.status == "partial":

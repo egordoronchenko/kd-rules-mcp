@@ -510,10 +510,14 @@ complete означает структурную полноту чтения, а
 
 ### `ed_validate`
 
-Проверяет связность уже открытого модуля менеджера: обработчики, ветки и ссылки правил.
+Проверяет открытый модуль менеджера: связность, со схемой и структурой — декларации.
 
-Ошибка — обработчик не будет вызван или модуль не скомпилируется.
-skipped — проверки, которые не выполнялись. Схема формата здесь не проверяется.
+Ошибка связности — обработчик не будет вызван или модуль не скомпилируется;
+ошибка структуры — статическая ссылка на метаданные отсутствует.
+Для проверок формата передайте schema_id; для стороны конфигурации — structure_id.
+Сопоставление типов требует оба снимка. skipped означает непроверенные группы или
+непрозрачные условия/источники, поэтому отсутствие замечаний не доказывает полноту.
+Версия и активные пространства имён берутся из открытой схемы. BSL не исполняется.
 
 | Параметр | Тип | По умолчанию | Описание |
 |---|---|---|---|
@@ -522,6 +526,9 @@ skipped — проверки, которые не выполнялись. Схе
 | `check_prefix` | string \| null | `null` | Префикс идентификатора проверки, например ed.handler.; пустая строка — без отбора |
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+| `schema_id` | string \| null | `null` | Снимок из ed_schema_open: проверяет имена, пути и значения в выбранной версии формата |
+| `structure_id` | string \| null | `null` | Структура из structure_load_project/xml/md83exp: проверяет объекты, реквизиты и типы конфигурации |
+| `direction` | string | `"both"` | Направление проверки: send, receive или both; both объединяет замечания двух проходов |
 
 ### `ed_close`
 
@@ -567,7 +574,8 @@ schema_id, счётчики и статус (partial — часть типов �
 
 Один тип схемы: свойства (вместе с развёрнутыми ключевыми и общими свойствами — путь в
 XML и имя, под которым свойство пишут в правиле), значения перечисления или фасеты;
-у свойства — тип, границы, признаки ссылки и табличной части, происхождение.
+у свойства — тип, границы, признаки ссылки и табличной части.
+Происхождение добавляется только при include_origin=true.
 
 | Параметр | Тип | По умолчанию | Описание |
 |---|---|---|---|
@@ -576,6 +584,7 @@ XML и имя, под которым свойство пишут в правил
 | `section` | string | `"properties"` | Раздел: properties, values или facets |
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+| `include_origin` | boolean | `false` | Добавить происхождение типа, свойств и общий граф страницы; по умолчанию они опущены |
 
 ### `ed_schema_close`
 
@@ -685,8 +694,8 @@ XML и имя, под которым свойство пишут в правил
 `level` и `check_prefix` фильтруют страницу `issues` с `offset`/`limit`/`has_more`.
 Связи из непрозрачного текста доступны у метода через `ed_get(children_kind="reference")`;
 вычисляемые имена учитываются отдельно и не считаются ошибками.
-Диагностики `ed_overview` описывают полноту чтения, а замечания `ed_validate` — связность модуля.
-`skipped` явно сообщает о неполном чтении и невыполненных проверках схемы.
+Диагностики `ed_overview` описывают полноту чтения, а замечания `ed_validate` — связность и декларации модуля.
+`skipped` явно сообщает о неполном чтении и невыполненных проверках схемы и структуры.
 Перечитать файл — `ed_close` и `ed_open`. После перезапуска сервера нужен новый `ed_open`.
 Идентификатор — `ed-<имя модуля>-<12 знаков sha256 пути на сервере>`; имя модуля — каталог над
 `Ext/Module.bsl` в выгрузке конфигурации, иначе имя файла без расширения;
@@ -725,13 +734,13 @@ XML и имя, под которым свойство пишут в правил
 | `ed_list` | Page; элемент: `address,kind,name,file_id,line_start,line_end,status`; у правил — известные `configuration_object,format_object`; у ПКС и ПКТЧ — `configuration_property,format_property` (объект правила — в адресе); при наличии детей — `child_count` |
 | `ed_get` | `address,kind,fields,span`; страницы `regions,tags,guards,children,diagnostics`; при `include_text: true` — `text: TextPage` |
 | `ed_locate` | `file_id,line,classification,matches: Page`; совпадение: `address,kind,span,relation` (`innermost`, `ancestor`, `associated`) |
-| `ed_validate` | `project_id`, `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница: `level`, `check`, `address`, `message`), `references` (`known`, `unparsed`, `unparsed_by_kind` — все семь видов, `deferred_argument_unparsed`) |
+| `ed_validate` | `project_id`, `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница: `level`, `check`, `address`, `message`), `references` (`known`, `unparsed`, `unparsed_by_kind` — все семь видов, `deferred_argument_unparsed`), `profile` (`schema_id`, `structure_id`, `format_version`, `active_namespaces`, `direction`), `coverage` (`checked`, `not_applicable`, `opaque_conditions`, `handler_may_supply`, `unresolved_schema`) |
 | `ed_close` | `project_id,closed: true` |
 
 `counts`: `pko,pod,pkpd,pks,pktch,search_sets,parameters,algorithms,handlers,dispatchers,support,unknown`.
 Счётчики алгоритмов и обработчиков считают роли методов. `diagnostics_summary` — словари
 счётчиков `code` и `severity`; подробности через `ed_list(kind="diagnostic")` и `ed_get`.
-`coverage`: `total_lines`, `declarative_lines`, `opaque_code_lines`, `trivia_lines`, `unknown_lines`,
+`coverage` в `ed_overview`: `total_lines`, `declarative_lines`, `opaque_code_lines`, `trivia_lines`, `unknown_lines`,
 `entity_covered_lines`, `coverage_ratio`, `classified_ratio` (отношения округлены до 6 знаков).
 `complete` означает структурную полноту принятого подмножества, а не правильность обмена.
 
@@ -817,13 +826,30 @@ text_offset=0, text_limit=2000, 1≤text_limit≤8000. Без `include_text` и�
 `ed_schema_type` принимает короткое имя типа (ищется в базовом пакете и активных расширениях; тип
 импортированного пакета — только полным именем), Clark-имя `{URI}Имя` или идентификатор локального
 типа из поля `type`.
-Возвращает данные типа, `origin` и выбранную страницу `properties`, `values` или `facets`.
+Возвращает данные типа и выбранную страницу `properties`, `values` или `facets`.
 Свойства содержат `physical_path`, `effective_path`, `type`, `lower`, `upper` (null — без ограничения),
-`nillable`, `form`, `explicit_attributes`, `status`, `reference`, `table_row`, `origin`.
+`nillable`, `form`, `explicit_attributes`, `status`, `reference`, `table_row`.
+По умолчанию `origin`, `origin_graph` и `origin` у свойств опущены; `include_origin=true`
+добавляет прежнее полное представление происхождения.
 Происхождение свойств представлено номерами узлов общего `origin_graph` страницы; узел хранит
 `role`, `namespace`, `span` (`source_id`, `line`, `xpath`), `via`. Все физические кандидаты сохранены.
 Страница содержит максимум `limit` строк (1–200), дополнительно ограничена 20000 байтами UTF-8 JSON.
 Продолжение: увеличить `offset` на фактическое число полученных строк, пока `has_more=true`.
+
+Для профильной проверки: `ed_open` → `ed_schema_open` → `structure_load_project` (либо
+`structure_load_xml` / `structure_load_md83exp`) → `ed_validate(project_id, schema_id,
+structure_id, direction="both")`. Каждый вход необязателен: без схемы или структуры соответствующая
+группа явно перечислена в `skipped`; сопоставление типов требует оба входа. Версия и активные URI
+берутся из открытой схемы, отдельные параметры версии/URI у `ed_validate` отсутствуют.
+`profile` содержит `schema_id`, `structure_id`, `format_version`, `active_namespaces`, `direction`,
+`fingerprints` — SHA-256 снимков `module`, `schema` (всё замыкание), `structure` (хеш входа кэша).
+Отсутствующие входы имеют `null`; повторный вызов использует прежние снимки.
+`coverage` содержит `checked`, `not_applicable`, `opaque_conditions`, `handler_may_supply`,
+`unresolved_schema`. `both` объединяет одинаковые замечания; счётчики покрытия и причин пропусков
+считают уникальные экземпляры «проверка × декларация», повтор направления их не удваивает.
+В агрегированном `skipped.reason` — код причины, число и до пяти адресов. Неизвестные условия,
+динамические выражения и возможные источники из обработчиков дают пропуски. `summary` и `coverage`
+относятся ко всему отчёту; отбор `level`/`check_prefix` и страницы меняют только `issues`.
 Фасеты и значения сохраняют повторы и пустые строки; регулярные выражения не исполняются.
 `ed_schema_close` возвращает `schema_id`, `closed`; повторный close — false.
 

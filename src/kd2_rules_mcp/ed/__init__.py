@@ -38,3 +38,4 @@ from .reader import read_manager_text as read_manager_text
 from .refs import EdReference as EdReference
 from .refs import ReferenceIndex as ReferenceIndex
 from .refs import build_references as build_references
+from .routes import read_routes as read_routes

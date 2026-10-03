@@ -33,6 +33,19 @@ def open_base(service, path=None, **kwargs):
     )
 
 
+def test_origin_is_opt_in(service):
+    ident = open_base(service)["schema_id"]
+    short = service.ed_schema_type(ident, "Item")
+    assert "origin" not in short and "origin_graph" not in short
+    assert all("origin" not in p for p in short["properties"]["items"])
+    full = service.ed_schema_type(ident, "Item", include_origin=True)
+    assert full["origin"] and full["origin_graph"]
+    assert all(p["origin"] for p in full["properties"]["items"])
+    for key in ("qname", "kind", "base"):
+        assert full[key] == short[key]
+    assert full["properties"]["total"] == short["properties"]["total"]
+
+
 def test_open_pages_and_close(service):
     opened = open_base(service)
     assert opened["status"] == "complete"

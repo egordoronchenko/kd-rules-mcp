@@ -1,0 +1,4 @@
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:validation-second-extension">
+  <import namespace="urn:test:validation"/>
+  <objectType name="Справочник.Дополнение"><property name="ДругойКод" type="xs:string" lowerBound="0"/></objectType>
+</package>

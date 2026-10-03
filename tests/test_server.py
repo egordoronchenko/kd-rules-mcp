@@ -137,12 +137,63 @@ async def test_ed_schema_tools(service: Kd2Service) -> None:
         assert len(listed["items"]) == 1 and listed["has_more"]
         detail = await _call(client, "ed_schema_type", schema_id=ident, qname="{urn:test:base}Item")
         assert detail["properties"]["total"] > 0
+        assert "origin" not in detail and "origin_graph" not in detail
+        detail = await _call(
+            client,
+            "ed_schema_type",
+            schema_id=ident,
+            qname="{urn:test:base}Item",
+            include_origin=True,
+        )
+        assert detail["origin"] and detail["origin_graph"]
         failure = await _error(
             client, "ed_schema_type", schema_id=ident, qname="{urn:test:base}Missing"
         )
         assert failure["code"] == "ed_schema_type_not_found"
         assert (await _call(client, "ed_schema_close", schema_id=ident))["closed"]
         assert not (await _call(client, "ed_schema_close", schema_id=ident))["closed"]
+
+
+async def test_ed_validate_profile_tools(service: Kd2Service, tmp_path) -> None:
+    from tests.test_ed_profile import BASE, document
+
+    path = tmp_path / "profile.bsl"
+    path.write_text(document(BASE).files[0].text, encoding="utf-8")
+    async with Client(create_server(service)) as client:
+        project = (await _call(client, "ed_open", path=str(path)))["project_id"]
+        schema = (
+            await _call(
+                client,
+                "ed_schema_open",
+                format_version="1.2",
+                path=str((DATA / "ed/schema/validation.bin").resolve()),
+            )
+        )["schema_id"]
+        structure = (
+            await _call(
+                client,
+                "structure_load_md83exp",
+                structure_id="synthetic",
+                path=str((DATA / "ed/schema/structure.xml").resolve()),
+            )
+        )["structure_id"]
+        report = await _call(
+            client,
+            "ed_validate",
+            project_id=project,
+            schema_id=schema,
+            structure_id=structure,
+            direction="send",
+        )
+        assert report["profile"]["direction"] == "send"
+        assert report["coverage"]["checked"] > 0 and not report["issues"]["items"]
+        for parameter, value, code in [
+            ("schema_id", "missing", "ed_schema_not_found"),
+            ("structure_id", "missing", "structure_not_found"),
+            ("direction", "other", "invalid_argument"),
+        ]:
+            failure = await _error(client, "ed_validate", project_id=project, **{parameter: value})
+            assert failure["code"] == code
 
 
 async def test_rules_open_schema_has_private(service: Kd2Service) -> None:

@@ -106,10 +106,12 @@
 - Правила регистрации — `registration_build`; черновик обратного направления — `correspondent_draft`.
 - Обмен через универсальный формат (правила КД 3) — пока только чтение и проверка: `ed_open` → `ed_overview` →
   `ed_list`, `ed_get`, `ed_locate` → `ed_validate` (связность модуля: обработчики, ветки диспетчера, ссылки
-  правил) → `ed_close`. Модуль менеджера обмена читается без исполнения BSL; формы генератора —
+  правил; с `schema_id` и `structure_id` — ещё и правила против схемы формата и структуры конфигурации) →
+  `ed_close`. Модуль менеджера обмена читается без исполнения BSL; формы генератора —
   `src/kd2_rules_mcp/ed/forms.py` со ссылками `reference/kd3-cfg/…:N`; исполнитель — общий модуль
   `ОбменДаннымиXDTOСервер` БСП (ссылки `XDTO:N`, обозначения — `docs/checks.md`). Схема формата — пакеты XDTO
-  выгрузки: `ed_schema_open` → `ed_schema_types`, `ed_schema_type` → `ed_schema_close`.
+  выгрузки: `ed_schema_open` → `ed_schema_types`, `ed_schema_type` → `ed_schema_close`. Чистые читатели без
+  инструментов (пока): маршруты версий формата — `ed/routes.py`.
 - Ошибка инструмента — JSON с полем `code`.
 
 MCP-серверы 1С (код и метаданные проектов, граф, справка, БСП, шаблоны, проверка кода, сервер данных базы) —
@@ -118,13 +120,16 @@ MCP-серверы 1С (код и метаданные проектов, гра�
 Скиллы: `.claude/skills/kd2-rules-build` — как строить правила через сервер (порядок и чек-лист; справочники по
 видам правил — `references/`, каждый факт со ссылкой на строки БСП или эталона);
 `.claude/skills/kd2-exchange-pitfalls` — грабли живых обменов с доказательствами по коду БСП, новые — туда же,
-только универсальные; `.claude/skills/kd2-install` — установка агентом (человеческая версия — `docs/INSTALL.md`,
+только универсальные; `.claude/skills/kd2-ed-rules` — обмен через универсальный формат: разбор и проверка модуля
+менеджера обмена, что БСП делает с правилами (`references/executor.md`) и грабли (`references/pitfalls.md`) — факт
+туда попадает только с процедурой и строками исполнителя;
+`.claude/skills/kd2-install` — установка агентом (человеческая версия — `docs/INSTALL.md`,
 менять вместе).
 
 Знания пользователя — `.claude/skills/kd2-*` и `docs/rules/`; это единственный источник. Cursor и OpenCode читают
 `.claude/skills` сами — копий в `.cursor/skills` нет (тест `tests/test_skills.py`). В `references/` скилла
 `kd2-rules-build` лежат копии `docs/rules/mcp-1c.md`, `docs/checks.md`, `docs/tools.md`, `docs/glossary.md`:
 после правки источника — `uv run python scripts/build_packs.py --write` (тест `tests/test_build_packs.py`).
-Тексты скиллов `kd2-rules-build` и `kd2-exchange-pitfalls` переносимы — в чужом проекте нет ни этого
+Тексты скиллов `kd2-rules-build`, `kd2-exchange-pitfalls` и `kd2-ed-rules` переносимы — в чужом проекте нет ни этого
 репозитория, ни его путей: ссылки только внутри скиллов или URL открытого репозитория, серверы 1С — ролями и
 именами из `project_list`. В проект 1С скиллы ставит `scripts/build_packs.py --dest <папка> --client claude`.

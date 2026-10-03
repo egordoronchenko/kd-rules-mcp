@@ -118,7 +118,7 @@ def only(report, check: str):
 def test_clean_base_has_only_schema_skip():
     _document, _references, report = analyze(module_text())
     assert report.issues == []
-    assert [(item.check, item.reason) for item in report.skipped] == [("ed.schema", SCHEMA)]
+    assert report.skipped == []
 
 
 @pytest.mark.parametrize("version", [1, 2, 3])
@@ -780,7 +780,7 @@ def test_unknown_near_dispatcher_skips_negative_handler_check():
     assert document.unknown
     assert any(item.check == "ed.handler.missing" for item in report.skipped)
     assert any(item.check == "ed.reader.incomplete" for item in report.skipped)
-    assert any(item.check == "ed.schema" for item in report.skipped)
+    assert not any(item.check == "ed.schema" for item in report.skipped)
     broken_helper = module_text().replace(
         "НоваяСтрока = РодительПКС.Добавить();",
         "НоваяСтрока = ДругаяТаблица.Добавить();",

@@ -41,10 +41,6 @@ _REQUIRED_EVENTS = ("ПередКонвертацией", "ПослеКонве�
 _EXTENDED_EVENT = "ПриПолученииЗапросаВыгрузкиОбъекта"
 _PROCEDURE_DISPATCHER = "выполнитьпроцедурумодуляменеджера"
 _FUNCTION_DISPATCHER = "выполнитьфункциюмодуляменеджера"
-_SCHEMA = "ed.schema"
-_SCHEMA_REASON = (
-    "Схема формата и структура конфигурации не переданы: проверки по схеме не выполнялись"
-)
 _EXTENDED = "ed.handler.extended_events"
 # ОСКД:253 — исполнитель читает поле ПриПодбореСсылкиДляПовторнойОтправки, а не поле события.
 _EXTENDED_REASON = (
@@ -113,7 +109,6 @@ def validate_links(
             )
         )
 
-    skip(_SCHEMA, _SCHEMA_REASON)
     incomplete = _incomplete_reason(document)
     if incomplete is not None:
         skip(_INCOMPLETE, incomplete)

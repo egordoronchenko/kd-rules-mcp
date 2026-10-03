@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:t="urn:test:validation" xmlns:e="urn:test:validation-extension" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:validation-extension">
+  <import namespace="urn:test:validation"/>
+  <objectType name="ОбщиеСвойстваПервый"><property name="Алиас" type="xs:string" lowerBound="0"/></objectType>
+  <objectType name="ОбщиеСвойстваВторой"><property name="Алиас" type="xs:string" lowerBound="0"/></objectType>
+  <objectType name="Справочник.Тест">
+    <property name="ДополнительныйКод" type="xs:string" lowerBound="0"/>
+    <property name="Первый" type="e:ОбщиеСвойстваПервый" lowerBound="0"/>
+    <property name="Второй" type="e:ОбщиеСвойстваВторой" lowerBound="0"/>
+    <property name="Товары" type="t:Rows" lowerBound="0"/>
+  </objectType>
+  <objectType name="Справочник.Дополнение"><property name="Код" type="xs:string" lowerBound="0"/></objectType>
+</package>
