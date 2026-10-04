@@ -211,11 +211,16 @@ class TypeResolver:
         self.characteristics = {
             obj.name: obj.type for obj in metadata.of("ChartOfCharacteristicTypes") if obj.type
         }
+        self._all_refs: dict[str, list[str]] = {}
 
     def all_refs(self, xml_ref: str) -> list[str]:
         """Все ссылочные типы вида (`CatalogRef` без имени — любой справочник)."""
-        prefix, tag = REFS[xml_ref]
-        return [f"{prefix}.{obj.name}" for obj in self.metadata.of(tag)]
+        found = self._all_refs.get(xml_ref)
+        if found is None:
+            prefix, tag = REFS[xml_ref]
+            found = [f"{prefix}.{obj.name}" for obj in self.metadata.of(tag)]
+            self._all_refs[xml_ref] = found
+        return found
 
     def resolve(self, desc: TypeDesc | None) -> Resolved:
         """Разрешённый тип; неизвестные виды остаются как есть и отсеиваются при записи."""

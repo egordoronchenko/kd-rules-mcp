@@ -1,5 +1,7 @@
 """Лексические границы BSL без выполнения кода и поиска форм по всему файлу."""
 
+import hashlib
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from .errors import EdFormatError
@@ -37,6 +39,13 @@ class Lexed:
     statements: tuple[Statement, ...]
     warnings: tuple[tuple[str, SourceSpan], ...]
     tags: tuple[SourceTag, ...] = ()
+
+
+# Один и тот же файл конфигурации разбирается заново для каждого расширения.
+# Ключ — идентификатор и хеш самого текста: объявленный sha256 иногда не обновляют,
+# когда подменяют текст, а позиции в разборе зависят от файла.
+_LEX_CACHE: OrderedDict[tuple[str, str], Lexed] = OrderedDict()
+_LEX_CACHE_MAX = 16
 
 
 def tokenize(text: str) -> tuple[Token, ...]:
@@ -137,6 +146,19 @@ def split_arguments(tokens: tuple[Token, ...]) -> tuple[tuple[Token, ...], ...]:
 
 def lex(source: SourceFile) -> Lexed:
     """Разделяет токены на операторы и структурные заголовки, сохраняя контекст."""
+    key = (source.file_id, hashlib.sha256(source.text.encode()).hexdigest())
+    cached = _LEX_CACHE.get(key)
+    if cached is not None:
+        _LEX_CACHE.move_to_end(key)
+        return cached
+    parsed = _lex(source)
+    _LEX_CACHE[key] = parsed
+    if len(_LEX_CACHE) > _LEX_CACHE_MAX:
+        _LEX_CACHE.popitem(last=False)
+    return parsed
+
+
+def _lex(source: SourceFile) -> Lexed:
     all_tokens = tokenize(source.text)
     tokens: list[Token] = []
     contexts: list[tuple[tuple[str, ...], tuple[str, ...]]] = []

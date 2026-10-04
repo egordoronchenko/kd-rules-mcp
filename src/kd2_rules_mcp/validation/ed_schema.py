@@ -172,6 +172,15 @@ def validate_schema(
     def owner_type(rule: ed.ObjectRule, direction: str) -> tuple[SchemaType | None, str]:
         return profile.owner_type(rule, direction, checking.applicability)
 
+    # Признак «выгрузка всего объекта доказана ПОД» не зависит от правила и направления:
+    # иначе каждый ПКО заново обходит все ПОД.
+    send_targets = {
+        ref.target_id
+        for pod in document.pod
+        if checking.applicability.evaluate(pod, "send") is True
+        for ref in pod.used_pko
+    }
+
     for direction in profile.directions:
         for rule in document.pko:
             typ, type_status = owner_type(rule, direction)
@@ -192,11 +201,7 @@ def validate_schema(
                 else:
                     checking.skip(check, type_status, rule)
 
-            full_send = any(
-                checking.applicability.evaluate(pod, "send") is True
-                and any(ref.target_id == rule.entity_id for ref in pod.used_pko)
-                for pod in document.pod
-            )
+            full_send = rule.entity_id in send_targets
             for group, properties in [
                 (None, rule.properties),
                 *((g, g.properties) for g in rule.groups),

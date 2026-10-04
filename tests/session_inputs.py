@@ -1,7 +1,8 @@
 """Общие входы тестов: один разбор на сеанс, ключ — путь и время изменения файла.
 
 Неизменяемые снимки (модуль менеджера, профиль маршрутов, схема формата, менеджер
-регистрации) возвращаются тем же объектом. Правила КД 2 копируются: модель дописывает
+регистрации, снимок структуры для проверок) возвращаются тем же объектом. Правила КД 2
+копируются: модель дописывает
 недостающий раздел и её правят тесты авторинга. Структура конфигурации корпуса
 собирается один раз, дальше в хранилище копируется готовый файл SQLite: наложение
 расширений меняет объекты выгрузки, поэтому сам разбор файлов между тестами не делится.
@@ -38,6 +39,7 @@ from kd2_rules_mcp.structures.store import (
     StructureStore,
     dump_fingerprint,
 )
+from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 
 _FileKey = tuple[str, int, int]
 _Rules = ExchangeRules | RegistrationRules
@@ -54,6 +56,7 @@ _orig_read_routes: Callable[..., RouteProfile] | None = None
 _orig_load_rules: Callable[..., _Rules] | None = None
 _orig_read_registration: Callable[..., RegistrationModuleDocument] | None = None
 _orig_load_xml: Callable[..., LoadResult] | None = None
+_orig_snapshot_load: Callable[..., StructureSnapshot] | None = None
 
 _packages: dict[tuple[_FileKey, str, int, int], SchemaPackage] = {}
 _schemas: list[_SchemaEntry] = []
@@ -62,6 +65,7 @@ _routes: dict[tuple[str, tuple[_FileKey, ...]], RouteProfile] = {}
 _rules: dict[tuple[object, ...], _Rules] = {}
 _registration: dict[_FileKey, RegistrationModuleDocument] = {}
 _structures: dict[str, _BuiltStructure] = {}
+_snapshots: dict[tuple[str, int, int], StructureSnapshot] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +437,38 @@ def _materialize(store: StructureStore, structure_id: str, built: _BuiltStructur
     )
 
 
+def _snapshot_stamp(connection: sqlite3.Connection) -> tuple[str, int, int] | None:
+    """Файл структуры вне временного каталога. База в памяти и файл теста не кэшируются."""
+    listed = connection.execute("PRAGMA database_list").fetchone()
+    if listed is None:
+        return None
+    file = listed["file"] if isinstance(listed, sqlite3.Row) else listed[2]
+    if not file:
+        return None
+    try:
+        path = Path(file).resolve()
+        if path.is_relative_to(_VOLATILE_ROOT):
+            return None
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def _cached_snapshot_load(connection: sqlite3.Connection) -> StructureSnapshot:
+    """Один снимок на файл структуры: проверки только читают его."""
+    assert _orig_snapshot_load is not None
+    stamp = _snapshot_stamp(connection)
+    if stamp is None:
+        return _orig_snapshot_load(connection)
+    found = _snapshots.get(stamp)
+    if found is not None:
+        return found
+    snapshot = _orig_snapshot_load(connection)
+    _snapshots[stamp] = snapshot
+    return snapshot
+
+
 def _cached_load_xml(
     self: StructureStore,
     structure_id: str,
@@ -476,7 +512,7 @@ def install() -> None:
     """Подменяет читатели до импорта тестов. Повторный вызов ничего не делает."""
     global _INSTALLED
     global _orig_read_package, _orig_load_schema, _orig_read_manager, _orig_read_routes
-    global _orig_load_rules, _orig_read_registration, _orig_load_xml
+    global _orig_load_rules, _orig_read_registration, _orig_load_xml, _orig_snapshot_load
     if _INSTALLED:
         return
     _INSTALLED = True
@@ -514,3 +550,17 @@ def install() -> None:
 
     _orig_load_xml = store.StructureStore.load_xml
     store.StructureStore.load_xml = _cached_load_xml
+
+    import kd2_rules_mcp.validation.ed_structure_snapshot as snapshot_module
+
+    _orig_snapshot_load = snapshot_module.StructureSnapshot.load
+
+    def _snapshot_load(
+        _cls: type[StructureSnapshot], connection: sqlite3.Connection
+    ) -> StructureSnapshot:
+        return _cached_snapshot_load(connection)
+
+    # Присваивание classmethod pyright отвергает: `load` для него уже привязанный метод.
+    setattr(  # noqa: B010 — присваивание classmethod pyright не принимает
+        snapshot_module.StructureSnapshot, "load", classmethod(_snapshot_load)
+    )

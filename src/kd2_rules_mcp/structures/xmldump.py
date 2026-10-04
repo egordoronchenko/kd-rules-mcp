@@ -102,7 +102,13 @@ REGISTER_TAGS = frozenset(
 
 
 def local(element: etree._Element) -> str:
-    """Имя тега без пространства имён."""
+    """Имя тега без пространства имён.
+
+    `QName` на каждом теге заметно дороже среза: у элемента lxml тег уже в форме `{uri}Имя`.
+    """
+    tag = element.tag
+    if isinstance(tag, str):
+        return tag[tag.rfind("}") + 1 :]
     return etree.QName(element).localname
 
 

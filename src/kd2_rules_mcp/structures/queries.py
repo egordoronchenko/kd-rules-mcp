@@ -120,6 +120,87 @@ def list_objects(
     return Page(items, len(rows), offset, limit)
 
 
+@dataclass(frozen=True, slots=True)
+class ObjectProperty:
+    """Свойство объекта в порядке файла: то, что нужно сверке, без квалификаторов страницы."""
+
+    path: str
+    kind: str
+    is_group: bool
+    types: tuple[str, ...]
+    unresolved: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectCard:
+    """Объект метаданных и полный список свойств. Промах — не карточка, а отсутствие."""
+
+    name: str
+    type_name: str
+    kind: str
+    properties: tuple[ObjectProperty, ...]
+
+
+def read_object_card(conn: sqlite3.Connection, name: str) -> ObjectCard | None:
+    """Объект и все его свойства одной выборкой, без подсказок при промахе.
+
+    Отбор объекта тот же, что у `describe_object`. Страницы здесь нет: проверка
+    регистрации читает свойства целиком и текст подсказки «похожие» не использует.
+    Пустые строки набора типов отбрасываются, как в выдаче страницы.
+    """
+    _prepare(conn)
+    row = _find_object(conn, name)
+    if row is None:
+        return None
+    properties = tuple(
+        ObjectProperty(
+            str(item["path"]),
+            str(item["kind"]),
+            bool(item["is_group"]),
+            tuple(_lines(item["types"])),
+            tuple(_lines(item["unresolved"])),
+        )
+        for item in conn.execute(
+            "SELECT p.path, p.kind, p.is_group, p.unresolved, ts.types AS types "
+            "FROM properties AS p LEFT JOIN type_sets AS ts ON ts.id = p.type_set_id "
+            "WHERE p.object_id = ? ORDER BY p.id",
+            (row["id"],),
+        )
+    )
+    return ObjectCard(
+        f"{row['kind']}.{row['name']}",
+        str(row["type_name"]),
+        str(row["kind"]),
+        properties,
+    )
+
+
+def exchange_plan_autoregistration(conn: sqlite3.Connection, name: str) -> dict[str, bool]:
+    """Тип элемента состава → авторегистрация. Первое вхождение типа побеждает.
+
+    Порядок и правила пустого набора типов те же, что у постраничного
+    `exchange_plan_content`: нет плана или это не план обмена — пустой словарь.
+    """
+    _prepare(conn)
+    lookup = name if "." in name else f"ПланОбмена.{name}"
+    row = _find_object(conn, lookup)
+    if row is None or row["kind"] != "ПланОбмена":
+        return {}
+    result: dict[str, bool] = {}
+    for item in conn.execute(
+        "SELECT p.autoregistration, p.unresolved, ts.types AS types FROM properties AS p "
+        "LEFT JOIN type_sets AS ts ON ts.id = p.type_set_id "
+        "WHERE p.object_id = ? AND p.kind = ? ORDER BY p.id",
+        (row["id"], _PLAN_CONTENT_ITEM),
+    ):
+        types = _lines(item["types"])
+        names = types if types else _lines(item["unresolved"])
+        flag = bool(item["autoregistration"])
+        for type_name in names:
+            result.setdefault(type_name, flag)
+    return result
+
+
 def describe_object(
     conn: sqlite3.Connection,
     name: str,

@@ -3,6 +3,7 @@
 import sqlite3
 from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -32,6 +33,38 @@ def check(text=BASE, direction="both"):
     return validate_structure(
         doc, snapshot(), build_addresses(doc), ValidationProfile.build(None, "1.2", direction)
     )
+
+
+def test_session_reuses_unchanged_structure_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Повтор того же файла не собирает снимок заново; правка файла собирает."""
+    from tests import session_inputs
+
+    monkeypatch.setattr(session_inputs, "_VOLATILE_ROOT", tmp_path.parent / "не-временный")
+    monkeypatch.setattr(session_inputs, "_snapshots", {})
+    path = tmp_path / "snap.sqlite"
+    created = db.create(path)
+    created.execute(
+        "INSERT INTO objects (kind, name, type_name) "
+        "VALUES ('Справочник', 'А', 'СправочникСсылка.А')"
+    )
+    created.commit()
+    created.close()
+    connection = sqlite3.connect(path)
+    try:
+        first = StructureSnapshot.load(connection)
+        assert StructureSnapshot.load(connection) is first
+        connection.execute(
+            "INSERT INTO objects (kind, name, type_name) VALUES "
+            "('Справочник', 'Б', 'СправочникСсылка.Б')"
+        )
+        connection.commit()
+        changed = StructureSnapshot.load(connection)
+    finally:
+        connection.close()
+    assert changed is not first
+    assert ("справочник", "б") in changed.objects
 
 
 def test_clean_and_snapshot_immutable():

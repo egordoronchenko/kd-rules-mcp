@@ -100,6 +100,26 @@ def test_object_missing(structure: sqlite3.Connection) -> None:
     )
 
 
+def test_missing_object_does_not_search_similar_names(
+    structure: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Промах объекта не строит подсказки: отчёт их не содержит, а поиск по всем именам дорогой."""
+    import kd2_rules_mcp.validation.registration as registration_module
+
+    registration_module._OBJECTS.clear()
+    registration_module._PLANS.clear()
+
+    def forbidden(*_args: object, **_kwargs: object) -> list[str]:
+        raise AssertionError("проверка регистрации не ищет похожие имена")
+
+    monkeypatch.setattr("kd2_rules_mcp.structures.queries.get_close_matches", forbidden)
+    report = _issues("issues.xml", structure)
+    assert (
+        "Правило «Удалённый документ»: объект «Документ.НетОбъекта» не найден в структуре"
+        in _by_check(report, "registration.object")
+    )
+
+
 def test_object_not_in_plan(structure: sqlite3.Connection) -> None:
     report = _issues("issues.xml", structure)
     assert (

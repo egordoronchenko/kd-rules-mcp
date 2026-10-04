@@ -17,16 +17,14 @@
 и не затрагивает изменение, которое в выборку не попало.
 """
 
+import os
 import sqlite3
 from dataclasses import dataclass
 
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
 from kd2_rules_mcp.structures.queries import (
-    MAX_LIMIT,
-    NotFound,
-    Page,
-    describe_object,
-    exchange_plan_content,
+    exchange_plan_autoregistration,
+    read_object_card,
 )
 from kd2_rules_mcp.structures.xmldump import KINDS
 from kd2_rules_mcp.validation.address import rule_address
@@ -93,54 +91,68 @@ class _Plan:
     content: dict[str, bool]
 
 
+# Один и тот же файл структуры читают десятки макетов. Ключ — путь, время и размер:
+# правка файла даёт новый ключ. Соединение в памяти не делит кэш с другими.
+_OBJECTS: dict[tuple[object, ...], _Obj | None] = {}
+_PLANS: dict[tuple[object, ...], dict[str, bool]] = {}
+
+
+def _database_stamp(connection: sqlite3.Connection) -> tuple[str, int, int] | None:
+    """Файл соединения. Пустой путь — временная база, её между вызовами не запоминаем."""
+    listed = connection.execute("PRAGMA database_list").fetchone()
+    if listed is None:
+        return None
+    file = listed["file"] if isinstance(listed, sqlite3.Row) else listed[2]
+    if not file:
+        return None
+    try:
+        stat = os.stat(file)
+    except OSError:
+        return None
+    return (file, stat.st_mtime_ns, stat.st_size)
+
+
 class _Index:
-    """Кэш `describe_object`: один объект читается один раз, страницами по MAX_LIMIT."""
+    """Объекты структуры: в одном вызове имя читается один раз, между вызовами — по файлу."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
+        self._stamp = _database_stamp(connection)
         self._cache: dict[str, _Obj | None] = {}
 
     def get(self, name: str) -> _Obj | None:
         """Объект по полному имени `Вид.Имя` или по имени типа КД."""
         if name not in self._cache:
-            loaded = self._load(name)
+            key = None if self._stamp is None else (*self._stamp, name)
+            if key is not None and key in _OBJECTS:
+                loaded = _OBJECTS[key]
+            else:
+                loaded = self._load(name)
+                self._remember(name, loaded)
             self._cache[name] = loaded
             if loaded is not None:
                 self._cache.setdefault(loaded.full_name, loaded)
                 self._cache.setdefault(loaded.type_name, loaded)
         return self._cache[name]
 
+    def _remember(self, name: str, loaded: _Obj | None) -> None:
+        if self._stamp is None:
+            return
+        names = [name]
+        if loaded is not None:
+            names.extend((loaded.full_name, loaded.type_name))
+        for item in names:
+            _OBJECTS.setdefault((*self._stamp, item), loaded)
+
     def _load(self, name: str) -> _Obj | None:
-        offset = 0
-        described: dict[str, object] | None = None
-        properties: dict[str, _Prop] = {}
-        while True:
-            page = describe_object(self._connection, name, offset=offset, limit=MAX_LIMIT)
-            if isinstance(page, NotFound):
-                return None
-            described = page
-            prop_page = page["properties"]
-            if not isinstance(prop_page, Page):
-                return None
-            for item in prop_page.items:
-                unresolved = item.get("unresolved") or []
-                properties[str(item["path"])] = _Prop(
-                    str(item["kind"]),
-                    bool(item["is_group"]),
-                    tuple(str(name_) for name_ in item["types"]),
-                    tuple(str(name_) for name_ in unresolved),
-                )
-            if not prop_page.has_more:
-                break
-            offset += len(prop_page.items)
-        if described is None:
+        card = read_object_card(self._connection, name)
+        if card is None:
             return None
-        return _Obj(
-            str(described["name"]),
-            str(described["type_name"]),
-            str(described["kind"]),
-            properties,
-        )
+        properties: dict[str, _Prop] = {}
+        for item in card.properties:
+            # Повтор пути: как у страниц describe_object, остаётся более поздняя строка.
+            properties[item.path] = _Prop(item.kind, item.is_group, item.types, item.unresolved)
+        return _Obj(card.name, card.type_name, card.kind, properties)
 
 
 def check_registration(
@@ -259,31 +271,16 @@ def _load_plan(
 
 
 def _plan_content(connection: sqlite3.Connection, full_name: str) -> dict[str, bool]:
-    """Тип элемента состава → авторегистрация. Страницы — из-за предела выдачи запроса."""
-    result: dict[str, bool] = {}
-    offset = 0
-    while True:
-        page = exchange_plan_content(connection, full_name, offset=offset, limit=MAX_LIMIT)
-        if isinstance(page, NotFound):
-            return result
-        for item in page.items:
-            for type_name in _content_types(item):
-                result.setdefault(type_name, bool(item["autoregistration"]))
-        if not page.has_more:
-            return result
-        offset += len(page.items)
-
-
-def _content_types(item: dict[str, object]) -> list[str]:
-    """Имена типов элемента состава; неразрешённый тип (последовательность) — тоже имя."""
-    types = item.get("types")
-    names = [str(name) for name in types] if isinstance(types, list) and types else []
-    if names:
-        return names
-    unresolved = item.get("unresolved")
-    if isinstance(unresolved, list):
-        return [str(name) for name in unresolved]
-    return []
+    """Тип элемента состава → авторегистрация. Первое вхождение типа побеждает."""
+    stamp = _database_stamp(connection)
+    key = None if stamp is None else (*stamp, full_name)
+    if key is not None and key in _PLANS:
+        return dict(_PLANS[key])
+    result = exchange_plan_autoregistration(connection, full_name)
+    if key is not None:
+        _PLANS[key] = result
+        return dict(result)
+    return result
 
 
 def _check_object(

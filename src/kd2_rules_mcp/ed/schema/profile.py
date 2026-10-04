@@ -3,10 +3,11 @@
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from types import MappingProxyType
 
 from kd2_rules_mcp.ed import model as ed
-from kd2_rules_mcp.ed.lexer import tokenize
+from kd2_rules_mcp.ed.lexer import Token, tokenize
 
 from .model import EdSchema, QName, ResolvedProperty, SchemaProperty, SchemaType
 from .resolver import effective_properties, resolve_property
@@ -24,11 +25,17 @@ def disjunction(values: tuple[Truth, ...]) -> Truth:
     return True if True in values else None if None in values else False
 
 
+@lru_cache(maxsize=8192)
+def _condition_tokens(raw: str) -> tuple[Token, ...]:
+    """Лексемы условия без комментариев. Один и тот же текст разбирается много раз."""
+    return tuple(token for token in tokenize(raw) if token.kind not in ("comment", "directive"))
+
+
 def evaluate_condition(
     raw: str, version: str | None, direction: str, numeric_helper_verified: bool = False
 ) -> Truth:
     """Только сравнения версии, направления и логические операции. XDTO:4153."""
-    tokens = tuple(t for t in tokenize(raw) if t.kind not in ("comment", "directive"))
+    tokens = _condition_tokens(raw)
     position = 0
 
     def take(value: str) -> bool:

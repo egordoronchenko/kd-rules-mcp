@@ -6,15 +6,18 @@ from pathlib import Path
 
 import pytest
 
+from kd2_rules_mcp.structures import db
 from kd2_rules_mcp.structures.queries import (
     MAX_LIMIT,
     NotFound,
     Page,
     compare_structures,
     describe_object,
+    exchange_plan_autoregistration,
     exchange_plan_content,
     list_objects,
     object_values,
+    read_object_card,
 )
 from kd2_rules_mcp.structures.store import StructureStore
 
@@ -275,3 +278,88 @@ def test_compare_sees_added_value_removed_property_and_changed_type(tmp_path: Pa
     assert change["new_qualifiers"] == change["old_qualifiers"]
     assert diff.counts()["changed_properties"] == 1
     assert diff.counts()["removed_properties"] == 1
+
+
+def test_full_object_card_matches_paged_describe(tmp_path: Path) -> None:
+    """Свойства за пределом страницы, пустые строки типов и повтор пути совпадают со страницами."""
+    connection = db.create(tmp_path / "wide.sqlite")
+    connection.execute(
+        "INSERT INTO objects (id, kind, name, type_name) VALUES "
+        "(1, 'Документ', 'Длинный', 'ДокументСсылка.Длинный'),"
+        "(2, 'ПланОбмена', 'Обмен', 'ПланОбменаСсылка.Обмен')"
+    )
+    connection.execute(
+        "INSERT INTO type_sets (id, types) VALUES (1, ?), (2, ?)",
+        ("Число\n\nСтрока", "СправочникСсылка.А"),
+    )
+    connection.executemany(
+        "INSERT INTO properties (object_id, kind, name, path, is_group, type_set_id) "
+        "VALUES (1, 'Реквизит', ?, ?, 0, 1)",
+        [(f"П{index}", f"П{index}") for index in range(MAX_LIMIT)],
+    )
+    connection.execute(
+        "INSERT INTO properties (object_id, kind, name, path, is_group, type_set_id, unresolved) "
+        "VALUES (1, 'Реквизит', 'П0', 'П0', 0, 2, ?)",
+        ("ХвостТип\n",),
+    )
+    for index in range(MAX_LIMIT + 1):
+        connection.execute(
+            "INSERT INTO properties (object_id, kind, name, path, autoregistration, unresolved) "
+            "VALUES (2, 'ЭлементСоставаПланаОбмена', ?, ?, ?, ?)",
+            (f"Э{index}", f"Э{index}", 1 if index == 0 else 0, f"СправочникСсылка.Имя{index}"),
+        )
+    connection.execute(
+        "INSERT INTO properties (object_id, kind, name, path, autoregistration, unresolved) "
+        "VALUES (2, 'ЭлементСоставаПланаОбмена', 'повтор', 'повтор', 0, 'СправочникСсылка.Имя0')"
+    )
+    connection.commit()
+    connection.row_factory = sqlite3.Row
+
+    paged: list[tuple[str, str, bool, tuple[str, ...], tuple[str, ...]]] = []
+    offset = 0
+    while True:
+        described = describe_object(connection, "Документ.Длинный", offset=offset, limit=MAX_LIMIT)
+        assert isinstance(described, dict)
+        page = described["properties"]
+        assert isinstance(page, Page)
+        for item in page.items:
+            unresolved = item.get("unresolved") or []
+            paged.append(
+                (
+                    str(item["path"]),
+                    str(item["kind"]),
+                    bool(item["is_group"]),
+                    tuple(item["types"]),
+                    tuple(unresolved),
+                )
+            )
+        if not page.has_more:
+            break
+        offset += len(page.items)
+    card = read_object_card(connection, "Документ.Длинный")
+    assert card is not None
+    assert len(paged) == MAX_LIMIT + 1
+    assert [
+        (item.path, item.kind, item.is_group, item.types, item.unresolved)
+        for item in card.properties
+    ] == paged
+    assert read_object_card(connection, "Документ.НетТакого") is None
+
+    flags: dict[str, bool] = {}
+    offset = 0
+    while True:
+        content = exchange_plan_content(
+            connection, "ПланОбмена.Обмен", offset=offset, limit=MAX_LIMIT
+        )
+        assert isinstance(content, Page)
+        for item in content.items:
+            names = item["types"] or item.get("unresolved") or []
+            for type_name in names:
+                flags.setdefault(str(type_name), bool(item["autoregistration"]))
+        if not content.has_more:
+            break
+        offset += len(content.items)
+    assert len(flags) > MAX_LIMIT
+    assert exchange_plan_autoregistration(connection, "ПланОбмена.Обмен") == flags
+    assert flags["СправочникСсылка.Имя0"] is True
+    connection.close()

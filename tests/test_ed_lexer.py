@@ -80,6 +80,20 @@ def test_regions_tags_and_directives_do_not_leak_from_literals():
     assert doc.guards[0].guard_kind == "preprocessor"
 
 
+def test_lex_reuses_parsed_file_with_the_same_bytes():
+    from kd2_rules_mcp.ed.model import SourceFile
+
+    text = "Процедура П()\nКонецПроцедуры\n"
+    same = SourceFile("модуль", "модуль.bsl", text, "sha-same", (0, 14, 29))
+    assert lex(same) is lex(same)
+    changed = SourceFile("модуль", "модуль.bsl", text + "А=1;\n", "sha-other", (0,))
+    assert lex(changed) is not lex(same)
+    # Объявленный хеш оставляют прежним, а текст подменяют: это другой разбор.
+    forged = SourceFile("модуль", "модуль.bsl", text + "А=1;\n", "sha-same", (0,))
+    assert lex(forged) is lex(changed)
+    assert lex(forged) is not lex(same)
+
+
 def test_unbalanced_region_is_diagnostic():
     doc = read_manager_text("""#КонецОбласти
 Процедура ЗаполнитьПараметрыКонвертации(ПараметрыКонвертации)
