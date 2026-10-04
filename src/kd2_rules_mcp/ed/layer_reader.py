@@ -44,6 +44,7 @@ from .lexer import Statement, Token, lex, normalized, split_arguments, tokenize
 from .model import (
     Classification,
     DispatcherCase,
+    EdDocument,
     Entity,
     Expr,
     FormalParameter,
@@ -1455,9 +1456,10 @@ class _Walker:
     ) -> str:
         literals: list[str] = []
         continuation = Continuation.NONE
+        opaque = False
 
         def visit(nodes: Sequence[_Node]) -> None:
-            nonlocal continuation
+            nonlocal continuation, opaque
             for node in nodes:
                 if isinstance(node, _If):
                     for branch in node.branches:
@@ -1501,6 +1503,8 @@ class _Walker:
                                     hook_id,
                                 )
                         else:
+                            if name is None and branch.body:
+                                opaque = True
                             visit(branch.body)
                     continue
                 if not isinstance(node, _Stmt):
@@ -1511,6 +1515,8 @@ class _Walker:
 
         visit(tree)
         self.handled[hook_id] = tuple(literals)
+        if opaque:
+            return Continuation.UNKNOWN
         if kind == HookKind.AFTER:
             return Continuation.ONCE
         if kind == HookKind.BEFORE:
@@ -2340,7 +2346,7 @@ class _Walker:
         chain: tuple[SourceSpan, ...],
     ) -> bool:
         if assignment and call:
-            started = self._start_builder(assignment[0], call, env, statement)
+            started = self._start_builder(assignment[0], call, env, statement, hook_id, procedure)
             if started:
                 return True
         if assignment and not call:
@@ -2355,6 +2361,8 @@ class _Walker:
         call: tuple[str, tuple[tuple[Token, ...], ...]],
         env: dict[str, _Bind],
         statement: Statement,
+        hook_id: str | None,
+        procedure: str,
     ) -> bool:
         name = call[0]
         method = name.rpartition(".")[2].casefold()
@@ -2392,7 +2400,7 @@ class _Walker:
             kind, collection = "pkpd", "pkpd"
         if not kind:
             return False
-        self._flush(variable.casefold(), (), None, "")
+        self._materialize(env, hook_id, procedure, only_key=variable.casefold())
         builder = _Builder(kind, variable, collection, statement, statement)
         builder.preds = (Pred.opaque(),) if self.opaque_depth else self.statement_preds
         self.builders[variable.casefold()] = builder
@@ -3370,10 +3378,19 @@ class _Walker:
             self._flush(key, preds, hook_id, procedure)
         self.builders.clear()
 
-    def _materialize(self, env: dict[str, _Bind], hook_id: str | None, procedure: str) -> None:
+    def _materialize(
+        self,
+        env: dict[str, _Bind],
+        hook_id: str | None,
+        procedure: str,
+        *,
+        only_key: str | None = None,
+    ) -> None:
         """Перед развилкой блок AddRule становится строкой с условием создания."""
         keys = {}
         for key, builder in list(self.builders.items()):
+            if only_key is not None and key != only_key:
+                continue
             if builder.name:
                 column = {"pko": "ИмяПКО", "pod": "Имя", "pkpd": "ИмяПКПД"}[builder.kind]
                 keys[key] = _ref(builder.collection, column, builder.name)
@@ -4712,6 +4729,32 @@ def _recover_parameter_nodes(
                     default_source=source_kind,
                 )
             )
+
+
+def dispatcher_unknown(document: EdDocument) -> bool:
+    """Непонятные фрагменты диспетчера, кроме распознанного литерального исключения."""
+    owners = {routine.entity_id for routine in document.routines if "dispatcher" in routine.roles}
+    for fragment in document.unknown:
+        if fragment.owner_id not in owners:
+            continue
+        tokens = tuple(token for token in tokenize(fragment.raw_text) if token.value != ";")
+        if (
+            fragment.reason == "unsupported_dispatcher_statement"
+            and tokens
+            and tokens[0].folded == "вызватьисключение"
+            and (
+                (len(tokens) == 2 and tokens[1].kind == "string")
+                or (
+                    len(tokens) == 4
+                    and tokens[1].value == "("
+                    and tokens[2].kind == "string"
+                    and tokens[3].value == ")"
+                )
+            )
+        ):
+            continue
+        return True
+    return False
 
 
 def dispatcher_throws(source: SourceFile) -> bool:

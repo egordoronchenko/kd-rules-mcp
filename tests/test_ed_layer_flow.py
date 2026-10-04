@@ -13,10 +13,12 @@ from kd2_rules_mcp.ed.layer_model import (
     LayerDescriptor,
     LayerSkip,
     LayerStatus,
+    OperationKind,
     rule_view,
 )
 from kd2_rules_mcp.ed.layer_reader import read_extension_text
 from kd2_rules_mcp.ed.layers import compose_manager, read_layers
+from kd2_rules_mcp.ed.model import ObjectRule
 from kd2_rules_mcp.ed.reader import read_manager_text
 
 ROOT = Path(__file__).resolve().parent / "data" / "ed" / "layers"
@@ -31,6 +33,56 @@ HEAD = (
 )
 FIND = '    Правило = ПравилаКонвертации.Найти("Товар", "ИмяПКО");\n'
 TAIL = "КонецПроцедуры\n"
+
+
+@pytest.mark.parametrize("second_name", ["Нов", "Другой"])
+def test_repeated_initializer_creates_two_distinct_rows(second_name: str):
+    add = (
+        "    П = ОбменДаннымиXDTOСервер.ИнициализироватьПравилоКонвертацииОбъекта"
+        "(ПравилаКонвертации);\n"
+        '    П.ИмяПКО = "{name}";\n    П.ОбъектФормата = "Catalog.X";\n'
+    )
+    result = _overlay(_demo(), HEAD + add.format(name="Нов") + add.format(name=second_name) + TAIL)
+    operations = [
+        op for op in result.operations if op.kind == OperationKind.ADD and not op.field_path
+    ]
+    assert len(operations) == 2
+    entities = [op.value for op in operations if isinstance(op.value, ObjectRule)]
+    assert len({entity.entity_id for entity in entities}) == 2
+    rows = [version for version in _context(result, "send").entities if version.state == "added"]
+    assert [row.payload.name for row in rows if row.payload] == ["Нов", second_name]
+    assert len({row.logical_id for row in rows}) == 2
+    assert all(row.certainty == "known" for row in rows)
+    assert not result.skipped
+
+
+def test_repeated_initializer_keeps_alias_bound_to_the_previous_row():
+    text = (
+        HEAD
+        + """
+    П = ОбменДаннымиXDTOСервер.ИнициализироватьПравилоКонвертацииОбъекта(ПравилаКонвертации);
+    П.ИмяПКО = "Первый";
+    П.ОбъектФормата = "Catalog.First";
+    Старый = П;
+    П = ОбменДаннымиXDTOСервер.ИнициализироватьПравилоКонвертацииОбъекта(ПравилаКонвертации);
+    П.ИмяПКО = "Второй";
+    П.ОбъектФормата = "Catalog.Second";
+    Старый.ОбъектФормата = "Catalog.Changed";
+"""
+        + TAIL
+    )
+    result = _overlay(_demo(), text)
+    rows = {
+        v.payload.name: v
+        for v in _context(result, "send").entities
+        if isinstance(v.payload, ObjectRule)
+    }
+    first, second = rows["Первый"].payload, rows["Второй"].payload
+    assert isinstance(first, ObjectRule) and isinstance(second, ObjectRule)
+    assert first.format_object.value == "Catalog.Changed"
+    assert second.format_object.value == "Catalog.Second"
+    assert all(v.certainty == "known" for v in rows.values())
+    assert not result.skipped
 
 
 def _add(format_name: str = "Extra") -> str:

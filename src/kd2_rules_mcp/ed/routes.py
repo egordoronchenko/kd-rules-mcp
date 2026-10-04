@@ -10,7 +10,7 @@ import hashlib
 from bisect import bisect_left
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from stat import S_ISREG
 
@@ -18,8 +18,9 @@ from lxml import etree as ET
 
 from .errors import EdFormatError, EdReadError, EdResourceLimitError
 from .forms import MANAGER_VERSIONS, VERSION_ROUTINE
+from .layer_model import LayeredManager, OperationKind
 from .lexer import Lexed, Statement, Token, lex, normalized, split_arguments, tokenize
-from .model import EdDocument, ParseStatus, SourceFile, SourceSpan
+from .model import EdDocument, Expr, ParseStatus, SourceFile, SourceSpan
 from .reader import read_manager
 from .route_model import (
     ConditionKind,
@@ -67,6 +68,7 @@ _NODE_REASON = (
     "исполнитель выбирает минимальную версию карты (XDTO:3618)."
 )
 _EXTENSION_REASON = "Расширения конфигурации не учитывались; слой base не равен живой базе."
+_LAYER_REASON = "Статические слои учтены; активность и порядок подключения в базе не проверены."
 _KNOWN_SETTINGS = frozenset(
     {
         "этопланобменаxdto",
@@ -197,6 +199,7 @@ class _Run:
     aborted: bool = False
     speculative: bool = False
     collect_literals: bool = False
+    strict: bool = False
     stack: list[tuple[str, str]] = field(default_factory=list)
     chain: list[SourceSpan] = field(default_factory=list)
     conditions: list[RouteCondition] = field(default_factory=list)
@@ -239,6 +242,7 @@ class RouteFileObservation:
 def read_routes(
     root: Path,
     *,
+    layers: LayeredManager | None = None,
     documents: Mapping[Path, EdDocument] | None = None,
     observe: Callable[[RouteFileObservation], None] | None = None,
 ) -> RouteProfile:
@@ -253,7 +257,329 @@ def read_routes(
         if observe is not None:
             observe(RouteFileObservation((root / "Configuration.xml").resolve(), None, None))
         raise EdFormatError("Нет Configuration.xml: это не полная XML-выгрузка конфигурации")
-    return _Reader(root.resolve(), documents=documents, observe=observe).build()
+    profile = _Reader(root.resolve(), documents=documents, observe=observe).build()
+    return (
+        apply_route_layers(profile, layers, documents=documents, observe=observe)
+        if layers is not None
+        else profile
+    )
+
+
+def apply_route_layers(
+    profile: RouteProfile,
+    layers: LayeredManager,
+    *,
+    documents: Mapping[Path, EdDocument] | None = None,
+    observe: Callable[[RouteFileObservation], None] | None = None,
+) -> RouteProfile:
+    """Накладывает прочитанные карты; прежние вставки остаются в истории ключа.
+
+    Самостоятельный менеджер читается тем же читателем интерфейса. Глобальная
+    карта расширений формата использует ту же грамматику _exec_routine, что база.
+    Активность расширений в живой базе этот снимок не утверждает.
+    """
+    operations = [
+        op
+        for reading in layers.readings
+        for op in reading.operations
+        if op.kind == OperationKind.MAP_INSERT and op.origin.layer_id != "base"
+    ]
+    extra_hooks = [
+        hook for hook in layers.hooks if hook.target_name.casefold() == _EXTENSIONS.casefold()
+    ]
+    route_hooks = [
+        hook
+        for hook in layers.hooks
+        if hook.target_name.casefold()
+        in {_VERSIONS.casefold(), _SETTINGS.casefold(), _EXTENSIONS.casefold()}
+    ]
+    unknown_hooks = [
+        hook
+        for hook in route_hooks
+        if hook.applicability != "known"
+        or hook.kind not in {"after", "before"}
+        or (
+            hook.target_name.casefold() != _EXTENSIONS.casefold()
+            and any(skip.origin.hook_id == hook.id for skip in layers.skipped)
+        )
+    ]
+    if not operations and not route_hooks:
+        return profile
+    descriptors = {layer.id: layer for layer in layers.layers}
+    readers: dict[str, _Reader] = {}
+    without = list(profile.without_node_entries)
+    plans = list(profile.plans)
+    extensions = list(profile.format_extensions)
+    skips = [
+        replace(skip, reason=_LAYER_REASON) if skip.code == "ed.route.extensions" else skip
+        for skip in profile.skipped
+    ]
+    partial = profile.status == "partial"
+    without_partial = profile.without_node_status == "partial"
+
+    def reader(layer_id: str) -> _Reader:
+        if layer_id not in readers:
+            readers[layer_id] = _Reader(
+                Path(descriptors[layer_id].root), documents=documents, observe=observe
+            )
+        return readers[layer_id]
+
+    # A1 сохраняет литеральные вставки, но не все неподдержанные методы карты.
+    # Для слоя проверяем тело уже принятой грамматикой; базовые ответы не меняются.
+    for hook in route_hooks:
+        if hook in unknown_hooks or hook in extra_hooks:
+            continue
+        owner = reader(hook.origin.layer_id)
+        module = owner._load_bsl(Path(hook.origin.path))
+        routine = module.routines.get(hook.routine.name.casefold()) if module else None
+        if module is None or routine is None:
+            unknown_hooks.append(hook)
+            continue
+        receiver = _Map("versions")
+        settings = _Settings({"версииформатаобмена": receiver}, {}, [receiver])
+        argument = settings if hook.target_name.casefold() == _SETTINGS.casefold() else receiver
+        run = _Run(procedure=routine.name, file=module.file, strict=True)
+        owner._exec_routine(module, routine, _Env({}, settings, [receiver]), run, (argument,))
+        if run.partial:
+            unknown_hooks.append(hook)
+
+    def source(origin) -> RouteSource:
+        file = next((f for f in layers.source_files if f.file_id == origin.file_id), None)
+        path = origin.path or (file.path if file else origin.file_id)
+        root = Path(descriptors[origin.layer_id].root)
+        return RouteSource(
+            _relative(root, Path(path)),
+            origin.span.line_start,
+            origin.span.line_end,
+            origin.procedure or "",
+            origin.call_chain,
+            origin.layer_id,
+            file.sha256 if file else "",
+        )
+
+    def insert(entries: list[RouteEntry], entry: RouteEntry) -> list[RouteEntry]:
+        # Условная вставка делает исход прежнего ключа также недоказанным.
+        state = "overwritten" if entry.state == "effective" else "conditional"
+        return [
+            replace(old, state=state) if old.key == entry.key and old.state == "effective" else old
+            for old in entries
+        ] + [entry]
+
+    for op in operations:
+        if not isinstance(op.value, Expr):
+            continue
+        parts = op.value.reference_parts
+        if not parts or not op.field_path:
+            continue
+        origin = source(op.origin)
+        uncertain = bool(op.preds)
+        conditions = (
+            (RouteCondition("opaque", str(op.preds), "unknown", origin),) if uncertain else ()
+        )
+        entry = RouteEntry(
+            op.field_path[0],
+            op.field_path[0].strip(),
+            parts[0],
+            origin,
+            conditions,
+            "conditional" if uncertain else "effective",
+        )
+        hook = next((hook for hook in route_hooks if hook.id == op.hook_id), None)
+        before = hook is not None and hook.kind == "before"
+        if op.target_ref == "without_node":
+            if before:
+                overridden = any(
+                    old.key == entry.key and old.state == "effective" for old in without
+                )
+                without.insert(0, replace(entry, state="overwritten") if overridden else entry)
+            else:
+                without = insert(without, entry)
+            without_partial |= uncertain
+        else:
+            name = op.target_ref.removeprefix("plan/")
+            found = next(
+                (i for i, plan in enumerate(plans) if plan.plan_name.casefold() == name.casefold()),
+                None,
+            )
+            if found is None:
+                skips.append(
+                    RouteSkip(
+                        "ed.route.reading",
+                        f"План {name} отсутствует в базовой выгрузке",
+                        origin.relative_file,
+                        origin.line_start,
+                    )
+                )
+                partial = True
+                continue
+            plan = plans[found]
+            if before:
+                overridden = any(
+                    old.key == entry.key and old.state == "effective" for old in plan.entries
+                )
+                entries = [
+                    replace(entry, state="overwritten") if overridden else entry,
+                    *plan.entries,
+                ]
+            else:
+                entries = insert(list(plan.entries), entry)
+            fallback, tied = _min_version(entries)
+            plans[found] = replace(
+                plan,
+                entries=tuple(entries),
+                status="partial" if uncertain else plan.status,
+                empty_node_fallback=fallback,
+                empty_node_tied_minima=tied,
+            )
+        partial |= uncertain
+
+    for hook in extra_hooks:
+        origin = source(hook.origin)
+        owner = reader(hook.origin.layer_id)
+        module = owner._load_bsl(Path(hook.origin.path))
+        routine = module.routines.get(hook.routine.name.casefold()) if module else None
+        if (
+            module is None
+            or routine is None
+            or hook.applicability != "known"
+            or hook.kind not in {"before", "after"}
+        ):
+            skips.append(
+                RouteSkip(
+                    "ed.route.format_extensions",
+                    "Карта расширений формата перехвата не доказана",
+                    origin.relative_file,
+                    origin.line_start,
+                )
+            )
+            partial = True
+            extensions = [
+                replace(entry, state="conditional") if entry.state == "effective" else entry
+                for entry in extensions
+            ]
+            continue
+        receiver = _Map("extensions")
+        run = _Run(procedure=routine.name, file=module.file, strict=True)
+        owner._exec_routine(module, routine, _Env({}, None, [receiver]), run, (receiver,))
+        partial |= run.partial
+        skips.extend(run.skips)
+        if run.partial:
+            skips.append(
+                RouteSkip(
+                    "ed.route.format_extensions",
+                    "Карта расширений формата неполна",
+                    origin.relative_file,
+                    origin.line_start,
+                )
+            )
+            extensions = [
+                replace(entry, state="conditional") if entry.state == "effective" else entry
+                for entry in extensions
+            ]
+        for entry in _extension_entries(receiver):
+            if hook.kind == "before":
+                overwritten = any(
+                    old.uri == entry.uri and old.state == "effective" for old in extensions
+                )
+                extensions.insert(
+                    0,
+                    replace(
+                        entry,
+                        source=replace(entry.source, layer=hook.origin.layer_id),
+                        state="overwritten" if overwritten else entry.state,
+                    ),
+                )
+                continue
+            extensions = [
+                replace(old, state="overwritten")
+                if old.uri == entry.uri and old.state == "effective"
+                else old
+                for old in extensions
+            ]
+            extensions.append(
+                replace(entry, source=replace(entry.source, layer=hook.origin.layer_id))
+            )
+
+    for hook in unknown_hooks:
+        origin = source(hook.origin)
+        partial = True
+        if hook.target_name.casefold() == _VERSIONS.casefold():
+            without_partial = True
+            without = [
+                replace(entry, state="conditional") if entry.state == "effective" else entry
+                for entry in without
+            ]
+        elif hook.target_name.casefold() == _SETTINGS.casefold():
+            plans = [
+                replace(
+                    plan,
+                    status="partial",
+                    entries=tuple(
+                        replace(entry, state="conditional") if entry.state == "effective" else entry
+                        for entry in plan.entries
+                    ),
+                )
+                if plan.plan_name.casefold() == hook.origin.metadata_name.casefold()
+                else plan
+                for plan in plans
+            ]
+        else:
+            extensions = [
+                replace(entry, state="conditional") if entry.state == "effective" else entry
+                for entry in extensions
+            ]
+        code = (
+            "ed.route.format_extensions"
+            if hook.target_name.casefold() == _EXTENSIONS.casefold()
+            else "ed.route.reading"
+        )
+        skips.append(
+            RouteSkip(
+                code, "Область карты перехвата неизвестна", origin.relative_file, origin.line_start
+            )
+        )
+
+    managers = {item.name.casefold(): item for item in profile.managers}
+    for entry in (*without, *(entry for plan in plans for entry in plan.entries)):
+        if not entry.manager_name or entry.manager_name.casefold() in managers:
+            continue
+        info = reader(entry.source.layer)._manager(entry.manager_name)
+        if info.path:
+            info = replace(info, path=str(Path(descriptors[entry.source.layer].root) / info.path))
+        managers[info.name.casefold()] = info
+    fingerprint = hashlib.sha256(
+        (
+            profile.sources_fingerprint + repr(operations) + repr(extensions) + repr(route_hooks)
+        ).encode()
+    ).hexdigest()
+    reading = replace(
+        profile.reading,
+        literal_insertions=profile.reading.literal_insertions + len(operations),
+        effective_plan=sum(len(plan.effective_map()) for plan in plans if plan.is_ed),
+        effective_without_node=sum(entry.state == "effective" for entry in without),
+        ed_managers=len(managers),
+    )
+    return replace(
+        profile,
+        profile_id="ed-routes-" + fingerprint[:16],
+        sources_fingerprint=fingerprint,
+        plans=tuple(plans),
+        without_node_entries=tuple(without),
+        format_extensions=tuple(extensions),
+        managers=tuple(managers.values()),
+        skipped=tuple(skips),
+        status="partial" if partial else "complete",
+        without_node_status="partial" if without_partial else profile.without_node_status,
+        reading=reading,
+        declared_modules=tuple(
+            dict.fromkeys(
+                (
+                    *profile.declared_modules,
+                    *(item.name for item in managers.values() if item.metadata_exists),
+                )
+            )
+        ),
+    )
 
 
 def compare_versions(left: str, right: str) -> int | None:
@@ -1072,8 +1398,9 @@ class _Reader:
             elif isinstance(node, _If):
                 self._exec_if(node, env, run)
             elif isinstance(node, _Loop | _Try):
+                self._strict_tokens(node.statement.tokens, node.statement.span, env, run)
                 body = node.body if isinstance(node, _Loop) else [*node.body, *node.handler]
-                if _affects_route(body, env):
+                if _affects_route(body, env, strict=run.strict):
                     file = run.file
                     if file is not None:
                         self._map_skip(
@@ -1106,6 +1433,7 @@ class _Reader:
             return
         known: list[tuple[RouteCondition, list[_Node]]] = []
         for tokens, body, statement in node.clauses:
+            self._strict_tokens(tokens, statement.span, env, run)
             condition = self._condition(tokens, statement, env, run, module)
             if condition.value == "unknown":
                 self._fork_unknown(node, env, run, condition)
@@ -1159,7 +1487,7 @@ class _Reader:
         bodies: list[list[_Node]] = [body for _, body, _ in node.clauses]
         if node.else_statement is not None:
             bodies.append(node.else_body)
-        if not any(_affects_route(body, env) for body in bodies):
+        if not any(_affects_route(body, env, strict=run.strict) for body in bodies):
             return
         file = run.file
         if file is not None:
@@ -1211,6 +1539,7 @@ class _Reader:
             run.tail_conditions.append(condition)
 
     def _exec_statement(self, statement: Statement, env: _Env, run: _Run) -> None:
+        self._strict_tokens(statement.tokens, statement.span, env, run, standalone=True)
         if statement.tokens and statement.tokens[0].kind == "directive":
             return
         if statement.head in ("возврат", "вызватьисключение"):
@@ -1223,6 +1552,53 @@ class _Reader:
         call = _call(tokens)
         if call is not None:
             self._exec_call(call[0], call[1], statement, env, run)
+
+    def _strict_tokens(
+        self,
+        tokens: tuple[Token, ...],
+        span: SourceSpan,
+        env: _Env,
+        run: _Run,
+        *,
+        standalone: bool = False,
+    ) -> None:
+        if not run.strict or run.file is None:
+            return
+        if any(
+            token.kind == "identifier" and token.folded in {"выполнить", "вычислить"}
+            for token in tokens
+        ):
+            self._map_skip(run.file, span, "Динамический код в перехвате карты", run)
+        whole_call = _call(_bare(tokens)) if standalone else None
+        for offset, token in enumerate(tokens):
+            if token.kind != "identifier" or not isinstance(
+                env.locals.get(token.folded), _Map | _Settings
+            ):
+                continue
+            parts = [token.folded]
+            end = offset + 1
+            while (
+                end + 1 < len(tokens)
+                and tokens[end].value == "."
+                and tokens[end + 1].kind == "identifier"
+            ):
+                parts.append(tokens[end + 1].folded)
+                end += 2
+            if end >= len(tokens) or tokens[end].value != "(" or len(parts) < 2:
+                continue
+            receiver = self._receiver(tuple(parts[:-1]), env)
+            if not isinstance(receiver, _Map | _Settings):
+                continue
+            if parts[-1] in {"количество", "получить", "содержитключ"}:
+                continue
+            if (
+                isinstance(receiver, _Map)
+                and parts[-1] == "вставить"
+                and whole_call
+                and _dotted(whole_call[0]) is not None
+            ):
+                continue
+            self._map_skip(run.file, span, "Неподдержанный метод карты в выражении", run)
 
     def _assign(
         self,
@@ -1244,6 +1620,23 @@ class _Reader:
                 )
             return
         folded = tuple(part.casefold() for part in names)
+        if not folded:
+            return
+        head = folded[0]
+        if run.strict and isinstance(env.locals.get(folded[0]), _Map) and len(folded) > 1:
+            self._map_skip(module.file, statement.span, "Запись в неизвестное поле карты", run)
+        routine = module.routines.get(run.procedure.casefold())
+        if (
+            run.strict
+            and len(folded) == 1
+            and isinstance(env.locals.get(folded[0]), _Map | _Settings)
+            and routine is not None
+            and any(
+                param.name.casefold() == folded[0] and not param.by_value
+                for param in routine.params
+            )
+        ):
+            self._map_skip(module.file, statement.span, "Перепривязка параметра карты", run)
         if len(folded) == 1 and _is_new_map(rhs):
             created = _Map(None)
             env.maps.append(created)
@@ -1268,7 +1661,7 @@ class _Reader:
             if len(folded) == 1:
                 env.locals[folded[0]] = _UNKNOWN
                 return
-            bound = _bound_settings(env, folded[0])
+            bound = _bound_settings(env, head)
             if bound is not None and len(folded) == 2 and folded[1] in _KNOWN_SETTINGS:
                 _mark_unread(bound, folded[1])
             return
@@ -1276,7 +1669,7 @@ class _Reader:
         if len(folded) == 1:
             env.locals[folded[0]] = target
             return
-        settings = _bound_settings(env, folded[0])
+        settings = _bound_settings(env, head)
         if settings is None:
             if isinstance(target, _Map | _Settings):
                 self._map_skip(
@@ -1309,6 +1702,10 @@ class _Reader:
         if len(folded) != 1:
             return
         field_name = folded[0]
+        if run.strict and field_name in _KNOWN_SETTINGS:
+            self._map_skip(
+                module.file, statement.span, "Замена поля настроек вне операций слоя", run
+            )
         if field_name not in _KNOWN_SETTINGS:
             if isinstance(value, _Map | _Settings):
                 self._map_skip(
@@ -1399,6 +1796,13 @@ class _Reader:
             return
         if folded[-1] == "вставить" and isinstance(receiver, _Map):
             self._insert(receiver, arguments, statement, env, run)
+            return
+        if (
+            run.strict
+            and isinstance(receiver, _Map)
+            and folded[-1] not in {"количество", "получить", "содержитключ"}
+        ):
+            self._map_skip(module.file, statement.span, "Неподдержанный метод карты", run)
             return
         if _args_pass_tracked(arguments, env):
             self._map_skip(
@@ -2603,15 +3007,17 @@ def _bound_settings(env: _Env, name: str) -> _Settings | None:
     return value if isinstance(value, _Settings) else None
 
 
-def _affects_route(nodes: Sequence[object], env: _Env) -> bool:
+def _affects_route(nodes: Sequence[object], env: _Env, *, strict: bool = False) -> bool:
     """Ветка значима, если способна оборвать чтение или изменить карту и настройки."""
     names = {name for name, value in env.locals.items() if isinstance(value, _Map | _Settings)}
-    for statement in _iter_statements(nodes):
+    for statement in _iter_statements(nodes, include_headers=strict):
         if statement.head in ("возврат", "вызватьисключение"):
             return True
         for token in statement.tokens:
             if token.kind != "identifier":
                 continue
+            if strict and token.folded in {"выполнить", "вычислить"}:
+                return True
             if token.folded in names or token.folded in _KNOWN_SETTINGS | _KNOWN_ALGORITHMS:
                 return True
     return False
@@ -2675,19 +3081,25 @@ def _mark_unread(settings: _Settings, field_name: str) -> None:
     settings.values[field_name] = _UNREAD
 
 
-def _iter_statements(nodes: Sequence[object]) -> Iterable[Statement]:
+def _iter_statements(
+    nodes: Sequence[object], *, include_headers: bool = False
+) -> Iterable[Statement]:
     for node in nodes:
         if isinstance(node, _Stmt):
             yield node.statement
         elif isinstance(node, _If):
-            for _, body, _ in node.clauses:
-                yield from _iter_statements(body)
-            yield from _iter_statements(node.else_body)
+            for _, body, statement in node.clauses:
+                if include_headers:
+                    yield statement
+                yield from _iter_statements(body, include_headers=include_headers)
+            yield from _iter_statements(node.else_body, include_headers=include_headers)
         elif isinstance(node, _Loop):
-            yield from _iter_statements(node.body)
+            if include_headers:
+                yield node.statement
+            yield from _iter_statements(node.body, include_headers=include_headers)
         elif isinstance(node, _Try):
-            yield from _iter_statements(node.body)
-            yield from _iter_statements(node.handler)
+            yield from _iter_statements(node.body, include_headers=include_headers)
+            yield from _iter_statements(node.handler, include_headers=include_headers)
 
 
 def _source(

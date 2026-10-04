@@ -21,7 +21,7 @@ from kd2_rules_mcp.ed.route_model import (
     RouteProfile,
     RouteStatus,
 )
-from kd2_rules_mcp.ed.routes import _min_version, _version_parts, compare_versions
+from kd2_rules_mcp.ed.routes import _LAYER_REASON, _min_version, _version_parts, compare_versions
 from kd2_rules_mcp.ed.schema.model import EdSchema, OriginStep, QName, SchemaProperty, SchemaType
 from kd2_rules_mcp.validation.report import Issue, Level, Skipped, ValidationReport
 
@@ -344,7 +344,16 @@ def compare_routes(
 
     skip("ed.route.node_state", _NODE)
     _skip_variants(left, right, skip)
-    skip("ed.route.extensions", _EXTENSIONS)
+    has_layers = any(
+        entry.source.layer != "base"
+        for profile in (left, right)
+        for entry in (
+            *profile.without_node_entries,
+            *(entry for plan in profile.plans for entry in plan.entries),
+            *profile.format_extensions,
+        )
+    )
+    skip("ed.route.extensions", _LAYER_REASON if has_layers else _EXTENSIONS)
     _skip_reading(left, right, skip)
     _skip_ambiguity(left, right, left_view, right_view, selection.selected_key, schemas, skip)
     _skip_unproven_minimum(left_view, right_view, skip)

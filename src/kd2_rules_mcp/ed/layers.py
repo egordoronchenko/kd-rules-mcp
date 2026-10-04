@@ -36,6 +36,7 @@ from .layer_reader import (
     DumpObject,
     base_map,
     dispatcher_throws,
+    dispatcher_unknown,
     filler_calls,
     handled_literals,
     layer_key,
@@ -60,6 +61,7 @@ from .model import (
     ParseStatus,
     PredefinedRule,
     ProcessingRule,
+    PropertyGroup,
     PropertyRule,
     RuleUse,
     SourceSpan,
@@ -436,6 +438,8 @@ def compose_manager(
         routines,
         all_skips,
         status,
+        source,
+        tuple(readings),
     )
     index = build_layer_addresses(layered)
     return replace(
@@ -762,7 +766,9 @@ def _apply(operation, tips, history, index, certainty, snapshots) -> bool:
         operation.value, (ObjectRule, ProcessingRule, PredefinedRule)
     ):
         _add_rule(operation, tips, history, index, certainty)
-    elif operation.kind == OperationKind.ADD and isinstance(operation.value, PropertyRule):
+    elif operation.kind == OperationKind.ADD and isinstance(
+        operation.value, (PropertyRule, PropertyGroup)
+    ):
         return _add_property(operation, tips, history, certainty)
     elif operation.kind == OperationKind.SET and operation.target_ref.startswith(
         "parameters" + _UNIT
@@ -806,16 +812,25 @@ def _add_property(operation, tips, history, certainty) -> bool:
     if not isinstance(tip.payload, ObjectRule):
         return False
     prop = replace(operation.value, owner_id=tip.payload.entity_id)
-    updated = replace(tip.payload, properties=(*tip.payload.properties, prop))
+    if isinstance(prop, PropertyGroup):
+        previous = tip.payload.groups
+        current = (*previous, prop)
+        updated = replace(tip.payload, groups=current)
+        member = "groups"
+    else:
+        previous = tip.payload.properties
+        current = (*previous, prop)
+        updated = replace(tip.payload, properties=current)
+        member = "properties"
     label = prop.format_property or prop.configuration_property
     _commit(
         found,
         updated,
         EntityState.CHANGED if tip.state != EntityState.ADDED else EntityState.ADDED,
         FieldChange(
-            ("properties", label),
-            tip.payload.properties,
-            updated.properties,
+            (member, label),
+            previous,
+            current,
             operation.origin,
             operation.id,
         ),
@@ -1484,11 +1499,12 @@ def _dispatch(source, readings, tips, throws: bool) -> tuple[DispatchChain, ...]
         if isinstance(tip.payload, (ObjectRule, ProcessingRule)):
             names.update(binding.target_name for binding in tip.payload.events)
     chains: list[DispatchChain] = []
+    base_unknown = dispatcher_unknown(source)
     for name in sorted(names):
-        if any(hook.kind == "change_control" for hook in hooks):
+        if any(hook.kind == "change_control" or hook.continuation == "unknown" for hook in hooks):
             resolution = "unknown"
         else:
-            resolution = _resolve(name, arounds, afters, source, readings, throws)
+            resolution = _resolve(name, arounds, afters, source, readings, throws, base_unknown)
         links = [DispatchLink(hook, None, hook.origin.layer_id, True) for hook in befores]
         links.extend(
             DispatchLink(
@@ -1512,8 +1528,10 @@ def _dispatch(source, readings, tips, throws: bool) -> tuple[DispatchChain, ...]
     return tuple(chains)
 
 
-def _resolve(name, arounds, afters, source, readings, throws: bool) -> str:
+def _resolve(name, arounds, afters, source, readings, throws: bool, base_unknown: bool) -> str:
     def base_outcome() -> str:
+        if base_unknown:
+            return "unknown"
         if any(case.literal_name == name for case in source.dispatcher_cases):
             return "call"
         return "throws" if throws else "no_call"
@@ -1534,8 +1552,8 @@ def _resolve(name, arounds, afters, source, readings, throws: bool) -> str:
         return "unknown"
 
     result = around_outcome(len(arounds) - 1)
-    if result == "throws":
-        return "throws"
+    if result in {"throws", "unknown"}:
+        return result
     for hook in afters:
         handled = set()
         for reading in readings:

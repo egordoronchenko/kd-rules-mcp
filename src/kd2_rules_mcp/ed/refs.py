@@ -166,19 +166,24 @@ def build_references(document: EdDocument) -> ReferenceIndex:
 
     Диспетчер и служебные методы пропускает.
     """
-    source = document.files[0]
     directions = _directions(document)
-    statement_starts = {statement.span.char_start for statement in lex(source).statements}
+    sources = {source.file_id: source for source in document.files}
+    starts: dict[str, set[int]] = {}
     drafts: list[_Draft] = []
     for routine in document.routines:
         if not routine.roles & _INDEXED_ROLES:
             continue
+        source = sources[routine.span.file_id]
+        if source.file_id not in starts:
+            starts[source.file_id] = {
+                statement.span.char_start for statement in lex(source).statements
+            }
         drafts.extend(
             _scan_routine(
                 source,
                 routine,
                 directions.get(routine.entity_id),
-                statement_starts,
+                starts[source.file_id],
             )
         )
     drafts.sort(

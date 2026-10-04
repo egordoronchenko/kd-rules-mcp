@@ -15,7 +15,7 @@ from .layer_model import (
     LayerOperation,
     OperationKind,
 )
-from .model import Entity, ObjectRule, ProcessingRule, Routine
+from .model import Entity, ObjectRule, ProcessingRule, PropertyGroup, PropertyRule, Routine
 
 _PREFIX = {"pko": "ПКО", "pod": "ПОД", "pkpd": "ПКПД", "parameters": "Параметр"}
 _RULE_KINDS = (
@@ -175,12 +175,7 @@ def _version_rows(version: EntityVersion) -> list[tuple[str, tuple, LayerAddress
     key = _span_key(payload.span)
     rows = [(layer, key, LayerAddressHit(layer, version, payload))]
     if isinstance(payload, ObjectRule):
-        for prop in payload.properties:
-            segment = property_key(prop.format_property, prop.configuration_property)
-            prop_address = f"{layer}/ПКС/{segment}"
-            rows.append(
-                (prop_address, _span_key(prop.span), LayerAddressHit(prop_address, version, prop))
-            )
+        rows.extend(_property_rows(version, layer))
     return rows
 
 
@@ -199,12 +194,34 @@ def _acting_rows(version: EntityVersion) -> list[tuple[str, tuple, LayerAddressH
         (explicit, key, LayerAddressHit(explicit, version, payload)),
     ]
     if isinstance(payload, ObjectRule):
-        for prop in payload.properties:
-            segment = property_key(prop.format_property, prop.configuration_property)
-            prop_address = f"Действующее/{prefix}/{name}/ПКС/{segment}"
-            rows.append(
-                (prop_address, _span_key(prop.span), LayerAddressHit(prop_address, version, prop))
+        rows.extend(_property_rows(version, explicit))
+    return rows
+
+
+def _property_rows(
+    version: EntityVersion, address: str
+) -> list[tuple[str, tuple, LayerAddressHit]]:
+    payload = version.payload
+    assert isinstance(payload, ObjectRule)
+    members: list[tuple[str, PropertyRule | PropertyGroup]] = [
+        (f"{address}/ПКС", prop) for prop in payload.properties
+    ]
+    for group in payload.groups:
+        segment = property_key(group.format_property, group.configuration_property)
+        group_address = f"{address}/ПКТЧ/{segment}"
+        members.append((f"{address}/ПКТЧ", group))
+        members.extend((f"{group_address}/ПКС", prop) for prop in group.properties)
+    rows = []
+    for parent, member in members:
+        segment = property_key(member.format_property, member.configuration_property)
+        member_address = f"{parent}/{segment}"
+        rows.append(
+            (
+                member_address,
+                _span_key(member.span),
+                LayerAddressHit(member_address, version, member),
             )
+        )
     return rows
 
 

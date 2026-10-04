@@ -20,6 +20,7 @@ from kd2_rules_mcp.ed.model import EdDocument, Guard, ObjectRule, PropertyRule
 from kd2_rules_mcp.ed.route_model import ManagerInfo
 from kd2_rules_mcp.ed.schema.model import EdSchema
 from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
+from kd2_rules_mcp.validation.ed_projection import project_document
 from kd2_rules_mcp.validation.ed_structure_snapshot import (
     StructureProperty,
     StructureSnapshot,
@@ -833,9 +834,10 @@ def apply_header_properties(
         changes.append(
             Change(op.operation_id, rule.entity_id, prop.entity_id, ("properties",), span)
         )
-    document = replace(base, pko=tuple(rules[r.entity_id] for r in base.pko), guards=tuple(guards))
-    if changes:
-        if any(f.file_id == generated_sources.source.file_id for f in base.files):
-            raise ValueError("Идентификатор порождённого файла уже занят")
-        document = replace(document, files=(*base.files, generated_sources.source))
+    document = project_document(
+        base,
+        pko=tuple(rules[r.entity_id] for r in base.pko),
+        guards=tuple(guards),
+        additional_files=(generated_sources.source,) if changes else (),
+    )
     return Projection(document, tuple(changes), str(base.parse_status), len(changes), headers_only)

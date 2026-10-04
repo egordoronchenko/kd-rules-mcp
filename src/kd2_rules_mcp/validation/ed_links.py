@@ -11,10 +11,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from kd2_rules_mcp.ed.address import AddressIndex, escape_segment
+from kd2_rules_mcp.ed.layer_model import EffectiveContext, LayeredManager
 from kd2_rules_mcp.ed.model import (
     DispatcherCase,
     EdDocument,
     Entity,
+    HandlerBinding,
     ObjectRule,
     ProcessingRule,
     PropertyRule,
@@ -69,11 +71,24 @@ class _Row:
 
 
 def validate_links(
-    document: EdDocument,
-    addresses: AddressIndex,
-    references: ReferenceIndex,
+    document: EdDocument | LayeredManager,
+    addresses: AddressIndex | None = None,
+    references: ReferenceIndex | None = None,
+    *,
+    context: EffectiveContext | None = None,
+    explained: frozenset[tuple[str, str, str, str]] = frozenset(),
+    uncertain: frozenset[tuple[str, str]] = frozenset(),
+    preserved: frozenset[tuple[str, str]] = frozenset(),
 ) -> ValidationReport:
     """Шестнадцать проверок одного снимка. Чтения файлов и модели КД 2 нет."""
+    if isinstance(document, LayeredManager):
+        from .ed_layers import validate_effective_links
+
+        if context is None:
+            raise ValueError("Для действующего представления нужен контекст направления")
+        return validate_effective_links(document, context)
+    if addresses is None or references is None:
+        raise ValueError("Для документа нужны индексы адресов и ссылок")
     rows: list[_Row] = []
     skips: dict[tuple[str, str], None] = {}
 
@@ -81,6 +96,18 @@ def validate_links(
         skips.setdefault((check, reason), None)
 
     def emit(check: str, entity: Entity, message: str, address: str | None = None) -> None:
+        if (check, entity.entity_id) in uncertain:
+            skip(check, f"{_address(addresses, entity)}: условие сущности неизвестно")
+            return
+        key = None
+        if isinstance(entity, HandlerBinding):
+            key = (check, entity.owner_id, norm_name(entity.target_name), norm_name(entity.event))
+        elif isinstance(entity, PropertyRule):
+            key = (check, entity.owner_id, entity.namespace, "")
+        elif isinstance(entity, (ObjectRule, ProcessingRule)):
+            key = (check, entity.entity_id, norm_name(entity.name), "")
+        if key in explained and (check, entity.entity_id) not in preserved:
+            return
         rows.append(
             _Row(
                 entity.span.file_id,
@@ -166,6 +193,11 @@ def validate_links(
     for rule in (*document.pko, *document.pod):
         owner_address = _address(addresses, rule)
         for binding in rule.events:
+            if context is not None:
+                from .ed_projection import event_direction
+
+                if event_direction(binding.event) not in (None, context.direction):
+                    continue
             if not binding.target_name.strip():
                 continue
             if binding.event == _EXTENDED_EVENT:

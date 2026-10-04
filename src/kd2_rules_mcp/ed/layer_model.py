@@ -339,6 +339,10 @@ class LayeredManager:
     routines: tuple[tuple[str, Routine], ...]
     skipped: tuple[LayerSkip, ...]
     status: str
+    # Для адаптера проверок: уже прочитанный выбранный менеджер и обещанные правки,
+    # включая операции с ложной защитой «цель отсутствует».
+    source_document: EdDocument | None = None
+    readings: tuple[ExtensionReading, ...] = ()
 
 
 @runtime_checkable

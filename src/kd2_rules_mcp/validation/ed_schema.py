@@ -8,6 +8,7 @@ from collections import Counter
 
 from kd2_rules_mcp.ed import model as ed
 from kd2_rules_mcp.ed.address import AddressIndex
+from kd2_rules_mcp.ed.layer_model import EffectiveContext, LayeredManager
 from kd2_rules_mcp.ed.schema.model import EdSchema, SchemaProperty, SchemaType
 from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
 from kd2_rules_mcp.ed.schema.resolver import is_reference, property_type, table_row
@@ -147,44 +148,52 @@ def required_properties(
 
 
 def validate_schema(
-    document: ed.EdDocument,
+    document: ed.EdDocument | LayeredManager,
     schema: EdSchema,
     index: AddressIndex,
     profile: ValidationProfile,
     snapshot: StructureSnapshot | None = None,
     coverage: Counter[str] | None = None,
+    *,
+    context: EffectiveContext | None = None,
 ) -> ValidationReport:
     """Проверяет выбранную схему и прямые типы при наличии структуры."""
-    context = CheckContext(document, index, profile)
+    if isinstance(document, LayeredManager):
+        from .ed_layers import validate_effective_schema
+
+        if context is None:
+            raise ValueError("Для действующего представления нужен контекст направления")
+        return validate_effective_schema(document, context, schema, profile, snapshot, coverage)
+    checking = CheckContext(document, index, profile)
     by_name: dict[str, list[ed.ObjectRule]] = {}
     for rule in document.pko:
         by_name.setdefault(rule.name.casefold(), []).append(rule)
 
     def owner_type(rule: ed.ObjectRule, direction: str) -> tuple[SchemaType | None, str]:
-        return profile.owner_type(rule, direction, context.applicability)
+        return profile.owner_type(rule, direction, checking.applicability)
 
     for direction in profile.directions:
         for rule in document.pko:
             typ, type_status = owner_type(rule, direction)
             check = "ed.schema.type_missing"
-            if context.start(check, rule, direction):
+            if checking.start(check, rule, direction):
                 if type_status == "missing":
-                    context.checked()
-                    context.report.warning(
+                    checking.checked()
+                    checking.report.warning(
                         check,
-                        context.address(rule),
+                        checking.address(rule),
                         f"Тип формата «{rule.format_object.value}» отсутствует в выбранной схеме; "
                         "ПКО исключается исполнителем.",
                     )
                 elif type_status == "resolved":
-                    context.checked()
+                    checking.checked()
                 elif type_status == "not_applicable":
-                    context.count("not_applicable")
+                    checking.count("not_applicable")
                 else:
-                    context.skip(check, type_status, rule)
+                    checking.skip(check, type_status, rule)
 
             full_send = any(
-                context.applicability.evaluate(pod, "send") is True
+                checking.applicability.evaluate(pod, "send") is True
                 and any(ref.target_id == rule.entity_id for ref in pod.used_pko)
                 for pod in document.pod
             )
@@ -207,12 +216,12 @@ def validate_schema(
                 group_status = type_status
                 if group:
                     check = "ed.schema.table_missing"
-                    if context.start(check, group, direction, rule):
+                    if checking.start(check, group, direction, rule):
                         if group_type is None or group_type_status != "resolved":
-                            context.skip(check, "owner_type_unavailable", group)
+                            checking.skip(check, "owner_type_unavailable", group)
                             group_status = "owner_type_unavailable"
                         elif not group.format_property:
-                            context.skip(check, "empty_format_side", group)
+                            checking.skip(check, "empty_format_side", group)
                             group_status = "empty_format_side"
                         else:
                             resolved = profile.resolve(group_type, group.format_property)
@@ -223,17 +232,17 @@ def validate_schema(
                                 )
                                 group_status = "resolved" if row_type else "not_table"
                             if group_status in ("missing", "not_table"):
-                                context.checked()
-                                context.report.warning(
+                                checking.checked()
+                                checking.report.warning(
                                     check,
-                                    context.address(group),
+                                    checking.address(group),
                                     f"Группа «{group.format_property}» "
                                     "не разрешается как табличная часть формата.",
                                 )
                             elif group_status == "resolved":
-                                context.checked()
+                                checking.checked()
                             else:
-                                context.skip(check, resolved.reason or group_status, group)
+                                checking.skip(check, resolved.reason or group_status, group)
                 supplied: set[str] = set()
                 possible_supplied: set[str] = set()
                 for prop in properties:
@@ -245,7 +254,7 @@ def validate_schema(
                         )
                     check = "ed.schema.property_missing"
                     resolved_prop = None
-                    state = context.applicability.evaluate(prop, direction, group or rule)
+                    state = checking.applicability.evaluate(prop, direction, group or rule)
                     if state is None and property_owner and prop.format_property:
                         possible = profile.resolve(
                             property_owner,
@@ -254,15 +263,15 @@ def validate_schema(
                         )
                         if possible.status == "resolved":
                             possible_supplied.update(possible.property_ids)
-                    if context.start(check, prop, direction, group or rule):
+                    if checking.start(check, prop, direction, group or rule):
                         if (
                             property_owner is None
                             or property_owner_status != "resolved"
                             or group_status != "resolved"
                         ):
-                            context.skip(check, "owner_type_unavailable", prop)
+                            checking.skip(check, "owner_type_unavailable", prop)
                         elif not prop.format_property:
-                            context.skip(check, "empty_format_side", prop)
+                            checking.skip(check, "empty_format_side", prop)
                         else:
                             resolved = profile.resolve(
                                 property_owner,
@@ -270,65 +279,65 @@ def validate_schema(
                                 group.format_property if group else None,
                             )
                             if resolved.status == "missing":
-                                context.checked()
-                                context.report.warning(
+                                checking.checked()
+                                checking.report.warning(
                                     check,
-                                    context.address(prop),
+                                    checking.address(prop),
                                     f"Свойство формата «{prop.format_property}» "
                                     "отсутствует в выбранном профиле; "
                                     "проверьте версию и обработчик.",
                                 )
                             elif resolved.status == "resolved":
-                                context.checked()
+                                checking.checked()
                                 resolved_prop = profile.properties[resolved.property_ids[0]]
                                 supplied.update(resolved.property_ids)
                             else:
-                                context.skip(check, resolved.reason or resolved.status, prop)
+                                checking.skip(check, resolved.reason or resolved.status, prop)
                     check = "ed.schema.pko_unavailable"
-                    if prop.conversion_rule and context.start(
+                    if prop.conversion_rule and checking.start(
                         check, prop, direction, group or rule
                     ):
                         targets = by_name.get(prop.conversion_rule.casefold(), [])
                         if type_status != "resolved":
-                            context.skip(check, "owner_type_unavailable", prop)
+                            checking.skip(check, "owner_type_unavailable", prop)
                         elif len(targets) > 1:
-                            context.skip(check, "ambiguous", prop)
+                            checking.skip(check, "ambiguous", prop)
                         elif targets:
                             target = targets[0]
                             _, status = owner_type(target, direction)
                             if status == "missing":
-                                context.checked()
-                                context.report.warning(
+                                checking.checked()
+                                checking.report.warning(
                                     check,
-                                    context.address(prop),
+                                    checking.address(prop),
                                     f"ПКО «{prop.conversion_rule}» "
                                     "недоступен в выбранной схеме формата.",
                                 )
                             elif status in ("resolved", "empty_format_side"):
-                                context.checked()
+                                checking.checked()
                             else:
-                                context.skip(check, status, prop)
+                                checking.skip(check, status, prop)
                     check = "ed.schema.type_incompatible"
                     if (
                         snapshot is not None
                         and not prop.algorithm_flag
                         and not prop.conversion_rule
                         and prop.format_property
-                        and context.start(check, prop, direction, group or rule)
+                        and checking.start(check, prop, direction, group or rule)
                     ):
                         if resolved_prop is None:
-                            context.skip(check, "owner_type_unavailable", prop)
+                            checking.skip(check, "owner_type_unavailable", prop)
                             continue
                         key, _ = metadata_key(rule.configuration_object.value)
                         obj = snapshot.objects.get(key) if key else None
-                        configuration_state = context.applicability.field(
+                        configuration_state = checking.applicability.field(
                             rule.configuration_object, direction
                         )
                         if configuration_state is None:
-                            context.skip(check, "opaque_condition", prop)
+                            checking.skip(check, "opaque_condition", prop)
                             continue
                         if configuration_state is False:
-                            context.count("not_applicable")
+                            checking.count("not_applicable")
                             continue
                         path = (
                             f"{group.configuration_property}.{prop.configuration_property}"
@@ -343,9 +352,9 @@ def validate_schema(
                             else ()
                         )
                         if not actual or len(actual) != 1 or actual[0].unresolved:
-                            context.skip(check, "unresolved_configuration_type", prop)
-                        elif has_handler(rule, direction, context.applicability):
-                            context.skip(check, "handler_may_supply", prop)
+                            checking.skip(check, "unresolved_configuration_type", prop)
+                        elif has_handler(rule, direction, checking.applicability):
+                            checking.skip(check, "handler_may_supply", prop)
                         else:
                             expected = atomic_family(schema, resolved_prop)
                             types = set(actual[0].types)
@@ -354,13 +363,13 @@ def validate_schema(
                                 or not types
                                 or not types <= {"Число", "Дата", "Булево"}
                             ):
-                                context.skip(check, "non_atomic_type", prop)
+                                checking.skip(check, "non_atomic_type", prop)
                             else:
-                                context.checked()
+                                checking.checked()
                                 if expected not in types:
-                                    context.report.warning(
+                                    checking.report.warning(
                                         check,
-                                        context.address(prop),
+                                        checking.address(prop),
                                         f"Типы свойства «{prop.format_property}» "
                                         "требуют преобразования, "
                                         "не описанного прямым ПКС.",
@@ -370,14 +379,14 @@ def validate_schema(
                     continue
                 check = "ed.schema.required_source"
                 owner = group or rule
-                if not context.start(check, owner, direction, rule if group else None):
+                if not checking.start(check, owner, direction, rule if group else None):
                     continue
                 if row_type is None or group_status != "resolved":
-                    context.skip(check, "owner_type_unavailable", owner)
+                    checking.skip(check, "owner_type_unavailable", owner)
                     continue
                 if not group:
                     for child_group in rule.groups:
-                        state = context.applicability.evaluate(child_group, direction, rule)
+                        state = checking.applicability.evaluate(child_group, direction, rule)
                         if child_group.format_property and state is not False:
                             resolved = profile.resolve(row_type, child_group.format_property)
                             if resolved.status == "resolved":
@@ -386,19 +395,19 @@ def validate_schema(
                                 )
                 for required, path in required_properties(profile, row_type):
                     if required.id in supplied:
-                        context.checked()
+                        checking.checked()
                         continue
                     if required.id in possible_supplied:
-                        context.skip(check, "opaque_condition", owner)
-                    elif has_handler(rule, "send", context.applicability):
-                        context.skip(check, "handler_may_supply", owner)
+                        checking.skip(check, "opaque_condition", owner)
+                    elif has_handler(rule, "send", checking.applicability):
+                        checking.skip(check, "handler_may_supply", owner)
                     elif not full_send or (group is not None and not properties):
-                        context.skip(check, "full_object_not_proven", owner)
+                        checking.skip(check, "full_object_not_proven", owner)
                     else:
-                        context.checked()
-                        context.report.warning(
+                        checking.checked()
+                        checking.report.warning(
                             check,
-                            context.address(owner),
+                            checking.address(owner),
                             f"Для обязательного свойства «{path}» "
                             "не подтверждён источник значения.",
                         )
@@ -407,10 +416,10 @@ def validate_schema(
             for search in rule.search_sets:
                 for name in search.fields:
                     check = "ed.schema.search_source"
-                    if not context.start(check, search, direction, rule):
+                    if not checking.start(check, search, direction, rule):
                         continue
                     if typ is None or type_status != "resolved":
-                        context.skip(check, "owner_type_unavailable", search)
+                        checking.skip(check, "owner_type_unavailable", search)
                         continue
                     key, _ = metadata_key(rule.configuration_object.value)
                     if name.casefold() == "этогруппа" or (
@@ -418,7 +427,7 @@ def validate_schema(
                         and key
                         and key[0] in ("справочник", "планвидовхарактеристик")
                     ):
-                        context.checked()
+                        checking.checked()
                         continue
                     candidates = [
                         p
@@ -426,7 +435,7 @@ def validate_schema(
                         if p.configuration_property.casefold() == name.casefold()
                     ]
                     states = [
-                        context.applicability.evaluate(p, direction, rule) for p in candidates
+                        checking.applicability.evaluate(p, direction, rule) for p in candidates
                     ]
                     resolutions = []
                     for candidate in candidates:
@@ -448,14 +457,14 @@ def validate_schema(
                         for p, state, resolved in zip(candidates, states, resolutions, strict=True)
                     )
                     if direct:
-                        context.checked()
-                    elif has_handler(rule, direction, context.applicability) or any(
+                        checking.checked()
+                    elif has_handler(rule, direction, checking.applicability) or any(
                         p.algorithm_flag and state is not False
                         for p, state in zip(candidates, states, strict=True)
                     ):
-                        context.skip(check, "handler_may_supply", search)
+                        checking.skip(check, "handler_may_supply", search)
                     elif None in states:
-                        context.skip(check, "opaque_condition", search)
+                        checking.skip(check, "opaque_condition", search)
                     elif opaque := next(
                         (
                             reason or status
@@ -464,59 +473,59 @@ def validate_schema(
                         ),
                         None,
                     ):
-                        context.skip(check, opaque, search)
+                        checking.skip(check, opaque, search)
                     else:
-                        context.checked()
-                        context.report.warning(
+                        checking.checked()
+                        checking.report.warning(
                             check,
-                            context.address(search),
+                            checking.address(search),
                             f"Для поля поиска «{name}» не подтверждён источник в формате.",
                         )
 
         for rule in document.pkpd:
             check = "ed.schema.pkpd_type_missing"
-            if not context.start(check, rule, direction):
+            if not checking.start(check, rule, direction):
                 continue
             name = rule.format_type.value
             typ, status = (
                 profile.find_type(name, dependency=True) if name else (None, "empty_format_side")
             )
-            if context.applicability.field(rule.format_type, direction) is not True:
+            if checking.applicability.field(rule.format_type, direction) is not True:
                 typ, status = None, "opaque_condition"
             elif rule.format_type.presence not in ("literal", "absent"):
                 typ, status = None, "dynamic_format_type"
             if status == "missing":
-                context.checked()
-                context.report.warning(
+                checking.checked()
+                checking.report.warning(
                     check,
-                    context.address(rule),
+                    checking.address(rule),
                     f"Тип формата ПКПД «{name}» отсутствует в выбранной схеме.",
                 )
             elif status == "resolved":
-                context.checked()
+                checking.checked()
             else:
-                context.skip(check, status, rule)
+                checking.skip(check, status, rule)
             for pair in rule.mappings:
                 check = "ed.schema.pkpd_value_missing"
-                if not context.start(check, pair, direction, rule):
+                if not checking.start(check, pair, direction, rule):
                     continue
                 if typ is None or status != "resolved":
-                    context.skip(check, "owner_type_unavailable", pair)
+                    checking.skip(check, "owner_type_unavailable", pair)
                     continue
                 values, complete = enum_values(schema, typ)
                 if not complete:
-                    context.skip(check, "partial_schema", pair)
+                    checking.skip(check, "partial_schema", pair)
                 elif pair.format_value.literal_type != "string":
-                    context.skip(check, "dynamic_format_value", pair)
+                    checking.skip(check, "dynamic_format_value", pair)
                 else:
-                    context.checked()
+                    checking.checked()
                     value = pair.format_value.literal_value
                     if values and value not in values:
-                        context.report.warning(
+                        checking.report.warning(
                             check,
-                            context.address(pair),
+                            checking.address(pair),
                             f"Значение «{value}» не входит в перечисление формата «{name}».",
                         )
     if coverage is not None:
-        coverage.update(context.coverage)
-    return context.finish()
+        coverage.update(checking.coverage)
+    return checking.finish()
