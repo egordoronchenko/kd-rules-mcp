@@ -15,6 +15,7 @@ from kd2_rules_mcp.structures.queries import (
     describe_object,
     exchange_plan_autoregistration,
     exchange_plan_content,
+    find_object,
     list_objects,
     object_values,
     read_object_card,
@@ -174,6 +175,30 @@ def test_missing_object_suggests_same_kind(connection: sqlite3.Connection) -> No
     assert "Документ.Заказ" not in other_kind.suggestions
     assert isinstance(describe_object(connection, "Число"), NotFound)
     assert isinstance(describe_object(connection, "Справочники"), NotFound)
+
+
+def test_bare_name_finds_the_only_object(connection: sqlite3.Connection) -> None:
+    found = describe_object(connection, "Заказ")
+    assert isinstance(found, dict)
+    assert found["name"] == "Документ.Заказ"
+    missed = describe_object(connection, "Валют")
+    assert isinstance(missed, NotFound)
+    assert "Справочник.Валюты" in missed.suggestions
+
+
+def test_bare_name_with_several_objects_lists_full_names(tmp_path: Path) -> None:
+    connection = db.create(tmp_path / "names.sqlite")
+    for kind in ("Справочник", "Документ"):
+        connection.execute(
+            "INSERT INTO objects (kind, name, type_name) VALUES (?, 'ФизическиеЛица', ?)",
+            (kind, f"{kind}Ссылка.ФизическиеЛица"),
+        )
+    connection.commit()
+    missed = find_object(connection, "ФизическиеЛица")
+    assert isinstance(missed, NotFound)
+    assert missed.suggestions == ["Документ.ФизическиеЛица", "Справочник.ФизическиеЛица"]
+    assert "несколько объектов" in missed.message
+    connection.close()
 
 
 def test_object_values_keep_file_order(connection: sqlite3.Connection) -> None:

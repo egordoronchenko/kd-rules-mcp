@@ -6,8 +6,13 @@ import pytest
 from lxml import etree
 
 from kd2_rules_mcp.kd2.canonical import canonical_diff, canonical_form, parse_xml
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_registration_rules
-from tests.corpus import EXCHANGE_KINDS, REGISTRATION_KINDS, CorpusFile, corpus_params
+from kd2_rules_mcp.kd2.rules_io import (
+    dump_rules,
+    load_exchange_rules,
+    load_registration_rules,
+    load_rules,
+)
+from tests.corpus import ALL_KINDS, EXCHANGE_KINDS, REGISTRATION_KINDS, CorpusFile, corpus_params
 
 pytestmark = pytest.mark.corpus
 
@@ -74,3 +79,31 @@ def test_registration_rules_name_their_exchange_plan(item: CorpusFile) -> None:
     """Правила регистрации из макета плана обмена ссылаются на этот же план."""
     rules = load_registration_rules(item.path)
     assert rules.exchange_plan == item.exchange_plan
+
+
+def _mix_endings(raw: bytes) -> bytes:
+    parts: list[bytes] = []
+    for index, line in enumerate(raw.splitlines(keepends=True)):
+        body = line.removesuffix(b"\r\n").removesuffix(b"\n").removesuffix(b"\r")
+        ending = b""
+        if line.endswith((b"\n", b"\r")):
+            ending = b"\n" if index % 3 == 0 else b"\r\n"
+        parts.append(body + ending)
+    return b"".join(parts)
+
+
+@pytest.mark.parametrize("item", corpus_params(ALL_KINDS))
+def test_mixed_newlines_round_trip_is_byte_identical(item: CorpusFile) -> None:
+    """Смешанные концы строк сохраняются, если макет и так воспроизводится побайтно.
+
+    Круг идёт по файлу, который писатель уже отдаёт без изменений: иначе правка
+    концов строк смешивается с нормализацией XML. Большой макет здесь не гоняем —
+    побайтный круг таких файлов в закрытом тесте живых правил.
+    """
+    raw = _raw(item)
+    if len(raw) > 300_000:
+        pytest.skip("большой макет")
+    if dump_rules(load_rules(raw)) != raw:
+        pytest.skip("макет не воспроизводится побайтно")
+    mixed = _mix_endings(raw)
+    assert dump_rules(load_rules(mixed)) == mixed

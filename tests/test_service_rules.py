@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
-from kd2_rules_mcp.service import Kd2Service, Settings
+import pytest
+
+from kd2_rules_mcp.errors import Kd2Error
+from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
 
 DATA = Path(__file__).parent / "data"
 
@@ -42,3 +45,29 @@ def test_rules_open_private_copy_save_does_not_touch_shared(tmp_path: Path) -> N
     assert after[copy["project_id"]]["saved_path"] == copy_saved["path"]
     assert "private" not in after[shared["project_id"]]
     assert after[copy["project_id"]]["private"] is True
+
+
+def test_missing_file_inside_workspace_is_not_found(tmp_path: Path) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    missing = service.workspace.root / "no.xml"
+    with pytest.raises(Kd2Error, match="Файл не найден"):
+        service.rules_open(str(missing))
+    with pytest.raises(Kd2Error, match="не входит в подключённые папки"):
+        service.rules_open(r"C:\kd2-rules-missing\no.xml")
+
+
+def test_rules_validate_level_aliases_fail_before_the_project(tmp_path: Path) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    with pytest.raises(ValueError, match="Допустимые"):
+        service.rules_validate("missing", None, None, "fatal", None, 0, 20)
+    opened = service.rules_open(str(DATA / "exchange_rules.xml"))
+    project = opened["project_id"]
+    errors = service.rules_validate(project, None, None, "error", None, 0, 20)
+    warnings = service.rules_validate(project, None, None, "WARNING", None, 0, 20)
+    assert all(item["level"] == "ошибка" for item in errors["issues"]["items"])
+    assert all(item["level"] == "предупреждение" for item in warnings["issues"]["items"])
+
+
+def test_container_source_path_maps_to_the_agent_path() -> None:
+    mapped = PathMap.parse(r"C:\1C\Бит=/projects/bit")
+    assert mapped.to_host("/projects/bit/Проект/Main") == r"C:\1C\Бит\Проект\Main"

@@ -11,7 +11,7 @@ import pytest
 from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
 from kd2_rules_mcp.structures.store import StructureStore
 from kd2_rules_mcp.validation.report import Issue, Level, ValidationReport
-from kd2_rules_mcp.validation.structure import check_rule, check_structures
+from kd2_rules_mcp.validation.structure import _listed_types, check_rule, check_structures
 
 DUMP = Path(__file__).parent / "data" / "xmldump"
 
@@ -189,19 +189,28 @@ def test_check_rule_reports_only_the_touched_node(sides: tuple[sqlite3.Connectio
     assert [(i.level, i.check) for i in alone.issues] == [(Level.ERROR, "structure.pko_missing")]
 
 
-def test_search_and_plain_pks_report_different_addresses(
+def test_search_and_plain_pks_report_one_issue(
     sides: tuple[sqlite3.Connection, ...],
 ) -> None:
-    """Два `structure.pko_missing` на поисковую и обычную ПКС с одним именем — разные адреса."""
+    """Пара «ПКС поиска / обычная ПКС» одного свойства — одно замечание с обоими адресами."""
     body = pks_xml("Владелец", "Владелец", "Свойство", attrs=' Поиск="true"') + pks_xml(
         "Владелец", "Владелец", "Свойство"
     )
     xml = rules_xml(pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, body))
     issues = only(check(sides, xml), "structure.pko_missing")
-    assert [i.address for i in issues] == [
-        "ПКО «Номенклатура» / ПКС Владелец[поиск]",
-        "ПКО «Номенклатура» / ПКС Владелец",
-    ]
+    assert len(issues) == 1
+    assert issues[0].address == (
+        "ПКО «Номенклатура» / ПКС Владелец[поиск]; ПКО «Номенклатура» / ПКС Владелец"
+    )
+
+
+def test_pko_missing_lists_at_most_eight_types() -> None:
+    names = [f"СправочникСсылка.Тип{index}" for index in range(10)]
+    assert _listed_types(names) == (
+        "СправочникСсылка.Тип0, СправочникСсылка.Тип1, СправочникСсылка.Тип2, "
+        "СправочникСсылка.Тип3, СправочникСсылка.Тип4, СправочникСсылка.Тип5, "
+        "СправочникСсылка.Тип6, СправочникСсылка.Тип7 … ещё 2"
+    )
 
 
 def test_reference_type_without_pko(sides: tuple[sqlite3.Connection, ...]) -> None:

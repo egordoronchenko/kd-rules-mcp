@@ -785,7 +785,13 @@ def create_server(service: Kd2Service) -> MCPServer:
             str | None, Field(description="Структура приёмника правил обмена")
         ] = None,
         level: Annotated[
-            str | None, Field(description="Только «ошибка» или только «предупреждение»")
+            str | None,
+            Field(
+                description=(
+                    "Только ошибки или только предупреждения: "
+                    "«ошибка», «предупреждение», error или warning"
+                )
+            ),
         ] = None,
         check_prefix: Annotated[
             str | None, Field(description="Префикс идентификатора проверки: format., structure.…")

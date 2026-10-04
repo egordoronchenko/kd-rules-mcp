@@ -279,7 +279,9 @@ def _check_structure(
             GROUP_FLAG,
             address,
             f"Приёмник «{receiver}» — {title} с иерархией групп и элементов, а включённого "
-            "ПКС «ЭтоГруппа» с признаком поиска нет: новые группы создаются элементами",
+            "ПКС «ЭтоГруппа» с признаком поиска нет: новые группы создаются элементами, "
+            "в том числе при синхронизации по идентификатору; при поиске по полям группа "
+            "находит одноимённый элемент",
         )
     if info.subordinate and by_fields and "владелец" not in fields:
         report.warning(
@@ -414,8 +416,13 @@ def _receivers(connection: sqlite3.Connection | None) -> dict[str, _Receiver] | 
         has_owner = int(object_id) in with_owner
         attrs = _attrs(str(attrs_raw))
         kind_name = str(kind)
+        # Иерархия групп и элементов есть, только когда объект иерархический и вид —
+        # групп и элементов. У не иерархического справочника вид по умолчанию всё равно
+        # «ИерархияГруппИЭлементов», поэтому одного вида мало. Свойство «ЭтоГруппа» —
+        # тот же признак, если флаг в attrs не попал.
+        hierarchical = str(attrs.get("Иерархический", "")).casefold() == "true"
         folders = kind_name in _GROUP_KINDS and (
-            has_group or attrs.get("ВидИерархии") == "ИерархияГруппИЭлементов"
+            has_group or (hierarchical and attrs.get("ВидИерархии") == "ИерархияГруппИЭлементов")
         )
         subordinate = kind_name == "Справочник" and (
             attrs.get("Подчиненный") == "true" or has_owner

@@ -66,7 +66,7 @@ from enum import Enum
 
 from lxml import etree
 
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument
+from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument, rule_code
 from kd2_rules_mcp.validation.address import TITLES, pks_address, rule_address, walk_pks
 from kd2_rules_mcp.validation.report import ValidationReport
 
@@ -284,12 +284,12 @@ def _base_address(stack: list[Node]) -> str:
 
 def _text(node: Node, tag: str) -> str:
     """Текст тега так, как его обрезает читатель (`СокрП`, БСП:4495)."""
-    return str(node.values.get(tag, "")).rstrip()
+    return rule_code(node.values.get(tag, ""))
 
 
 def _attr(node: Node, name: str) -> str:
     """Атрибут так, как его обрезает `одАтрибут` (`СокрП`, БСП:4408)."""
-    return str(node.attrs.get(name, "")).rstrip()
+    return rule_code(node.attrs.get(name, ""))
 
 
 def _rules(root: Node, tag: str) -> list[Node]:

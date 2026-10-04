@@ -13,6 +13,16 @@ from kd2_rules_mcp.kd2.schema import Kind, Scalar, kind
 from kd2_rules_mcp.kd2.xmlstyle import XmlStyle
 
 
+def rule_code(value: object) -> str:
+    """Код или имя правила без хвостовых пробелов.
+
+    КД хранит код строкой фиксированной длины и в выгрузке из базы дополняет его
+    пробелами (до 50). Читатель обрезает хвост (`СокрП`, БСП:4495, БСП:4408).
+    Сравнение ссылок, ключи и адреса правил используют только этот вид.
+    """
+    return str(value).rstrip()
+
+
 @dataclass(eq=False, slots=True)
 class Node:
     """Элемент правил: атрибуты, простые значения, вложенные элементы и список правил/групп."""
@@ -54,7 +64,7 @@ class Node:
     def code(self) -> str:
         """Код правила (`Код`) или имя (`Имя`) для алгоритмов и запросов."""
         value = self.values.get("Код", self.attrs.get("Имя", ""))
-        return str(value)
+        return rule_code(value)
 
     @property
     def is_group(self) -> bool:
@@ -96,6 +106,9 @@ class RulesDocument:
 
     root: Node
     style: XmlStyle
+    # Байты файла, из которого разобран документ. Сериализатор возвращает им
+    # исходные концы строк неизменённым строкам. У собранного заново документа пусто.
+    origin: bytes | None = None
 
     @property
     def root_tag(self) -> str:

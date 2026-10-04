@@ -283,3 +283,28 @@ def test_preserve_line_endings_delete_keeps_neighbor_endings() -> None:
 def test_preserve_line_endings_changed_last_line_uses_new_ending() -> None:
     """Изменённая последняя строка берёт конец из нового файла."""
     assert preserve_line_endings(b"a\nlast", b"a\r\nchanged") == b"a\nchanged"
+
+
+def test_preserve_line_endings_diffs_only_the_changed_middle() -> None:
+    """Правка в середине: строки до и после неё сохраняют свои концы, новая — как у строки выше."""
+    old = b"a\r\nb\nc\nd\r\ne\n"
+    new = b"a\nb\nX\nY\nd\ne\n"
+    assert preserve_line_endings(old, new) == b"a\r\nb\nX\nY\nd\r\ne\n"
+
+
+@pytest.mark.parametrize(
+    ("new", "expected"),
+    [
+        (b"a\nB\nC\nd\ne\n", b"a\r\nB\r\nC\r\nd\r\ne\n"),
+        (b"a\nB\nd\ne\n", b"a\r\nB\r\nd\r\ne\n"),
+    ],
+)
+def test_preserve_line_endings_over_budget_falls_back(
+    monkeypatch: pytest.MonkeyPatch, new: bytes, expected: bytes
+) -> None:
+    """Середина сверх предела диффа: сопоставление по месту либо грубый дифф, без потери строк."""
+    from kd2_rules_mcp.kd2 import xmlstyle
+
+    monkeypatch.setattr(xmlstyle, "_DIFF_BUDGET", 0)
+    old = b"a\r\nb\nc\nd\r\ne\n"
+    assert preserve_line_endings(old, new) == expected

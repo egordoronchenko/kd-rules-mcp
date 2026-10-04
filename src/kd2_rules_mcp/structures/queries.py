@@ -367,7 +367,9 @@ def _select_page(
 def find_object(conn: sqlite3.Connection, name: str) -> sqlite3.Row | NotFound:
     """Строка объекта (`id`, `kind`, `name`, `type_name`, `synonym`, `attrs`).
 
-    `name` — `Вид.Имя` или имя типа (`СправочникСсылка.Имя`); нет объекта — `NotFound` с похожими.
+    `name` — `Вид.Имя`, имя типа (`СправочникСсылка.Имя`) или одно имя без вида.
+    Имя без вида, которое встречается один раз, возвращает этот объект; несколько —
+    `NotFound` с полными именами. Нет объекта — `NotFound` с похожими по имени без вида.
     """
     _prepare(conn)
     row = _find_object(conn, name)
@@ -375,15 +377,50 @@ def find_object(conn: sqlite3.Connection, name: str) -> sqlite3.Row | NotFound:
 
 
 def _find_object(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
-    return conn.execute(
+    row = conn.execute(
         "SELECT id, kind, name, type_name, synonym, attrs FROM objects WHERE "
         f"{_real_where()} AND (kind || '.' || name = ? OR type_name = ?) "
         "ORDER BY CASE WHEN kind || '.' || name = ? THEN 0 ELSE 1 END LIMIT 1",
         (*_STUB_TYPE_NAMES, name, name, name),
     ).fetchone()
+    if row is not None or "." in name:
+        return row
+    same = _rows_named(conn, name)
+    if len(same) == 1:
+        return same[0]
+    return None
+
+
+def _rows_named(conn: sqlite3.Connection, name: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT id, kind, name, type_name, synonym, attrs FROM objects WHERE "
+            f"{_real_where()} AND name = ? ORDER BY kind, name",
+            (*_STUB_TYPE_NAMES, name),
+        )
+    )
 
 
 def _not_found(conn: sqlite3.Connection, name: str) -> NotFound:
+    if "." not in name:
+        same = _rows_named(conn, name)
+        if len(same) > 1:
+            full = [f"{row['kind']}.{row['name']}" for row in same]
+            listed = ", ".join(full)
+            return NotFound(
+                name=name,
+                suggestions=full,
+                message=(
+                    f"Объект «{name}» не найден: несколько объектов с таким именем: {listed}"
+                ),
+            )
+        suggestions = _bare_suggestions(conn, name)
+        similar = ", ".join(suggestions) if suggestions else "нет"
+        return NotFound(
+            name=name,
+            suggestions=suggestions,
+            message=f"Объект «{name}» не найден; похожие: {similar}",
+        )
     kind, word = _suggestion_kind(conn, name)
     suggestions: list[str] = []
     if kind is not None:
@@ -401,6 +438,20 @@ def _not_found(conn: sqlite3.Connection, name: str) -> NotFound:
         suggestions=suggestions,
         message=f"Объект «{name}» не найден; похожие: {similar}",
     )
+
+
+def _bare_suggestions(conn: sqlite3.Connection, name: str) -> list[str]:
+    """Похожие полные имена: сравнение по имени объекта без вида."""
+    by_bare: dict[str, list[str]] = {}
+    for kind, obj_name in conn.execute(
+        f"SELECT kind, name FROM objects WHERE {_real_where()} ORDER BY kind, name",
+        _STUB_TYPE_NAMES,
+    ):
+        by_bare.setdefault(str(obj_name), []).append(f"{kind}.{obj_name}")
+    found: list[str] = []
+    for bare in get_close_matches(name, list(by_bare), n=_SUGGESTIONS):
+        found.extend(by_bare[bare])
+    return found
 
 
 def _suggestion_kind(conn: sqlite3.Connection, name: str) -> tuple[str | None, str]:
@@ -454,13 +505,19 @@ def _qualifier_signature(row: sqlite3.Row) -> tuple[tuple[str, Any], ...]:
 
 
 def _property_item(row: sqlite3.Row) -> dict[str, Any]:
+    types = _lines(row["types"])
+    qualifiers = dict(_qualifier_signature(row))
+    # «Дата и время» — умолчание ОписаниеТипов и пишется всем свойствам. Снаружи
+    # состав даты имеет смысл только у типа «Дата».
+    if "Дата" not in types:
+        qualifiers.pop("date_parts", None)
     item: dict[str, Any] = {
         "path": row["path"],
         "kind": row["kind"],
         "synonym": row["synonym"],
         "is_group": bool(row["is_group"]),
-        "types": _lines(row["types"]),
-        "qualifiers": dict(_qualifier_signature(row)),
+        "types": types,
+        "qualifiers": qualifiers,
     }
     unresolved = _lines(row["unresolved"])
     if unresolved:

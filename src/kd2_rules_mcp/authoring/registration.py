@@ -142,15 +142,47 @@ _COMPARISONS = frozenset(
 _OPERATORS = frozenset({"И", "ИЛИ"})
 
 
+_OBJECT_KEYS = frozenset(
+    {
+        "metadata_name",
+        "code",
+        "name",
+        "comment",
+        "unload_mode",
+        "plan_filters",
+        "object_filters",
+    }
+)
+_PLAN_FILTER_KEYS = frozenset(
+    {"plan_property", "object_property", "property_type", "comparison", "constant"}
+)
+_OBJECT_FILTER_KEYS = frozenset(
+    {"object_property", "property_type", "comparison", "constant_value"}
+)
+_GROUP_KEYS = frozenset({"operator", "items"})
+
+
+def _reject_unknown(entry: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
+    extra = [str(key) for key in entry if key not in allowed]
+    if not extra:
+        return
+    listed = ", ".join(f"«{key}»" for key in extra)
+    allowed_text = ", ".join(f"«{key}»" for key in sorted(allowed))
+    noun = "ключ" if len(extra) == 1 else "ключи"
+    raise ValueError(f"Неизвестный {noun} {listed} в {where}. Допустимые: {allowed_text}")
+
+
 def parse_registration_object(item: Mapping[str, Any]) -> RegistrationObject:
     """Объект правил регистрации из словаря `registration_build`.
 
     Плоский список отборов — прежнее соединение через «И» (корень отбора у читателя
     всегда «И», ЗагрузкаПравилРегистрацииОбъектов:1203). Группа — `operator` «И» или
     «ИЛИ» и `items`. Читатель группы рекурсивен и глубину не ограничивает
-    (ЗагрузкаПравилРегистрацииОбъектов:597-599, :638-640). Неизвестный вид сравнения
-    и неизвестный вид группы — `ValueError`: иначе читатель молча подменит оператор.
+    (ЗагрузкаПравилРегистрацииОбъектов:597-599, :638-640). Неизвестный вид сравнения,
+    неизвестный вид группы и неизвестный ключ — `ValueError`: иначе читатель молча
+    подменит оператор, а лишний ключ пропадёт.
     """
+    _reject_unknown(item, _OBJECT_KEYS, "объекте правил регистрации")
     name = str(item.get("metadata_name", "")).strip()
     if not name:
         raise ValueError("У объекта правил регистрации нет «metadata_name»")
@@ -187,7 +219,9 @@ def _as_mapping(entry: object, where: str) -> Mapping[str, Any]:
 
 def _plan_entry(entry: Mapping[str, Any]) -> PlanFilter | PlanFilterGroup:
     if "operator" in entry:
+        _reject_unknown(entry, _GROUP_KEYS, "группе отбора по свойствам плана обмена")
         return _group(entry, "plan_filters", _plan_entry, PlanFilterGroup)
+    _reject_unknown(entry, _PLAN_FILTER_KEYS, "отборе по свойствам плана обмена")
     comparison = str(entry.get("comparison", ""))
     _check_comparison(comparison, "отбора по свойствам плана обмена")
     constant = _flag(entry.get("constant", False), "constant")
@@ -202,7 +236,9 @@ def _plan_entry(entry: Mapping[str, Any]) -> PlanFilter | PlanFilterGroup:
 
 def _object_entry(entry: Mapping[str, Any]) -> ObjectFilter | ObjectFilterGroup:
     if "operator" in entry:
+        _reject_unknown(entry, _GROUP_KEYS, "группе отбора по свойствам объекта")
         return _group(entry, "object_filters", _object_entry, ObjectFilterGroup)
+    _reject_unknown(entry, _OBJECT_FILTER_KEYS, "отборе по свойствам объекта")
     comparison = str(entry.get("comparison", ""))
     _check_comparison(comparison, "отбора по свойствам объекта")
     return ObjectFilter(
@@ -403,6 +439,7 @@ def _rules(
         if meta.full_name in seen:
             continue
         seen.add(meta.full_name)
+        _warn_filter_properties(tables, spec, meta, warnings)
         if meta.type_name not in content_types:
             if from_rules:
                 outside_default.append(meta.full_name)
@@ -411,6 +448,43 @@ def _rules(
         nodes.append(_pro(_with_tables(tables, spec, meta, plan), meta, codes.next(spec.code)))
     _warn_lists(warnings, missing, outside_default, outside_explicit, plan_name)
     return nodes
+
+
+def _warn_filter_properties(
+    tables: _PropertyTables,
+    spec: RegistrationObject,
+    meta: _Meta,
+    warnings: list[str],
+) -> None:
+    """Реквизит отбора, которого нет у объекта. Пустое имя и константа плана не предупреждают."""
+    seen: set[str] = set()
+    nodes: list[object] = []
+    if spec.plan_filters:
+        nodes.extend(spec.plan_filters)
+    if spec.object_filters:
+        nodes.extend(spec.object_filters)
+    for raw in _filter_object_properties(nodes):
+        name = raw.strip()
+        if not name or name in seen:
+            continue
+        if tables.rows(meta.full_name, name, plan=False):
+            continue
+        seen.add(name)
+        warnings.append(f"«{meta.full_name}»: реквизита «{name}» в отборе нет в структуре")
+
+
+def _filter_object_properties(nodes: list[object]) -> list[str]:
+    found: list[str] = []
+    for node in nodes:
+        if isinstance(node, PlanFilter):
+            # `constant` — в поле объекта записано значение, а не имя реквизита.
+            if not node.constant:
+                found.append(node.object_property)
+        elif isinstance(node, ObjectFilter):
+            found.append(node.object_property)
+        elif isinstance(node, (PlanFilterGroup, ObjectFilterGroup)):
+            found.extend(_filter_object_properties(list(node.items)))
+    return found
 
 
 def _warn_lists(

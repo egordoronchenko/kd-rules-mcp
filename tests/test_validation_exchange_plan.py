@@ -49,7 +49,11 @@ WRITE_MESSAGE = (
 )
 CONVERSION_WRITE = (
     "В «ПослеЗагрузкиДанных» есть «Объект.Записать(»: запись идёт до установки режима "
-    "загрузки, проведение выполнится дважды или прервёт загрузку"
+    "загрузки, запись выполнится дважды или прервёт загрузку"
+)
+CATALOG_WRITE = (
+    "В «ПослеЗагрузки» есть «Объект.Записать(»: запись идёт до установки режима "
+    "загрузки, запись выполнится дважды или прервёт загрузку"
 )
 MANUAL = (
     "Правило рассчитано на ручной обмен универсальной обработкой, "
@@ -113,6 +117,14 @@ def pks(source: str, target: str, extra: str = "", attrs: str = "") -> str:
 
 def pkz(source: str, target: str) -> str:
     return f"<Значение><Источник>{source}</Источник><Приемник>{target}</Приемник></Значение>"
+
+
+# ПВД делает ПКО достижимым: без него проверка проведения не выполняется.
+_PVD_INCOME = "<Правило><Код>В</Код><КодПравилаКонвертации>Приход</КодПравилаКонвертации></Правило>"
+
+
+def income(body: str = "", extra: str = "", attrs: str = "") -> bytes:
+    return exchange(pko("Приход", DOC, DOC, body, extra, attrs), _PVD_INCOME)
 
 
 def run(
@@ -236,20 +248,20 @@ def test_document_without_posted_warns_until_handler_sets_mode(
     sides: tuple[sqlite3.Connection, ...],
 ) -> None:
     source, target = sides
-    warned = run(exchange(pko("Приход", DOC, DOC)), source, target)
+    warned = run(income(), source, target)
     assert [(issue.address, issue.message) for issue in hits(warned, DOCUMENT_POSTING)] == [
         ("ПКО «Приход»", POSTING_MESSAGE)
     ]
-    with_pks = run(exchange(pko("Приход", DOC, DOC, pks("Проведен", "Проведен"))), source, target)
+    with_pks = run(income(pks("Проведен", "Проведен")), source, target)
     assert hits(with_pks, DOCUMENT_POSTING) == []
     after = "<ПослеЗагрузки>Объект.Проведен = Истина;</ПослеЗагрузки>"
-    by_handler = run(exchange(pko("Приход", DOC, DOC, extra=after)), source, target)
+    by_handler = run(income(extra=after), source, target)
     assert hits(by_handler, DOCUMENT_POSTING) == []
     before = '<ПередВыгрузкой>РежимЗаписи = "Проведение";</ПередВыгрузкой>'
-    by_export = run(exchange(pko("Приход", DOC, DOC, extra=before)), source, target)
+    by_export = run(income(extra=before), source, target)
     assert hits(by_export, DOCUMENT_POSTING) == []
     empty_mode = '<ПередЗагрузкой>РежимЗаписи = "";</ПередЗагрузкой>'
-    still = run(exchange(pko("Приход", DOC, DOC, extra=empty_mode)), source, target)
+    still = run(income(extra=empty_mode), source, target)
     assert hits(still, DOCUMENT_POSTING) == [
         Issue(
             level=hits(still, DOCUMENT_POSTING)[0].level,
@@ -259,13 +271,11 @@ def test_document_without_posted_warns_until_handler_sets_mode(
         )
     ]
     on_load = "<ПриЗагрузке>РежимЗаписи = РежимЗаписиДокумента.Проведение;</ПриЗагрузке>"
-    loaded = run(exchange(pko("Приход", DOC, DOC, extra=on_load)), source, target)
+    loaded = run(income(extra=on_load), source, target)
     assert hits(loaded, DOCUMENT_POSTING) == []
     # Атрибут «РежимЗаписи» пишется до «ПриВыгрузке», присваивание в нём режим уже не меняет.
     late = '<ПриВыгрузке>РежимЗаписи = "Проведение";</ПриВыгрузке>'
-    late_hits = hits(
-        run(exchange(pko("Приход", DOC, DOC, extra=late)), source, target), DOCUMENT_POSTING
-    )
+    late_hits = hits(run(income(extra=late), source, target), DOCUMENT_POSTING)
     assert [(issue.address, issue.message) for issue in late_hits] == [
         ("ПКО «Приход»", POSTING_MESSAGE)
     ]
@@ -273,10 +283,11 @@ def test_document_without_posted_warns_until_handler_sets_mode(
 
 def test_opaque_posting_handler_is_skipped(sides: tuple[sqlite3.Connection, ...]) -> None:
     extra = "<ПослеЗагрузки>Выполнить(КодЗаписи);</ПослеЗагрузки>"
-    report = run(exchange(pko("Приход", DOC, DOC, extra=extra)), sides[0], sides[1])
+    report = run(income(extra=extra), sides[0], sides[1])
     assert hits(report, DOCUMENT_POSTING) == []
     assert skips(report, DOCUMENT_POSTING) == [
-        "ПКО «Приход»: обработчик непрозрачен — не видно, задаёт ли он режим записи или «Проведен»"
+        "ПКО «Приход»: обработчик «ПослеЗагрузки» непрозрачен — не видно, "
+        "задаёт ли он режим записи или «Проведен»"
     ]
     no_target = run(exchange(pko("Приход", DOC, DOC)), sides[0], None)
     assert skips(no_target, DOCUMENT_POSTING) == [
@@ -315,6 +326,21 @@ def test_object_write_warns_only_on_direct_call(sides: tuple[sqlite3.Connection,
     assert [(issue.address, issue.message) for issue in hits(conversion, OBJECT_WRITE)] == [
         ("Конвертация", CONVERSION_WRITE)
     ]
+    catalog = "<ПослеЗагрузки>Объект.Записать();</ПослеЗагрузки>"
+    catalog_rules = exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=catalog))
+    catalog_hits = hits(run(catalog_rules, source, target), OBJECT_WRITE)
+    assert [(issue.address, issue.message) for issue in catalog_hits] == [
+        ("ПКО «Номенклатура»", CATALOG_WRITE)
+    ]
+
+
+def test_unreachable_document_skips_posting_check(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    """ПКО без ПВД и без ссылок — structure.pko_unreachable, проведение не проверяется."""
+    report = run(exchange(pko("Приход", DOC, DOC)), sides[0], sides[1])
+    assert hits(report, DOCUMENT_POSTING) == []
+    assert skips(report, DOCUMENT_POSTING) == []
 
 
 def test_manual_exchange_forms_warn_and_standard_selection_does_not(

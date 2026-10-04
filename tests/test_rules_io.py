@@ -64,6 +64,30 @@ def test_source_style_is_preserved() -> None:
         assert dump_rules(load_rules(raw)) == raw
 
 
+def _mix_endings(raw: bytes) -> bytes:
+    parts: list[bytes] = []
+    for index, line in enumerate(raw.splitlines(keepends=True)):
+        body = line.removesuffix(b"\r\n").removesuffix(b"\n").removesuffix(b"\r")
+        ending = b""
+        if line.endswith((b"\n", b"\r")):
+            ending = b"\n" if index % 2 else b"\r\n"
+        parts.append(body + ending)
+    return b"".join(parts)
+
+
+def test_mixed_line_endings_survive_open_and_save() -> None:
+    """Выгрузка КД мешает CRLF и LF: без правок файл тот же, правка трогает одну строку."""
+    mixed = _mix_endings(as_file(EXCHANGE))
+    assert b"\r\n" in mixed and b"\n" in mixed.replace(b"\r\n", b"")
+    assert dump_rules(load_rules(mixed)) == mixed
+    rules = load_rules(mixed)
+    rules.root.values["Наименование"] = "правка"
+    changed = dump_rules(rules)
+    left = mixed.splitlines(keepends=True)
+    right = changed.splitlines(keepends=True)
+    assert sum(1 for pair in zip(left, right, strict=True) if pair[0] != pair[1]) == 1
+
+
 def test_export_in_kd_style_for_new_file() -> None:
     rules = load_rules(as_file(REGISTRATION, bom=False, newline="\n"))
     out = dump_rules(rules, KD_STYLE)

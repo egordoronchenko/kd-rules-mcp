@@ -157,6 +157,8 @@ class ServiceBase:
             )
         if not local.exists():
             # Внутренний путь контейнера агенту не показываем: остаётся путь, который он передал.
+            if self._inside_connected(local):
+                raise Kd2Error(f"Файл не найден: «{path}»")
             raise Kd2Error(
                 f"Путь «{path}» не найден: путь не входит в подключённые папки проектов "
                 "(`project_list`)"
@@ -199,7 +201,25 @@ class ServiceBase:
         return self.settings.path_map.to_host(path.resolve())
 
     def _host_text(self, path: str) -> str:
-        return self.settings.path_map.to_host(Path(path)) if path else ""
+        # Сырая строка, без Path(): контейнерный `/projects/…` на Windows иначе
+        # перестаёт совпадать с картой путей.
+        return self.settings.path_map.to_host(path) if path else ""
+
+    def _inside_connected(self, path: Path) -> bool:
+        """Путь лежит в рабочей папке, папке проекта или папке живых правил."""
+        resolved = path.resolve()
+        roots = [
+            self.workspace.root,
+            *self.settings.project_dirs.values(),
+            *self.rules_dirs().values(),
+        ]
+        for root in roots:
+            try:
+                resolved.relative_to(root.resolve())
+            except ValueError:
+                continue
+            return True
+        return False
 
     def _project_view(self, project: RulesProject) -> dict[str, Any]:
         document = project.document

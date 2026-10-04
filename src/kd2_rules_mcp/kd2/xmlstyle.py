@@ -7,6 +7,7 @@
 
 import difflib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 BOM = b"\xef\xbb\xbf"
@@ -122,34 +123,74 @@ def _split_lines(data: bytes) -> list[tuple[bytes, bytes]]:
     return lines
 
 
+def same_text_lines(old: bytes, new: bytes) -> bool:
+    """Строки без концов совпали: исходные байты можно вернуть как есть."""
+    return [text for text, _ending in _split_lines(old)] == [
+        text for text, _ending in _split_lines(new)
+    ]
+
+
+# Предел сравнения середины построчным диффом: число строк старого × нового.
+_DIFF_BUDGET = 100_000_000
+
+
 def preserve_line_endings(old: bytes, new: bytes) -> bytes:
-    """Переводы строк старого файла у строк, которые не менялись; у новых — как у строки выше."""
+    """Переводы строк старого файла у строк, которые не менялись; у новых — как у строки выше.
+
+    Общие начало и конец файлов сопоставляются напрямую, построчный дифф идёт только по
+    середине: правка правил локальна, а дифф целого макета с повторяющимися строками
+    занимает секунды на каждое сохранение.
+    """
     old_lines = _split_lines(old)
     new_lines = _split_lines(new)
     if not old_lines:
         return new
-    matcher = difflib.SequenceMatcher(
-        None,
-        [text for text, _ending in old_lines],
-        [text for text, _ending in new_lines],
-        autojunk=False,
-    )
+    old_text = [text for text, _ending in old_lines]
+    new_text = [text for text, _ending in new_lines]
+    limit = min(len(old_text), len(new_text))
+    head = 0
+    while head < limit and old_text[head] == new_text[head]:
+        head += 1
+    tail = 0
+    while tail < limit - head and old_text[-1 - tail] == new_text[-1 - tail]:
+        tail += 1
+    old_end = len(old_text) - tail
+    new_end = len(new_text) - tail
     parts: list[bytes] = []
     # Первая новая строка файла не имеет строки выше: берём конец первой строки старого.
     previous = old_lines[0][1]
     last = len(new_lines) - 1
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+    for index in range(head):
+        previous = old_lines[index][1]
+        parts.append(new_text[index] + previous)
+    for tag, i1, i2, j1, j2 in _middle_opcodes(old_text[head:old_end], new_text[head:new_end]):
         if tag == "delete":
             continue
         if tag == "equal":
             for old_index, new_index in zip(range(i1, i2), range(j1, j2), strict=True):
-                ending = old_lines[old_index][1]
-                parts.append(new_lines[new_index][0] + ending)
-                previous = ending
+                previous = old_lines[head + old_index][1]
+                parts.append(new_text[head + new_index] + previous)
             continue
-        for new_index in range(j1, j2):
+        for new_index in range(head + j1, head + j2):
             # Последняя строка, если она новая, берёт конец из new, а не у строки выше.
             ending = new_lines[new_index][1] if new_index == last else previous
-            parts.append(new_lines[new_index][0] + ending)
+            parts.append(new_text[new_index] + ending)
             previous = ending
+    for offset in range(tail):
+        previous = old_lines[old_end + offset][1]
+        parts.append(new_text[new_end + offset] + previous)
     return b"".join(parts)
+
+
+def _middle_opcodes(old: list[bytes], new: list[bytes]) -> Sequence[tuple[str, int, int, int, int]]:
+    """Операции диффа середины; сверх предела — сопоставление по месту или грубый дифф."""
+    if not old or not new:
+        return [("replace", 0, len(old), 0, len(new))]
+    if len(old) * len(new) <= _DIFF_BUDGET:
+        return difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
+    if len(old) == len(new):
+        return [
+            ("equal" if before == after else "replace", index, index + 1, index, index + 1)
+            for index, (before, after) in enumerate(zip(old, new, strict=True))
+        ]
+    return difflib.SequenceMatcher(None, old, new, autojunk=True).get_opcodes()

@@ -13,7 +13,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node
+from kd2_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
 from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS
 from kd2_rules_mcp.validation.address import (
     pks_address,
@@ -23,7 +23,7 @@ from kd2_rules_mcp.validation.address import (
     side_name,
     walk_pks,
 )
-from kd2_rules_mcp.validation.report import ValidationReport
+from kd2_rules_mcp.validation.report import Issue, ValidationReport
 
 SOURCE = "Источник"
 TARGET = "Приемник"
@@ -203,6 +203,7 @@ def check_structures(
         _check_pod(context, pod)
     _check_unreachable_pko(context)
     _check_ref_only_pko(context)
+    _merge_pko_missing(context.report)
     return context.report
 
 
@@ -255,7 +256,7 @@ def _prepare(
             )
     context = _Context(rules, report, sides)
     for pko in rules.pko():
-        context.pko_by_code.setdefault(pko.code, pko)
+        context.pko_by_code.setdefault(rule_code(pko.code), pko)
         source_type = str(pko.get(SOURCE))
         if source_type:
             context.pko_sources.add(source_type)
@@ -540,7 +541,7 @@ def _check_pks_types(
         # Исп:13152-13161: ссылка без ПКО своего типа молча не выгружается.
         whole = len(missing) == len(source_refs) == len(source.types)
         message = (
-            f"Нет ПКО для типов {', '.join(missing)}: значения этих типов не выгрузятся"
+            f"Нет ПКО для типов {_listed_types(missing)}: значения этих типов не выгрузятся"
             " (свойство пропускается) — создайте ПКО или укажите правило конвертации в ПКС"
         )
         mentioned = _pko_handlers_mention(pko, side_name(pks, TARGET))
@@ -564,6 +565,13 @@ def _check_pks_types(
 
 def _types(prop: Property) -> str:
     return ", ".join(prop.types) or "не заданы"
+
+
+def _listed_types(names: list[str], limit: int = 8) -> str:
+    """Не больше `limit` имён; хвост — «… ещё N»."""
+    if len(names) <= limit:
+        return ", ".join(names)
+    return ", ".join(names[:limit]) + f" … ещё {len(names) - limit}"
 
 
 # --- ПКЗ ---------------------------------------------------------------------------------------
@@ -686,7 +694,7 @@ def _disabled(node: Node) -> bool:
 
 def _conversion_code(node: Node) -> str:
     """Код ПКО из `КодПравилаКонвертации` (ПКС, группа ПКС, ПКЗ, ПВД)."""
-    return str(node.get("КодПравилаКонвертации")).strip()
+    return rule_code(node.get("КодПравилаКонвертации"))
 
 
 def _pvd_pko_codes(rules: ExchangeRules) -> set[str]:
@@ -740,6 +748,60 @@ def _handler_corpus(rules: ExchangeRules) -> str:
     return "\n".join(chunks)
 
 
+# Добавка к замечаниям об обработчиках загрузки ПКО, которое уходит только ссылкой.
+# Узел «Ссылка» читает свойство через поиск (БСП:7984–8010) и не вызывает
+# ПередЗагрузкой / ПриЗагрузке / ПослеЗагрузки этого ПКО; «ПослеЗагрузки» исполнитель
+# выполняет на закрывающем теге объекта (БСП:10986–11005).
+REF_ONLY_LOAD_NOTE = (
+    " Правило уходит только ссылкой: обработчики загрузки для него не выполняются, "
+    "пока объект не начнёт выгружаться целиком (флаг узла «при необходимости» "
+    "в правилах регистрации или ВыгрузитьОбъект = Истина)."
+)
+PKO_LOAD_EVENTS = frozenset({"ПередЗагрузкой", "ПриЗагрузке", "ПослеЗагрузки"})
+
+
+def unreachable_pko_codes(rules: ExchangeRules) -> set[str]:
+    """Коды ПКО, на которые `structure.pko_unreachable` ставит предупреждение."""
+    called = _referenced_pko_codes(rules)
+    handlers = _handler_corpus(rules)
+    found: set[str] = set()
+    for pko in rules.pko():
+        if _disabled(pko) or not str(pko.get(SOURCE)).strip():
+            continue
+        code = rule_code(pko.code)
+        if code and code not in called and code not in handlers:
+            found.add(code)
+    return found
+
+
+def ref_only_pko_codes(rules: ExchangeRules) -> set[str]:
+    """Коды ПКО, которые `structure.pko_ref_only` считает достижимыми только ссылкой."""
+    pvd_codes = _pvd_pko_codes(rules)
+    references = _pks_references(rules)
+    whole = _whole_export_corpus(rules)
+    found: set[str] = set()
+    for pko in rules.pko():
+        if _disabled(pko):
+            continue
+        source = str(pko.get(SOURCE)).strip()
+        if not source.startswith(_OBJECT_REF_PREFIXES):
+            continue
+        code = rule_code(pko.code)
+        if not code or code in pvd_codes or code in whole:
+            continue
+        linked = references.get(code, [])
+        if not linked or any(item.exports_whole for item in linked):
+            continue
+        found.add(code)
+    return found
+
+
+def ref_only_pko_addresses(rules: ExchangeRules) -> set[str]:
+    """Адреса ПКО из `ref_only_pko_codes`."""
+    codes = ref_only_pko_codes(rules)
+    return {rule_address(pko) for pko in rules.pko() if rule_code(pko.code) in codes}
+
+
 def _check_unreachable_pko(context: _Context) -> None:
     """ПКО, которое ничем не вызывается.
 
@@ -748,13 +810,9 @@ def _check_unreachable_pko(context: _Context) -> None:
     Пустой источник — выгрузка из обработчиков; выключенное ПКО не исполняется.
     От загруженных структур не зависит.
     """
-    called = _referenced_pko_codes(context.rules)
-    handlers = _handler_corpus(context.rules)
+    unreachable = unreachable_pko_codes(context.rules)
     for pko in context.rules.pko():
-        if _disabled(pko) or not str(pko.get(SOURCE)).strip():
-            continue
-        code = pko.code.strip()
-        if code and (code in called or code in handlers):
+        if rule_code(pko.code) not in unreachable:
             continue
         context.report.warning(
             "structure.pko_unreachable",
@@ -784,7 +842,7 @@ def _pks_handler_text(node: Node) -> str:
 
 def _pks_references(rules: ExchangeRules) -> dict[str, list[_PksReference]]:
     """ПКС и группы ПКС, ссылающиеся на код: полем `КодПравилаКонвертации` или обработчиком."""
-    codes = list(dict.fromkeys(pko.code.strip() for pko in rules.pko() if pko.code.strip()))
+    codes = list(dict.fromkeys(rule_code(pko.code) for pko in rules.pko() if rule_code(pko.code)))
     found: dict[str, list[_PksReference]] = {}
     for owner in rules.pko():
         properties = owner.child("Свойства")
@@ -852,24 +910,49 @@ def _check_ref_only_pko(context: _Context) -> None:
     Флаг узла «при необходимости» задаётся правилами регистрации (БСП:3393-3437) и отсюда
     не виден. От загруженных структур не зависит; при правке одного правила не считается.
     """
-    pvd_codes = _pvd_pko_codes(context.rules)
     references = _pks_references(context.rules)
-    whole = _whole_export_corpus(context.rules)
+    ref_only = ref_only_pko_codes(context.rules)
     for pko in context.rules.pko():
-        if _disabled(pko):
-            continue
-        source = str(pko.get(SOURCE)).strip()
-        if not source.startswith(_OBJECT_REF_PREFIXES):
-            continue
-        code = pko.code.strip()
-        if not code or code in pvd_codes or code in whole:
+        code = rule_code(pko.code)
+        if code not in ref_only:
             continue
         linked = references.get(code, [])
-        if not linked or any(item.exports_whole for item in linked):
-            continue
         shown = ", ".join(item.address for item in linked[:_REF_ONLY_SHOWN])
         context.report.warning(
             "structure.pko_ref_only",
             rule_address(pko),
             _ref_only_message(pko.code, shown),
         )
+
+
+def _merge_pko_missing(report: ValidationReport) -> None:
+    """Одно `structure.pko_missing` на пару «ПКС поиска / обычная ПКС» одного свойства.
+
+    Адреса отличаются только меткой `[поиск]`; в склеенном замечании оба, через «; ».
+    """
+    groups: dict[tuple[str, str, str], list[int]] = {}
+    for index, issue in enumerate(report.issues):
+        if issue.check != "structure.pko_missing":
+            continue
+        plain = issue.address.replace("[поиск]", "")
+        groups.setdefault((issue.level.value, issue.message, plain), []).append(index)
+    drop: set[int] = set()
+    replacements: dict[int, Issue] = {}
+    for indexes in groups.values():
+        if len(indexes) < 2:
+            continue
+        seen: list[str] = []
+        for index in indexes:
+            address = report.issues[index].address
+            if address not in seen:
+                seen.append(address)
+        base = report.issues[indexes[0]]
+        replacements[indexes[0]] = Issue(base.level, base.check, "; ".join(seen), base.message)
+        drop.update(indexes[1:])
+    if not replacements:
+        return
+    report.issues = [
+        replacements.get(index, issue)
+        for index, issue in enumerate(report.issues)
+        if index not in drop
+    ]

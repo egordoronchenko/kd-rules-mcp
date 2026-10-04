@@ -460,6 +460,28 @@ def test_flat_filter_list_stays_implicit_and(structure: sqlite3.Connection) -> N
     assert [item.tag for item in items] == ["ЭлементОтбора", "ЭлементОтбора"]
 
 
+def test_unknown_registration_key_lists_allowed(structure: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="Допустимые"):
+        parse_registration_object({"metadata_name": "Документ.Приход", "foo": 1})
+    spec = parse_registration_object(
+        {
+            "metadata_name": "Документ.Приход",
+            "object_filters": [{"object_property": "НетТакого"}],
+        }
+    )
+    build = build_registration_rules(
+        structure, "Обмен", objects=[spec], created_at=WHEN, identifier=RULE_ID
+    )
+    assert any("НетТакого" in item for item in build.warnings)
+    empty = parse_registration_object(
+        {"metadata_name": "Документ.Приход", "object_filters": [{"object_property": ""}]}
+    )
+    quiet = build_registration_rules(
+        structure, "Обмен", objects=[empty], created_at=WHEN, identifier=RULE_ID
+    )
+    assert not any("реквизита" in item for item in quiet.warnings)
+
+
 def test_unsupported_filter_form_is_rejected() -> None:
     """Неизвестный вид сравнения, вид группы и пустая группа — ошибка, а не молчаливая подмена."""
     with pytest.raises(ValueError, match="Вид сравнения «ВСписке»"):

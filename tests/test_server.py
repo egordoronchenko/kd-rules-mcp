@@ -321,6 +321,7 @@ async def test_structure_tools(service: Kd2Service) -> None:
         assert forced["reused"] is False
         listed = await _call(client, "structure_list")
         assert [item["structure_id"] for item in listed["structures"]] == ["dump"]
+        assert listed["structures"][0]["extensions"] == []
         objects = await _call(client, "structure_objects", structure_id="dump", kind="Справочник")
         assert "Справочник.Контрагенты" in [item["name"] for item in objects["items"]]
         described = await _call(

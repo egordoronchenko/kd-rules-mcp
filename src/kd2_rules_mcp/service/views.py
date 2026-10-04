@@ -12,7 +12,7 @@ from kd2_rules_mcp.authoring.registration import (
 )
 from kd2_rules_mcp.errors import Kd2Error, ObjectNotFoundError
 from kd2_rules_mcp.kd2.diff import TEXT_LIMIT, clip
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument
+from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument, rule_code
 from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS
 from kd2_rules_mcp.projects import Base, LocalSettings, base_login, dev_env_login, resolve
 from kd2_rules_mcp.structures.queries import MAX_LIMIT, NotFound, Page
@@ -323,7 +323,7 @@ def _group_counts(section: Node) -> list[dict[str, Any]]:
 def _reference_text(tag: str, value: Any) -> Any:
     """Код правила в поле-ссылке без хвостовых пробелов. Значение узла не меняется."""
     if tag in _RULE_CODE_FIELDS and isinstance(value, str):
-        return value.strip()
+        return rule_code(value)
     return value
 
 
@@ -498,6 +498,31 @@ def report_summary(report: ValidationReport) -> dict[str, Any]:
         "by_check": by_check,
         "text": report.summary(),
     }
+
+
+# `rules_validate`: русские подписи ответа и английские синонимы. Регистр не важен.
+_LEVEL_ALIASES = {
+    "ошибка": Level.ERROR.value,
+    "error": Level.ERROR.value,
+    "предупреждение": Level.WARNING.value,
+    "warning": Level.WARNING.value,
+}
+LEVEL_ALLOWED = "«ошибка», «предупреждение», «error», «warning»"
+
+
+def parse_level(level: str | None) -> str | None:
+    """Уровень отбора страницы замечаний. Пусто — без отбора.
+
+    Недопустимое значение — `ValueError` со списком допустимых, до прогона проверок.
+    """
+    if level is None:
+        return None
+    if not isinstance(level, str):
+        raise ValueError(f"Уровень должен быть строкой. Допустимые: {LEVEL_ALLOWED}")
+    found = _LEVEL_ALIASES.get(level.casefold())
+    if found is None:
+        raise ValueError(f"Уровень «{level}» не принимается. Допустимые: {LEVEL_ALLOWED}")
+    return found
 
 
 def report_view(

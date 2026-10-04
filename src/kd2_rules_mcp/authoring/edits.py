@@ -48,7 +48,7 @@ from kd2_rules_mcp.errors import (
     RuleNotFoundError,
     UnknownFieldError,
 )
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node
+from kd2_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
 from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS, Scalar, ValueType
 from kd2_rules_mcp.structures.queries import NotFound, find_object
 from kd2_rules_mcp.validation.address import (
@@ -643,7 +643,7 @@ def _find_coded(rules: ExchangeRules, kind_name: str, key: str) -> tuple[Node, N
 
 def _find_in(container: Node, key: str) -> tuple[Node, Node] | None:
     for item in container.items:
-        if not item.is_group and item.code == key:
+        if not item.is_group and item.code == rule_code(key):
             return container, item
         if item.is_group:
             found = _find_in(item, key)
@@ -1144,7 +1144,8 @@ def _reject_referenced(rules: ExchangeRules, node: Node) -> None:
 
 
 def _referrers(rules: ExchangeRules, code: str, skip: Node) -> list[str]:
-    if not code:
+    wanted = rule_code(code)
+    if not wanted:
         return []
     found: list[str] = []
     for pko in rules.pko():
@@ -1154,13 +1155,13 @@ def _referrers(rules: ExchangeRules, code: str, skip: Node) -> list[str]:
         if properties is None:
             continue
         for path, item in walk_pks(properties):
-            if str(item.get("КодПравилаКонвертации")) == code:
+            if rule_code(item.get("КодПравилаКонвертации")) == wanted:
                 found.append(pks_address(pko.code, path))
     for pvd in rules.pvd():
-        if str(pvd.get("КодПравилаКонвертации")) == code:
+        if rule_code(pvd.get("КодПравилаКонвертации")) == wanted:
             found.append(rule_address(pvd))
     for item in _parameters(rules):
-        if str(item.attrs.get("ПравилоКонвертации", "")) == code:
+        if rule_code(item.attrs.get("ПравилоКонвертации", "")) == wanted:
             found.append(rule_address(item))
     return found
 
@@ -1215,7 +1216,7 @@ def _check_dangling(rules: ExchangeRules, kind_name: str, node: Node) -> None:
     if field_name is None:
         return
     ref = _stored(node, field_name)
-    if not ref or any(item.code == ref for item in rules.pko()):
+    if not ref or any(item.code == rule_code(ref) for item in rules.pko()):
         return
     type_side, type_name = _ref_type(kind_name, node)
     listed = rules.pko()

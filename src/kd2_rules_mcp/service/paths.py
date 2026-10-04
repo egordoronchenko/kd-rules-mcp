@@ -38,9 +38,13 @@ class PathMap:
                 return Path(local, *rest)
         return Path(path)
 
-    def to_host(self, path: Path) -> str:
-        """Локальный путь сервера → путь агента (для ответов)."""
-        text = str(path)
+    def to_host(self, path: Path | str) -> str:
+        """Локальный путь сервера → путь агента (для ответов).
+
+        Строка передаётся как есть: `Path` на Windows переписывает `/projects/…`
+        в `\\projects\\…`, и префикс карты путей больше не совпадает.
+        """
+        text = path if isinstance(path, str) else str(path)
         for host, local in sorted(self.pairs, key=lambda pair: len(pair[1]), reverse=True):
             rest = _strip_prefix(text, local)
             if rest is not None:

@@ -55,7 +55,7 @@ import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node
+from kd2_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
 from kd2_rules_mcp.validation.address import (
     CONVERSION_ADDRESS,
     pks_address,
@@ -64,7 +64,12 @@ from kd2_rules_mcp.validation.address import (
     side_name,
 )
 from kd2_rules_mcp.validation.report import ValidationReport
-from kd2_rules_mcp.validation.structure import Structure
+from kd2_rules_mcp.validation.structure import (
+    REF_ONLY_LOAD_NOTE,
+    Structure,
+    ref_only_pko_codes,
+    unreachable_pko_codes,
+)
 
 ENUM_PKZ = "structure.enum_pkz"
 PREDEFINED_PKZ = "structure.predefined_pkz"
@@ -345,8 +350,8 @@ def _check_posting(
             "нет структуры приёмника — не видно, проводится ли документ",
         )
         return
-    global_mode = _posting_mode(
-        "\n".join(_event(rules, name) for name in _LOAD_MODE_EVENTS),
+    global_mode, global_opaque = _posting_modes(
+        {name: _event(rules, name) for name in _LOAD_MODE_EVENTS},
         algorithms,
     )
     if global_mode == "sets":
@@ -354,22 +359,30 @@ def _check_posting(
     if global_mode == "opaque":
         report.skip(
             DOCUMENT_POSTING,
-            "событие конвертации непрозрачно — не видно, задаёт ли оно режим записи",
+            "событие конвертации "
+            + _quoted(global_opaque)
+            + " непрозрачно — не видно, задаёт ли оно режим записи",
         )
         return
+    unreachable = unreachable_pko_codes(rules)
     for pko in rules.pko():
+        if rule_code(pko.code) in unreachable:
+            continue
         if _disabled(pko) or not _postable(pko, target):
             continue
         if _conducted_pks(pko):
             continue
-        mode = _posting_mode(_posting_handlers(pko), algorithms)
+        mode, opaque = _posting_modes(
+            {event: str(pko.get(event)) for event in _PKO_POSTING_EVENTS},
+            algorithms,
+        )
         if mode == "sets":
             continue
         if mode == "opaque":
             report.skip(
                 DOCUMENT_POSTING,
-                f"{rule_address(pko)}: обработчик непрозрачен — не видно, задаёт ли он "
-                "режим записи или «Проведен»",
+                f"{rule_address(pko)}: обработчик {_quoted(opaque)} непрозрачен — не видно, "
+                "задаёт ли он режим записи или «Проведен»",
             )
             continue
         report.warning(
@@ -380,25 +393,30 @@ def _check_posting(
         )
 
 
+_WRITE_PREFIX = "В «{event}» есть «Объект.Записать(»: запись идёт до установки режима загрузки, "
+_WRITE_DOCUMENT = _WRITE_PREFIX + "проведение выполнится дважды или прервёт загрузку"
+_WRITE_OTHER = _WRITE_PREFIX + "запись выполнится дважды или прервёт загрузку"
+
+
 def _check_object_write(report: ValidationReport, rules: ExchangeRules) -> None:
+    ref_only = ref_only_pko_codes(rules)
     for pko in rules.pko():
         if _disabled(pko):
             continue
         text = str(pko.get("ПослеЗагрузки"))
         if _OBJECT_WRITE.search(_mask(_strip_comments(text))):
-            report.warning(
-                OBJECT_WRITE,
-                rule_address(pko),
-                "В «ПослеЗагрузки» есть «Объект.Записать(»: запись идёт до установки режима "
-                "загрузки, проведение выполнится дважды или прервёт загрузку",
-            )
+            document = str(pko.get("Приемник")).startswith("ДокументСсылка.")
+            template = _WRITE_DOCUMENT if document else _WRITE_OTHER
+            message = template.format(event="ПослеЗагрузки")
+            if rule_code(pko.code) in ref_only:
+                message += REF_ONLY_LOAD_NOTE
+            report.warning(OBJECT_WRITE, rule_address(pko), message)
     conversion = _event(rules, "ПослеЗагрузкиДанных")
     if _OBJECT_WRITE.search(_mask(_strip_comments(conversion))):
         report.warning(
             OBJECT_WRITE,
             CONVERSION_ADDRESS,
-            "В «ПослеЗагрузкиДанных» есть «Объект.Записать(»: запись идёт до установки режима "
-            "загрузки, проведение выполнится дважды или прервёт загрузку",
+            _WRITE_OTHER.format(event="ПослеЗагрузкиДанных"),
         )
 
 
@@ -535,13 +553,29 @@ def _check_incoming(
             )
 
 
-def _posting_handlers(pko: Node) -> str:
-    # `ПриВыгрузке` идёт после записи атрибута `РежимЗаписи` (БСП:924–930, затем БСП:941).
-    # `ПриЗагрузке` — до выбора режима (БСП:10622–10655, решение — БСП:11051).
-    return "\n".join(
-        str(pko.get(event))
-        for event in ("ПередВыгрузкой", "ПередЗагрузкой", "ПриЗагрузке", "ПослеЗагрузки")
-    )
+# `ПриВыгрузке` идёт после записи атрибута `РежимЗаписи` (БСП:924–930, затем БСП:941).
+# `ПриЗагрузке` — до выбора режима (БСП:10622–10655, решение — БСП:11051).
+_PKO_POSTING_EVENTS = ("ПередВыгрузкой", "ПередЗагрузкой", "ПриЗагрузке", "ПослеЗагрузки")
+
+
+def _quoted(names: list[str]) -> str:
+    return ", ".join(f"«{name}»" for name in names)
+
+
+def _posting_modes(events: dict[str, str], algorithms: dict[str, str]) -> tuple[str, list[str]]:
+    """`sets` — хотя бы одно событие задаёт режим; иначе `opaque` с именами непрозрачных."""
+    opaque: list[str] = []
+    for name, text in events.items():
+        if not text.strip():
+            continue
+        mode = _posting_mode(text, algorithms)
+        if mode == "sets":
+            return "sets", []
+        if mode == "opaque":
+            opaque.append(name)
+    if opaque:
+        return "opaque", opaque
+    return "clear", []
 
 
 def _posting_mode(text: str, algorithms: dict[str, str]) -> str:

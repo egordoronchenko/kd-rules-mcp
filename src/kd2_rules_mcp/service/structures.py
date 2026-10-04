@@ -1,5 +1,6 @@
 """Инструменты структур метаданных и списка проектов."""
 
+import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -22,6 +23,19 @@ from kd2_rules_mcp.structures.queries import (
 )
 
 
+def _extension_list(raw: object) -> list[object]:
+    """Список расширений из meta: в кэше это JSON-строка."""
+    if isinstance(raw, list):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 class StructuresMixin(ServiceBase):
     """Загрузка и запросы структур, список проектов."""
 
@@ -37,7 +51,7 @@ class StructuresMixin(ServiceBase):
                     "version": meta.get("config_version", ""),
                     "source": meta.get("source", ""),
                     "source_path": self._host_text(meta.get("source_path", "")),
-                    "extensions": meta.get("extensions", "[]"),
+                    "extensions": _extension_list(meta.get("extensions", "[]")),
                     "loaded_at": meta.get("loaded_at", ""),
                 }
             )

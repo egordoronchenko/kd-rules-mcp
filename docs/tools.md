@@ -386,7 +386,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `project_id` | string | обязательный | Идентификатор рабочего проекта правил (rules_projects) |
 | `source_structure` | string \| null | `null` | Структура источника (у правил регистрации — где живёт план обмена) |
 | `target_structure` | string \| null | `null` | Структура приёмника правил обмена |
-| `level` | string \| null | `null` | Только «ошибка» или только «предупреждение» |
+| `level` | string \| null | `null` | Только ошибки или только предупреждения: «ошибка», «предупреждение», error или warning |
 | `check_prefix` | string \| null | `null` | Префикс идентификатора проверки: format., structure.… |
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
@@ -791,10 +791,10 @@ rebuild и changed_input_groups; имена изменившихся входо�
 |---|---|
 | `project_list` | `workspace` — рабочая папка путём агента; `shared_mcp` — общие серверы без префикса; `projects` — по проекту: `project`, `name`, `available`, `folder` — папка проекта путём агента, если задана на сервере (иначе ключа нет), `configurations` (`structure_id`, `dump`, `extensions`), `bases` (`role`, `configuration`, `login` — `true`, если логин задан в `logins` или `.dev.env`, иначе `false`; имя и пароль не отдаются; сервер не видит `projects.local.yaml` — признак только по `.dev.env`; у песочницы — `data_mcp` и `data_mcp_server`), `code_mcp`, `code_mcp_server`, `rules_dir` (`path`, `writable`) — если задан; `exchanges` — `plan`, `projects`. `code_mcp`/`data_mcp` — имена как в `.mcp.json` проекта (работа из папки проекта 1С), `code_mcp_server`/`data_mcp_server` — с префиксом проекта (работа из папки сервера) |
 | `structure_load_project` | как у `structure_load_xml` + `project`, `configuration` |
-| `structure_list` | `structures` — `structure_id`, `configuration`, `synonym`, `version`, `source`, `source_path`, `extensions`, `loaded_at` |
+| `structure_list` | `structures` — `structure_id`, `configuration`, `synonym`, `version`, `source`, `source_path` (путь агента), `extensions` (список путей, не JSON-строка), `loaded_at` |
 | `structure_load_xml`, `structure_load_md83exp` | `structure_id`, `reused`, `counts`, `elapsed_s`, `message`; при неразрешённых типах — `unresolved_total`, `unresolved_top` (до 20) |
 | `structure_objects` | страница списка: элементы — `name` (`Вид.Имя`), `type_name`, `synonym` |
-| `structure_object` | `name`, `type_name`, `kind`, `synonym`, `attrs`, `properties` (страница списка) |
+| `structure_object` | `name`, `type_name`, `kind`, `synonym`, `attrs`, `properties` (страница списка). Имя без вида (`ФизическиеЛица`): объект один — он и возвращается; несколько — `object_not_found` с полными именами. Похожие ищутся по имени без вида. `date_parts` в квалификаторах свойства — только у типа «Дата» |
 | `structure_values`, `structure_plan_content` | страница списка |
 | `structure_compare` | `counts`, `limit`, `added_objects`, `removed_objects`, `added_properties`, `removed_properties`, `changed_properties`, `added_values`, `removed_values` (каждый список — до `limit`) |
 | `match_objects` | страница списка: элементы — `confidence`, `auto`, `source`, `target` (`Вид.Имя`), `synonym`, `note` |
@@ -810,11 +810,11 @@ rebuild и changed_input_groups; имена изменившихся входо�
 | `rules_pack` | `path`, `size_bytes`, `load_with` (форма загрузки в БСП), `files` (`file`, `path`, `size_bytes`, `rules`), `warnings` |
 | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates` | итог правки: `address` и только непустые списки `warnings` (строки `<проверка>: <текст>`), `skipped`, `not_applied`, `unresolved`, `disabled` — ключа нет, значит список пуст |
 | `rule_update_many` | `owner`, `kind`, `count`, `updated` — итог правки на каждую цель |
-| `rules_validate` | `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница списка: `level`, `check`, `address`, `message`) |
+| `rules_validate` | `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` (страница списка: `level`, `check`, `address`, `message`). `level`: «ошибка», «предупреждение», `error`, `warning` (регистр не важен); иное — `invalid_argument` со списком допустимых до проверки |
 | `rules_diff` | `left`, `right` (`project_id` или `path` — путь агента), `kind` (`exchange` или `registration`), `ignored_fields` (пусто при `include_header`; иначе `ДатаВремяСоздания` и `Ид`), `summary` (только непустые разделы: `added`, `removed`, `changed`), `changes` (страница: `section`, `address`, `change`, и при изменении поля — `field`, `old`, `new`, `handler_diff`). Добавленное или удалённое правило — одна строка, его содержимое не раскрывается |
 | `handlers_export` | `folder`, `count`, `removed` (число удалённых прежних обёрток), `files` (`file`, `address`, `event`), `has_more` |
 | `handlers_locate` | `found`; если найдено — `address`, `event`, `handler_line`, иначе `file`, `line` |
-| `registration_build` | проект правил + `warnings` |
+| `registration_build` | проект правил + `warnings`. Реквизита отбора нет в структуре объекта — строка в `warnings`, правила при этом создаются. Неизвестный ключ объекта или отбора — `invalid_argument` со списком допустимых, до сборки |
 | `correspondent_draft` | проект правил + `draft`, `missing`, `notes`, `handlers_total`, `handlers` (`address`, `event`, `note`, `code`), `disabled_total`, `disabled` (`address`, `reason`) |
 
 ## EnterpriseData: порядок, адреса и ответы
@@ -1018,12 +1018,12 @@ text_offset=0, text_limit=2000, 1≤text_limit≤8000. Без `include_text` и�
 | рабочего проекта правил нет (не открывался или закрыт `rules_close`) | `project_not_found` | все, что принимают `project_id` |
 | явный идентификатор нового проекта уже занят | `duplicate_project` | `rules_create`, `registration_build`, `correspondent_draft` |
 | путь записи вне рабочей папки и `rules_dir` | `path_outside_workspace` | `rules_save`, `rules_pack`, `handlers_export` |
-| путь чтения серверу не виден или не найден; папка проекта не задана; `handlers_locate` до `handlers_export`; отрицательное смещение; разные виды правил; пустые поля `rule_update_many` | `rejected` | `structure_load_*`, `rules_open`, `rules_pack`, `rules_diff`, `handlers_locate`, `rule_update_many`, списки |
+| путь чтения серверу не виден или не найден; папка проекта не задана; `handlers_locate` до `handlers_export`; отрицательное смещение; разные виды правил; пустые поля `rule_update_many`. Файла нет внутри рабочей папки, папки проекта или `rules_dir` — текст «Файл не найден»; путь вне этих папок — «путь не входит в подключённые папки» | `rejected` | `structure_load_*`, `rules_open`, `rules_pack`, `rules_diff`, `handlers_locate`, `rule_update_many`, списки |
 | файл правил или снимок проекта не разбирается | `rules_format` | `rules_open`, `rules_pack`, `rules_diff`, обращение к проекту с битым снимком |
 | файл структуры не разбирается | `structure_format` | `structure_load_xml`, `structure_load_md83exp`, `structure_load_project` |
 | ошибка в `projects.yaml`, неизвестный проект, конфигурация или база | `project_config` | `project_list`, `structure_load_project` |
 | отказ правки | `unknown_field`, `duplicate_rule`, `ambiguous_address`, `rule_not_found`, `dangling_reference`, `edit_rejected` | `rule_create`, `rule_update`, `rule_update_many`, `rule_delete`, `pko_create_from_candidates`, `rules_get` (`rule_not_found`, `ambiguous_address`) |
-| неизвестный уровень или класс уверенности | `invalid_argument` | `rules_validate` и `ed_validate` (`level`), `match_*` (`confidence`) |
+| неизвестный уровень или класс уверенности. `rules_validate`: «ошибка», «предупреждение», `error`, `warning`. `ed_validate`: только «ошибка» и «предупреждение» | `invalid_argument` | `rules_validate` и `ed_validate` (`level`), `registration_build` (неизвестный ключ), `match_*` (`confidence`) |
 | непредвиденное исключение сервера (трассировка в логе сервера) | `internal` | все инструменты |
 
 ## Схема формата EnterpriseData

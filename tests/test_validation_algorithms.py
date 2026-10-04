@@ -14,6 +14,7 @@ from kd2_rules_mcp.validation.algorithms import (
     references,
 )
 from kd2_rules_mcp.validation.report import Level
+from kd2_rules_mcp.validation.structure import REF_ONLY_LOAD_NOTE
 from tests.corpus import EXCHANGE_KINDS, CorpusFile, corpus_params
 
 _HEAD = "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>"
@@ -107,6 +108,34 @@ def test_references_skip_comments_literals_and_methods() -> None:
     assert references(text) == ["Настоящий"]
 
 
+def test_ref_only_pko_load_handler_is_warning() -> None:
+    """Обработчики загрузки ПКО, которое уходит только ссылкой, не исполняются."""
+    body = (
+        "<ПравилаКонвертацииОбъектов>"
+        "<Правило><Код>Шапка</Код><Источник>ДокументСсылка.А</Источник>"
+        "<Приемник>ДокументСсылка.Б</Приемник><Свойства>"
+        '<Свойство><Источник Имя="Контрагент" Вид="Реквизит"/>'
+        '<Приемник Имя="Контрагент" Вид="Реквизит"/>'
+        "<КодПравилаКонвертации>Контрагенты</КодПравилаКонвертации></Свойство>"
+        "</Свойства></Правило>"
+        "<Правило><Код>Контрагенты</Код>"
+        "<Источник>СправочникСсылка.Контрагенты</Источник>"
+        "<Приемник>СправочникСсылка.Контрагенты</Приемник>"
+        "<ПередЗагрузкой>Выполнить(Алгоритмы.Нет);</ПередЗагрузкой>"
+        "<ПоследовательностьПолейПоиска>Выполнить(Алгоритмы.Нет);</ПоследовательностьПолейПоиска>"
+        "<ПередВыгрузкой>Выполнить(Алгоритмы.Нет);</ПередВыгрузкой>"
+        "</Правило></ПравилаКонвертацииОбъектов>"
+    )
+    issues = check_algorithm_refs(_rules(body)).issues
+    by_event = {issue.address.split(" / ", 1)[1]: issue for issue in issues}
+    load = by_event["ПередЗагрузкой"]
+    assert load.level is Level.WARNING
+    assert load.check == MISSING_ALGORITHM
+    assert REF_ONLY_LOAD_NOTE.strip() in load.message
+    assert by_event["ПоследовательностьПолейПоиска"].level is Level.ERROR
+    assert by_event["ПередВыгрузкой"].level is Level.ERROR
+
+
 @pytest.mark.corpus
 @pytest.mark.parametrize("item", corpus_params(EXCHANGE_KINDS))
 def test_corpus_algorithm_issues_match_xml(item: CorpusFile) -> None:
@@ -120,7 +149,12 @@ def test_corpus_algorithm_issues_match_xml(item: CorpusFile) -> None:
         for element in parse_xml(raw).iterfind("Алгоритмы//Алгоритм")
     }
     for issue in check_algorithm_refs(load_exchange_rules(item.path)).issues:
-        assert issue.level is Level.ERROR, item.id
+        _event = issue.address.rpartition(" / ")[2]
+        if issue.level is Level.WARNING:
+            assert _event in {"ПередЗагрузкой", "ПриЗагрузке", "ПослеЗагрузки"}, item.id
+            assert "только ссылкой" in issue.message, item.id
+        else:
+            assert issue.level is Level.ERROR, item.id
         assert issue.address, item.id
         match = _ISSUE_NAME.search(issue.message)
         assert match is not None, issue.message

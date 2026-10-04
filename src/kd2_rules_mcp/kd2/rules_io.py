@@ -19,7 +19,13 @@ from kd2_rules_mcp.kd2.schema import (
     ValueType,
     kind,
 )
-from kd2_rules_mcp.kd2.xmlstyle import XmlStyle, XmlWriter, detect_style
+from kd2_rules_mcp.kd2.xmlstyle import (
+    XmlStyle,
+    XmlWriter,
+    detect_style,
+    preserve_line_endings,
+    same_text_lines,
+)
 
 SUPPORTED_FORMAT_VERSION = "2.01"
 _INT = re.compile(r"-?\d+")
@@ -137,8 +143,11 @@ def load_rules(source: bytes | Path) -> ExchangeRules | RegistrationRules:
     node = _parse_node(root, root_kind, root_tag)
     style = detect_style(raw)
     if root_tag == "ПравилаОбмена":
-        return ExchangeRules(node, style)
-    return RegistrationRules(node, style)
+        document: ExchangeRules | RegistrationRules = ExchangeRules(node, style)
+    else:
+        document = RegistrationRules(node, style)
+    document.origin = raw
+    return document
 
 
 def load_exchange_rules(source: bytes | Path) -> ExchangeRules:
@@ -252,7 +261,17 @@ def _write_node(writer: XmlWriter, node: Node) -> None:
 
 
 def dump_rules(document: RulesDocument, style: XmlStyle | None = None) -> bytes:
-    """Экспорт правил в XML в стиле КД; по умолчанию — в стиле исходного файла."""
+    """Экспорт правил в XML в стиле КД; по умолчанию — в стиле исходного файла.
+
+    Без явного стиля концы строк неизменённых строк берутся из исходного файла:
+    выгрузка КД мешает CRLF и LF, а один перевод на весь файл раздувает текстовый дифф.
+    """
     writer = XmlWriter(style or document.style)
     _write_node(writer, document.root)
-    return writer.result()
+    written = writer.result()
+    if style is None and document.origin:
+        # Неизменённый файл — те же байты, без построчного диффа: на большом макете он квадратичный.
+        if same_text_lines(document.origin, written):
+            return document.origin
+        return preserve_line_endings(document.origin, written)
+    return written

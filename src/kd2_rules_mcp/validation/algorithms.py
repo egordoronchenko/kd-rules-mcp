@@ -32,7 +32,12 @@ from enum import Enum
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node
 from kd2_rules_mcp.validation.address import rule_address
 from kd2_rules_mcp.validation.handlers import ALGORITHM_EVENT, collect_handlers
-from kd2_rules_mcp.validation.report import ValidationReport
+from kd2_rules_mcp.validation.report import Issue, Level, ValidationReport
+from kd2_rules_mcp.validation.structure import (
+    PKO_LOAD_EVENTS,
+    REF_ONLY_LOAD_NOTE,
+    ref_only_pko_addresses,
+)
 
 MISSING_ALGORITHM = "algorithm.missing"
 WRONG_MODE = "algorithm.wrong_mode"
@@ -92,7 +97,36 @@ def check_algorithm_refs(rules: ExchangeRules) -> ValidationReport:
         if isinstance(text, str):
             address = f"{rule_address(node)} / {ALGORITHM_EVENT}"
             _check_text(report, text, address, _phase_of_algorithm(node), names)
+    _soften_ref_only_load(report, rules)
     return report
+
+
+def _soften_ref_only_load(report: ValidationReport, rules: ExchangeRules) -> None:
+    """Обработчики загрузки ПКО «только ссылка» исполнителем не вызываются (БСП:7984–8010)."""
+    addresses = ref_only_pko_addresses(rules)
+    if not addresses:
+        return
+    softened: list[Issue] = []
+    for issue in report.issues:
+        head, separator, event = issue.address.rpartition(" / ")
+        if (
+            separator
+            and head in addresses
+            and event in PKO_LOAD_EVENTS
+            and issue.check in (MISSING_ALGORITHM, WRONG_MODE)
+            and issue.level is Level.ERROR
+        ):
+            softened.append(
+                Issue(
+                    Level.WARNING,
+                    issue.check,
+                    issue.address,
+                    issue.message + REF_ONLY_LOAD_NOTE,
+                )
+            )
+        else:
+            softened.append(issue)
+    report.issues = softened
 
 
 def references(text: str) -> list[str]:

@@ -591,6 +591,39 @@ def test_delete_and_rename_of_referenced_pko_are_refused() -> None:
     _assert_sound(rules)
 
 
+def test_padded_pko_code_still_blocks_delete_and_rename() -> None:
+    """КД дополняет код пробелами; ссылка с другим хвостом всё равно держит ПКО."""
+    rules = _rules()
+    org = "СправочникСсылка.Организации"
+    create_rule(rules, "pko", "Организации", {"Источник": org, "Приемник": org})
+    create_rule(
+        rules, "pko", "Док", {"Источник": "ДокументСсылка.Док", "Приемник": "ДокументСсылка.Док"}
+    )
+    create_rule(
+        rules,
+        "pks",
+        "Организация",
+        {"Приемник": _side("Организация", "Реквизит", org), "КодПравилаКонвертации": "Организации"},
+        owner="Док",
+    )
+    padded = "Организации".ljust(50)
+    pko = next(item for item in rules.pko() if item.code == "Организации")
+    pko.values["Код"] = padded
+    pks = next(item for item in rules.pko() if item.code == "Док").child("Свойства")
+    assert pks is not None
+    pks.items[0].values["КодПравилаКонвертации"] = "Организации" + " " * 3
+    before = dump_rules(rules)
+    with pytest.raises(DanglingReferenceError, match="удалить нельзя"):
+        delete_rule(rules, "pko", padded)
+    with pytest.raises(DanglingReferenceError, match="изменить нельзя"):
+        update_rule(rules, "pko", "Организации", {"Код": "Другой"})
+    assert dump_rules(rules) == before
+    update_rule(rules, "pko", padded, {"Комментарий": "жив"})
+    assert (
+        next(item for item in rules.pko() if item.code == "Организации").get("Комментарий") == "жив"
+    )
+
+
 def test_structure_checks_refuse_missing_object_property_and_value(tmp_path: Path) -> None:
     source = _Builder(tmp_path / "source.sqlite")
     target = _Builder(tmp_path / "target.sqlite")

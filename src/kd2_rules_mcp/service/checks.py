@@ -5,7 +5,7 @@ from typing import Any
 from kd2_rules_mcp.errors import Kd2Error
 from kd2_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
 from kd2_rules_mcp.service.base import ServiceBase
-from kd2_rules_mcp.service.views import page_limit, report_view
+from kd2_rules_mcp.service.views import page_limit, parse_level, report_view
 from kd2_rules_mcp.validation.algorithms import check_algorithm_refs
 from kd2_rules_mcp.validation.exchange_plan import check_exchange_plan
 from kd2_rules_mcp.validation.format import check_format
@@ -29,6 +29,8 @@ class ChecksMixin(ServiceBase):
         limit: int,
         exchange_project_id: str | None = None,
     ) -> dict[str, Any]:
+        # Уровень проверяется до обхода правил: отказ не должен ждать полную проверку.
+        selected = parse_level(level)
         with self._lock, self._sides(source_structure, target_structure) as (source, target):
             document = self._document(project_id)
             report = check_format(document)
@@ -41,7 +43,7 @@ class ChecksMixin(ServiceBase):
             elif isinstance(document, RegistrationRules):
                 exchange = self._exchange(exchange_project_id) if exchange_project_id else None
                 report.extend(check_registration(document, source, exchange_rules=exchange))
-        return report_view(report, level, check_prefix, offset, limit)
+        return report_view(report, selected, check_prefix, offset, limit)
 
     def handlers_export(self, project_id: str, folder: str, limit: int) -> dict[str, Any]:
         with self._lock:
