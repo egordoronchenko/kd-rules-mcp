@@ -62,6 +62,7 @@ from kd2_rules_mcp.ed.address import AmbiguousAddressError, EntityNotFoundError,
 from kd2_rules_mcp.ed.layer_model import LayerDescriptor
 from kd2_rules_mcp.ed.layer_reader import read_extension_text
 from kd2_rules_mcp.ed.layers import compose_manager
+from kd2_rules_mcp.ed.lexer import lex
 from kd2_rules_mcp.ed.model import Classification, ObjectRule
 from kd2_rules_mcp.ed.refs import build_references
 from kd2_rules_mcp.ed.schema import EdSchema
@@ -211,9 +212,7 @@ def _failure(error: AuthoringPreconditionError) -> EdAuthoringPreconditionError:
                 {
                     "id": f.id,
                     "address": f.address,
-                    "message": f"Тело не прошло проверку {f.id}; строка {f.line}"
-                    if f.id.startswith("ed.author.body_")
-                    else f.message,
+                    "message": f.message,
                     "source": {"file": f.file, "line": f.line},
                 }
                 for f in error.failures
@@ -1025,20 +1024,33 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         self, operation: Operation, entries: dict[tuple[str, str, str], _Inputs]
     ) -> tuple[str, str, str]:
         """После перезапуска прежние решения восстанавливаются по карте, без хранимого draft."""
-        entry = next(iter(entries.values()))
         target = operation.target
-        plans = [
-            p for p in entry.value.routes.plans if p.plan_name.casefold() == target.plan.casefold()
-        ]
+        if entries:
+            entry = next(iter(entries.values()))
+            route, structure_id = entry.route, entry.structure_id
+        else:
+            root = self._project_root(target.project, target.configuration)
+            route, _, stale = self._open_snapshot(root, target.project, target.configuration, False)
+            if stale:
+                raise EdAuthoringStaleError(
+                    "Снимок маршрутов изменился; повторите ed_routes с force", {}
+                )
+            config = self._catalog().configuration(target.project, target.configuration)
+            folder = self.settings.project_dirs[target.project]
+            structure_id = "ed-authoring-" + digest((target.project, target.configuration))[:24]
+            self.store.load_xml(
+                structure_id, root, [resolve(folder, path) for path in config.extensions]
+            )
+        plans = [p for p in route.profile.plans if p.plan_name.casefold() == target.plan.casefold()]
         names = {
             e.manager_name
             for p in plans
             for e in p.entries
             if e.key == target.format_version and e.state == "effective" and e.manager_name
         }
-        managers = [m for m in entry.value.routes.managers if m.name in names and m.path]
+        managers = [m for m in route.profile.managers if m.name in names and m.path]
         uris = {_format_uri(p.base_namespace, target.format_version) for p in plans}
-        packages = [p for p in entry.value.routes.packages if p.namespace in uris]
+        packages = [p for p in route.profile.packages if p.namespace in uris]
         if len(managers) != 1 or len(packages) != 1:
             raise AuthoringPreconditionError(
                 (
@@ -1049,10 +1061,10 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     ),
                 )
             )
-        opened = self.ed_open(self._host(entry.route.root / (managers[0].path or "")))
+        opened = self.ed_open(self._host(route.root / (managers[0].path or "")))
         if opened["source_changed"]:
             self.ed_close(opened["project_id"])
-            opened = self.ed_open(self._host(entry.route.root / (managers[0].path or "")))
+            opened = self.ed_open(self._host(route.root / (managers[0].path or "")))
         schema = self.ed_schema_open(
             target.format_version,
             project=target.project,
@@ -1067,7 +1079,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 configuration=target.configuration,
                 package=packages[0].metadata_name,
             )
-        return opened["project_id"], schema["schema_id"], entry.structure_id
+        return opened["project_id"], schema["schema_id"], structure_id
 
     def _previous_failure(self, error: AuthoringPreconditionError, operation: Operation):
         mapped = _failure(error)
@@ -1496,6 +1508,41 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                         "line_end": prop.span.line_end,
                     }
                 )
+        previous_calls = []
+        statements = lex(generated.source).statements
+        for binding in plan.bindings:
+            if not binding.previous_name:
+                continue
+            routine = next(r for r in generated.routines if r.name == binding.handler_name)
+            calls = [
+                s
+                for s in statements
+                if routine.body_span.char_start <= s.span.char_start < routine.body_span.char_end
+                and len(s.tokens) > 1
+                and s.tokens[0].folded == binding.previous_name.casefold()
+                and s.tokens[1].value == "("
+            ]
+            if len(calls) != 1:
+                raise AuthoringPreconditionError(
+                    (
+                        Failure(
+                            "ed.author.new_issues",
+                            binding.target.pko_address,
+                            "Прежний обработчик должен вызываться один раз",
+                        ),
+                    )
+                )
+            rule = base_index.find(binding.target.pko_address)
+            assert isinstance(rule, ObjectRule)
+            previous_calls.append(
+                {
+                    "target_name": binding.previous_name,
+                    "rule_name": rule.declared_name or rule.name,
+                    "event": binding.event,
+                    "call_count": len(calls),
+                    "source": {"file": "modules/" + module_path, "line": calls[0].span.line_start},
+                }
+            )
         expected_previous = {b.previous_name for b in plan.bindings if b.previous_name}
         for call in generated.previous_calls:
             if call.target_name not in expected_previous or call.call_count != 1:
@@ -1538,11 +1585,27 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 if c.before.direction == op.target.direction and not c.delta.no_new_issues
             )
             if incompatible:
+                reasons = sorted(
+                    {
+                        f"Версия {c.before.version}: {i.address}: {i.message}"
+                        for c in other_comparisons
+                        if c.before.direction == op.target.direction
+                        and c.before.version in incompatible
+                        for i in c.delta.new
+                    }
+                    | {
+                        f"Версия {c.before.version}: {s.check}: {s.reason}"
+                        for c in other_comparisons
+                        if c.before.direction == op.target.direction
+                        and c.before.version in incompatible
+                        for s in c.delta.new_relevant_skipped
+                    }
+                )
                 notice = Notice(
                     "ed.author.other_version_incompatible",
                     op.operation_id,
                     op.target.pko_address,
-                    "Доработка несовместима с другими версиями менеджера",
+                    "Доработка несовместима с другими версиями менеджера: " + "; ".join(reasons),
                     tuple(sorted(set(incompatible))),
                 )
                 notices[notice.notice_id] = notice
@@ -1592,16 +1655,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 }
                 for b in plan.bindings
             ],
-            previous_calls=[
-                {
-                    "target_name": c.target_name,
-                    "rule_name": c.rule_name,
-                    "event": c.event,
-                    "call_count": c.call_count,
-                    "source": {"file": c.span.file_id, "line": c.span.line_start},
-                }
-                for c in generated.previous_calls
-            ],
+            previous_calls=previous_calls,
             body_refs={"known": body_known, "unparsed": body_unparsed, "bytes": body_bytes},
             source_map=source_map,
             template_evidence={
@@ -1674,8 +1728,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             raise ValueError("delivery: extension или manual")
         if version_scope not in (None, "manager"):
             raise ValueError("version_scope: manager или null")
-        if not isinstance(operations, list) or not operations:
-            raise ValueError("Нужен непустой список операций")
+        if not isinstance(operations, list):
+            raise ValueError("Нужен список операций")
         self._limit(len(operations), MAX_OPERATIONS, "операции")
         identity_data = _mapping(
             extension, "extension", {"name", "prefix", "synonym", "version", "compatibility_mode"}
@@ -1738,16 +1792,20 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                             )
                         )
                     manager_versions[manager_path] = op.target.format_version
-                first_entry = next(iter(entries.values()))
+                config_path = self._project_root(project, configuration) / "Configuration.xml"
                 config_description = read_description(
                     "Configuration.xml",
-                    self._description(first_entry, "Configuration.xml"),
+                    self._description(next(iter(entries.values())), "Configuration.xml")
+                    if entries
+                    else config_path.read_text("utf-8-sig"),
                     "Configuration",
                 )
                 destination = self._destination(
                     artifact_name(identity.name, config_description.uuid), output_dir
                 )
                 previous, previous_files = self._previous(destination)
+                if not operations and previous is None:
+                    raise ValueError("Нужен непустой список операций без прежнего комплекта")
                 previous_operations = (
                     (*previous.operations, *previous.handler_operations) if previous else ()
                 )
@@ -1757,6 +1815,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 if set(drop_operations) - previous_ids:
                     raise ValueError("drop_operations содержит операцию вне прежнего комплекта")
                 retained_ids = previous_ids - set(drop_operations)
+                if previous and not retained_ids and not operations:
+                    raise ValueError("Итоговый набор операций должен оставаться непустым")
                 if previous:
                     if previous.identity != identity:
                         raise _failure(
@@ -1808,6 +1868,22 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 use_handlers = bool(previous and previous.schema_version == 2) or any(
                     not isinstance(op, AddHeaderProperty) for ops in groups.values() for op in ops
                 )
+                known_attributes: dict[tuple[str, str], frozenset[str]] = {}
+                for refs, ops in groups.items():
+                    index = self._ed_project(refs[0]).index
+                    for op in ops:
+                        if not isinstance(op, AddHeaderProperty) or not op.new_attribute:
+                            continue
+                        try:
+                            rule = index.find(op.target.pko_address)
+                        except (EntityNotFoundError, AmbiguousAddressError):
+                            continue
+                        if isinstance(rule, ObjectRule):
+                            key, _ = metadata_key(rule.configuration_object.value)
+                            if key:
+                                known_attributes[key] = known_attributes.get(key, frozenset()) | {
+                                    op.new_attribute.name.casefold()
+                                }
                 self._limit(len({r[0] for r in entries}), MAX_MANAGERS, "менеджеры")
                 for refs, ops in groups.items():
                     entry = entries[refs]
@@ -1823,7 +1899,13 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     if use_handlers:
                         ops = list(merge_operations((), tuple(ops)))
                     prepared_key = digest(
-                        (tuple(ops), identity, version_scope, entry.value.source_set)
+                        (
+                            tuple(ops),
+                            identity,
+                            version_scope,
+                            entry.value.source_set,
+                            known_attributes if use_handlers else None,
+                        )
                     )
                     with _phase("prepare"):
                         if entry.prepared is None or entry.prepared_key != prepared_key:
@@ -1845,7 +1927,11 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                                         raise self._previous_failure(error, old) from error
                             if use_handlers:
                                 entry.prepared = prepare_handler_operations(
-                                    entry.value, tuple(ops), identity, version_scope=version_scope
+                                    entry.value,
+                                    tuple(ops),
+                                    identity,
+                                    version_scope=version_scope,
+                                    known_attributes=known_attributes,
                                 )
                             else:
                                 entry.prepared = prepare_authoring(
@@ -2041,6 +2127,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     rebuild=bool(previous and (changed_inputs or drop_operations)),
                     changed_inputs=changed_inputs,
                     handler_plans=handler_plans,
+                    previous=previous,
+                    previous_files=previous_files,
                     migration=bool(previous and previous.schema_version == 1 and use_handlers),
                 )
                 if mode == "preview":

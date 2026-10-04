@@ -332,6 +332,7 @@ def render_handlers_instruction(
     paths: tuple[str, ...],
     projects: tuple[str, ...] = (),
     form_evidence: Mapping[str, bool] | None = None,
+    pko_names: Mapping[str, str] | None = None,
 ) -> str:
     """Инструкция §7. Подстановки только для применимых событий и preset.
 
@@ -345,9 +346,14 @@ def render_handlers_instruction(
         .read_text("utf-8")
     )
     has_preset = any(isinstance(op, PreserveMissingHeaderProperty) for op in plan.operations)
+    has_missing_section = has_preset or any(
+        isinstance(op, AddHeaderProperty) and op.target.direction == "receive"
+        for op in plan.operations
+    )
     for condition, active in (
+        ("has_missing_section", has_missing_section),
         ("has_preset", has_preset),
-        ("no_preset", not has_preset),
+        ("no_preset", has_missing_section and not has_preset),
         ("extension", delivery == "extension"),
         ("manual", delivery != "extension"),
     ):
@@ -358,6 +364,8 @@ def render_handlers_instruction(
             flags=re.S,
         )
     names = _pko_labels(plan.operations, plan.bindings)
+    if pko_names is not None:
+        names.update(pko_names)
     paragraphs = []
     for binding in _bindings_in_order(plan):
         label = names.get(binding.target.pko_address, binding.target.pko_address)
@@ -388,7 +396,9 @@ def render_handlers_instruction(
             "значением. Пустое значение отправитель в сообщение не пишет, поэтому очистить "
             "реквизит приёмника пустым значением нельзя — сохранится прежнее; для намеренной "
             "очистки нужна отдельная договорённость сторон. Подписки и обработчики конфигурации "
-            "при записи объекта могут изменить реквизит независимо от этого правила."
+            "при записи объекта могут изменить реквизит независимо от этого правила. "
+            "Явно переданное пустое значение (пустой элемент в сообщении) реквизит очищает: "
+            "обработчик сохраняет значение только при отсутствии свойства."
         )
     evidence = {
         binding.handler_name: binding.runtime_verified
@@ -437,6 +447,7 @@ def render_handlers_instruction(
             "preserve_paragraphs": "\n\n".join(preserves),
             "runtime_verified": str(plan.runtime_verified).lower(),
             "runtime_status": status,
+            "runtime_probes": handler_runtime_probes(plan, names, paths),
             "unverified_table": table(
                 ("Форма не проверена обменом",), ((name,) for name in unverified)
             )
@@ -459,6 +470,50 @@ def render_handlers_instruction(
                 result,
             )
     return re.sub(r"\n{3,}", "\n\n", result).rstrip() + "\n"
+
+
+def handler_runtime_probes(
+    plan: HandlerOperationsPlan, names: Mapping[str, str], paths: tuple[str, ...]
+) -> str:
+    """Проба назначенного имени: только заполнение правил и чтение события."""
+    module = next(
+        (path.split("/")[2] for path in paths if path.startswith("modules/CommonModules/")),
+        "<менеджер>",
+    )
+    blocks = []
+    for direction in ("send", "receive"):
+        bindings = [b for b in _bindings_in_order(plan) if b.target.direction == direction]
+        if not bindings:
+            continue
+        lines = [
+            "Правила = ОбменДаннымиXDTOСервер.КоллекцияПравилКонвертации("
+            f"{bsl_string(str(plan.manager_interface))});"
+        ]
+        if plan.manager_interface == 3:
+            lines.extend(
+                [
+                    f"// КомпонентыОбмена из типового пути: {direction_label(direction)}.",
+                    f"{module}.{FILLER}(КомпонентыОбмена, Правила, Истина);",
+                    f"{module}.{FILLER}(КомпонентыОбмена, Правила, Ложь);",
+                ]
+            )
+        else:
+            lines.append(f"{module}.{FILLER}({bsl_string(direction_label(direction))}, Правила);")
+        for binding in bindings:
+            name = names[binding.target.pko_address]
+            lines.extend(
+                [
+                    f'Правило = Правила.Найти({bsl_string(name)}, "ИмяПКО");',
+                    "Если Правило = Неопределено Тогда",
+                    f"\tСообщить({bsl_string('ПКО ' + name + ' отсутствует')});",
+                    "Иначе",
+                    f"\tСообщить(Строка(Правило.{binding.event})); "
+                    f"// Ожидается: {binding.handler_name}",
+                    "КонецЕсли;",
+                ]
+            )
+        blocks.append("```bsl\n" + "\n".join(lines) + "\n```")
+    return "\n\n".join(blocks) or "В комплекте нет привязок обработчиков."
 
 
 def _bindings_in_order(plan: HandlerOperationsPlan) -> tuple[HandlerBindingPlan, ...]:

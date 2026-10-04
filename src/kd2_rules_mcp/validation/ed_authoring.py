@@ -9,7 +9,11 @@ from typing import Any, cast
 from kd2_rules_mcp.authoring.ed.candidates import compatibility, target_objects
 from kd2_rules_mcp.authoring.ed.canonical import canonicalize_operations
 from kd2_rules_mcp.authoring.ed.context import AuthoringContext
-from kd2_rules_mcp.authoring.ed.handlers import HandlerOperationsPlan, canonical_operations_bytes
+from kd2_rules_mcp.authoring.ed.handlers import (
+    HandlerOperationsPlan,
+    canonical_operations_bytes,
+    handler_name,
+)
 from kd2_rules_mcp.authoring.ed.hook import generate_hook
 from kd2_rules_mcp.authoring.ed.model import (
     AddHeaderProperty,
@@ -24,6 +28,7 @@ from kd2_rules_mcp.authoring.ed.model import (
     ProfileComparison,
     ProfileReport,
     Projection,
+    SetObjectHandler,
     ValidationDelta,
     digest,
     runtime_verified,
@@ -54,9 +59,10 @@ def prepare_handler_operations(
     identity: ExtensionIdentity,
     *,
     version_scope: str | None,
+    known_attributes: Mapping[tuple[str, str], frozenset[str]] | None = None,
 ) -> HandlerOperationsPlan:
     """Запуск A: канонические решения и предусловия, ещё без проекции/отрисовки B."""
-    from .ed_authoring_handlers import validate_handler_operations
+    from .ed_authoring_handlers import check_body, validate_handler_operations
 
     if not operations:
         raise ValueError("Нужна хотя бы одна операция")
@@ -66,6 +72,24 @@ def prepare_handler_operations(
         raise EdAuthoringResourceLimitError("В одном вызове допускается не более 100 операций")
     context = AuthoringContext(inputs)
     canonical = canonicalize_operations(inputs, operations, context)
+    if known_attributes:
+        for op in canonical:
+            if isinstance(op, SetObjectHandler):
+                rule = context.index(inputs.document).find(op.target.pko_address)
+                assert isinstance(rule, ObjectRule)
+                context.handler_bodies[op.operation_id] = check_body(
+                    inputs,
+                    op,
+                    context,
+                    operations=canonical,
+                    known_attributes=known_attributes,
+                    wrapper_name=handler_name(
+                        identity.prefix,
+                        rule.declared_name or rule.name,
+                        op.target.direction,
+                        op.event,
+                    ),
+                )
     notices = validate_preconditions(
         inputs, canonical, identity, version_scope=version_scope, context=context
     )

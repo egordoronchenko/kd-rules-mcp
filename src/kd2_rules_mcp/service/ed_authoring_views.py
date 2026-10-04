@@ -6,8 +6,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from typing import Any
 
+from kd2_rules_mcp.authoring.ed.handler_render import procedure_block
 from kd2_rules_mcp.authoring.ed.handlers import HandlerOperationsPlan, operation_kind
-from kd2_rules_mcp.authoring.ed.manifest import sha256
+from kd2_rules_mcp.authoring.ed.manifest import ArtifactManifest, sha256
 from kd2_rules_mcp.authoring.ed.model import (
     AddAlgorithmicHeaderProperty,
     AddHeaderProperty,
@@ -19,6 +20,7 @@ from kd2_rules_mcp.authoring.ed.model import (
     order_operations,
 )
 from kd2_rules_mcp.authoring.ed.render import RenderedAuthoring
+from kd2_rules_mcp.ed.lexer import tokenize
 from kd2_rules_mcp.ed.route_model import RouteEntry, RouteProfile
 from kd2_rules_mcp.service.ed_views import address_matches, skipped_addresses
 from kd2_rules_mcp.validation.ed_authoring_handlers import preset_procedure_text
@@ -64,12 +66,98 @@ def compact_page(base: dict, rows: Sequence[dict], offset: int, limit: int) -> d
     Неделимую запись и обязательную сводку не обрезаем. Даже при необычно длинной
     записи страница продвигается; порог 4 КБ закреплён тестами для рабочего корпуса.
     """
-    result = base | page(rows, offset, limit)
+    result = page(rows, offset, limit)
     while len(result["items"]) > 1 and json_size(result) > PAGE_BYTES:
         result["items"].pop()
         result["next_offset"] = offset + len(result["items"])
         result["has_more"] = result["next_offset"] < result["total"]
-    return result
+    return base | result
+
+
+def artifact_changes(
+    previous: ArtifactManifest | None,
+    current: ArtifactManifest,
+    previous_files: Mapping[str, bytes],
+    current_files: Mapping[str, bytes],
+) -> list[dict]:
+    """Дельта решений и привязок; тексты процедур в просмотр не попадают."""
+    if previous is None:
+        return []
+    changes = []
+    if previous.schema_version != current.schema_version:
+        changes.append(
+            {
+                "kind": "schema_version",
+                "from": previous.schema_version,
+                "to": current.schema_version,
+            }
+        )
+    old = {op.operation_id: op for op in (*previous.operations, *previous.handler_operations)}
+    new = {op.operation_id: op for op in (*current.operations, *current.handler_operations)}
+    for kind, left, right in (("operation_removed", old, new), ("operation_added", new, old)):
+        changes.extend(
+            {
+                "kind": kind,
+                "operation_id": ident,
+                "operation_kind": operation_kind(left[ident]),
+                "target": asdict(left[ident].target),
+            }
+            for ident in sorted(left.keys() - right.keys())
+        )
+
+    def binding_key(record):
+        return (
+            record.get("module", ""),
+            record["target"]["direction"],
+            record["target"]["pko_address"],
+            record["event"],
+            record["handler_name"],
+        )
+
+    old_bindings = {binding_key(b): b for b in previous.handler_bindings}
+    new_bindings = {binding_key(b): b for b in current.handler_bindings}
+    for kind, left, right in (
+        ("binding_removed", old_bindings, new_bindings),
+        ("binding_added", new_bindings, old_bindings),
+    ):
+        changes.extend(
+            {
+                "kind": kind,
+                "pko_address": key[2],
+                "event": key[3],
+                "handler_name": key[4],
+                "direction": key[1],
+                "module": key[0],
+            }
+            for key in sorted(left.keys() - right.keys())
+        )
+
+    def procedures(files):
+        result = {}
+        for path, content in files.items():
+            if not path.startswith("modules/") or not path.endswith("Module.bsl"):
+                continue
+            text = content.decode("utf-8")
+            tokens = tokenize(text)
+            for number, token in enumerate(tokens[:-1]):
+                if token.kind == "identifier" and token.folded == "процедура":
+                    name = tokens[number + 1].value
+                    result[(path.removeprefix("modules/"), name)] = procedure_block(text, name)
+        return result
+
+    old_procedures, new_procedures = procedures(previous_files), procedures(current_files)
+    for key in sorted(old_procedures.keys() | new_procedures.keys()):
+        if old_procedures.get(key) == new_procedures.get(key):
+            continue
+        kind = (
+            "procedure_added"
+            if key not in old_procedures
+            else "procedure_removed"
+            if key not in new_procedures
+            else "procedure_changed"
+        )
+        changes.append({"kind": kind, "name": key[1], "module": key[0]})
+    return changes
 
 
 def _entries(entries: Sequence[RouteEntry], manager: str) -> list[RouteEntry]:
@@ -177,12 +265,15 @@ def build_view(
     changed_inputs: Mapping[str, Sequence[str]] | None = None,
     handler_plans: Sequence[HandlerOperationsPlan] = (),
     migration: bool = False,
+    previous: ArtifactManifest | None = None,
+    previous_files: Mapping[str, bytes] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict] = []
     scopes, scope_rows = [], []
     before, after, before_skipped, after_skipped = [], [], [], []
     profiles, new, disappeared, new_skipped = [], [], [], []
     other_states = {}
+    other_skipped = Counter()
     changed_rules, added_attributes, unverified = set(), set(), set()
 
     def other_state(key, state):
@@ -239,10 +330,16 @@ def build_view(
                     ("issue_disappeared", comparison.delta.disappeared),
                 ):
                     rows.extend({"kind": kind, "profile": profile, **i.to_dict()} for i in issues)
-                rows.extend(
-                    {"kind": "skipped_new", "profile": profile, **s.to_dict()}
-                    for s in comparison.delta.new_relevant_skipped
-                )
+                if selected:
+                    rows.extend(
+                        {"kind": "skipped_new", "profile": profile, **s.to_dict()}
+                        for s in comparison.delta.new_relevant_skipped
+                    )
+                else:
+                    other_skipped.update(
+                        (s.check, s.reason.partition("; ")[0].rpartition(": ")[0] or s.reason)
+                        for s in comparison.delta.new_relevant_skipped
+                    )
             if selected:
                 profiles.append(profile)
                 before.extend(comparison.before.issues)
@@ -285,7 +382,13 @@ def build_view(
             )
     if section == "summary":
         # Риски нужны до файлов и необязательных подробностей других профилей.
-        rows.sort(key=lambda r: r["kind"] != "notice")
+        rows.sort(
+            key=lambda r: (r["kind"] != "notice", r.get("notice_id") not in bundle.manifest.notices)
+        )
+        rows.extend(
+            {"kind": "skipped_new_count", "check": check, "reason": reason, "count": count}
+            for (check, reason), count in sorted(other_skipped.items())
+        )
         rows.extend(
             {"kind": "file", "name": path, "size": len(content), "sha256": sha256(content)}
             for path, content in bundle.files.items()
@@ -335,7 +438,12 @@ def build_view(
             "runtime": "not_run",
         },
         "required_acknowledgements": list(bundle.manifest.notices),
+        "changes": artifact_changes(previous, bundle.manifest, previous_files or {}, bundle.files),
     }
+    if section == "summary":
+        base["acknowledgement_notices"] = [
+            r for r in rows if r["kind"] == "notice" and r["notice_id"] in bundle.manifest.notices
+        ]
     if handler_plans:
         report = json.loads(bundle.files["validation.json"])
         reports = report.get("managers", [report])
@@ -373,12 +481,7 @@ def build_view(
             "schema_version": 2,
             "migration": {"from": 1, "to": 2} if migration else None,
         }
-        base["changes"] = ["Миграция прежнего комплекта версии 1 в версию 2"] if migration else []
-    return (
-        compact_page(base, rows, offset, limit)
-        if section in ("summary", "operations")
-        else base | page(rows, offset, limit)
-    )
+    return compact_page(base, rows, offset, limit)
 
 
 def operation_rows(bundle: RenderedAuthoring, plans: Sequence[HandlerOperationsPlan]) -> list[dict]:

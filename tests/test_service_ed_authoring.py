@@ -330,7 +330,7 @@ def test_v1_migration_and_dropping_last_handler_keeps_v2(setup):
     old = json.loads((Path(legacy["output_dir"]) / "manifest.json").read_text("utf-8"))
     viewed = preview(current)
     assert viewed["summary"]["migration"] == {"from": 1, "to": 2}
-    assert "версии 1" in viewed["changes"][0]
+    assert viewed["changes"][0] == {"kind": "schema_version", "from": 1, "to": 2}
     failure(lambda: write(current, legacy), "ed_authoring_stale")
     written = write(current, viewed)
     new = json.loads((Path(written["output_dir"]) / "manifest.json").read_text("utf-8"))
@@ -489,6 +489,7 @@ def test_v2_two_managers_survive_service_restart(setup, scenario, monkeypatch):
     files = content(destination)
     manifest = module.previous_artifact(files)
     assert manifest is not None and len(manifest.handler_operations) == 2
+    assert files["instruction.md"].decode().count("Комплект " + manifest.build_hash + ".") == 2
     assert len(manifest.handler_bindings) == 2 and len(manifest.procedures) == 4
     assert all("module" in record for record in manifest.procedures)
     assert len(written["scopes"]) == 2 and written["summary"]["handlers"] == 2
@@ -502,6 +503,8 @@ def test_v2_two_managers_survive_service_restart(setup, scenario, monkeypatch):
     fresh = restarted, args | {"operations": [second]}, root
     assert write(fresh)["status"] == "unchanged"
     assert content(destination) == files and first["output_dir"] == written["output_dir"]
+    assert preview(fresh, operations=[])["changes"] == []
+    assert write(fresh, operations=[])["status"] == "unchanged"
 
 
 def reopen_authoring(setup, *, root=None):
@@ -1351,7 +1354,7 @@ def test_summary_sections_filters_and_full_bundle_are_independent(setup, monkeyp
 
     monkeypatch.setattr(module, "prepare_authoring", prepare)
     summary = preview(setup)
-    assert json_size(summary) <= 4096
+    assert json_size(module.views.page(summary["items"], 0, summary["limit"])) <= 4096
     assert summary["section"] == "summary"
     assert set(summary["validation"]["before"]) == {"errors", "warnings", "skipped"}
     assert set(summary["validation"]["after"]) == {"errors", "warnings", "skipped"}
@@ -1363,7 +1366,7 @@ def test_summary_sections_filters_and_full_bundle_are_independent(setup, monkeyp
         "notice",
         "issue_new",
         "issue_disappeared",
-        "skipped_new",
+        "skipped_new_count",
         "file",
     }
     assert [r["message"] for r in rows if r["kind"] == "issue_disappeared"] == ["Старое 0"]
@@ -1465,15 +1468,247 @@ def test_candidates_hundreds_of_properties_have_bounded_pages(setup):
         response = service.ed_authoring_candidates(
             target, "format", text="Реквизит", configuration_attribute="Заметка", **options
         )
-        assert json_size(response) <= 4096
+        assert json_size(module.views.page(response["items"], 0, response["limit"])) <= 4096
         return response
 
     first = call()
     assert first["total"] == 500 and first["has_more"] and first["next_offset"] < 50
-    assert json_size(first) <= 4096
+    assert json_size(module.views.page(first["items"], 0, first["limit"])) <= 4096
     assert set(first["items"][0]) == {"name", "path", "type", "compatible", "reason"}
     assert first["auto"] is False
     assert all(row["compatible"] for row in first["items"])
 
     rows = all_items(call)
     assert [r["name"] for r in rows] == [f"Реквизит{i:03}" for i in range(500)]
+
+
+def test_stand_body_reads_new_attribute_from_same_or_previous_kit(setup):
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    prop = copy.deepcopy(setup[1]["operations"][0])
+    prop["target"] = current[1]["operations"][0]["target"]
+    handler = copy.deepcopy(current[1]["operations"][0])
+    handler["body"] = 'ДанныеXDTO.Вставить("Комментарий", "ВЫЧИСЛЕНО:" + ДанныеИБ.доп_Заметка);'
+    together = preview(current, operations=[prop, handler])
+    assert together["summary"]["template_evidence"]["verified_bindings"] == 1
+    write(current, operations=[prop])
+    migrated = preview(current, operations=[handler])
+    assert migrated["build_hash"] == together["build_hash"]
+    assert {c["kind"] for c in migrated["changes"]} >= {
+        "schema_version",
+        "operation_added",
+        "binding_added",
+        "procedure_added",
+    }
+    written = write(current, migrated, operations=[handler])
+    files = content(Path(written["output_dir"]))
+    # Перепроверка и повторная запись не требуют ни новых решений, ни старых session-ID.
+    reopened = (Kd2Service(current[0].settings), current[1], current[2])
+    verified = preview(reopened, operations=[])
+    assert verified["changes"] == []
+    assert write(reopened, verified, operations=[])["status"] == "unchanged"
+    assert content(Path(written["output_dir"])) == files
+    handler_id = next(
+        r["operation_id"]
+        for r in all_items(
+            current[0].ed_authoring_build,
+            **(current[1] | {"operations": [], "section": "operations"}),
+        )
+        if r["kind"] == "set_object_handler"
+    )
+    removed = preview(reopened, operations=[], drop_operations=[handler_id])
+    assert {c["kind"] for c in removed["changes"]} >= {
+        "operation_removed",
+        "binding_removed",
+        "procedure_removed",
+    }
+    write(reopened, removed, operations=[], drop_operations=[handler_id])
+    # Реквизит другого объекта не становится известным для этого тела.
+    foreign = copy.deepcopy(handler)
+    foreign["target"]["pko_address"] = "ПКО/Заказ"
+    refused = failure(lambda: preview(current, operations=[foreign]), "ed_authoring_precondition")
+    assert any("ДанныеИБ.доп_Заметка" in f["message"] for f in refused["failures"])
+
+
+@pytest.mark.parametrize(
+    "body,name",
+    [
+        ("Возврат;\nX = ПолученныеДанные;", "ПолученныеДанные"),
+        ("Возврат;\nПерем ДанныеXDTO;", "ДанныеXDTO"),
+        ("Возврат;\nX = ДанныеИБ.НетРеквизита;", "НетРеквизита"),
+        ('Возврат;\nДанныеXDTO.Вставить("НетСвойства", 1);', "НетСвойства"),
+    ],
+)
+def test_stand_body_failure_preserves_name_and_line(setup, body, name):
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    fixture["input"][0]["body"] = body
+    current, _ = handler_setup(setup, fixture)
+    refused = failure(lambda: preview(current), "ed_authoring_precondition")
+    assert any(
+        name in f["message"] and "строка тела 2" in f["message"] and f["source"]["line"] == 2
+        for f in refused["failures"]
+    )
+
+
+def test_stand_chained_validation_records_previous_call_and_changed_procedure(setup):
+    fixture = json.loads((HANDLERS / "dto/chain-send.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    written = write(current)
+    files = content(Path(written["output_dir"]))
+    report = json.loads(files["validation.json"])
+    assert len(report["previous_calls"]) == 1
+    call = report["previous_calls"][0]
+    assert call["target_name"] == fixture["input"][0]["expected_previous"]
+    assert call["rule_name"] == "Товар" and call["event"] == "ПриОтправкеДанных"
+    assert call["call_count"] == 1
+    assert (
+        files[call["source"]["file"]]
+        .decode()
+        .splitlines()[call["source"]["line"] - 1]
+        .lstrip()
+        .startswith(call["target_name"] + "(")
+    )
+    incoming = copy.deepcopy(current[1]["operations"])
+    incoming[0]["body"] += "\n// Изменение тела\n"
+    old_id = report["handler_slots"][0]["operation_ids"][0]
+    viewed = preview(current, operations=incoming, drop_operations=[old_id])
+    assert any(
+        c["kind"] == "procedure_changed" and c["name"] == report["handler_slots"][0]["handler_name"]
+        for c in viewed["changes"]
+    )
+    path = next(n for n in files if n.startswith("modules/") and n.endswith("Module.bsl"))
+    (Path(written["output_dir"]) / path).write_bytes(files[path] + b"\n// edit\n")
+    refused = failure(lambda: preview(current, operations=[]), "ed_authoring_precondition")
+    assert path in refused["failures"][0]["message"]
+
+
+@pytest.mark.parametrize("skipped_only", [False, True])
+def test_stand_other_version_notice_names_property_and_version(setup, monkeypatch, skipped_only):
+    from kd2_rules_mcp.validation.report import Skipped
+
+    fixture = json.loads((HANDLERS / "dto/algorithmic-send.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    if skipped_only:
+        original = module.compare_reports
+
+        def compare(before, after, *args, **kwargs):
+            delta = original(before, after, *args, **kwargs)
+            if before.version == "1.21" and delta.new:
+                return replace(
+                    delta,
+                    new=(),
+                    new_relevant_skipped=(
+                        Skipped(
+                            "ed.schema.type_incompatible", "Тип свойства Комментарий не определён"
+                        ),
+                    ),
+                )
+            return delta
+
+        monkeypatch.setattr(module, "compare_reports", compare)
+    viewed = preview(current)
+    notices = [
+        n
+        for n in viewed["acknowledgement_notices"]
+        if n["id"] == "ed.author.other_version_incompatible"
+    ]
+    assert notices and all(
+        "1.21" in n["message"] and "Комментарий" in n["message"] for n in notices
+    )
+
+
+def test_stand_section_budget_excludes_header_and_packs_whole_records():
+    from kd2_rules_mcp.service.ed_authoring_views import compact_page, json_size
+
+    rows = [{"number": i, "message": "Запись " * 15} for i in range(150)]
+    base = {"summary": "Шапка " * 3000}
+    first = compact_page(base, rows, 0, 100)
+    assert 1 < len(first["items"]) < 100
+    assert json_size({k: v for k, v in first.items() if k != "summary"}) <= 4096
+    overflowing = {k: v for k, v in first.items() if k != "summary"}
+    overflowing["items"] = first["items"] + [rows[first["next_offset"]]]
+    overflowing["next_offset"] += 1
+    assert json_size(overflowing) > 4096
+    assert compact_page({}, rows, 0, 100)["items"] == first["items"]
+    result = []
+    offset = 0
+    while offset < len(rows):
+        current = compact_page(base, rows, offset, 100)
+        result.extend(current["items"])
+        offset = current["next_offset"]
+    assert result == rows
+
+
+@pytest.mark.parametrize(
+    "scenario", ["set-send", "set-receive-before-write", "preserve-receive", "algorithmic-send"]
+)
+def test_stand_instruction_probes_sections_hash_and_installation(setup, scenario):
+    fixture = json.loads((HANDLERS / f"dto/{scenario}.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    written = write(current)
+    files = content(Path(written["output_dir"]))
+    manifest = json.loads(files["manifest.json"])
+    instruction = files["instruction.md"].decode()
+    assert "Комплект " + manifest["build_hash"] + "." in instruction
+    assert 'КоллекцияПравилКонвертации("2")' in instruction
+    assert 'Менеджер2.ЗаполнитьПравилаКонвертацииОбъектов("' in instruction
+    assert 'Правила.Найти("Товар", "ИмяПКО")' in instruction
+    for binding in manifest["bindings"]:
+        assert "Правило." + binding["event"] in instruction
+        assert "Ожидается: " + binding["handler_name"] in instruction
+    assert ("## Отсутствующее свойство" in instruction) is (scenario == "preserve-receive")
+    if scenario == "preserve-receive":
+        assert (
+            "Явно переданное пустое значение (пустой элемент в сообщении) реквизит очищает:"
+            in instruction
+        )
+    assert "число вызовов\n   сервер доказывает по тексту модуля" in instruction
+    assert "при обновлении существующего расширения режим сохраняется прежним" in instruction
+    assert "### Установка без конфигуратора базы" in instruction
+    assert "РасширенияКонфигурации.Получить(Новый Структура" in instruction
+    assert "Записать(Новый ДвоичныеДанные(<файл>))" in instruction
+    assert "первым выполните обмен из этой базы к корреспонденту" in instruction
+    assert "[if " not in instruction and "[/if]" not in instruction
+    for previous_line, line in zip(
+        instruction.splitlines(), instruction.splitlines()[1:], strict=False
+    ):
+        if line.startswith("|") and not previous_line.startswith("|"):
+            assert previous_line == ""
+
+
+def test_stand_migration_summary_folds_other_skips_and_shows_all_acknowledgements(
+    setup, monkeypatch
+):
+    from kd2_rules_mcp.authoring.ed.model import ValidationDelta
+    from kd2_rules_mcp.validation.report import Skipped
+
+    fixture = json.loads((HANDLERS / "dto/preserve-receive.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    write(current, operations=[current[1]["operations"][0]])
+    service = current[0]
+    original = service._validate_handler_layer
+
+    def validate(*args):
+        bundle = original(*args)
+        comparisons = list(bundle.prepared.other_profiles)
+        comparison = comparisons[0]
+        skips = tuple(
+            Skipped("ed.schema.type_incompatible", f"handler_may_supply: ПКО/Правило{i}")
+            for i in range(600)
+        )
+        comparisons[0] = replace(comparison, delta=ValidationDelta((), (), skips))
+        return replace(bundle, prepared=replace(bundle.prepared, other_profiles=tuple(comparisons)))
+
+    monkeypatch.setattr(service, "_validate_handler_layer", validate)
+    viewed = preview(current)
+    assert viewed["summary"]["migration"] == {"from": 1, "to": 2}
+    assert {n["notice_id"] for n in viewed["acknowledgement_notices"]} == set(
+        viewed["required_acknowledgements"]
+    )
+    assert viewed["items"][0]["kind"] == "notice" and len(viewed["items"]) > 1
+    rows = all_items(lambda **options: preview(current, **options))
+    grouped = [
+        r for r in rows if r["kind"] == "skipped_new_count" and r["reason"] == "handler_may_supply"
+    ]
+    assert sum(r["count"] for r in grouped) >= 600
+    assert viewed["total"] < 40

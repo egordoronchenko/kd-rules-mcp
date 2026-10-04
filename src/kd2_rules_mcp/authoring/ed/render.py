@@ -374,6 +374,7 @@ def render_handlers_authoring(
         delivery=delivery,
         paths=tuple(sorted((*result, "manifest.json", "instruction.md"))),
         form_evidence=form_evidence,
+        pko_names=pko_names_from_document(inputs.document),
     )
     result["instruction.md"] = instruction.encode("utf-8")
     manifest = ArtifactManifest(

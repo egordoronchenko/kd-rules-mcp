@@ -180,8 +180,12 @@ async def test_ed_authoring_tools(setup):
         assert candidates["items"] and candidates["auto"] is False
         result = await client.call_tool("ed_authoring_build", args)
         assert not result.is_error and result.structured_content is not None
-        assert len("".join(getattr(item, "text", "") for item in result.content).encode()) <= 4096
         preview = result.structured_content
+        page_keys = ("items", "offset", "limit", "total", "has_more", "next_offset")
+        page = {key: preview[key] for key in page_keys}
+        assert len(json.dumps(page, ensure_ascii=False, indent=2).encode()) <= 4096
+        assert len(preview["items"]) > 1
+        assert json.loads("".join(getattr(item, "text", "") for item in result.content)) == preview
         assert preview["status"] == "ready"
         issues = await _call(
             client,

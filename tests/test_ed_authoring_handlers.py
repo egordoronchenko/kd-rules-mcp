@@ -114,14 +114,29 @@ def test_events_and_interfaces(version, event):
     assert plan.manager_interface == version
     assert plan.dispatcher_name == IDENTITY.prefix + "Диспетчер"
     assert plan.dispatcher_order == (plan.bindings[0].handler_name,)
-    assert not plan.runtime_verified and not plan.bindings[0].runtime_verified
+    proven = version == 2 and event == "ПриОтправкеДанных"
+    assert plan.runtime_verified is proven and plan.bindings[0].runtime_verified is proven
     assert any(n.detail_key == "agent_body" for n in plan.notices)
+    if proven:
+        assert "ed.author.handler_runtime_unverified" not in {n.id for n in plan.notices}
+        return
     notice = next(n for n in plan.notices if n.id == "ed.author.handler_runtime_unverified")
-    assert "Объектный путь доказан кодом, не обменом" in notice.message
     if event == "ПриОтправкеДанных":
         assert "/отправка " in notice.message
+        assert "Объектный путь" not in notice.message
     else:
+        assert "Объектный путь доказан кодом, не обменом" in notice.message
         assert "обычный путь и объектный путь" in notice.message
+
+
+def test_stand_nested_structure_property_is_not_an_opaque_application_call():
+    value = handler_inputs()
+    op = handler(body='Есть = ДанныеXDTO.КлючевыеСвойства.Свойство("Код");')
+    checked = check_body(value, op, AuthoringContext(value))
+    assert not checked.failures
+    assert not checked.opaque_calls
+    unknown = check_body(value, handler(body="ПрикладнойМодуль.Метод();"), AuthoringContext(value))
+    assert unknown.opaque_calls[0].name == "ПрикладнойМодуль.Метод"
 
 
 @pytest.mark.parametrize("event", tuple(EVENT_PARAMETERS))
@@ -537,7 +552,7 @@ def test_several_bindings_fix_dispatcher_order_names_and_interface():
     mixed = prepare_handler_operations(
         chained, (linked, algorithmic), IDENTITY, version_scope="manager"
     )
-    assert mixed.runtime_verified and mixed.bindings[0].previous_name == "Типовой"
+    assert not mixed.runtime_verified and mixed.bindings[0].previous_name == "Типовой"
     prop, preset = preset_operations()
     neighbour = SetObjectHandler(
         replace(TARGET, pko_address="ПКО/Заказ"), "ПриОтправкеДанных", "Возврат;", "", "none"
@@ -745,9 +760,9 @@ def test_algorithmic_send_written_existing_attribute_and_receive_not_supported()
     prop = AddAlgorithmicHeaderProperty(TARGET, "Заметка", "Комментарий", op.operation_id)
     plan = prepare_handler_operations(value, (prop, op), IDENTITY, version_scope="manager")
     assert plan.operations[0] == op
-    assert plan.runtime_verified and plan.bindings[0].runtime_verified
+    assert not plan.runtime_verified and not plan.bindings[0].runtime_verified
     assert "ed.author.handler_type_unproven" in {n.id for n in plan.notices}
-    assert "ed.author.handler_runtime_unverified" not in {n.id for n in plan.notices}
+    assert "ed.author.handler_runtime_unverified" in {n.id for n in plan.notices}
     wrong = replace(op, body="Возврат;")
     assert_refusal(
         value,
@@ -980,11 +995,21 @@ def test_canonical_dto_for_writer_b(path):
         assert_refusal(value, canonical, fixture["expected_failure"].removeprefix("ed.author."))
     else:
         plan = prepare_handler_operations(value, canonical, IDENTITY, version_scope="manager")
-        assert json.loads(json.dumps([asdict(b) for b in plan.bindings])) == fixture["bindings"]
+        # DTO и смысловые ID неизменны; свидетельства форм обновлены стендом D.
+        expected = json.loads(json.dumps(fixture["bindings"]))
+        unverified = path.stem in (
+            "algorithmic-send",
+            "algorithmic-send-reference",
+            "chain-and-algorithmic",
+        )
+        for binding in expected:
+            if binding["event"] == "ПриОтправкеДанных":
+                binding["runtime_verified"] = not unverified
+        assert json.loads(json.dumps([asdict(b) for b in plan.bindings])) == expected
         assert plan.dispatcher_name == fixture["dispatcher_name"]
         assert list(plan.dispatcher_order) == fixture["dispatcher_order"]
         assert plan.manager_interface == fixture["manager_interface"]
-        assert plan.runtime_verified is fixture["plan_runtime_verified"]
+        assert plan.runtime_verified is all(b["runtime_verified"] for b in expected)
         if "preset_body_file" in fixture:
             exemplar = (HANDLERS / fixture["preset_body_file"]).read_text(encoding="utf-8")
             assert exemplar == preset_procedure_text(

@@ -481,6 +481,23 @@ def test_owned_content_changed(damage):
     assert bundle.files["manifest.json"] == bundle.manifest.to_bytes()
 
 
+@pytest.mark.parametrize("damage", ["missing", "invalid_json", "invalid_content"])
+def test_previous_artifact_names_damaged_manifest(damage):
+    from kd2_rules_mcp.authoring.ed.artifacts import previous_artifact
+
+    bundle = render_authoring(prepared(), descriptions())
+    actual = dict(bundle.files)
+    if damage == "missing":
+        actual.pop("manifest.json")
+    else:
+        actual["manifest.json"] = b"{" if damage == "invalid_json" else b"{}"
+    with pytest.raises(AuthoringPreconditionError) as error:
+        previous_artifact(actual)
+    failure = error.value.failures[0]
+    assert failure.id == "ed.author.owned_content_changed"
+    assert "manifest.json" in failure.message
+
+
 def test_union_conflict_preserves_old_files():
     first = render_authoring(prepared(), descriptions())
     assert OPERATION.new_attribute is not None
@@ -704,7 +721,10 @@ def test_v1_kit_plus_handler_keeps_object_uuids_and_rejects_tamper():
     assert 'ДобавитьПКС(Правило.Свойства, "доп_Заметка", "Комментарий");' in text
     assert "Пример" not in migrated.instruction
     assert "добавлен обработчик события" in migrated.instruction
-    assert "безопасном режиме" in migrated.instruction
+    assert "получает\n   безопасный режим — снимите его" in migrated.instruction
+    assert (
+        "при обновлении существующего расширения режим сохраняется прежним" in migrated.instruction
+    )
     assert fresh.files == migrated.files
     repeated = render_handlers_authoring(
         value.preparation_inputs,

@@ -10,7 +10,7 @@ from kd2_rules_mcp.kd2.model import ExchangeRules, Node
 from kd2_rules_mcp.kd2.rules_io import load_registration_rules
 from kd2_rules_mcp.kd2.xmlstyle import KD_STYLE
 from kd2_rules_mcp.structures.store import StructureStore
-from kd2_rules_mcp.validation.registration import _sample, check_registration
+from kd2_rules_mcp.validation.registration import QUERY_PARAMETERS, _sample, check_registration
 from kd2_rules_mcp.validation.report import Level, ValidationReport
 
 DUMP = Path(__file__).parent / "data" / "registration" / "dump"
@@ -326,6 +326,73 @@ def test_no_pvd_skipped_without_exchange_rules(structure: sqlite3.Connection) ->
     skipped = [item for item in report.skipped if item.check == "registration.no_pvd"]
     assert len(skipped) == 1
     assert skipped[0].reason == "проект правил обмена не передан"
+
+
+def _query_rules(handler: str, *, attrs: str = 'Валидное="true"', plan_filter: str = "") -> bytes:
+    return f"""<ПравилаРегистрации>
+<ВерсияФормата>2.01</ВерсияФормата>
+<ПланОбмена Имя="Обмен">Обмен</ПланОбмена>
+<ПравилаРегистрацииОбъектов>
+<Правило {attrs}>
+<Код>1</Код>
+<Наименование>Приход</Наименование>
+<ОбъектНастройки>ДокументСсылка.Приход</ОбъектНастройки>
+<ОбъектМетаданныхИмя>Документ.Приход</ОбъектМетаданныхИмя>
+{plan_filter}
+<ПриОбработке>{handler}</ПриОбработке>
+</Правило>
+</ПравилаРегистрацииОбъектов>
+</ПравилаРегистрации>""".encode()
+
+
+def _query_hits(handler: str, **kwargs: str) -> ValidationReport:
+    return check_registration(load_registration_rules(_query_rules(handler, **kwargs)), None)
+
+
+def test_query_parameter_binding_warns_only_on_a_literal_query() -> None:
+    """Исполнитель задаёт `{План}ЭтотУзел` и `СвойствоОбъекта_` + ключ, не голое имя."""
+    warned = _query_hits(
+        'ТекстЗапроса = "ВЫБРАТЬ Ссылка ИЗ ПланОбмена.Обмен ГДЕ Поле = &amp;ВидыЦен";'
+    )
+    found = [issue for issue in warned.warnings if issue.check == QUERY_PARAMETERS]
+    assert len(found) == 1
+    assert found[0].address == "ПРО «1»"
+    assert "ВидыЦен" in found[0].message
+    assert "СвойствоОбъекта_" in found[0].message
+    plan_filter = (
+        "<ОтборПоСвойствамПланаОбмена><ЭлементОтбора>"
+        "<ЭтоСтрокаКонстанты>false</ЭтоСтрокаКонстанты>"
+        "<СвойствоОбъекта>Дата</СвойствоОбъекта>"
+        "</ЭлементОтбора></ОтборПоСвойствамПланаОбмена>"
+    )
+    bound = (
+        'ТекстЗапроса = "ВЫБРАТЬ Ссылка ИЗ ПланОбмена.Обмен ГДЕ '
+        "Поле = &amp;СвойствоОбъекта_Дата И Ссылка &lt;&gt; &amp;ОбменЭтотУзел "
+        'И &amp;УсловиеОтбораПоРеквизитуФлагу";'
+    )
+    clean = _query_hits(bound, plan_filter=plan_filter)
+    assert [issue for issue in clean.warnings if issue.check == QUERY_PARAMETERS] == []
+    inserted = _query_hits(
+        'ПараметрыЗапроса.Вставить("ВидыЦен", 1);\n'
+        'ТекстЗапроса = "ВЫБРАТЬ &amp;СвойствоОбъекта_ВидыЦен";'
+    )
+    assert [issue for issue in inserted.warnings if issue.check == QUERY_PARAMETERS] == []
+    bare_after_insert = _query_hits(
+        'ПараметрыЗапроса.Вставить("ВидыЦен", 1);\nТекстЗапроса = "ВЫБРАТЬ &amp;ВидыЦен";'
+    )
+    assert [issue for issue in bare_after_insert.warnings if issue.check == QUERY_PARAMETERS]
+    comment = _query_hits('// ТекстЗапроса = "ВЫБРАТЬ &amp;ВидыЦен";')
+    assert [issue for issue in comment.warnings if issue.check == QUERY_PARAMETERS] == []
+    literal = _query_hits('Сообщить("ТекстЗапроса = ""ВЫБРАТЬ &amp;ВидыЦен""");')
+    assert [issue for issue in literal.warnings if issue.check == QUERY_PARAMETERS] == []
+    built = _query_hits('ТекстЗапроса = ТекстЗапроса + " И Поле = &amp;ВидыЦен";')
+    assert [issue for issue in built.warnings if issue.check == QUERY_PARAMETERS] == []
+    assert any(item.check == QUERY_PARAMETERS for item in built.skipped)
+    disabled = _query_hits(
+        'ТекстЗапроса = "ВЫБРАТЬ &amp;ВидыЦен";',
+        attrs='Отключить="true" Валидное="true"',
+    )
+    assert [issue for issue in disabled.warnings if issue.check == QUERY_PARAMETERS] == []
 
 
 def test_plan_content_sample_is_truncated() -> None:

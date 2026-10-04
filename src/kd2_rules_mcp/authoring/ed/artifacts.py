@@ -14,7 +14,13 @@ from .handler_render import procedure_block
 from .hook import valid_identifier
 from .identity import IdentityMap, refuse
 from .manifest import ArtifactManifest, json_bytes, sha256, validate_previous
-from .model import AddHeaderProperty, SourceSet, digest, order_operations
+from .model import (
+    AddHeaderProperty,
+    AuthoringPreconditionError,
+    SourceSet,
+    digest,
+    order_operations,
+)
 from .render import RenderedAuthoring
 from .xml_dump import M, serialize
 
@@ -30,8 +36,24 @@ def previous_artifact(files: Mapping[str, bytes]) -> ArtifactManifest | None:
     if not files:
         return None
     if "manifest.json" not in files:
-        refuse("owned_content_changed", "Каталог не содержит собственного manifest")
-    manifest = ArtifactManifest.from_bytes(files["manifest.json"])
+        refuse("owned_content_changed", "Отсутствует файл manifest.json")
+    try:
+        manifest = ArtifactManifest.from_bytes(files["manifest.json"])
+    except AuthoringPreconditionError:
+        refuse("owned_content_changed", "Повреждён файл manifest.json")
+    if files["manifest.json"] != manifest.to_bytes():
+        refuse("owned_content_changed", "Изменён файл manifest.json")
+    changed = sorted(
+        path
+        for path, fingerprint in manifest.file_hashes.items()
+        if path not in files or sha256(files[path]) != fingerprint
+    )
+    changed.extend(sorted(set(files) - {*manifest.file_hashes, "manifest.json"}))
+    if changed:
+        refuse(
+            "owned_content_changed",
+            "Изменены, отсутствуют или неизвестны файлы: " + ", ".join(changed),
+        )
     validate_previous(manifest, files)
     if manifest.schema_version >= 2:
         _handler_bodies_match(manifest, files)
@@ -48,20 +70,32 @@ def _handler_bodies_match(manifest: ArtifactManifest, files: Mapping[str, bytes]
     for path, text in modules.items():
         extension = files.get("extension/" + path)
         if extension is not None and extension.decode("utf-8") != text:
-            refuse("owned_content_changed", "Модули комплекта с обработчиками различаются")
+            refuse(
+                "owned_content_changed",
+                f"Модули комплекта различаются: modules/{path}, extension/{path}",
+            )
     for record in manifest.procedures:
         name = str(record["name"])
         module = record.get("module")
         if (module is None and len(modules) != 1) or (module is not None and module not in modules):
-            refuse("owned_content_changed", "Не определён модуль процедуры", name)
+            refuse(
+                "owned_content_changed",
+                "Не определён модуль процедуры по файлу manifest.json",
+                name,
+            )
+        module_path = "modules/" + (str(module) if module is not None else next(iter(modules)))
         text = modules[str(module)] if module is not None else next(iter(modules.values()))
         try:
             block = procedure_block(text, name)
         except ValueError:
-            refuse("owned_content_changed", "Порождённая процедура отсутствует в модуле", name)
+            refuse(
+                "owned_content_changed", "Порождённая процедура отсутствует: " + module_path, name
+            )
         if sha256(block.encode("utf-8")) != record["body_sha256"]:
             refuse(
-                "owned_content_changed", "Тело порождённой процедуры не совпадает с manifest", name
+                "owned_content_changed",
+                "Тело порождённой процедуры не совпадает с manifest: " + module_path,
+                name,
             )
 
 
@@ -177,7 +211,17 @@ def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring
             "managers": [json.loads(b.files["validation.json"]) for b in bundles],
         }
     )
-    instruction = "\n\n".join(b.instruction.rstrip() for b in bundles) + "\n"
+    instruction = (
+        "\n\n".join(
+            b.instruction.replace(
+                "Комплект " + b.manifest.build_hash + ".", "Комплект " + build_hash + "."
+            ).rstrip()
+            if any(item.manifest.schema_version == 2 for item in bundles)
+            else b.instruction.rstrip()
+            for b in bundles
+        )
+        + "\n"
+    )
     files["instruction.md"] = instruction.encode("utf-8")
     manifest = replace(
         first.manifest,

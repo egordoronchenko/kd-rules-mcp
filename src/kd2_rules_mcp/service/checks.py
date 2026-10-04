@@ -1,5 +1,6 @@
 """Проверка правил и выгрузка обработчиков."""
 
+from pathlib import Path
 from typing import Any
 
 from kd2_rules_mcp.errors import Kd2Error
@@ -7,7 +8,7 @@ from kd2_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.views import page_limit, parse_level, report_view
 from kd2_rules_mcp.validation.algorithms import check_algorithm_refs
-from kd2_rules_mcp.validation.exchange_plan import check_exchange_plan
+from kd2_rules_mcp.validation.exchange_plan import check_exchange_plan, plan_name_from_path
 from kd2_rules_mcp.validation.format import check_format
 from kd2_rules_mcp.validation.handlers import export_handlers, locate
 from kd2_rules_mcp.validation.registration import check_registration
@@ -39,7 +40,16 @@ class ChecksMixin(ServiceBase):
                 report.extend(check_algorithm_refs(document))
                 report.extend(check_search_params(document))
                 report.extend(check_search_objects(document, target))
-                report.extend(check_exchange_plan(document, source, target))
+                rules_path = self.workspace.get(project_id).source_path
+                report.extend(
+                    check_exchange_plan(
+                        document,
+                        source,
+                        target,
+                        plan_name_from_path(rules_path),
+                        Path(rules_path).parts[:-1] if rules_path else (),
+                    )
+                )
             elif isinstance(document, RegistrationRules):
                 exchange = self._exchange(exchange_project_id) if exchange_project_id else None
                 report.extend(check_registration(document, source, exchange_rules=exchange))

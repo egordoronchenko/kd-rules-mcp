@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from kd2_rules_mcp.authoring.ed.context import AuthoringContext
@@ -99,6 +100,8 @@ KNOWN_SAFE_CALLS = RULE_LOOKUP_CALLS | frozenset(
         "стрдлина",
         "данныеxdto.вставить",
         "данныеxdto.свойство",
+        "данныеxdto.ключевыесвойства.свойство",
+        "данныеxdto.общиесвойстваобъектовформата.свойство",
         "данныеxdto.удалить",
         "полученныеданные.дополнительныесвойства.вставить",
         "полученныеданные.дополнительныесвойства.свойство",
@@ -261,7 +264,8 @@ def _runtime_notice(version: int | None, event: str) -> str:
     )
     return (
         f"Шаблон {version}/{event}/{path} ещё не подтверждён живым обменом. "
-        "Объектный путь доказан кодом, не обменом; текущий комплект не имеет runtime-проверки."
+        + ("Объектный путь доказан кодом, не обменом; " if event != "ПриОтправкеДанных" else "")
+        + "текущий комплект не имеет runtime-проверки."
     )
 
 
@@ -363,6 +367,8 @@ def check_body(
     context: AuthoringContext,
     *,
     wrapper_name: str = "АвторскийОбработчик",
+    operations: tuple[Operation, ...] = (),
+    known_attributes: Mapping[tuple[str, str], frozenset[str]] | None = None,
 ) -> BodyCheck:
     """Принятое тело не выходит из процедуры и не скрывает изменение правил."""
     body = operation.body
@@ -427,12 +433,12 @@ def check_body(
     unavailable.add("параметры")
     formal_names = {p.casefold() for ps in EVENT_PARAMETERS.values() for p in ps} | {"параметры"}
     for statement in lex(document.files[0]).statements:
-        if statement.head == "перем" and any(
-            t.folded in formal_names for t in statement.tokens[1:]
-        ):
+        shadowed = [t.value for t in statement.tokens[1:] if t.folded in formal_names]
+        if statement.head == "перем" and shadowed:
             fail(
                 "body_parameter_unavailable",
-                "нельзя затенять формальный параметр объявлением Перем",
+                "нельзя затенять формальный параметр объявлением Перем: " + ", ".join(shadowed),
+                line=max(1, statement.span.line_start - 1),
             )
     forbidden = {
         "процедура",
@@ -702,6 +708,16 @@ def check_body(
     assert isinstance(rule, ObjectRule)
     key, _ = metadata_key(rule.configuration_object.value)
     owner = inputs.structure.objects.get(key) if key else None
+    new_attributes = set((known_attributes or {}).get(key, ())) if key else set()
+    for prop in operations:
+        if not isinstance(prop, AddHeaderProperty) or not prop.new_attribute:
+            continue
+        prop_rule = context.index(inputs.document).find(prop.target.pko_address)
+        if (
+            isinstance(prop_rule, ObjectRule)
+            and metadata_key(prop_rule.configuration_object.value)[0] == key
+        ):
+            new_attributes.add(prop.new_attribute.name.casefold())
     profile = context.profile(operation.target.format_version, operation.target.direction)
     applicable = context.applicable(
         inputs.document, operation.target.format_version, operation.target.direction
@@ -715,9 +731,14 @@ def check_body(
                 and not owner.property(attribute)
                 and not standard_attribute(owner, attribute)
                 and attribute.casefold() not in object_runtime_fields(owner)
+                and attribute.casefold() not in new_attributes
                 and (i + 3 == len(tokens) or tokens[i + 3].value != "(")
             ):
-                fail("body_reference_unresolved", "реквизит ДанныеИБ не найден в структуре", token)
+                fail(
+                    "body_reference_unresolved",
+                    f"реквизит ДанныеИБ.{attribute} не найден в структуре или комплекте",
+                    token,
+                )
     body_doc = replace(
         document,
         routines=tuple(
@@ -811,7 +832,13 @@ def check_body(
         if reference.kind == "instruction_rule" and reference.name == "":
             continue
         line = reference_line(reference)
-        label = reference.name if reference.name else (reference.raw.strip() or reference.kind)
+        label = (
+            reference.name
+            or ", ".join(
+                token.value for token in tokenize(reference.raw) if token.kind == "identifier"
+            )
+            or reference.kind
+        )
         if reference.name is None:
             fail(
                 "body_dynamic_reference",
@@ -837,6 +864,7 @@ def check_body(
                 owner
                 and (
                     owner.property(name)
+                    or name.casefold() in new_attributes
                     or standard_attribute(owner, name)
                     or name.casefold() in object_runtime_fields(owner)
                 )
@@ -1134,7 +1162,7 @@ def validate_handler_operations(
                 )
             checked = context.handler_bodies.get(op.operation_id)
             if checked is None:
-                checked = check_body(inputs, op, context, wrapper_name=name)
+                checked = check_body(inputs, op, context, wrapper_name=name, operations=operations)
             failures.extend(checked.failures)
             context.handler_bodies[op.operation_id] = checked
             notices.append(
@@ -1170,10 +1198,13 @@ def validate_handler_operations(
                         "Запись такого свойства остаётся отказом.",
                     )
                 )
+            # Стенд D, §8: docs/plans/evals/2026-10-05-ed-handlers-stand.md.
+            # Интерфейс 2: отправка без цепочки (включая прямую ПКС) и after_existing.
+            # Алгоритмическая ПКС этим стендом не проверялась.
             op_verified = (
                 interface == 2
                 and event == "ПриОтправкеДанных"
-                and (op.chain == "after_existing" or op.operation_id in algorithmic_send)
+                and op.operation_id not in algorithmic_send
             )
             bindings.append(
                 HandlerBindingPlan(
@@ -1262,6 +1293,7 @@ def validate_handler_operations(
                     "нужна set_object_handler с телом агента",
                 )
             preset_slots.setdefault((target, event), []).append(op.operation_id)
+            # Стенд D, §8: сохранение с прямой ПКС, обычный путь, найденный объект.
             op_verified = interface == 2
             notices.append(
                 Notice(
@@ -1284,7 +1316,7 @@ def validate_handler_operations(
                     "Алгоритмическая ПКС получения не подтверждена живым обменом (H7)",
                 )
                 continue
-            op_verified = interface == 2
+            op_verified = False
             handler = by_id.get(op.handler_operation_id)
             if (
                 not isinstance(handler, SetObjectHandler)
@@ -1297,7 +1329,7 @@ def validate_handler_operations(
                 continue
             checked = context.handler_bodies.get(handler.operation_id)
             if checked is None:
-                checked = check_body(inputs, handler, context)
+                checked = check_body(inputs, handler, context, operations=operations)
             key, _ = metadata_key(rule.configuration_object.value)
             owner = inputs.structure.objects.get(key) if key else None
             attrs = owner.property(op.configuration_attribute) if owner else ()

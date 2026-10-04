@@ -15,9 +15,15 @@
 включённых ПВД (БСП:17931-17938, БСП:18210-18236; `Отключить` снимает `Включить`,
 БСП:6768). Квитанция удаляет регистрацию по номеру сообщения (БСП:17439-17445)
 и не затрагивает изменение, которое в выборку не попало.
+
+`registration.query_parameter_binding` — предупреждение. После `ПриОбработке`
+`МассивУзловПоЗначениямСвойств` подставляет только `{ИмяПланаОбмена}ЭтотУзел`
+и `СвойствоОбъекта_` + ключ `ПараметрыЗапроса` (ОбменДаннымиСобытия:2222-2228).
+`&УсловиеОтбораПоРеквизитуФлагу` заменяется текстом раньше (там же, 2198-2213).
 """
 
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 
@@ -28,6 +34,13 @@ from kd2_rules_mcp.structures.queries import (
 )
 from kd2_rules_mcp.structures.xmldump import KINDS
 from kd2_rules_mcp.validation.address import rule_address
+from kd2_rules_mcp.validation.exchange_plan import (
+    _assign_rhs,
+    _bsl_string,
+    _is_bare_name,
+    _skip_bsl_string,
+    _strip_comments,
+)
 from kd2_rules_mcp.validation.report import ValidationReport
 
 # Вид метаданных → префикс имени типа КД (`Документ` → `ДокументСсылка.`).
@@ -60,6 +73,13 @@ _NO_STRUCTURE = "структура конфигурации-источника 
 _NO_PLAN_CONTENT = "в менеджере регистрации нет состава плана обмена"
 _NO_OBJECT_SETTINGS = "объект настройки менеджера регистрации недоступен"
 _NO_EXCHANGE_RULES = "проект правил обмена не передан"
+QUERY_PARAMETERS = "registration.query_parameter_binding"
+_QUERY_HANDLERS = ("ПриОбработке", "ПриОбработкеДополнительный")
+# Текст подставляется до `УстановитьПараметр` (ОбменДаннымиСобытия:2198-2213).
+_SUBSTITUTED_PARAMETER = "УсловиеОтбораПоРеквизитуФлагу"
+_PARAMETER_PREFIX = "СвойствоОбъекта_"
+_EXECUTE = re.compile(r"(?<![\w.])Выполнить\s*\(", re.IGNORECASE)
+_ALGORITHM_REF = re.compile(r"(?<![\w.])Алгоритмы\s*\.", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -188,6 +208,7 @@ def check_registration(
         for rule in rules.rules():
             if _loaded(rule):
                 _check_settings(report, rule, None)
+                _check_query_parameters(report, rules, rule)
         return report
 
     index = _Index(structure)
@@ -208,6 +229,7 @@ def check_registration(
             _check_autoregistration(report, rule, plan, obj)
         if obj is not None:
             _check_object_filters(report, rule, obj, index)
+        _check_query_parameters(report, rules, rule)
     if plan is not None:
         if exchange_rules is None:
             report.skip("registration.no_pvd", _NO_EXCHANGE_RULES)
@@ -666,3 +688,246 @@ def _is_reference(type_name: str) -> bool:
     """`ДокументСсылка.Приход` — ссылка; `РегистрСведенийЗапись.Курсы` — нет."""
     head, dot, _ = type_name.partition(".")
     return bool(dot) and head.endswith("Ссылка")
+
+
+def _check_query_parameters(report: ValidationReport, rules: RegistrationRules, rule: Node) -> None:
+    """Собственный литеральный запрос ПРО ссылается на параметр, который исполнитель не задаёт.
+
+    Проверяется только одно присваивание `ТекстЗапроса` строковым литералом.
+    Текст, собранный кодом, `Выполнить` и вызов алгоритма — пропуск: тела в правилах
+    регистрации нет.
+    """
+    for event in _QUERY_HANDLERS:
+        text = str(rule.get(event))
+        if not text.strip():
+            continue
+        cleaned = _strip_comments(text)
+        address = rule_address(rule)
+        if _EXECUTE.search(cleaned) or _ALGORITHM_REF.search(cleaned):
+            report.skip(
+                QUERY_PARAMETERS,
+                f"{address}: «{event}» собирает запрос кодом — параметры не сверяются",
+            )
+            continue
+        literals = _assign_rhs(cleaned, "ТекстЗапроса")
+        if not literals:
+            continue
+        if len(literals) != 1:
+            report.skip(
+                QUERY_PARAMETERS,
+                f"{address}: «{event}» задаёт «ТекстЗапроса» несколько раз — "
+                "не видно, какой текст исполнится",
+            )
+            continue
+        query = _bsl_string(literals[0])
+        if query is None:
+            report.skip(
+                QUERY_PARAMETERS,
+                f"{address}: «{event}» собирает «ТекстЗапроса» кодом — параметры не сверяются",
+            )
+            continue
+        keys = _bound_keys(cleaned, _filter_keys(rule))
+        plan = rules.exchange_plan.strip()
+        system = f"{plan}ЭтотУзел" if plan else ""
+        missing = [
+            name
+            for name in _query_parameter_names(query)
+            if not _parameter_is_bound(name, system, keys)
+        ]
+        unbound = [
+            name for name in missing if keys is not None or not name.startswith(_PARAMETER_PREFIX)
+        ]
+        if not unbound:
+            if missing:
+                report.skip(
+                    QUERY_PARAMETERS,
+                    f"{address}: «{event}» меняет «ПараметрыЗапроса» кодом — "
+                    "не видно, какие ключи с префиксом «СвойствоОбъекта_» заданы",
+                )
+            continue
+        shown = ", ".join(f"«{name}»" for name in unbound)
+        report.warning(
+            QUERY_PARAMETERS,
+            address,
+            f"В «{event}» параметр запроса {shown} исполнитель не устанавливает. "
+            "К ключам «ПараметрыЗапроса» добавляется префикс «СвойствоОбъекта_», "
+            f"отдельно задаётся «{system or 'ИмяПланаОбменаЭтотУзел'}»",
+        )
+
+
+def _parameter_is_bound(name: str, system: str, keys: set[str] | None) -> bool:
+    if name == _SUBSTITUTED_PARAMETER:
+        return True
+    if system and name == system:
+        return True
+    if not name.startswith(_PARAMETER_PREFIX):
+        return False
+    if keys is None:
+        return False
+    return name[len(_PARAMETER_PREFIX) :] in keys
+
+
+def _query_parameter_names(query: str) -> list[str]:
+    """Имена `&Параметр` запроса вне строк и комментариев, в порядке появления."""
+    found: list[str] = []
+    seen: set[str] = set()
+    index = 0
+    length = len(query)
+    while index < length:
+        char = query[index]
+        if char == '"':
+            index = _skip_bsl_string(query, index)
+            continue
+        if query.startswith("//", index):
+            newline = query.find("\n", index)
+            index = length if newline < 0 else newline + 1
+            continue
+        if (
+            char == "&"
+            and index + 1 < length
+            and (query[index + 1].isalnum() or query[index + 1] == "_")
+        ):
+            end = index + 1
+            if end < length and query[end].isdigit():
+                index += 1
+                continue
+            while end < length and (query[end].isalnum() or query[end] == "_"):
+                end += 1
+            name = query[index + 1 : end]
+            if name and not name[0].isdigit() and name not in seen:
+                seen.add(name)
+                found.append(name)
+            index = end
+            continue
+        index += 1
+    return found
+
+
+def _filter_keys(rule: Node) -> set[str]:
+    """Ключи `ПараметрыЗапроса` из отбора по свойствам плана, без констант.
+
+    Читатель кладёт ключ `СтрЗаменить(СвойствоОбъекта, ".", "_")`
+    (ЗагрузкаПравилРегистрацииОбъектов:886-890). Константа в запрос не параметром.
+    """
+    root = rule.child("ОтборПоСвойствамПланаОбмена")
+    keys: set[str] = set()
+    if root is None:
+        return keys
+    stack = list(root.items)
+    while stack:
+        item = stack.pop()
+        if item.tag == "Группа":
+            stack.extend(item.items)
+            continue
+        if item.get("ЭтоСтрокаКонстанты") is True:
+            continue
+        prop = str(item.get("СвойствоОбъекта")).strip()
+        if prop:
+            keys.add(prop.replace(".", "_"))
+    return keys
+
+
+def _bound_keys(code: str, initial: set[str]) -> set[str] | None:
+    """Ключи после литеральных правок `ПараметрыЗапроса`. `None` — правка непрозрачна."""
+    keys = set(initial)
+    folded_name = "параметрызапроса"
+    size = len(folded_name)
+    lower = code.casefold()
+    index = 0
+    length = len(code)
+    while index < length:
+        if code[index] == '"':
+            index = _skip_bsl_string(code, index)
+            continue
+        if lower.startswith(folded_name, index) and _is_bare_name(code, index, size):
+            cursor = index + size
+            while cursor < length and code[cursor] in " \t\r\n":
+                cursor += 1
+            if cursor < length and code[cursor] == "=":
+                replaced = _structure_keys(code, cursor + 1)
+                if replaced is None:
+                    return None
+                keys = replaced
+                index = cursor + 1
+                continue
+            if code.startswith(".", cursor) or (cursor < length and code[cursor] == "."):
+                call = _read_call(code, cursor)
+                if call is None:
+                    return None
+                name, argument, next_index = call
+                if name == "очистить":
+                    keys = set()
+                elif name == "вставить" and argument is not None:
+                    keys.add(argument)
+                elif name == "удалить" and argument is not None:
+                    keys.discard(argument)
+                else:
+                    return None
+                index = next_index
+                continue
+        index += 1
+    return keys
+
+
+def _keyword_end(code: str, index: int, word: str) -> int | None:
+    if not code.casefold().startswith(word, index) or not _is_bare_name(code, index, len(word)):
+        return None
+    return index + len(word)
+
+
+def _structure_keys(code: str, start: int) -> set[str] | None:
+    """Ключи `Новый Структура("Имя1, Имя2")`. Иной правой части нет."""
+    cursor = start
+    while cursor < len(code) and code[cursor] in " \t\r\n":
+        cursor += 1
+    end = _keyword_end(code, cursor, "новый")
+    if end is None:
+        return None
+    cursor = end
+    while cursor < len(code) and code[cursor] in " \t\r\n":
+        cursor += 1
+    end = _keyword_end(code, cursor, "структура")
+    if end is None:
+        return None
+    cursor = end
+    while cursor < len(code) and code[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= len(code) or code[cursor] != "(":
+        return set()
+    cursor += 1
+    while cursor < len(code) and code[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor < len(code) and code[cursor] == ")":
+        return set()
+    if cursor >= len(code) or code[cursor] != '"':
+        return None
+    end = _skip_bsl_string(code, cursor)
+    inner = code[cursor + 1 : end - 1].replace('""', '"')
+    return {part.strip() for part in inner.split(",") if part.strip()}
+
+
+def _read_call(code: str, start: int) -> tuple[str, str | None, int] | None:
+    """`.Имя(` после `ПараметрыЗапроса`. Литеральный первый аргумент либо `None`."""
+    cursor = start
+    if cursor >= len(code) or code[cursor] != ".":
+        return None
+    cursor += 1
+    while cursor < len(code) and code[cursor] in " \t\r\n":
+        cursor += 1
+    begin = cursor
+    while cursor < len(code) and (code[cursor].isalnum() or code[cursor] == "_"):
+        cursor += 1
+    name = code[begin:cursor].casefold()
+    while cursor < len(code) and code[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= len(code) or code[cursor] != "(":
+        return None
+    cursor += 1
+    while cursor < len(code) and code[cursor] in " \t\r\n":
+        cursor += 1
+    argument: str | None = None
+    if cursor < len(code) and code[cursor] == '"':
+        end = _skip_bsl_string(code, cursor)
+        argument = code[cursor + 1 : end - 1].replace('""', '"')
+        cursor = end
+    return name, argument, cursor

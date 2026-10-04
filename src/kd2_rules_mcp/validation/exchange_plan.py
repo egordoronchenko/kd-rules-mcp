@@ -41,6 +41,22 @@
 - `handlers.export_key` — `КлючВыгружаемыхДанных` в `ПередВыгрузкой` без
   `ЗапоминатьВыгруженные = Истина`: кэш включён только при ссылке на себя и флаге ПКО
   (БСП:388–398, БСП:424, БСП:469–471), ищется после обработчика (БСП:607).
+- `handlers.ignored_modified_flag` — `ОбъектМодифицирован = Ложь` в `ПриЗагрузке` /
+  `ПослеЗагрузки`: флаг ставится в Истина и нигде не читается (БСП:10624, БСП:10953),
+  объект записывается всегда (БСП:11119, БСП:11228).
+- `handlers.table_no_clear` — `НеОчищать` у группы табличной части: атрибут читается
+  (БСП:10897), но передаётся только загрузке движений (БСП:10922–10924).
+- `handlers.pvd_refusal` — `Отказ = Истина` в `ПередОбработкой` ПВД, и объект выборки
+  входит в состав плана обмена правил: после обработчика отказ не проверяется
+  (БСП:18369–18404). Проверка — в `ПередВыгрузкой` (БСП:13618–13628). Объекта в составе
+  нет — замечания нет. Состава не видно — пропуск.
+- `structure.repeated_table_target` — несколько групп одной табличной части: каждая
+  загрузка замещает строки (БСП:9200–9264).
+- `structure.ambiguous_default_pko` — несколько ПКО одного источника и ссылка без имени
+  правила: берётся последнее загруженное (БСП:5837–5845, БСП:6977–6997, БСП:13131–13164).
+- `structure.multiple_pvd_same_type` — несколько включённых ПВД одного объекта выборки,
+  и этот объект входит в состав плана: обмен через план берёт первое
+  (БСП:6768, БСП:17931, БСП:18361–18367). Вне состава замечания нет.
 - `format.source_name`, `format.source_version` — `<Источник>` заголовка против структуры
   источника: имя без учёта регистра, из имени базы вырезано «БАЗОВАЯ» (`РПО:43–44`);
   версия — первые три числа (`РПО:64–69`, разбор — `ОбщегоНазначенияКлиентСервер:1030–1043`).
@@ -52,10 +68,12 @@
 
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
+from kd2_rules_mcp.structures.queries import exchange_plan_autoregistration
 from kd2_rules_mcp.validation.address import (
     CONVERSION_ADDRESS,
     pks_address,
@@ -67,6 +85,7 @@ from kd2_rules_mcp.validation.report import ValidationReport
 from kd2_rules_mcp.validation.structure import (
     REF_ONLY_LOAD_NOTE,
     Structure,
+    is_ref,
     ref_only_pko_codes,
     unreachable_pko_codes,
 )
@@ -79,6 +98,12 @@ OBJECT_WRITE = "handlers.object_write"
 PVD_ARBITRARY = "handlers.pvd_arbitrary"
 PVD_SELECTION = "handlers.pvd_selection"
 EXPORT_KEY = "handlers.export_key"
+MODIFIED_FLAG = "handlers.ignored_modified_flag"
+TABLE_NO_CLEAR = "handlers.table_no_clear"
+PVD_REFUSAL = "handlers.pvd_refusal"
+REPEATED_TABLE = "structure.repeated_table_target"
+AMBIGUOUS_PKO = "structure.ambiguous_default_pko"
+MULTIPLE_PVD = "structure.multiple_pvd_same_type"
 SOURCE_NAME = "format.source_name"
 SOURCE_VERSION = "format.source_version"
 
@@ -86,6 +111,8 @@ _MANUAL = (
     "Правило рассчитано на ручной обмен универсальной обработкой, "
     "в обмене через план обмена эта часть не исполняется"
 )
+# Нет структуры источника или плана в ней: не видно, дойдёт ли объект до ПВД.
+_PLAN_UNKNOWN = "состав плана обмена неизвестен: не видно, регистрируется ли объект"
 _PREDEFINED_PREFIXES = (
     "СправочникСсылка.",
     "ПланВидовХарактеристикСсылка.",
@@ -101,6 +128,11 @@ _ALGORITHM = re.compile(
     re.IGNORECASE,
 )
 _EXECUTE_OPAQUE = re.compile(r'(?<![\w.])Выполнить\s*\(\s*(?!")', re.IGNORECASE)
+# Штатный вызов алгоритма: тело подставляется, само `Выполнить` код не прячет.
+_ALGORITHM_EXECUTE = re.compile(
+    r"(?<![\w.])Выполнить\s*\(\s*Алгоритмы\s*\.\s*([^\W\d]\w*)\b\s*\)",
+    re.IGNORECASE,
+)
 _EXECUTE_STRING = re.compile(
     r'(?<![\w.])Выполнить\s*\(\s*("(?:[^"]|"")*")\s*\)',
     re.IGNORECASE,
@@ -129,6 +161,12 @@ _DYNAMIC_INDEX = re.compile(
 )
 _DYNAMIC_OBJECT = re.compile(r"(?<![\w.])Объект\s*\[", re.IGNORECASE)
 _BYPASS_TRUE = re.compile(r"(?<![\w.])(?:Отказ|Пусто)\s*=\s*Истина\b", re.IGNORECASE)
+# Граница оператора: присваивание, а не сравнение в `Если Отказ = Истина`.
+_ASSIGN_BEFORE = frozenset(
+    {"", ";", "тогда", "иначе", "цикл", "конецесли", "конеццикла", "конецпопытки"}
+)
+_LOAD_FLAG_EVENTS = ("ПриЗагрузке", "ПослеЗагрузки")
+_PKS_NAME_EVENTS = ("ПередВыгрузкой", "ПриВыгрузке")
 _EXPORT_WHOLE = re.compile(r"(?<![\w.])ВыгрузитьОбъект\s*=\s*Истина\b", re.IGNORECASE)
 _PREDEFINED_ASSIGN = re.compile(
     r"(?<![\w.])ИмяПредопределенногоЭлемента\s*=\s*([^\n]*)",
@@ -174,20 +212,99 @@ def check_exchange_plan(
     rules: ExchangeRules,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
+    plan_name: str | None = None,
+    plan_hints: Sequence[str] = (),
 ) -> ValidationReport:
-    """Проверки обмена через план обмена. Без нужной структуры — запись в `skipped`."""
+    """Проверки обмена через план обмена. Без нужной структуры — запись в `skipped`.
+
+    `plan_name` — имя плана этих правил (каталог `ExchangePlans/<Имя>`). Состав
+    ищется в структуре источника так же, как у `registration.plan_membership`.
+    `plan_hints` — каталоги пути файла правил: когда имя не задано, план называет
+    каталог, равный имени ровно одного плана обмена структуры (папка живых правил).
+    """
+    _REACH_CACHE.clear()
+    _NAME_CACHE.clear()
     report = ValidationReport()
     source_structure = Structure.load(source) if source is not None else None
     target_structure = Structure.load(target) if target is not None else None
     algorithms = _algorithms(rules)
+    plan_content = _rules_plan_content(source, plan_name, plan_hints)
     _check_header(report, rules, source)
     _check_values(report, rules, source_structure, target_structure, algorithms)
     _check_posting(report, rules, target_structure, algorithms)
     _check_object_write(report, rules)
+    _check_modified_flag(report, rules, algorithms)
+    _check_table_clear(report, rules, target_structure, algorithms)
+    _check_repeated_table(report, rules, target_structure)
+    _check_ambiguous_pko(report, rules, source_structure, algorithms)
+    _check_multiple_pvd(report, rules, plan_content)
     _check_pvd(report, rules, algorithms)
+    _check_pvd_refusal(report, rules, algorithms, plan_content)
     _check_export_key(report, rules, algorithms)
     _check_incoming(report, rules, algorithms)
     return report
+
+
+def plan_name_from_path(path: Path | str | None) -> str | None:
+    """Имя плана обмена, если файл правил лежит в каталоге `ExchangePlans/<Имя>`."""
+    if not path:
+        return None
+    parts = Path(path).parts
+    for index, part in enumerate(parts[:-1]):
+        if part.casefold() == "exchangeplans":
+            return parts[index + 1] or None
+    return None
+
+
+def _rules_plan_content(
+    source: sqlite3.Connection | None,
+    plan_name: str | None,
+    plan_hints: Sequence[str] = (),
+) -> dict[str, bool] | None:
+    """Состав плана правил: тип элемента → авторегистрация. Нет плана — `None`.
+
+    Имя задано — ищется `ПланОбмена.<Имя>` (`registration.plan_membership`,
+    `exchange_plan_autoregistration`). Имя не задано и в структуре ровно один
+    план обмена — берётся он. Несколько планов без имени или план не найден —
+    состав неизвестен.
+    """
+    if source is None:
+        return None
+    name = (plan_name or "").strip()
+    if not name:
+        names = _exchange_plan_names(source)
+        if len(names) != 1:
+            # Живые правила лежат в папке с именем плана (`…/ПравилаОбмена/<план>/`): каталог
+            # пути, равный имени ровно одного плана структуры, называет план.
+            named = [item for item in names if item in plan_hints]
+            if len(named) != 1:
+                return None
+            names = named
+        name = names[0]
+    if not _exchange_plan_exists(source, name):
+        return None
+    factory = source.row_factory
+    try:
+        return exchange_plan_autoregistration(source, name)
+    finally:
+        source.row_factory = factory
+
+
+def _exchange_plan_names(connection: sqlite3.Connection) -> list[str]:
+    rows = connection.execute(
+        "SELECT name FROM objects WHERE kind = 'ПланОбмена' AND is_group = 0 ORDER BY name"
+    )
+    return [str(row[0]) for row in rows]
+
+
+def _exchange_plan_exists(connection: sqlite3.Connection, name: str) -> bool:
+    """План `ПланОбмена.<Имя>` есть в структуре. Имя с точкой — уже полное."""
+    lookup = name if "." in name else f"ПланОбмена.{name}"
+    row = connection.execute(
+        "SELECT kind FROM objects WHERE is_group = 0 AND kind || '.' || name = ? LIMIT 1",
+        (lookup,),
+    ).fetchone()
+    return row is not None and str(row[0]) == "ПланОбмена"
 
 
 def _check_header(
@@ -444,6 +561,427 @@ def _check_pvd(report: ValidationReport, rules: ExchangeRules, algorithms: dict[
                 PVD_SELECTION,
                 f"{rule_address(pvd)}: «ПередОбработкой» непрозрачен — не видно, "
                 "задаёт ли обработчик «ВыборкаДанных»",
+            )
+
+
+_MODIFIED_TEXT = (
+    "Присваивание «ОбъектМодифицирован = Ложь» в «{event}» не отменяет запись: "
+    "исполнитель ставит флаг перед обработчиком и нигде его не читает, объект "
+    "записывается всегда. Рецепт относится к универсальной обработке обмена, "
+    "а не к обмену через план"
+)
+
+
+def _check_modified_flag(
+    report: ValidationReport, rules: ExchangeRules, algorithms: dict[str, str]
+) -> None:
+    """`ОбъектМодифицирован = Ложь` в загрузке ПКО не отменяет штатную запись.
+
+    `ПрочитатьОбъект` ставит переменную в Истина перед `ПриЗагрузке` (БСП:10624)
+    и перед `ПослеЗагрузки` (БСП:10953) и дальше её не читает: документ пишется
+    в БСП:11119, прочие объекты — в БСП:11228. Поле структуры и текст в строке
+    или комментарии не считаются.
+    """
+    for pko in rules.pko():
+        if _disabled(pko):
+            continue
+        events = [name for name in _LOAD_FLAG_EVENTS if str(pko.get(name)).strip()]
+        if not events:
+            continue
+        found: list[str] = []
+        opaque = False
+        for name in events:
+            state = _scan_assignment(
+                str(pko.get(name)), algorithms, "ОбъектМодифицирован", frozenset({"ложь"})
+            )
+            if state == "hit":
+                found.append(name)
+            elif state == "opaque":
+                opaque = True
+        if found:
+            report.warning(
+                MODIFIED_FLAG,
+                rule_address(pko),
+                _MODIFIED_TEXT.format(event="», «".join(found)),
+            )
+            continue
+        if opaque:
+            report.skip(
+                MODIFIED_FLAG,
+                f"{rule_address(pko)}: обработчик загрузки непрозрачен — не видно, "
+                "присваивается ли «ОбъектМодифицирован = Ложь»",
+            )
+
+
+def _check_table_clear(
+    report: ValidationReport,
+    rules: ExchangeRules,
+    target: Structure | None,
+    algorithms: dict[str, str],
+) -> None:
+    """`НеОчищать` у группы табличной части загрузчик ТЧ не получает.
+
+    Атрибут читается (БСП:10897) и передаётся только `ЗагрузитьДвижения`
+    (БСП:10922–10924). `ЗагрузитьТабличнуюЧасть` его не видит (БСП:10913–10918).
+    """
+    for pko in rules.pko():
+        if _disabled(pko):
+            continue
+        properties = pko.child("Свойства")
+        if properties is None:
+            continue
+        for path, group in _object_groups(properties, pko, target):
+            handler = str(group.get("ПередОбработкойВыгрузки"))
+            if not handler.strip():
+                continue
+            kind = _collection_class(group, pko, target)
+            address = pks_address(pko.code, path)
+            if kind is None:
+                if _may_assign_clear(handler, algorithms):
+                    report.skip(
+                        TABLE_NO_CLEAR,
+                        f"{address}: вид группы не определён — не видно, "
+                        "табличная часть это или набор записей",
+                    )
+                continue
+            if kind != "table":
+                continue
+            state = _scan_assignment(handler, algorithms, "НеОчищать", frozenset({"истина", "1"}))
+            if state == "hit":
+                name = side_name(group, "Приемник") or side_name(group, "Источник")
+                report.warning(
+                    TABLE_NO_CLEAR,
+                    address,
+                    f"Группа выставляет «НеОчищать» для табличной части «{name}». "
+                    "Атрибут читается, но передаётся только загрузке движений; "
+                    "загрузка табличной части его не получает, прежние строки этим "
+                    "не сохраняются",
+                )
+                continue
+            if state == "opaque":
+                report.skip(
+                    TABLE_NO_CLEAR,
+                    f"{address}: «ПередОбработкойВыгрузки» непрозрачен — не видно, "
+                    "выставляет ли обработчик «НеОчищать»",
+                )
+
+
+def _may_assign_clear(handler: str, algorithms: dict[str, str]) -> bool:
+    return _scan_assignment(handler, algorithms, "НеОчищать", frozenset({"истина", "1"})) != "none"
+
+
+def _check_repeated_table(
+    report: ValidationReport, rules: ExchangeRules, target: Structure | None
+) -> None:
+    """Несколько групп одной табличной части замещают строки, а не складывают их.
+
+    `ЗагрузитьТабличнуюЧасть` собирает результат из текущего фрагмента и загружает
+    его в табличную часть (БСП:9200–9264). Для движений действует `НеОчищать`,
+    поэтому наборы записей здесь не проверяются.
+    """
+    for pko in rules.pko():
+        if _disabled(pko):
+            continue
+        properties = pko.child("Свойства")
+        if properties is None:
+            continue
+        grouped: dict[str, list[str]] = {}
+        unknown: dict[str, int] = {}
+        for path, group in _object_groups(properties, pko, target):
+            name = side_name(group, "Приемник")
+            kind = _collection_class(group, pko, target)
+            if kind is None:
+                if name:
+                    unknown[name] = unknown.get(name, 0) + 1
+                continue
+            if kind != "table" or not name:
+                continue
+            grouped.setdefault(name, []).append(pks_address(pko.code, path))
+        for name, addresses in grouped.items():
+            if len(addresses) < 2:
+                continue
+            shown = " и ".join(addresses) if len(addresses) == 2 else ", ".join(addresses)
+            report.warning(
+                REPEATED_TABLE,
+                rule_address(pko),
+                f"Группы {shown} пишут табличную часть «{name}». Каждая загружается "
+                "отдельно и замещает строки. Объедините строки до выгрузки или "
+                "подтвердите, что группы взаимоисключающие",
+            )
+        for name, count in unknown.items():
+            if count < 2 or name in grouped:
+                continue
+            report.skip(
+                REPEATED_TABLE,
+                f"{rule_address(pko)}: несколько групп «{name}», а вид не определён — "
+                "не видно, повторяется ли табличная часть приёмника",
+            )
+
+
+def _check_ambiguous_pko(
+    report: ValidationReport,
+    rules: ExchangeRules,
+    source: Structure | None,
+    algorithms: dict[str, str],
+) -> None:
+    """Неявный выбор ПКО — последнее загруженное правило этого типа источника.
+
+    `ЗагрузитьПравилоКонвертации` перезаписывает ПКО менеджера типа (БСП:5837–5845),
+    восстановление кэша повторяет присваивание (БСП:7081–7085). `НайтиПравило` без
+    имени берёт `Менеджеры[ТипЗнч].ПКО` (БСП:6977–6997). Так же свойство без
+    `КодПравилаКонвертации` (БСП:12908, БСП:13131–13164) и ПВД с пустым кодом
+    (БСП:13451, БСП:13633, БСП:13311–13316). Вызов без имени для вида субконто —
+    `НайтиПравило(ВидСубконто)` при пустом `ИмяПКОВидСубконто` (БСП:12303–12305):
+    имя задаёт обработчик, а не код правила, поэтому здесь не проверяется.
+    Код группы ПКС читатель загружает (БСП:5353–5354) и при выгрузке не читает.
+    """
+    by_type: dict[str, list[Node]] = {}
+    for pko in rules.pko():
+        if _disabled(pko):
+            continue
+        source_type = str(pko.get("Источник")).strip()
+        if source_type:
+            by_type.setdefault(source_type, []).append(pko)
+    ambiguous = {name: nodes for name, nodes in by_type.items() if len(nodes) > 1}
+    if not ambiguous:
+        return
+    refs: dict[str, list[str]] = {name: [] for name in ambiguous}
+    opaque_types: set[str] = set()
+    untyped = False
+    for pko in rules.pko():
+        if _disabled(pko):
+            continue
+        properties = pko.child("Свойства")
+        if properties is None:
+            continue
+        untyped = _implicit_properties(
+            properties,
+            pko,
+            [],
+            "",
+            source,
+            algorithms,
+            ambiguous,
+            refs,
+            opaque_types,
+            untyped=untyped,
+        )
+    global_choice = _name_choice(_event(rules, "ПередВыгрузкойОбъекта"), algorithms)
+    for pvd in rules.pvd():
+        if _disabled(pvd):
+            continue
+        selection = str(pvd.get("ОбъектВыборки")).strip()
+        if selection not in ambiguous or _conversion_code(pvd):
+            continue
+        choice = _merge_name(
+            global_choice, _name_choice(str(pvd.get("ПередВыгрузкойОбъекта")), algorithms)
+        )
+        if choice == "explicit":
+            continue
+        if choice == "opaque":
+            opaque_types.add(selection)
+            continue
+        refs[selection].append(rule_address(pvd))
+    pending_untyped = False
+    for source_type, nodes in ambiguous.items():
+        found = refs[source_type]
+        codes = ", ".join(f"«{rule_code(node.code)}»" for node in nodes)
+        if found:
+            shown = ", ".join(found[:_SHOWN])
+            if len(found) > _SHOWN:
+                shown += f" и ещё {len(found) - _SHOWN}"
+            report.warning(
+                AMBIGUOUS_PKO,
+                rule_address(nodes[-1]),
+                f"Для источника «{source_type}» включены ПКО {codes}. Неявный выбор — "
+                "последнее загруженное ПКО этого типа. Ссылка без кода правила: "
+                f"{shown}",
+            )
+            continue
+        if source_type in opaque_types:
+            report.skip(
+                AMBIGUOUS_PKO,
+                f"Для источника «{source_type}» несколько ПКО, а ссылка без кода правила "
+                "непрозрачна — не видно, задаёт ли обработчик имя ПКО",
+            )
+            continue
+        pending_untyped = untyped
+    if pending_untyped:
+        report.skip(
+            AMBIGUOUS_PKO,
+            "у части свойств без кода правила тип не виден — неявный выбор ПКО не проверен",
+        )
+
+
+def _implicit_properties(
+    container: Node,
+    pko: Node,
+    ancestors: list[Node],
+    prefix: str,
+    source: Structure | None,
+    algorithms: dict[str, str],
+    ambiguous: dict[str, list[Node]],
+    refs: dict[str, list[str]],
+    opaque_types: set[str],
+    *,
+    untyped: bool,
+) -> bool:
+    segments = pks_segments(container)
+    for segment, item in zip(segments, container.items, strict=True):
+        if _disabled(item):
+            continue
+        path = f"{prefix}{segment}"
+        # Код группы при выгрузке не читается. Свойством без имени правила считается
+        # ПКС; у группы — только если в правилах явно указан ссылочный тип источника.
+        if item.is_group:
+            _implicit_node(
+                item,
+                pko,
+                path,
+                ancestors,
+                source,
+                algorithms,
+                ambiguous,
+                refs,
+                opaque_types,
+                allow_untyped=False,
+            )
+            untyped = _implicit_properties(
+                item,
+                pko,
+                [*ancestors, item],
+                f"{path}/",
+                source,
+                algorithms,
+                ambiguous,
+                refs,
+                opaque_types,
+                untyped=untyped,
+            )
+            continue
+        if _implicit_node(
+            item,
+            pko,
+            path,
+            ancestors,
+            source,
+            algorithms,
+            ambiguous,
+            refs,
+            opaque_types,
+            allow_untyped=True,
+        ):
+            untyped = True
+    return untyped
+
+
+def _implicit_node(
+    node: Node,
+    pko: Node,
+    path: str,
+    ancestors: list[Node],
+    source: Structure | None,
+    algorithms: dict[str, str],
+    ambiguous: dict[str, list[Node]],
+    refs: dict[str, list[str]],
+    opaque_types: set[str],
+    *,
+    allow_untyped: bool,
+) -> bool:
+    """Возвращает истину, если тип свойства не виден и неявный выбор не доказан."""
+    if _conversion_code(node):
+        return False
+    handlers = "\n".join(str(node.get(name)) for name in _PKS_NAME_EVENTS)
+    choice = _name_choice(handlers, algorithms)
+    if choice == "explicit":
+        return False
+    types = _property_source_types(node, pko, ancestors, source)
+    if types is None:
+        return allow_untyped and choice == "none"
+    matched = [name for name in types if name in ambiguous and is_ref(name)]
+    if choice == "opaque":
+        opaque_types.update(matched)
+        return False
+    address = pks_address(pko.code, path)
+    for name in matched:
+        refs[name].append(address)
+    return False
+
+
+def _check_multiple_pvd(
+    report: ValidationReport, rules: ExchangeRules, plan_content: dict[str, bool] | None
+) -> None:
+    """Обмен через план берёт одно ПВД на объект метаданных — первое включённое.
+
+    В таблицу попадают только правила с `Включить` (БСП:6768, БСП:17931).
+    `Найти` возвращает первую строку (БСП:18361–18367). Объект вне состава плана
+    не регистрируется и до этой выборки не доходит — замечания нет.
+    """
+    grouped: dict[str, list[Node]] = {}
+    for pvd in rules.pvd():
+        if _disabled(pvd):
+            continue
+        selection = str(pvd.get("ОбъектВыборки")).strip()
+        if selection:
+            grouped.setdefault(selection, []).append(pvd)
+    for selection, nodes in grouped.items():
+        if len(nodes) < 2:
+            continue
+        if plan_content is None:
+            report.skip(MULTIPLE_PVD, f"{rule_address(nodes[0])}: {_PLAN_UNKNOWN}")
+            continue
+        if selection not in plan_content:
+            continue
+        codes = ", ".join(f"«{rule_code(node.code)}»" for node in nodes)
+        report.warning(
+            MULTIPLE_PVD,
+            rule_address(nodes[0]),
+            f"Для «{selection}» включены ПВД {codes}. При обмене через план берётся "
+            "первое; остальные ПВД этого типа не работают, их обработчики не выполняются",
+        )
+
+
+def _check_pvd_refusal(
+    report: ValidationReport,
+    rules: ExchangeRules,
+    algorithms: dict[str, str],
+    plan_content: dict[str, bool] | None,
+) -> None:
+    """`Отказ` в `ПередОбработкой` ПВД выборка изменений не проверяет.
+
+    Обработчик выполняется (БСП:18369–18404), и дальше `Отказ` не читается.
+    Отказ от объекта проверяет `ВыгрузкаОбъектаВыборки` после `ПередВыгрузкой`
+    (БСП:13618–13628). Замечание — только если объект выборки входит в состав
+    плана и может быть зарегистрирован. `ВыборкаДанных` в том же обработчике —
+    отдельное замечание.
+    """
+    for pvd in rules.pvd():
+        if _disabled(pvd):
+            continue
+        handler = str(pvd.get("ПередОбработкойПравила"))
+        if not handler.strip():
+            continue
+        state = _scan_assignment(handler, algorithms, "Отказ", frozenset({"истина"}))
+        if state == "hit":
+            selection = str(pvd.get("ОбъектВыборки")).strip()
+            if plan_content is None:
+                report.skip(PVD_REFUSAL, f"{rule_address(pvd)}: {_PLAN_UNKNOWN}")
+                continue
+            if selection not in plan_content:
+                continue
+            report.warning(
+                PVD_REFUSAL,
+                rule_address(pvd),
+                f"«Отказ» в «ПередОбработкой» ПВД «{pvd.code}» при обмене через план "
+                f"не проверяется: зарегистрированные объекты «{selection}» будут выгружены. "
+                "Чтобы объект не уходил — правило регистрации или отказ в «ПередВыгрузкой» ПВД.",
+            )
+            continue
+        if state == "opaque":
+            report.skip(
+                PVD_REFUSAL,
+                f"{rule_address(pvd)}: «ПередОбработкой» непрозрачен — не видно, "
+                "присваивается ли «Отказ = Истина»",
             )
 
 
@@ -1108,6 +1646,373 @@ def _predefined(structure: Structure, object_id: int) -> set[str]:
         (object_id,),
     )
     return {name for (name,) in rows}
+
+
+def _conversion_code(node: Node) -> str:
+    """Код ПКО из `КодПравилаКонвертации`. Пустая строка — правило не названо."""
+    return rule_code(node.get("КодПравилаКонвертации"))
+
+
+def _object_groups(
+    container: Node, pko: Node, target: Structure | None, prefix: str = ""
+) -> Iterator[tuple[str, Node]]:
+    """Группы, которые пишут коллекцию самого объекта, а не строки вложенной."""
+    segments = pks_segments(container)
+    for segment, item in zip(segments, container.items, strict=True):
+        if _disabled(item) or not item.is_group:
+            continue
+        path = f"{prefix}{segment}"
+        yield path, item
+        kind = _collection_class(item, pko, target)
+        rules_kind = _side_kind(item, "Приемник")
+        # Пустой вид — простая группировка: дети пишут тот же объект (БСП:11654).
+        # Непустой неразобранный вид коллекцией может быть, внутрь не спускаемся.
+        if kind in ("table", "movement") or (kind is None and rules_kind):
+            continue
+        yield from _object_groups(item, pko, target, f"{path}/")
+
+
+def _collection_class(node: Node, pko: Node, target: Structure | None) -> str | None:
+    """`table`, `movement`, `other` либо `None`, если вид коллекции не разобрать.
+
+    Пустой `Вид` без структуры не доказывает табличную часть: исполнитель относит
+    его к простой группировке (БСП:11654), но это не вид из правил. Структура
+    приёмника, если свойство найдено, вид подтверждает.
+    """
+    rules_class = _classify_kind(_side_kind(node, "Приемник"))
+    if target is None:
+        return rules_class
+    name = side_name(node, "Приемник")
+    receiver = str(pko.get("Приемник")).strip()
+    obj = target.get(receiver) if receiver else None
+    if obj is None or not name:
+        return rules_class
+    matches = [
+        prop
+        for (path, parent), props in target.properties(obj).items()
+        if parent == "" and path == name
+        for prop in props
+    ]
+    if not matches:
+        return rules_class
+    classes = {item for item in (_classify_kind(prop.kind) for prop in matches) if item}
+    if rules_class not in (None, "other") and rules_class in classes:
+        return rules_class
+    if len(classes) == 1:
+        return next(iter(classes))
+    if not classes:
+        return rules_class if rules_class is not None else "other"
+    return None
+
+
+def _classify_kind(kind: str) -> str | None:
+    """`None` — вид в правилах не задан или не из списка коллекций."""
+    if kind == "ТабличнаяЧасть":
+        return "table"
+    if kind.startswith("НаборДвижений") or kind == "НаборЗаписейПоследовательности":
+        return "movement"
+    if kind == "ПодчиненныйСправочник":
+        return "other"
+    # Пустой и неизвестный вид без структуры не считаем табличной частью.
+    return None
+
+
+def _side_kind(node: Node, side: str) -> str:
+    child = node.child(side)
+    return str(child.attrs.get("Вид", "")) if child is not None else ""
+
+
+def _property_source_types(
+    node: Node, pko: Node, ancestors: list[Node], source: Structure | None
+) -> tuple[str, ...] | None:
+    """Типы источника свойства. `None` — ни правила, ни структура их не показывают."""
+    declared = _declared_types(node, "Источник")
+    if declared:
+        return declared
+    if source is None:
+        return None
+    obj = source.get(str(pko.get("Источник")).strip())
+    if obj is None:
+        return None
+    prefix = ""
+    parent_kind = ""
+    chain = [*ancestors, node]
+    for index, item in enumerate(chain):
+        name = side_name(item, "Источник")
+        if not name:
+            return None
+        kind = _side_kind(item, "Источник") if item.is_group else ""
+        prop = source.find(obj, f"{prefix}{name}", parent_kind, kind)
+        if prop is None:
+            return None
+        if index == len(chain) - 1:
+            return prop.types or None
+        prefix = f"{prefix}{name}."
+        parent_kind = prop.kind
+    return None
+
+
+def _declared_types(node: Node, side: str) -> tuple[str, ...]:
+    child = node.child(side)
+    if child is None:
+        return ()
+    raw = str(child.attrs.get("Тип", "")).strip()
+    if not raw:
+        return ()
+    return tuple(part.strip() for part in re.split(r"[,;\n]", raw) if part.strip())
+
+
+def _name_choice(text: str, algorithms: dict[str, str]) -> str:
+    """`none` — имя ПКО не задаётся; `explicit` — строковый литерал; `opaque` — иначе."""
+    if not text.strip() or not _may_set_pko_name(text, algorithms, set()):
+        return "none"
+    expanded = _expand(text, algorithms)
+    opaque = _text_opaque(expanded, algorithms)
+    values = _assign_rhs(expanded.code, "ИмяПКО")
+    literals = all(_bsl_string(rhs) is not None for rhs in values)
+    if values and literals and not opaque:
+        return "explicit"
+    if values or opaque:
+        return "opaque"
+    return "none"
+
+
+def _merge_name(earlier: str, later: str) -> str:
+    """Поздний обработчик перекрывает ранний, если сам задаёт имя."""
+    if later == "explicit":
+        return "explicit"
+    if later == "opaque" or earlier == "opaque":
+        return "opaque"
+    if earlier == "explicit":
+        return "explicit"
+    return "none"
+
+
+_REACH_CACHE: dict[tuple[str, str], str] = {}
+_NAME_CACHE: dict[str, bool] = {}
+
+
+def _may_set_pko_name(text: str, algorithms: dict[str, str], seen: set[str]) -> bool:
+    """Имя ПКО может быть задано в этом тексте или в вызванном алгоритме.
+
+    Ложь — разворачивать тело незачем. Неразрешённый `Выполнить` оставляет истину:
+    такой код непрозрачен и разбирается обычным путём.
+    """
+    lowered = text.casefold()
+    if "имяпко" in lowered:
+        return True
+    if "алгоритм" not in lowered and "выполнить" not in lowered:
+        return False
+    cleaned = _mask(_strip_comments(text))
+    if _EXECUTE_OPAQUE.search(
+        _ALGORITHM_EXECUTE.sub(
+            lambda match: "" if match.group(1).casefold() in algorithms else match.group(0),
+            cleaned,
+        )
+    ):
+        return True
+    for match in _ALGORITHM.finditer(cleaned):
+        key = match.group(1).casefold()
+        if key in seen:
+            continue
+        if key not in algorithms:
+            return True
+        cached = _NAME_CACHE.get(key)
+        if cached is None:
+            _NAME_CACHE[key] = False
+            cached = _may_set_pko_name(algorithms[key], algorithms, seen | {key})
+            _NAME_CACHE[key] = cached
+        if cached:
+            return True
+    return False
+
+
+def _assigns_literal(code: str, name: str, accepted: frozenset[str]) -> bool:
+    return any(rhs.casefold() in accepted for rhs in _assign_rhs(code, name))
+
+
+def _scan_assignment(
+    text: str, algorithms: dict[str, str], name: str, accepted: frozenset[str]
+) -> str:
+    """`hit` — присваивание литерала; `opaque` — код не виден; `none` — присваивания нет.
+
+    Тело алгоритма читается, только если в нём есть имя или вызов, и один раз на
+    проверку: один и тот же алгоритм из многих обработчиков повторно не обходится.
+    """
+    return _scan_chunks(text, algorithms, name.casefold(), accepted, set())
+
+
+def _scan_chunks(
+    text: str,
+    algorithms: dict[str, str],
+    folded: str,
+    accepted: frozenset[str],
+    seen: set[str],
+) -> str:
+    opaque = False
+    stack = [text]
+    while stack:
+        chunk = stack.pop()
+        lowered = chunk.casefold()
+        mentions = folded in lowered
+        calls = "алгоритм" in lowered or "выполнить" in lowered
+        if not mentions and not calls:
+            continue
+        cleaned = _strip_comments(chunk)
+        if mentions and any(rhs.casefold() in accepted for rhs in _assign_rhs(cleaned, folded)):
+            return "hit"
+        if not calls:
+            continue
+        masked = _mask(cleaned)
+        pending = _ALGORITHM_EXECUTE.sub(
+            lambda match: "" if match.group(1).casefold() in algorithms else match.group(0),
+            masked,
+        )
+        if _EXECUTE_OPAQUE.search(pending):
+            opaque = True
+        for match in _ALGORITHM.finditer(masked):
+            key = match.group(1).casefold()
+            if key in seen:
+                continue
+            state = _REACH_CACHE.get((folded, key))
+            if state is None or state == "open":
+                if state == "open":
+                    continue
+                body = algorithms.get(key)
+                if body is None:
+                    state = "opaque"
+                else:
+                    _REACH_CACHE[(folded, key)] = "open"
+                    state = _scan_chunks(body, algorithms, folded, accepted, seen | {key})
+                    _REACH_CACHE[(folded, key)] = state
+            if state == "hit":
+                return "hit"
+            if state == "opaque":
+                opaque = True
+    return "opaque" if opaque else "none"
+
+
+def _text_opaque(expanded: _Text, algorithms: dict[str, str]) -> bool:
+    """Код не виден целиком: `Выполнить` не от известного алгоритма или алгоритма нет.
+
+    `Выполнить(Алгоритмы.Имя)` при известном имени телом уже развёрнут и код не прячет.
+    """
+    if not expanded.opaque:
+        return False
+    cleaned = _mask(_strip_comments(expanded.code))
+    pending = _ALGORITHM_EXECUTE.sub(
+        lambda match: "" if match.group(1).casefold() in algorithms else match.group(0),
+        cleaned,
+    )
+    if _EXECUTE_OPAQUE.search(pending):
+        return True
+    return any(
+        match.group(1).casefold() not in algorithms for match in _ALGORITHM.finditer(cleaned)
+    )
+
+
+def _assign_rhs(code: str, name: str) -> list[str]:
+    """Правые части присваиваний `name` на границе оператора, без строк и комментариев."""
+    if name.casefold() not in code.casefold():
+        return []
+    cleaned = _strip_comments(code)
+    found: list[str] = []
+    folded = name.casefold()
+    size = len(folded)
+    lower = cleaned.casefold()
+    index = 0
+    length = len(cleaned)
+    while index < length:
+        if cleaned[index] == '"':
+            index = _skip_bsl_string(cleaned, index)
+            continue
+        if lower.startswith(folded, index) and _is_bare_name(cleaned, index, size):
+            after = index + size
+            if _is_statement_assign(cleaned, index, after):
+                rhs, index = _read_rhs_until_break(cleaned, _after_equals(cleaned, after))
+                found.append(rhs.strip())
+                continue
+        index += 1
+    return found
+
+
+def _is_bare_name(text: str, index: int, size: int) -> bool:
+    before = text[index - 1] if index else ""
+    after = text[index + size] if index + size < len(text) else ""
+    # Пустая строка входит в любую: без `before` имя в начале текста тоже голое.
+    if before and (before.isalnum() or before in "._"):
+        return False
+    return not (after.isalnum() or after == "_")
+
+
+def _is_statement_assign(text: str, start: int, after_name: int) -> bool:
+    if _token_before(text, start).casefold() not in _ASSIGN_BEFORE:
+        return False
+    cursor = after_name
+    while cursor < len(text) and text[cursor] in " \t\r\n":
+        cursor += 1
+    return cursor < len(text) and text[cursor] == "="
+
+
+def _after_equals(text: str, after_name: int) -> int:
+    cursor = after_name
+    while cursor < len(text) and text[cursor] != "=":
+        cursor += 1
+    return cursor + 1
+
+
+def _token_before(text: str, pos: int) -> str:
+    cursor = pos - 1
+    while cursor >= 0 and text[cursor] in " \t\r\n":
+        cursor -= 1
+    if cursor < 0:
+        return ""
+    if text[cursor] == ";":
+        return ";"
+    end = cursor + 1
+    while cursor >= 0 and (text[cursor].isalnum() or text[cursor] == "_"):
+        cursor -= 1
+    return text[cursor + 1 : end]
+
+
+def _read_rhs_until_break(text: str, start: int) -> tuple[str, int]:
+    chars: list[str] = []
+    index = start
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            end = _skip_bsl_string(text, index)
+            chars.append(text[index:end])
+            index = end
+            continue
+        if char in ";\n":
+            break
+        chars.append(char)
+        index += 1
+    return "".join(chars), index
+
+
+def _bsl_string(rhs: str) -> str | None:
+    """Содержимое одного строкового литерала либо `None`, если справа не только он."""
+    text = rhs.strip()
+    if len(text) < 2 or text[0] != '"' or text[-1] != '"':
+        return None
+    end = _skip_bsl_string(text, 0)
+    if end != len(text):
+        return None
+    return text[1:-1].replace('""', '"')
+
+
+def _skip_bsl_string(text: str, start: int) -> int:
+    index = start + 1
+    while index < len(text):
+        if text[index] == '"':
+            if index + 1 < len(text) and text[index + 1] == '"':
+                index += 2
+                continue
+            return index + 1
+        index += 1
+    return len(text)
 
 
 def _expand(text: str, algorithms: dict[str, str], seen: set[str] | None = None) -> _Text:

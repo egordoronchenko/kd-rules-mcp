@@ -10,17 +10,24 @@ from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
 from kd2_rules_mcp.structures.db import SCHEMA
 from kd2_rules_mcp.structures.store import StructureStore
 from kd2_rules_mcp.validation.exchange_plan import (
+    AMBIGUOUS_PKO,
     DOCUMENT_POSTING,
     ENUM_PKZ,
     EXPORT_KEY,
     INCOMING_KEY,
+    MODIFIED_FLAG,
+    MULTIPLE_PVD,
     OBJECT_WRITE,
     PREDEFINED_PKZ,
     PVD_ARBITRARY,
+    PVD_REFUSAL,
     PVD_SELECTION,
+    REPEATED_TABLE,
     SOURCE_NAME,
     SOURCE_VERSION,
+    TABLE_NO_CLEAR,
     check_exchange_plan,
+    plan_name_from_path,
 )
 from kd2_rules_mcp.validation.report import Issue, ValidationReport
 
@@ -112,6 +119,15 @@ def pks(source: str, target: str, extra: str = "", attrs: str = "") -> str:
     return (
         f'<Свойство{attrs}><Источник Имя="{source}" Вид="Реквизит"/>'
         f'<Приемник Имя="{target}" Вид="Реквизит"/>{extra}</Свойство>'
+    )
+
+
+def pks_group(
+    source: str, target: str, body: str = "", extra: str = "", kind: str = "ТабличнаяЧасть"
+) -> str:
+    return (
+        f'<Группа><Источник Имя="{source}" Вид="{kind}"/>'
+        f'<Приемник Имя="{target}" Вид="{kind}"/>{extra}{body}</Группа>'
     )
 
 
@@ -358,9 +374,11 @@ def test_manual_exchange_forms_warn_and_standard_selection_does_not(
     ]
     standard = (
         "<Правило><Код>В</Код><СпособОтбораДанных>СтандартнаяВыборка</СпособОтбораДанных>"
+        f"<ОбъектВыборки>{DOC}</ОбъектВыборки>"
         "<ПередОбработкойПравила>Отказ = Истина;</ПередОбработкойПравила></Правило>"
     )
-    assert run(exchange(pvd=standard), source, target).issues == []
+    refusal = run(exchange(pvd=standard), source, target)
+    assert [(issue.check, issue.address) for issue in refusal.issues] == [(PVD_REFUSAL, "ПВД «В»")]
     opaque = (
         "<Правило><Код>В</Код><ПередОбработкойПравила>Выполнить(КодОтбора);</ПередОбработкойПравила>"
         "</Правило>"
@@ -619,3 +637,355 @@ def test_basic_suffix_is_stripped_only_from_structure_name() -> None:
         "версия конфигурации в заголовке или в структуре не разбирается на три числа"
     ]
     connection.close()
+
+
+def test_modified_flag_warns_on_assignment_not_on_lookalikes(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    source, target = sides
+    direct = "<ПриЗагрузке>ОбъектМодифицирован = Ложь;</ПриЗагрузке>"
+    warned = run(exchange(pko("Приход", DOC, DOC, extra=direct)), source, target)
+    assert [issue.address for issue in hits(warned, MODIFIED_FLAG)] == ["ПКО «Приход»"]
+    assert "не отменяет запись" in hits(warned, MODIFIED_FLAG)[0].message
+    assert "универсальной обработке" in hits(warned, MODIFIED_FLAG)[0].message
+    lookalikes = (
+        "<ПослеЗагрузки>// ОбъектМодифицирован = Ложь;\n"
+        'Сообщить("ОбъектМодифицирован = Ложь");\n'
+        "Данные.ОбъектМодифицирован = Ложь;\n"
+        "Если ОбъектМодифицирован = Ложь Тогда\n"
+        "КонецЕсли;</ПослеЗагрузки>"
+    )
+    assert (
+        hits(
+            run(exchange(pko("Приход", DOC, DOC, extra=lookalikes)), source, target), MODIFIED_FLAG
+        )
+        == []
+    )
+    disabled = run(
+        exchange(pko("Приход", DOC, DOC, extra=direct, attrs=' Отключить="true"')),
+        source,
+        target,
+    )
+    assert hits(disabled, MODIFIED_FLAG) == []
+    via_algorithm = exchange(
+        pko("Приход", DOC, DOC, extra="<ПриЗагрузке>Выполнить(Алгоритмы.Сброс);</ПриЗагрузке>"),
+        algorithms='<Алгоритм Имя="Сброс"><Текст>ОбъектМодифицирован = Ложь;</Текст></Алгоритм>',
+    )
+    assert hits(run(via_algorithm, source, target), MODIFIED_FLAG)
+    quiet_algorithm = exchange(
+        pko("Приход", DOC, DOC, extra="<ПриЗагрузке>Выполнить(Алгоритмы.Пустой);</ПриЗагрузке>"),
+        algorithms='<Алгоритм Имя="Пустой"><Текст>Сообщить("нет");</Текст></Алгоритм>',
+    )
+    quiet = run(quiet_algorithm, source, target)
+    assert hits(quiet, MODIFIED_FLAG) == []
+    assert skips(quiet, MODIFIED_FLAG) == []
+    opaque = "<ПриЗагрузке>Выполнить(Текст);</ПриЗагрузке>"
+    assert skips(
+        run(exchange(pko("Приход", DOC, DOC, extra=opaque)), source, target), MODIFIED_FLAG
+    )
+
+
+def test_table_no_clear_is_only_a_tabular_section(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    source, target = sides
+    flag = "<ПередОбработкойВыгрузки>НеОчищать = Истина;</ПередОбработкойВыгрузки>"
+    table = pks_group("Товары", "Товары", extra=flag)
+    warned = run(exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, table)), source, target)
+    found = hits(warned, TABLE_NO_CLEAR)
+    assert len(found) == 1
+    assert "Товары" in found[0].message
+    assert "не получает" in found[0].message
+    number = pks_group(
+        "Товары",
+        "Товары",
+        extra="<ПередОбработкойВыгрузки>НеОчищать = 1;</ПередОбработкойВыгрузки>",
+    )
+    assert hits(
+        run(exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, number)), source, target),
+        TABLE_NO_CLEAR,
+    )
+    movement = pks_group("Остатки", "Остатки", extra=flag, kind="НаборДвиженийРегистраНакопления")
+    assert (
+        hits(run(exchange(pko("Приход", DOC, DOC, movement)), source, target), TABLE_NO_CLEAR) == []
+    )
+    comment = pks_group(
+        "Товары",
+        "Товары",
+        extra=(
+            "<ПередОбработкойВыгрузки>// НеОчищать = Истина;\n"
+            'Сообщить("НеОчищать = Истина");\n'
+            "Строка.НеОчищать = Истина;</ПередОбработкойВыгрузки>"
+        ),
+    )
+    assert (
+        hits(
+            run(exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, comment)), source, target),
+            TABLE_NO_CLEAR,
+        )
+        == []
+    )
+    disabled = pks_group("Товары", "Товары", extra=flag)
+    assert (
+        hits(
+            run(
+                exchange(
+                    pko(
+                        "Номенклатура",
+                        NOMENCLATURE,
+                        NOMENCLATURE,
+                        disabled,
+                        attrs=' Отключить="true"',
+                    )
+                ),
+                source,
+                target,
+            ),
+            TABLE_NO_CLEAR,
+        )
+        == []
+    )
+    unknown = pks_group("Товары", "Товары", extra=flag, kind="")
+    skipped = run(exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, unknown)), None, None)
+    assert hits(skipped, TABLE_NO_CLEAR) == []
+    assert skips(skipped, TABLE_NO_CLEAR)
+    # Структура называет «Товары» табличной частью, даже если вид в правилах пуст.
+    confirmed = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, unknown)), source, target
+    )
+    assert hits(confirmed, TABLE_NO_CLEAR)
+
+
+def test_repeated_table_target_names_both_groups(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    source, target = sides
+    body = pks_group("Товары", "Товары") + pks_group("Прочее", "Товары")
+    warned = run(exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, body)), source, target)
+    found = hits(warned, REPEATED_TABLE)
+    assert len(found) == 1
+    assert "взаимоисключающие" in found[0].message
+    assert found[0].message.count("ПКС") == 2
+    movement = pks_group("Остатки", "Остатки", kind="НаборДвиженийРегистраНакопления") + pks_group(
+        "Ещё", "Остатки", kind="НаборДвиженийРегистраНакопления"
+    )
+    assert (
+        hits(run(exchange(pko("Приход", DOC, DOC, movement)), source, target), REPEATED_TABLE) == []
+    )
+    one = pks_group("Товары", "Товары")
+    assert (
+        hits(
+            run(exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, one)), source, target),
+            REPEATED_TABLE,
+        )
+        == []
+    )
+    unknown = pks_group("А", "Строки", kind="") + pks_group("Б", "Строки", kind="")
+    skipped = run(exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, unknown)), None, None)
+    assert hits(skipped, REPEATED_TABLE) == []
+    assert "вид не определён" in skips(skipped, REPEATED_TABLE)[0]
+
+
+def test_ambiguous_default_pko_needs_an_implicit_reference(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    source, target = sides
+    catalog = pko("Ном", NOMENCLATURE, NOMENCLATURE) + pko("НомГруппа", NOMENCLATURE, NOMENCLATURE)
+    assert hits(run(exchange(catalog), source, target), AMBIGUOUS_PKO) == []
+    property_xml = (
+        '<Свойство><Источник Имя="Номенклатура" Вид="Реквизит" '
+        f'Тип="{NOMENCLATURE}"/><Приемник Имя="Номенклатура" Вид="Реквизит"/></Свойство>'
+    )
+    linked = catalog + pko("Приход", DOC, DOC, property_xml)
+    warned = run(exchange(linked), source, target)
+    found = hits(warned, AMBIGUOUS_PKO)
+    assert len(found) == 1
+    assert "Ном" in found[0].message and "НомГруппа" in found[0].message
+    assert "последнее загруженное" in found[0].message
+    assert "ПКС" in found[0].message
+    named = property_xml.replace(
+        "</Свойство>", "<КодПравилаКонвертации>Ном</КодПравилаКонвертации></Свойство>"
+    )
+    assert (
+        hits(run(exchange(catalog + pko("Приход", DOC, DOC, named)), source, target), AMBIGUOUS_PKO)
+        == []
+    )
+    commented = (
+        '<Свойство><Источник Имя="Номенклатура" Вид="Реквизит" '
+        f'Тип="{NOMENCLATURE}"/>'
+        '<Приемник Имя="Номенклатура" Вид="Реквизит"/>'
+        '<ПередВыгрузкой>// ИмяПКО = "";\nИмяПКО = "Ном";</ПередВыгрузкой></Свойство>'
+    )
+    assert (
+        hits(
+            run(exchange(catalog + pko("Приход", DOC, DOC, commented)), source, target),
+            AMBIGUOUS_PKO,
+        )
+        == []
+    )
+    disabled = pko("Ном", NOMENCLATURE, NOMENCLATURE, attrs=' Отключить="true"') + pko(
+        "НомГруппа", NOMENCLATURE, NOMENCLATURE
+    )
+    assert (
+        hits(
+            run(exchange(disabled + pko("Приход", DOC, DOC, property_xml)), source, target),
+            AMBIGUOUS_PKO,
+        )
+        == []
+    )
+    untyped = pks("Номенклатура", "Номенклатура")
+    skipped = run(exchange(catalog + pko("Приход", DOC, DOC, untyped)), None, None)
+    assert hits(skipped, AMBIGUOUS_PKO) == []
+    assert skips(skipped, AMBIGUOUS_PKO)
+
+
+def test_multiple_pvd_of_one_type_keeps_only_the_first(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    source, target = sides
+    rules = (
+        f"<Правило><Код>Первое</Код><ОбъектВыборки>{DOC}</ОбъектВыборки></Правило>"
+        f"<Правило><Код>Второе</Код><ОбъектВыборки>{DOC}</ОбъектВыборки></Правило>"
+    )
+    warned = run(exchange(pvd=rules), source, target)
+    found = hits(warned, MULTIPLE_PVD)
+    assert len(found) == 1
+    assert found[0].address == "ПВД «Первое»"
+    assert "не выполняются" in found[0].message
+    assert "Второе" in found[0].message
+    disabled = (
+        f"<Правило><Код>Первое</Код><ОбъектВыборки>{DOC}</ОбъектВыборки></Правило>"
+        f'<Правило Отключить="true"><Код>Второе</Код><ОбъектВыборки>{DOC}</ОбъектВыборки></Правило>'
+    )
+    assert hits(run(exchange(pvd=disabled), source, target), MULTIPLE_PVD) == []
+    different = (
+        f"<Правило><Код>Первое</Код><ОбъектВыборки>{DOC}</ОбъектВыборки></Правило>"
+        f"<Правило><Код>Второе</Код><ОбъектВыборки>{NOMENCLATURE}</ОбъектВыборки></Правило>"
+    )
+    assert hits(run(exchange(pvd=different), source, target), MULTIPLE_PVD) == []
+    # Контрагентов в составе плана «Обмен» нет: до выборки изменений объект не доходит.
+    outside = (
+        "<Правило><Код>Первое</Код>"
+        "<ОбъектВыборки>СправочникСсылка.Контрагенты</ОбъектВыборки></Правило>"
+        "<Правило><Код>Второе</Код>"
+        "<ОбъектВыборки>СправочникСсылка.Контрагенты</ОбъектВыборки></Правило>"
+    )
+    quiet = run(exchange(pvd=outside), source, target)
+    assert hits(quiet, MULTIPLE_PVD) == []
+    assert skips(quiet, MULTIPLE_PVD) == []
+    unknown = run(exchange(pvd=rules), None, None)
+    assert hits(unknown, MULTIPLE_PVD) == []
+    assert skips(unknown, MULTIPLE_PVD) == [
+        "ПВД «Первое»: состав плана обмена неизвестен: не видно, регистрируется ли объект"
+    ]
+
+
+_PLAN_UNKNOWN = "состав плана обмена неизвестен: не видно, регистрируется ли объект"
+_REFUSAL = (
+    f"«Отказ» в «ПередОбработкой» ПВД «В» при обмене через план не проверяется: "
+    f"зарегистрированные объекты «{DOC}» будут выгружены. "
+    "Чтобы объект не уходил — правило регистрации или отказ в «ПередВыгрузкой» ПВД."
+)
+
+
+def _refusal(selection: str = DOC, handler: str = "Отказ = Истина;") -> str:
+    return (
+        f"<Правило><Код>В</Код><ОбъектВыборки>{selection}</ОбъектВыборки>"
+        f"<ПередОбработкойПравила>{handler}</ПередОбработкойПравила></Правило>"
+    )
+
+
+def test_pvd_refusal_is_separate_from_selection(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    source, target = sides
+    both = _refusal(handler="Отказ = Истина;\nВыборкаДанных = Запрос.Выполнить();")
+    warned = run(exchange(pvd=both), source, target)
+    assert [issue.message for issue in hits(warned, PVD_REFUSAL)] == [_REFUSAL]
+    assert hits(warned, PVD_SELECTION)
+    lookalikes = (
+        "<Правило><Код>В</Код><ПередОбработкойПравила>"
+        "// Отказ = Истина;\n"
+        'Сообщить("Отказ = Истина");\n'
+        "Если Отказ = Истина Тогда\nКонецЕсли;\n"
+        "Параметры.Отказ = Истина;"
+        "</ПередОбработкойПравила></Правило>"
+    )
+    assert hits(run(exchange(pvd=lookalikes), source, target), PVD_REFUSAL) == []
+    correct_phase = (
+        "<Правило><Код>В</Код><ПередВыгрузкойОбъекта>Отказ = Истина;</ПередВыгрузкойОбъекта>"
+        "</Правило>"
+    )
+    assert hits(run(exchange(pvd=correct_phase), source, target), PVD_REFUSAL) == []
+    disabled = (
+        '<Правило Отключить="true"><Код>В</Код>'
+        "<ПередОбработкойПравила>Отказ = Истина;</ПередОбработкойПравила></Правило>"
+    )
+    assert hits(run(exchange(pvd=disabled), source, target), PVD_REFUSAL) == []
+    opaque = (
+        "<Правило><Код>В</Код><ПередОбработкойПравила>Выполнить(Текст);</ПередОбработкойПравила>"
+        "</Правило>"
+    )
+    assert skips(run(exchange(pvd=opaque), source, target), PVD_REFUSAL) == [
+        "ПВД «В»: «ПередОбработкой» непрозрачен — не видно, присваивается ли «Отказ = Истина»"
+    ]
+    # Контрагентов в составе плана «Обмен» нет — отказ для выгрузки без плана, замечания нет.
+    outside = run(exchange(pvd=_refusal("СправочникСсылка.Контрагенты")), source, target)
+    assert hits(outside, PVD_REFUSAL) == []
+    assert skips(outside, PVD_REFUSAL) == []
+    unknown = run(exchange(pvd=_refusal()), None, None)
+    assert hits(unknown, PVD_REFUSAL) == []
+    assert skips(unknown, PVD_REFUSAL) == [f"ПВД «В»: {_PLAN_UNKNOWN}"]
+    missing_plan = check_exchange_plan(
+        load_exchange_rules(exchange(pvd=_refusal())), source, target, "НетТакого"
+    )
+    assert hits(missing_plan, PVD_REFUSAL) == []
+    assert skips(missing_plan, PVD_REFUSAL) == [f"ПВД «В»: {_PLAN_UNKNOWN}"]
+
+
+def test_several_plans_without_a_name_leave_refusal_unknown() -> None:
+    """Несколько планов и нет имени — состав не выбрать, даже если объект есть в одном из них."""
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(SCHEMA)
+    for index, name in enumerate(("Первый", "Второй"), start=1):
+        connection.execute(
+            "INSERT INTO objects (id, kind, name, type_name) VALUES (?, 'ПланОбмена', ?, ?)",
+            (index, name, f"ПланОбменаСсылка.{name}"),
+        )
+    connection.execute(
+        "INSERT INTO type_sets (id, types) VALUES (1, ?)",
+        (DOC,),
+    )
+    connection.execute(
+        "INSERT INTO properties (object_id, kind, name, path, type_set_id, autoregistration) "
+        "VALUES (1, 'ЭлементСоставаПланаОбмена', 'Приход', 'Приход', 1, 0)"
+    )
+    report = check_exchange_plan(load_exchange_rules(exchange(pvd=_refusal())), connection, None)
+    assert hits(report, PVD_REFUSAL) == []
+    assert skips(report, PVD_REFUSAL) == [f"ПВД «В»: {_PLAN_UNKNOWN}"]
+    named = check_exchange_plan(
+        load_exchange_rules(exchange(pvd=_refusal())), connection, None, "Первый"
+    )
+    assert [issue.message for issue in hits(named, PVD_REFUSAL)] == [_REFUSAL]
+    # Папка живых правил названа именем плана: каталог пути называет план без явного имени.
+    hinted = check_exchange_plan(
+        load_exchange_rules(exchange(pvd=_refusal())),
+        connection,
+        None,
+        None,
+        ("C:", "проект", "ПравилаОбмена", "Первый"),
+    )
+    assert [issue.message for issue in hits(hinted, PVD_REFUSAL)] == [_REFUSAL]
+    # Два каталога пути равны именам двух планов — выбора нет.
+    both = check_exchange_plan(
+        load_exchange_rules(exchange(pvd=_refusal())), connection, None, None, ("Первый", "Второй")
+    )
+    assert skips(both, PVD_REFUSAL) == [f"ПВД «В»: {_PLAN_UNKNOWN}"]
+    connection.close()
+
+
+def test_plan_name_comes_from_the_exchange_plan_directory() -> None:
+    path = Path("cfg/ExchangePlans/ОбменЗарплата/Templates/ПравилаОбмена/Ext/Template.txt")
+    assert plan_name_from_path(path) == "ОбменЗарплата"
+    assert plan_name_from_path(Path("workspace/bit-zup/ExchangeRules.xml")) is None
+    assert plan_name_from_path(None) is None
