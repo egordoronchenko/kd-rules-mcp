@@ -89,6 +89,20 @@ def entity_fields(entity: ed.Entity) -> dict[str, Any]:
             if isinstance(value, str) and f.name.endswith("_raw")
             else scalar(value)
         )
+    from kd2_rules_mcp.ed.layer_model import LayerHandlerBinding
+
+    if isinstance(entity, LayerHandlerBinding) and entity.body_changes:
+        result["body_modified"] = entity.body_modified
+        result["body_changes"] = [
+            {
+                "kind": change.kind,
+                "target": change.target_name,
+                "layer_id": change.origin.layer_id,
+                "file_id": change.origin.file_id,
+                "span": span_view(change.origin.span),
+            }
+            for change in entity.body_changes
+        ]
     return result
 
 
@@ -293,7 +307,7 @@ def summary(document: ed.EdDocument) -> dict[str, Any]:
 # Адрес в тексте пропуска: у модели Skipped отдельного поля нет, адреса лежат в причине.
 _SKIPPED_ADDRESS = re.compile(
     r"(?<![\w/])(?:Конвертация\b|"
-    r"(?:ПКО|ПОД|ПКПД|Параметр|Алгоритм|Обработчик|Служебный|Диспетчер|Событие|Неизвестное)"
+    r"(?:Слой|Действующее|ПКО|ПОД|ПКПД|Параметр|Алгоритм|Обработчик|Служебный|Диспетчер|Событие|Неизвестное)"
     r"(?:/[^,\s;]+)+)"
 )
 

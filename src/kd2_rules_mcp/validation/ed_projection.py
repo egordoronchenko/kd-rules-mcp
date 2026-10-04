@@ -5,15 +5,18 @@
 
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any, cast
 
+from kd2_rules_mcp.ed.forms import EVENT_INVOCATIONS, accepts_arguments, invocation_keys_match
 from kd2_rules_mcp.ed.layer_model import (
     Certainty,
     EffectiveContext,
+    EffectiveDocument,
     EntityState,
     LayeredManager,
 )
+from kd2_rules_mcp.ed.lexer import tokenize
 from kd2_rules_mcp.ed.model import (
     EdDocument,
     Guard,
@@ -24,6 +27,27 @@ from kd2_rules_mcp.ed.model import (
     RuleUse,
     SourceFile,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ContextDocument(EffectiveDocument):
+    """Роли для вызовов контекста и счётчик деклараций исходного файла раздельны.
+
+    Исходные процедуры остаются в документе во всех направлениях. Их счётчик
+    сохраняет классификацию читателя базы; собственные обработчики слоя добавляются
+    только там, где действуют. Это не расширяет индекс тел неактивных обработчиков.
+    """
+
+    source_handler_ids: frozenset[str] = frozenset()
+
+    @property
+    def counts(self) -> dict[str, int]:
+        result = super(ContextDocument, self).counts
+        result["handlers"] = len(
+            self.source_handler_ids
+            | {routine.entity_id for routine in self.routines if "handler" in routine.roles}
+        )
+        return result
 
 
 def event_direction(event: str) -> str | None:
@@ -131,7 +155,19 @@ def effective_document(layered: LayeredManager, context: EffectiveContext) -> Ed
     )
     pkpd = tuple(entity for entity in payloads if isinstance(entity, PredefinedRule))
     parameters = tuple(entity for entity in payloads if isinstance(entity, Parameter))
-    uses = tuple(use for use in source.rule_uses if use.rule_id is None) + tuple(
+    unchanged_ids = {
+        version.payload.entity_id
+        for version in context.entities
+        if version.payload is not None and version.state == EntityState.BASE
+    }
+    unscoped_ids = {
+        use.rule_id
+        for use in source.rule_uses
+        if use.direction is None and use.rule_id in unchanged_ids
+    }
+    uses = tuple(
+        use for use in source.rule_uses if use.rule_id is None or use.rule_id in unscoped_ids
+    ) + tuple(
         RuleUse(
             entity_id="effective-use:" + entity.entity_id,
             kind="rule_use",
@@ -143,9 +179,65 @@ def effective_document(layered: LayeredManager, context: EffectiveContext) -> Ed
             direction=context.direction,
         )
         for entity in (*pko, *pod)
+        if entity.entity_id not in unscoped_ids
     )
     routines = {routine.entity_id: routine for routine in source.routines}
     routines.update({routine.entity_id: routine for _, routine in layered.routines})
+    # Новые привязки содержат имя; связываем его с процедурой своего файла.
+    # Неоднозначность имён не разрешается выбором последнего элемента.
+
+    dispatch_targets: dict[tuple[str, str], str | None] = {}
+    dispatch_cases = {}
+    dispatch_resolution = {
+        (chain.kind, chain.target_name): chain.resolution for chain in context.dispatch_chains
+    }
+    original_bindings = {
+        (rule.entity_id, event.event): event.target_name
+        for rule in (*source.pko, *source.pod)
+        for event in rule.events
+    }
+
+    def bind_events(rule):
+        events = []
+        for event in rule.events:
+            signature = EVENT_INVOCATIONS.get(event.event)
+            key = (signature.kind if signature else "procedure", event.target_name)
+            if key in dispatch_targets:
+                target_id = dispatch_targets[key]
+            elif layered.readings:
+                target_id = None
+            else:
+                target_id = event.target_id
+            case = dispatch_cases.get(key)
+            callee = routines.get(target_id or "")
+            invalid = bool(
+                layered.readings
+                and case
+                and signature
+                and original_bindings.get((rule.entity_id, event.event)) != event.target_name
+                and (
+                    case.returns != (signature.kind == "function")
+                    or not invocation_keys_match(signature, case.arguments)
+                    or (
+                        callee is not None
+                        and not accepts_arguments(callee.parameters, len(case.arguments))
+                    )
+                )
+            )
+            events.append(
+                replace(
+                    event,
+                    target_id=None if invalid else target_id,
+                    resolution="invalid_signature"
+                    if invalid
+                    else "unknown"
+                    if layered.readings
+                    and (signature is None or dispatch_resolution.get(key) == "unknown")
+                    else event.resolution,
+                )
+            )
+        return replace(rule, events=tuple(events))
+
     dispatcher_ids = {routine.name.casefold(): routine.entity_id for routine in source.routines}
     cases = {}
     for chain in context.dispatch_chains:
@@ -174,15 +266,78 @@ def effective_document(layered: LayeredManager, context: EffectiveContext) -> Ed
             if target:
                 case = replace(case, dispatcher_id=dispatcher_ids.get(target, case.dispatcher_id))
             cases[case.entity_id] = case
-    targets = {binding.target_name.casefold() for rule in (*pko, *pod) for binding in rule.events}
-    callees = {
-        case.target.reference_parts[0].casefold()
-        for case in cases.values()
-        if case.target.reference_parts
+        # Строка ключа точная; идентификатор процедуры сравнивается без регистра.
+        # Источник выбранной ветки различает одноимённые методы разных расширений.
+        if selected and selected[0].case is not None:
+            case = selected[0].case
+            candidates = [
+                routine.entity_id
+                for routine in routines.values()
+                if case.target.reference_parts
+                and routine.name.casefold() == case.target.reference_parts[0].casefold()
+                and routine.span.file_id == case.span.file_id
+            ]
+            dispatch_targets[chain.kind, chain.target_name] = (
+                candidates[0] if len(candidates) == 1 else None
+            )
+            dispatch_cases[chain.kind, chain.target_name] = case
+    pko = tuple(bind_events(rule) for rule in pko)
+    pod = tuple(bind_events(rule) for rule in pod)
+    source_ids = {item.entity_id for item in source.routines}
+    active_ids = {
+        event.target_id
+        for rule in (*pko, *pod)
+        for event in rule.events
+        if event_direction(event.event) in (None, context.direction)
+    }
+    active_ids.update(
+        hook.routine.entity_id
+        for rule in (*pko, *pod)
+        for event in rule.events
+        if event_direction(event.event) in (None, context.direction)
+        for change in getattr(event, "body_changes", ())
+        for hook in layered.hooks
+        if hook.origin == change.origin
+    )
+    previous_calls = tuple(
+        call
+        for call in layered.previous_calls
+        if call.rule_id in {rule.entity_id for rule in (*pko, *pod)}
+        and event_direction(call.event) in (None, context.direction)
+    )
+    helpers = {
+        (routine.span.file_id, routine.name.casefold()): routine
+        for routine in routines.values()
+        if "handler_helper" in routine.roles
+    }
+    helper_files = {file_id for file_id, _ in helpers}
+    changed = bool(helpers or previous_calls)
+    while changed:
+        before = len(active_ids)
+        for call in previous_calls:
+            if call.routine_id in active_ids:
+                active_ids.add(call.target_id)
+        for routine in routines.values():
+            if routine.entity_id not in active_ids or routine.span.file_id not in helper_files:
+                continue
+            tokens = tokenize(routine.raw_text)
+            for index, token in enumerate(tokens):
+                target = helpers.get((routine.span.file_id, token.folded))
+                if (
+                    target
+                    and index + 1 < len(tokens)
+                    and tokens[index + 1].value == "("
+                    and (not index or tokens[index - 1].value != ".")
+                ):
+                    active_ids.add(target.entity_id)
+        changed = len(active_ids) != before
+    originally_bound = {
+        event.target_id for rule in (*source.pko, *source.pod) for event in rule.events
     }
     all_routines = tuple(
-        replace(routine, roles=routine.roles | {"handler"})
-        if routine.name.casefold() in targets | callees
+        replace(routine, roles=routine.roles - {"handler", "handler_helper"})
+        if routine.entity_id not in active_ids
+        and (routine.entity_id not in source_ids or routine.entity_id in originally_bound)
         else routine
         for routine in routines.values()
     )
@@ -195,7 +350,7 @@ def effective_document(layered: LayeredManager, context: EffectiveContext) -> Ed
             file for file in layered.source_files if file.file_id not in existing_files
         ),
     )
-    return replace(
+    document = replace(
         document,
         pod=pod,
         pkpd=pkpd,
@@ -203,4 +358,11 @@ def effective_document(layered: LayeredManager, context: EffectiveContext) -> Ed
         routines=all_routines,
         rule_uses=uses,
         dispatcher_cases=tuple(cases.values()),
+    )
+    return ContextDocument(
+        **{f.name: getattr(document, f.name) for f in fields(EdDocument)},
+        previous_calls=previous_calls,
+        source_handler_ids=frozenset(
+            routine.entity_id for routine in source.routines if "handler" in routine.roles
+        ),
     )

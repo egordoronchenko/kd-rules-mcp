@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .errors import EdFormatError, EdReadError
-from .forms import DISPATCHERS, EVENT_SIGNATURES
+from .forms import DISPATCHERS, EVENT_INVOCATIONS, EVENT_SIGNATURES
 from .layer_model import (
     Certainty,
     DispatchChain,
@@ -21,8 +21,10 @@ from .layer_model import (
     ExtensionReading,
     FieldChange,
     Footprint,
+    HandlerBodyChange,
     LayerDescriptor,
     LayeredManager,
+    LayerHandlerBinding,
     LayerOperation,
     LayerSkip,
     LayerStatus,
@@ -46,6 +48,8 @@ from .layer_reader import (
     read_dump,
     read_extension_file,
     recover_parameters,
+    resolve_handler_bindings,
+    source_from_text,
 )
 from .lexer import lex
 from .model import (
@@ -340,6 +344,116 @@ def compose_manager(
     active: set[tuple[int, str]] = set()
     live_skips: set[tuple[int, str, bool]] = set()
     conditions = property_conditions(source.files[0]) if source.files else {}
+    if any(
+        hook.target_name.casefold() in _DISPATCH for reading in readings for hook in reading.hooks
+    ):
+        preliminary = []
+        for direction in ("send", "receive"):
+            for headers_only in header_flags:
+                tips, *_ = _context_state(
+                    source,
+                    calls,
+                    parameters,
+                    readings,
+                    direction,
+                    headers_only,
+                    conditions,
+                    set(),
+                    set(),
+                )
+                preliminary.append(
+                    EffectiveContext(
+                        direction,
+                        headers_only,
+                        None,
+                        manager_name,
+                        manager_layer_id,
+                        tuple(tips.values()),
+                        (),
+                        _dispatch(source, readings, tips, throws),
+                        (),
+                        (),
+                    )
+                )
+        descriptors = {layer.id: layer for layer in layers}
+        resolved = []
+        prior_contexts = []
+        for index, reading in enumerate(readings):
+            previous_contexts = []
+            if index:
+                for context in preliminary:
+                    tips, *_ = _context_state(
+                        source,
+                        calls,
+                        parameters,
+                        readings[:index],
+                        context.direction,
+                        context.headers_only,
+                        conditions,
+                        set(),
+                        set(),
+                    )
+                    previous_contexts.append(
+                        replace(
+                            context,
+                            entities=tuple(tips.values()),
+                            dispatch_chains=_dispatch(source, readings[:index], tips, throws),
+                        )
+                    )
+            resolved.append(
+                resolve_handler_bindings(
+                    reading,
+                    source,
+                    preliminary,
+                    descriptors.get(
+                        reading.layer_id,
+                        LayerDescriptor(
+                            reading.layer_id, 1, reading.layer_id, reading.source.path, None, ""
+                        ),
+                    ),
+                    _trusted(source),
+                    previous_contexts,
+                    tuple(routine for earlier in readings[:index] for routine in earlier.routines),
+                )
+            )
+            prior_contexts.append(previous_contexts)
+        # Прежний обработчик нижнего слоя остаётся действующим через доказанный вызов.
+        # Разбираем его на пути вызывающего события; каскад обёрток конечен по слоям.
+        followed = set()
+        for _ in readings:
+            calls_to_previous = tuple(call for item in resolved for call in item.previous_calls)
+            pending = {call.target_id for call in calls_to_previous} - followed
+            affected = {
+                index
+                for index, item in enumerate(resolved)
+                if any(r.entity_id in pending for r in item.routines)
+            }
+            if not affected:
+                break
+            followed.update(pending)
+            for index in sorted(affected):
+                reading = resolved[index]
+                resolved[index] = resolve_handler_bindings(
+                    reading,
+                    source,
+                    preliminary,
+                    descriptors.get(
+                        reading.layer_id,
+                        LayerDescriptor(
+                            reading.layer_id,
+                            index + 1,
+                            reading.layer_id,
+                            reading.source.path,
+                            None,
+                            "",
+                        ),
+                    ),
+                    _trusted(source),
+                    prior_contexts[index],
+                    tuple(routine for earlier in readings[:index] for routine in earlier.routines),
+                    calls_to_previous,
+                )
+        readings = tuple(resolved)
     for direction in ("send", "receive"):
         for headers_only in header_flags:
             tips, history, taints, references, faults = _context_state(
@@ -354,7 +468,12 @@ def compose_manager(
                 live_skips,
             )
             tips = {
-                key: replace(value, direction=direction, headers_only=headers_only)
+                key: replace(
+                    value,
+                    payload=_with_handler_hooks(value.payload, source, readings),
+                    direction=direction,
+                    headers_only=headers_only,
+                )
                 for key, value in tips.items()
             }
             history = [
@@ -455,6 +574,56 @@ def _route_only(reading: ExtensionReading) -> bool:
     hooks_ok = all(hook.target_name.casefold() in _ROUTE for hook in reading.hooks)
     ops_ok = all(op.kind == OperationKind.MAP_INSERT for op in reading.operations)
     return hooks_ok and ops_ok
+
+
+def _with_handler_hooks(payload, source, readings):
+    """Перехват типового тела — факт привязки, не изменение состава правил."""
+    if not isinstance(payload, (ObjectRule, ProcessingRule)):
+        return payload
+    events = []
+    routines = {r.entity_id: r for r in source.routines}
+    for binding in payload.events:
+        target = routines.get(binding.target_id or "")
+        if target is None:
+            case = next(
+                (c for c in source.dispatcher_cases if c.literal_name == binding.target_name), None
+            )
+            name = (
+                case.target.reference_parts[0]
+                if case and case.target.reference_parts
+                else binding.target_name
+            )
+            target = next(
+                (r for r in source.routines if r.name.casefold() == name.casefold()), None
+            )
+        reached = {target.entity_id} if target else set()
+        reached.update(
+            call.target_id
+            for reading in readings
+            for call in reading.previous_calls
+            if call.rule_id == payload.entity_id and call.event == binding.event
+        )
+        changes = tuple(
+            HandlerBodyChange(hook.kind, hook.target_name, hook.origin)
+            for reading in readings
+            for hook in reading.hooks
+            if hook.target_class == "handler"
+            and hook.applicability == "known"
+            and any(
+                routines[rid].name.casefold() == hook.target_name.casefold()
+                for rid in reached
+                if rid in routines
+            )
+        )
+        if changes:
+            from dataclasses import fields
+
+            binding = LayerHandlerBinding(
+                **{f.name: getattr(binding, f.name) for f in fields(HandlerBinding)},
+                body_changes=changes,
+            )
+        events.append(binding)
+    return replace(payload, events=tuple(events))
 
 
 def _context_state(
@@ -1486,25 +1655,70 @@ def _dispatch(source, readings, tips, throws: bool) -> tuple[DispatchChain, ...]
         hook
         for reading in readings
         for hook in reading.hooks
-        if hook.target_name.casefold() in _DISPATCH and hook.applicability == "known"
+        if hook.target_name.casefold() in _DISPATCH
+        and (hook.applicability == "known" or hook.target_class == "function_dispatcher")
     ]
-    arounds = [hook for hook in hooks if hook.kind == "around"]
-    afters = [hook for hook in hooks if hook.kind == "after"]
-    befores = [hook for hook in hooks if hook.kind == "before"]
-    names = {case.literal_name for case in source.dispatcher_cases}
+    names = {
+        (case.literal_name, "function" if case.returns else "procedure")
+        for case in source.dispatcher_cases
+    }
     for reading in readings:
         for hook in reading.hooks:
-            names.update(handled_literals(reading, hook.id))
+            names.update(
+                (name, hook.routine.routine_kind) for name in handled_literals(reading, hook.id)
+            )
     for tip in tips.values():
         if isinstance(tip.payload, (ObjectRule, ProcessingRule)):
-            names.update(binding.target_name for binding in tip.payload.events)
+            names.update(
+                (
+                    binding.target_name,
+                    EVENT_INVOCATIONS[binding.event].kind
+                    if binding.event in EVENT_INVOCATIONS
+                    else "procedure",
+                )
+                for binding in tip.payload.events
+            )
     chains: list[DispatchChain] = []
-    base_unknown = dispatcher_unknown(source)
-    for name in sorted(names):
-        if any(hook.kind == "change_control" or hook.continuation == "unknown" for hook in hooks):
+    unknown_by_kind = {
+        kind: dispatcher_unknown(source, kind=kind) for kind in ("procedure", "function")
+    }
+    function_throws = False
+    if any(kind == "function" for _, kind in names):
+        routine = next(
+            (r for r in source.routines if r.name.casefold() == "выполнитьфункциюмодуляменеджера"),
+            None,
+        )
+        if routine:
+            function_throws = dispatcher_throws(
+                source_from_text(
+                    routine.raw_text,
+                    routine.span.file_id,
+                    "dispatcher",
+                    False,
+                    routine.raw_text.encode("utf-8"),
+                )
+            )
+    for name, kind in sorted(names):
+        active_hooks = [hook for hook in hooks if hook.routine.routine_kind == kind]
+        arounds = [hook for hook in active_hooks if hook.kind == "around"]
+        afters = [hook for hook in active_hooks if hook.kind == "after"]
+        befores = [hook for hook in active_hooks if hook.kind == "before"]
+        base_unknown = unknown_by_kind[kind]
+        if any(
+            hook.kind == "change_control" or hook.continuation == "unknown" for hook in active_hooks
+        ):
             resolution = "unknown"
         else:
-            resolution = _resolve(name, arounds, afters, source, readings, throws, base_unknown)
+            resolution = _resolve(
+                name,
+                arounds,
+                afters,
+                source,
+                readings,
+                throws if kind == "procedure" else function_throws,
+                base_unknown,
+                kind,
+            )
         links = [DispatchLink(hook, None, hook.origin.layer_id, True) for hook in befores]
         links.extend(
             DispatchLink(
@@ -1518,21 +1732,26 @@ def _dispatch(source, readings, tips, throws: bool) -> tuple[DispatchChain, ...]
         links.extend(
             DispatchLink(None, case, "base", False)
             for case in source.dispatcher_cases
-            if case.literal_name == name
+            if case.literal_name == name and case.returns == (kind == "function")
         )
         links.extend(
             DispatchLink(hook, _case_for(readings, hook.id, name), hook.origin.layer_id, True)
             for hook in afters
         )
-        chains.append(DispatchChain(name, "procedure", tuple(links), resolution))
+        chains.append(DispatchChain(name, kind, tuple(links), resolution))
     return tuple(chains)
 
 
-def _resolve(name, arounds, afters, source, readings, throws: bool, base_unknown: bool) -> str:
+def _resolve(
+    name, arounds, afters, source, readings, throws: bool, base_unknown: bool, kind: str
+) -> str:
     def base_outcome() -> str:
         if base_unknown:
             return "unknown"
-        if any(case.literal_name == name for case in source.dispatcher_cases):
+        if any(
+            case.literal_name == name and case.returns == (kind == "function")
+            for case in source.dispatcher_cases
+        ):
             return "call"
         return "throws" if throws else "no_call"
 
@@ -1544,7 +1763,18 @@ def _resolve(name, arounds, afters, source, readings, throws: bool, base_unknown
         for reading in readings:
             handled.update(handled_literals(reading, hook.id))
         if name in handled:
-            return "call"
+            operation = next(
+                (
+                    op
+                    for reading in readings
+                    for op in reading.operations
+                    if op.hook_id == hook.id
+                    and op.kind == OperationKind.DISPATCH
+                    and op.target_ref == name
+                ),
+                None,
+            )
+            return "unknown" if operation and operation.resolution != "applied" else "call"
         if hook.continuation == "once":
             return around_outcome(index - 1)
         if hook.continuation == "none":

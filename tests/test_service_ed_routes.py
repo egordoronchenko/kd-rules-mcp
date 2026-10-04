@@ -21,12 +21,125 @@ from kd2_rules_mcp.server import error_payload
 from kd2_rules_mcp.service import Kd2Service, Settings
 from kd2_rules_mcp.service import ed_routes as routes_service
 from kd2_rules_mcp.validation.ed_routes import SchemaUnavailable
+from tests import session_inputs
 
 DATA = Path(__file__).parent / "data" / "ed" / "routes"
 GRAMMAR = DATA / "grammar"
 MANAGER = Path(__file__).parent / "data" / "ed" / "manager_v2.bsl"
 FORMAT_URI = "urn:test/1.2"
 MESSAGE_URI = "http://www.1c.ru/SSL/Exchange/Message"
+
+
+def test_ordered_route_layers_and_open_arguments(service, monkeypatch):
+    root = Path(__file__).parent / "data/ed/layers"
+    assert session_inputs._orig_read_routes is not None
+    monkeypatch.setattr(routes_service, "read_routes", session_inputs._orig_read_routes)
+    base = service.ed_routes(path=str((root / "base").resolve()), extensions=[])
+    layered = service.ed_routes(
+        path=str((root / "base").resolve()), extensions=[str((root / "a").resolve())]
+    )
+    assert layered["profile_id"] != base["profile_id"]
+    assert layered["extension_policy"] == "ordered_layers"
+    versions = service.ed_routes(profile_id=layered["profile_id"], section="versions")
+    assert any(row["source"]["layer_id"] == "L01-ДемоA" for row in versions["items"])
+    compared = service.ed_route_compare(layered["profile_id"], layered["profile_id"])
+    args = compared["profile"]["selected"]["left"]["ed_open"]
+    assert args["extensions"] == [str((root / "a").resolve())]
+    opened = service.ed_open(**args)
+    assert opened["composition_status"] == "complete"
+    assert len({f["file_id"] for f in opened["source_files"]}) == len(opened["source_files"])
+    rows = service.ed_list(opened["project_id"], "pko")["items"]
+    assert {r["name"] for r in rows} == {"Товар"}
+    assert rows[0]["layer_id"] == "L01-ДемоA"
+    versions = service.ed_route_compare(
+        layered["profile_id"], layered["profile_id"], section="versions"
+    )["versions"]["items"]
+    assert any(row["left"]["source"]["layer_id"] == "L01-ДемоA" for row in versions)
+    skipped = service.ed_route_compare(
+        layered["profile_id"], layered["profile_id"], section="skipped", limit=200
+    )["skipped"]["items"]
+    assert not any("не учитывались" in row["reason"] for row in skipped)
+
+
+def test_inert_route_layers_do_not_claim_extensions_ignored(service, monkeypatch):
+    root = Path(__file__).parent / "data/ed/layers"
+    assert session_inputs._orig_read_routes is not None
+    monkeypatch.setattr(routes_service, "read_routes", session_inputs._orig_read_routes)
+    profile = service.ed_routes(path=str(root / "base"), extensions=[str(root / "b")])["profile_id"]
+    skipped = service.ed_route_compare(profile, profile, section="skipped", limit=200)
+    assert not any("не учитывались" in row["reason"] for row in skipped["skipped"]["items"])
+    versions = service.ed_route_compare(profile, profile, section="versions")["versions"]["items"]
+    assert all(row["left"]["source"]["layer_id"] == "base" for row in versions)
+
+
+def test_layer_routes_work_with_base_reader_cache_wrapper(service, monkeypatch):
+    root = Path(__file__).parent / "data/ed/layers"
+    assert session_inputs._orig_read_routes is not None
+    original = session_inputs._orig_read_routes
+    observations = []
+
+    def wrapped(path, *, documents=None, observe=None):
+        observations.append(observe)
+        return original(path, documents=documents, observe=observe)
+
+    monkeypatch.setattr(routes_service, "read_routes", wrapped)
+    result = service.ed_routes(
+        path=str((root / "base").resolve()), extensions=[str((root / "a").resolve())]
+    )
+    assert result["extension_policy"] == "ordered_layers"
+    assert callable(observations[0])
+    versions = service.ed_routes(profile_id=result["profile_id"], section="versions")
+    assert any(row["source"]["layer_id"] == "L01-ДемоA" for row in versions["items"])
+    # Авторинг открывает базовый профиль с documents и без расширений. После чтения
+    # маршрутов со слоем это попадание в кэш, без повторного чтения всех файлов базы.
+    base, reused, stale = service._open_snapshot(
+        (root / "base").resolve(), None, None, False, documents={}, read_files_only=True
+    )
+    assert reused and not stale
+    assert len(observations) == 1
+    assert base.profile.profile_id != result["profile_id"]
+    assert all(
+        entry.source.layer == "base" for plan in base.profile.plans for entry in plan.entries
+    )
+
+
+def test_route_layer_freshness_and_order(service, tmp_path, monkeypatch):
+    root = tmp_path / "kits"
+    shutil.copytree(Path(__file__).parent / "data/ed/layers", root)
+    assert session_inputs._orig_read_routes is not None
+    monkeypatch.setattr(routes_service, "read_routes", session_inputs._orig_read_routes)
+    args = {"path": str(root / "base"), "extensions": [str(root / "a"), str(root / "b")]}
+    first = service.ed_routes(**args)
+    assert service.ed_routes(**args)["reused"]
+    reversed_layers = service.ed_routes(
+        path=args["path"], extensions=list(reversed(args["extensions"]))
+    )
+    assert first["profile_id"] != reversed_layers["profile_id"]
+    module = next((root / "a/CommonModules").glob("*/Ext/Module.bsl"))
+    module.write_bytes(module.read_bytes() + b"\n")
+    assert service.ed_routes(**args)["stale"]
+    assert service.ed_routes(**args, force=True)["profile_id"] != first["profile_id"]
+
+
+@pytest.mark.parametrize(
+    "error,code",
+    [
+        (routes_service.EdFormatError, "ed_route_format"),
+        (routes_service.EdResourceLimitError, "ed_route_resource_limit"),
+    ],
+)
+def test_layer_reader_errors_keep_existing_service_codes(service, monkeypatch, error, code):
+    root = Path(__file__).parent / "data/ed/layers"
+
+    def failed(*args, **kwargs):
+        raise error("Ошибка чтения слоя")
+
+    monkeypatch.setattr(routes_service, "read_layers", failed)
+    with pytest.raises(Kd2Error) as caught:
+        service.ed_routes(
+            path=str((root / "base").resolve()), extensions=[str((root / "a").resolve())]
+        )
+    assert error_payload(caught.value)["code"] == code
 
 
 @pytest.fixture

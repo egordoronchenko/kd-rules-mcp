@@ -5,6 +5,7 @@
 Признак `stale` считается по каталогам, которые читает `read_routes`, а не по всей выгрузке.
 """
 
+import hashlib
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -12,10 +13,15 @@ from pathlib import Path
 from typing import Any
 
 from kd2_rules_mcp.ed.errors import EdFormatError, EdReadError, EdResourceLimitError
+from kd2_rules_mcp.ed.layer_model import LayeredManager
+from kd2_rules_mcp.ed.layers import read_layers
 from kd2_rules_mcp.ed.model import EdDocument
 from kd2_rules_mcp.ed.route_model import RouteProfile
-from kd2_rules_mcp.ed.routes import RouteFileObservation, read_routes
+from kd2_rules_mcp.ed.routes import RouteFileObservation, apply_route_layers, read_routes
 from kd2_rules_mcp.ed.schema import EdSchema, load_schema
+from kd2_rules_mcp.errors import (
+    EdReadError as ServiceEdReadError,
+)
 from kd2_rules_mcp.errors import (
     EdRouteFormatError,
     EdRouteProfileNotFoundError,
@@ -25,6 +31,7 @@ from kd2_rules_mcp.errors import (
     Kd2Error,
 )
 from kd2_rules_mcp.projects import ProjectConfigError, resolve
+from kd2_rules_mcp.service import ed_layers as layer_views
 from kd2_rules_mcp.service import ed_routes_views as views
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.ed_views import validate_page
@@ -71,6 +78,7 @@ class _RouteSnapshot:
     stale: bool = False
     read_files: dict[Path, tuple[int, int] | None] = field(default_factory=dict)
     file_hashes: dict[Path, str] = field(default_factory=dict)
+    extension_roots: tuple[Path, ...] = ()
 
 
 class EdRoutesMixin(ServiceBase):
@@ -96,6 +104,7 @@ class EdRoutesMixin(ServiceBase):
         offset: int = 0,
         limit: int = 50,
         force: bool = False,
+        extensions: list[str] | None = None,
     ) -> dict[str, Any]:
         """Один источник: проект, путь выгрузки или уже открытый снимок."""
         validate_page(offset, limit)
@@ -111,6 +120,13 @@ class EdRoutesMixin(ServiceBase):
             raise ValueError("Укажите ровно один источник: project, path или profile_id")
         if ident is not None and (force or configuration_name != "full"):
             raise ValueError("profile_id не сочетается с configuration и force")
+        if ident is not None and extensions is not None:
+            raise ValueError("extensions задаётся при открытии, вместе с project или path")
+        if extensions is not None and (
+            not isinstance(extensions, list)
+            or any(not isinstance(e, str) or not e.strip() for e in extensions)
+        ):
+            raise ValueError("extensions: упорядоченный список путей")
         if path_text is not None and configuration_name != "full":
             raise ValueError("configuration применим только к project")
 
@@ -122,17 +138,43 @@ class EdRoutesMixin(ServiceBase):
                 root = self._project_root(project_name, configuration_name)
                 bound_project: str | None = project_name
                 bound_configuration: str | None = configuration_name
+                if extensions is None:
+                    config = self._catalog().configuration(project_name, configuration_name)
+                    folder = self.settings.project_dirs[project_name]
+                    extensions = [self._host(resolve(folder, e)) for e in config.extensions]
             else:
                 root = self._visible_root(path_text or "")
                 bound_project = None
                 bound_configuration = None
+            try:
+                roots = layer_views.extension_paths(extensions or [], self._read_path)
+                layer_views.checked_extensions(root, roots)
+            except Kd2Error as error:
+                raise ServiceEdReadError(str(error)) from error
             snap, reused, stale = self._open_snapshot(
-                root, bound_project, bound_configuration, force
+                root, bound_project, bound_configuration, force, extensions=roots
             )
         canonical = None if plan_text is None else _canonical_plan(snap.profile, plan_text)
         if section_name == "summary":
-            return views.route_summary(snap.profile, _source_view(snap), reused=reused, stale=stale)
+            result = views.route_summary(
+                snap.profile, _source_view(snap), reused=reused, stale=stale
+            )
+            if snap.extension_roots:
+                result["extension_policy"] = "ordered_layers"
+                result["extensions"] = [self._host(p) for p in snap.extension_roots]
+            return result
         rows = views.route_rows(snap.profile, section_name, canonical)
+        if section_name == "versions":
+            entries = [
+                e
+                for p in snap.profile.plans
+                if canonical is None or p.plan_name == canonical
+                for e in p.entries
+            ]
+            if canonical is None:
+                entries.extend(snap.profile.without_node_entries)
+            for row, entry in zip(rows, entries, strict=True):
+                row["source"] = {"location": row["source"], "layer_id": entry.source.layer}
         return views.route_page(
             snap.profile.profile_id,
             section_name,
@@ -182,11 +224,26 @@ class EdRoutesMixin(ServiceBase):
             raise ValueError(str(error)) from error
         schemas = self._schemas(left, right, selection)
         comparison = compare_routes(left.profile, right.profile, selection, schemas)
+        layered = bool(left.extension_roots or right.extension_roots)
+        if layered:
+            comparison = replace(
+                comparison,
+                report=replace(
+                    comparison.report,
+                    skipped=[
+                        item
+                        for item in comparison.report.skipped
+                        if not (
+                            item.check == "ed.route.extensions" and "не учитывались" in item.reason
+                        )
+                    ],
+                ),
+            )
         selected = {
             "left": self._open_arguments(left, comparison.profile.left),
             "right": self._open_arguments(right, comparison.profile.right),
         }
-        return views.compare_response(
+        result = views.compare_response(
             left_id=left_id,
             right_id=right_id,
             comparison=comparison,
@@ -199,6 +256,38 @@ class EdRoutesMixin(ServiceBase):
             offset=offset,
             limit=limit,
         )
+        if layered and section_name == "versions":
+            for row in result["versions"]["items"]:
+                for name, snap, plan_name in (
+                    ("left", left, comparison.profile.left_plan),
+                    ("right", right, comparison.profile.right_plan),
+                ):
+                    entries = (
+                        snap.profile.without_node_entries
+                        if route_context == "without_node"
+                        else next(
+                            (
+                                plan.entries
+                                for plan in snap.profile.plans
+                                if plan.plan_name == plan_name
+                            ),
+                            (),
+                        )
+                    )
+                    entry = next(
+                        (
+                            e
+                            for e in reversed(entries)
+                            if e.key == row["key"] and e.state == "effective"
+                        ),
+                        None,
+                    )
+                    row[name]["source"] = (
+                        {"location": row[name]["source"], "layer_id": entry.source.layer}
+                        if entry
+                        else None
+                    )
+        return result
 
     def _project_root(self, project: str, configuration: str) -> Path:
         try:
@@ -236,8 +325,9 @@ class EdRoutesMixin(ServiceBase):
         documents: Mapping[Path, EdDocument] | None = None,
         read_files_only: bool = False,
         verify_read_files: bool = True,
+        extensions: tuple[Path, ...] = (),
     ) -> tuple[_RouteSnapshot, bool, bool]:
-        key = str(root)
+        key = _snapshot_key(root, extensions)
         if not force:
             with self._lock:
                 snap = self._routes.get(self._route_roots.get(key, ""))
@@ -252,17 +342,56 @@ class EdRoutesMixin(ServiceBase):
                     )
                 )
                 if not read_files_only and snap.manifest is None and not stale:
-                    snap.manifest = _manifest(root)
+                    snap.manifest = _manifests(root, extensions)
                 with self._lock:
                     current = self._routes.get(snap.profile.profile_id)
                     if current is not None:
                         current.stale = stale
                         self._routes.move_to_end(current.profile.profile_id)
                         return current, True, stale
-        profile = self._read_profile(root, documents=documents)
+        layers = None
+        base_snapshot = None
+        if extensions:
+            try:
+                for folder in (root, *extensions):
+                    layer_views.checked_dump(folder)
+                layers = layer_views.portable_files(read_layers(root, extensions))
+            except EdReadError as error:
+                raise ServiceEdReadError(str(error)) from error
+            except EdFormatError as error:
+                raise EdRouteFormatError(str(error)) from error
+            except EdResourceLimitError as error:
+                raise EdRouteResourceLimitError(str(error)) from error
+            # Базовый профиль нужен и авторингу без слоя. Сохраняем его отдельный ключ,
+            # чтобы открытие маршрутов проекта не заставляло авторинг перечитывать базу.
+            base_snapshot, _, base_stale = self._open_snapshot(
+                root, project, configuration, force, documents=documents
+            )
+            if base_stale:
+                base_snapshot, _, _ = self._open_snapshot(
+                    root, project, configuration, True, documents=documents
+                )
+        profile = self._read_profile(
+            root,
+            documents=documents,
+            **({"layers": layers, "base_snapshot": base_snapshot} if layers else {}),
+        )
+        if layers:
+            digest = hashlib.sha256()
+            digest.update(profile.sources_fingerprint.encode())
+            for item in layers.layers:
+                digest.update((item.root + "\0" + item.fingerprint).encode())
+            for source in layers.source_files:
+                digest.update(source.sha256.encode())
+            fingerprint = digest.hexdigest()
+            profile = replace(
+                profile,
+                sources_fingerprint=fingerprint,
+                profile_id="ed-route-layer-" + fingerprint[:24],
+            )
         if project is not None:
             profile = replace(profile, project=project, configuration=configuration)
-        manifest = None if read_files_only else _manifest(root) or ()
+        manifest = None if read_files_only else _manifests(root, extensions)
         file_hashes, read_files = self._route_reads.pop(str(root), ({}, {}))
         size = _stored_bytes(profile) + _stored_bytes(manifest) + _stored_bytes(file_hashes)
         host_path = self._host(root)
@@ -288,6 +417,7 @@ class EdRoutesMixin(ServiceBase):
                 False,
                 read_files,
                 file_hashes,
+                extensions,
             )
             self._routes[profile.profile_id] = created
             self._route_bytes += size
@@ -309,18 +439,33 @@ class EdRoutesMixin(ServiceBase):
             }
 
     def _read_profile(
-        self, root: Path, *, documents: Mapping[Path, EdDocument] | None = None
+        self,
+        root: Path,
+        *,
+        documents: Mapping[Path, EdDocument] | None = None,
+        layers: LayeredManager | None = None,
+        base_snapshot: _RouteSnapshot | None = None,
     ) -> RouteProfile:
         try:
-            observed: dict[Path, tuple[int, int] | None] = {}
-            hashes: dict[Path, str] = {}
+            observed: dict[Path, tuple[int, int] | None] = (
+                dict(base_snapshot.read_files) if base_snapshot else {}
+            )
+            hashes: dict[Path, str] = dict(base_snapshot.file_hashes) if base_snapshot else {}
 
             def observe(file: RouteFileObservation) -> None:
                 observed.setdefault(file.path, file.stamp)
                 if file.sha256 is not None:
                     hashes[file.path] = file.sha256
 
-            profile = read_routes(root, documents=documents, observe=observe)
+            profile = (
+                base_snapshot.profile
+                if base_snapshot
+                else read_routes(root, documents=documents, observe=observe)
+            )
+            if layers is not None:
+                # Тот же публичный шаг, что в read_routes(layers=...), после чтения базы.
+                # Обвязки кэша базового профиля сохраняют свой прежний контракт.
+                profile = apply_route_layers(profile, layers, documents=documents, observe=observe)
             self._route_reads[str(root)] = (hashes, observed)
             return profile
         except EdResourceLimitError as error:
@@ -347,10 +492,15 @@ class EdRoutesMixin(ServiceBase):
 
     def _open_arguments(self, snap: _RouteSnapshot, side: SideSelection) -> dict[str, Any]:
         """Аргументы перехода. Нет однозначного пути или пакета — null и причина."""
-        ed_open = None
+        ed_open: dict[str, Any] | None = None
         ed_open_reason = None
         if side.manager_path:
             ed_open = {"path": self._host((snap.root / side.manager_path).resolve())}
+            if snap.extension_roots:
+                ed_open.update(
+                    configuration_path=snap.host_path,
+                    extensions=[self._host(p) for p in snap.extension_roots],
+                )
         elif side.manager_name:
             ed_open_reason = "Тело модуля менеджера не прочитано"
         else:
@@ -492,8 +642,24 @@ def _manifest(root: Path) -> tuple[tuple[str, int, int], ...] | None:
 
 
 def _is_stale(snap: _RouteSnapshot) -> bool:
-    current = _manifest(snap.root)
+    current = _manifests(snap.root, snap.extension_roots)
     return current is None or current != snap.manifest
+
+
+def _snapshot_key(root: Path, extensions: tuple[Path, ...]) -> str:
+    return str(root) if not extensions else "\0".join(str(p) for p in (root, *extensions))
+
+
+def _manifests(root: Path, extensions: tuple[Path, ...]):
+    if not extensions:
+        return _manifest(root)
+    combined = []
+    for ordinal, folder in enumerate((root, *extensions)):
+        manifest = _manifest(folder)
+        if manifest is None:
+            return None
+        combined.extend((f"{ordinal}/{p}", size, stamp) for p, size, stamp in manifest)
+    return tuple(combined)
 
 
 def _stored_bytes(value: object, seen: set[int] | None = None) -> int:

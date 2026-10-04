@@ -79,6 +79,10 @@ def validate_links(
     explained: frozenset[tuple[str, str, str, str]] = frozenset(),
     uncertain: frozenset[tuple[str, str]] = frozenset(),
     preserved: frozenset[tuple[str, str]] = frozenset(),
+    declared_pko: frozenset[str] = frozenset(),
+    declared_rules: frozenset[str] = frozenset(),
+    declared_pod_formats: frozenset[str] = frozenset(),
+    baseline_bindings: frozenset[str] = frozenset(),
 ) -> ValidationReport:
     """Шестнадцать проверок одного снимка. Чтения файлов и модели КД 2 нет."""
     if isinstance(document, LayeredManager):
@@ -158,8 +162,8 @@ def validate_links(
     cases: dict[str, list[DispatcherCase]] = defaultdict(list)
     for case in document.dispatcher_cases:
         cases[norm_name(case.literal_name)].append(case)
-    pko_names = {norm_name(rule.name) for rule in document.pko}
-    rule_names = pko_names | {norm_name(rule.name) for rule in document.pkpd}
+    pko_names = {norm_name(rule.name) for rule in document.pko} | declared_pko
+    rule_names = pko_names | {norm_name(rule.name) for rule in document.pkpd} | declared_rules
     procedures = {norm_name(rule.procedure_name) for rule in (*document.pko, *document.pod)}
     send_ids = {
         use.rule_id
@@ -179,7 +183,7 @@ def validate_links(
         rule.format_selection.value
         for rule in document.pod
         if rule.entity_id in receive_ids and rule.format_selection.value
-    }
+    } | declared_pod_formats
 
     for name in _REQUIRED_EVENTS:
         if not routines.get(name.casefold()):
@@ -196,7 +200,9 @@ def validate_links(
             if context is not None:
                 from .ed_projection import event_direction
 
-                if event_direction(binding.event) not in (None, context.direction):
+                if binding.entity_id not in baseline_bindings and event_direction(
+                    binding.event
+                ) not in (None, context.direction):
                     continue
             if not binding.target_name.strip():
                 continue
@@ -204,6 +210,21 @@ def validate_links(
                 extended = True
                 continue
             expected = function_ids if binding.event == "ВыборкаДанных" else procedure_ids
+            if binding.resolution == "unknown":
+                skip(
+                    "ed.handler.missing",
+                    f"{owner_address}: путь вызова события {binding.event} неизвестен",
+                )
+                continue
+            if binding.resolution == "invalid_signature":
+                emit(
+                    "ed.handler.missing",
+                    binding,
+                    f"Событие «{binding.event}» не может вызвать «{binding.target_name}»: "
+                    "ветка требует другой способ вызова или ключи структуры параметров.",
+                    owner_address,
+                )
+                continue
             matched = [
                 case
                 for case in cases.get(norm_name(binding.target_name), ())

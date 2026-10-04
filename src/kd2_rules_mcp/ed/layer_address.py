@@ -237,7 +237,7 @@ def _routine_row(
 
 
 def _is_handler(routine: Routine, layered: LayeredManager) -> bool:
-    if "handler" in routine.roles or routine.name.casefold().startswith("пко_"):
+    if routine.roles & {"handler", "handler_helper"}:
         return True
     for context in layered.contexts:
         for chain in context.dispatch_chains:

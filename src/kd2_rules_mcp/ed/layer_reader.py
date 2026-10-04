@@ -17,16 +17,23 @@ from lxml import etree as ET
 from .coverage import build_coverage
 from .errors import EdFormatError, EdReadError, EdResourceLimitError
 from .forms import (
+    CONVERSION_EVENTS,
     DISPATCHERS,
     ENTRYPOINTS,
+    EVENT_INVOCATIONS,
+    EVENT_SIGNATURES,
     PKO_FIELDS,
     PKPD_FIELDS,
     POD_FIELDS,
+    RULE_RETURNING_CALLS,
+    accepts_arguments,
     helper_forms,
+    invocation_keys_match,
 )
 from .layer_model import (
     Applicability,
     Continuation,
+    EffectiveContext,
     ExtensionReading,
     Footprint,
     Hook,
@@ -38,6 +45,7 @@ from .layer_model import (
     OperationKind,
     Origin,
     Pred,
+    PreviousCall,
     SourceFile,
 )
 from .lexer import Statement, Token, lex, normalized, split_arguments, tokenize
@@ -73,6 +81,22 @@ MAX_CALLS = 256
 MAX_CONDITIONS = 32
 MAX_EDGES = 4
 MAX_OPS = 100_000
+
+
+@dataclass(frozen=True)
+class _HandlerUse:
+    rule_id: str
+    rule_name: str
+    event: str
+    target_name: str
+    direction: str
+    headers_only: bool = False
+    previous_name: str | None = None
+    collection: str = "pko"
+    active_file_id: str | None = None
+    previous_id: str | None = None
+
+
 _MD = "http://v8.1c.ru/8.3/MDClasses"
 _PARSER = ET.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
 _UNIT = "\x1f"
@@ -314,6 +338,7 @@ class _Branch:
 class _If:
     branches: list[_Branch]
     statement: Statement
+    end: Statement
 
     @property
     def condition(self) -> tuple[Token, ...]:
@@ -826,8 +851,9 @@ def build_tree(statements: tuple[Statement, ...] | list[Statement]) -> list[_Nod
             )
         if pos >= len(rows) or _head(rows[pos]) not in ("конецесли", "#конецесли"):
             raise EdFormatError("Незакрытое условие BSL")
+        end = rows[pos]
         pos += 1
-        return _If(branches, header)
+        return _If(branches, header, end)
 
     def parse_loop() -> _Loop:
         nonlocal pos
@@ -1243,6 +1269,9 @@ class _Walker:
         self.parameter_collections: dict[str, str] = {}
         self.catches: list[list[tuple[Pred, dict[str, _Bind]]]] = []
         self.uncaught: list[Pred] = []
+        self.targets: dict[str, Routine] = {}
+        self.annotated_routines: set[str] = set()
+        self.ambiguous_routines: set[str] = set()
 
     def origin(
         self,
@@ -1379,9 +1408,6 @@ class _Walker:
                 "collection",
             )
             return Continuation.NONE
-        replaced = self._replaced_callee(kind, target, tree, routine, hook_id)
-        if replaced:
-            return replaced
         self.walk(tree, env, _true(), hook_id, routine.name, ())
         self._flush_all(hook_id, routine.name, ())
         return Continuation.ONCE
@@ -1410,43 +1436,123 @@ class _Walker:
             Footprint(scope, ref),
         )
 
-    def _replaced_callee(
-        self,
-        kind: str,
-        target: str,
-        tree: list[_Node],
-        routine: Routine,
-        hook_id: str,
-    ) -> str:
-        """``&Вместо`` без ``ПродолжитьВызов`` подменяет helper или процедуру правила."""
-        if kind != HookKind.AROUND or _leading_continue(tree, routine):
-            return ""
-        folded = target.casefold()
-        if folded in ("добавитьпкс", "добавитьпктч"):
-            self._area_skip(
-                "helper_replaced",
-                routine.span,
-                routine.name,
-                "pko",
-                routine.raw_text,
-                hook_id,
-                "collection",
-            )
-            return Continuation.NONE
-        if folded.startswith("добавитьпко_") or folded.startswith("добавитьпод_"):
-            self._area_skip(
-                "rule_procedure_replaced",
-                routine.span,
-                routine.name,
-                target,
-                routine.raw_text,
-                hook_id,
-                "procedure",
-            )
-            return Continuation.NONE
-        return ""
-
     def _walk_dispatch(
+        self,
+        hook_id: str,
+        routine: Routine,
+        tree: list[_Node],
+        kind: str,
+        env: dict[str, _Bind],
+    ) -> str:
+        """Закрытая грамматика процедурного диспетчера автора (§2.3, §5.3).
+
+        Метки и операции публикуются только после доказательства всего дерева.
+        Функциональный диспетчер сохраняет прежнюю ограниченную грамматику.
+        """
+        if routine.routine_kind == "function":
+            return self._walk_legacy_dispatch(hook_id, routine, tree, kind, env)
+        cases: list[DispatcherCase] = []
+        marks: list[tuple[SourceSpan, Classification]] = []
+        names: set[str] = set()
+        continuation = Continuation.NONE
+
+        def visit(nodes: Sequence[_Node]) -> bool:
+            nonlocal continuation
+            if len(nodes) != 1 or not isinstance(nodes[0], _If):
+                return False
+            node = nodes[0]
+            if not node.branches:
+                return False
+            marks.append((node.end.span, Classification.DECLARATIVE))
+            for branch in node.branches:
+                marks.append((branch.statement.span, Classification.DECLARATIVE))
+                if branch.condition is None:
+                    if _single_continue(branch.body, routine):
+                        statement = branch.body[0].statement
+                        # Здесь допустим именно оператор, а не Возврат с вызовом.
+                        if statement.head == "возврат":
+                            return False
+                        marks.append((statement.span, Classification.DECLARATIVE))
+                        continuation = Continuation.ONCE
+                    elif not branch.body:
+                        continue
+                    elif not visit(branch.body):
+                        return False
+                    continue
+                tokens = branch.condition
+                if (
+                    branch.statement.head not in ("если", "иначеесли")
+                    or len(tokens) != 3
+                    or tokens[0].kind != "identifier"
+                    or tokens[0].folded != (routine.parameters[0].name or "").casefold()
+                    or tokens[1].value != "="
+                    or tokens[2].kind != "string"
+                ):
+                    return False
+                name = tokens[2].value
+                if name is None or name in names or not _direct_call(branch.body):
+                    return False
+                names.add(name)
+                statement = branch.body[0].statement
+                call = _call(_bare(statement.tokens))
+                if call is None:
+                    return False
+                target = self.routines.get(call[0].casefold())
+                if target is None or call[0].casefold() in (
+                    self.targets.keys() | self.annotated_routines | self.ambiguous_routines
+                ):
+                    return False
+                callee = target[0]
+                if any(param.name is None for param in callee.parameters):
+                    return False
+                prefix = (routine.parameters[1].name or "").casefold()
+                if (
+                    callee.routine_kind != "procedure"
+                    or not accepts_arguments(callee.parameters, len(call[1]))
+                    or any(
+                        len(arg) != 3
+                        or arg[0].folded != prefix
+                        or arg[1].value != "."
+                        or arg[2].kind != "identifier"
+                        for arg in call[1]
+                    )
+                ):
+                    return False
+                case = _case(self.source, routine, name, statement)
+                if case is None:
+                    return False
+                cases.append(case)
+                marks.append((statement.span, Classification.DECLARATIVE))
+            return True
+
+        if kind != HookKind.AROUND or len(routine.parameters) != 2 or not visit(tree):
+            self._area_skip(
+                "opaque_dispatch",
+                routine.body_span,
+                routine.name,
+                "dispatcher",
+                self.source.text[routine.body_span.char_start : routine.body_span.char_end],
+                hook_id,
+                "dispatcher",
+            )
+            self.marks.append((routine.body_span, Classification.UNKNOWN))
+            return Continuation.UNKNOWN
+        self.marks.extend(marks)
+        for case in cases:
+            self.op(
+                OperationKind.DISPATCH,
+                case.literal_name,
+                (),
+                case,
+                case.span,
+                routine.name,
+                (),
+                hook_id,
+            )
+        self.handled[hook_id] = tuple(case.literal_name for case in cases)
+        return continuation
+
+    def _walk_legacy_dispatch(
         self,
         hook_id: str,
         routine: Routine,
@@ -1783,6 +1889,7 @@ class _Walker:
         if self.cond_depth > MAX_CONDITIONS:
             raise _Abort("resource_limit", self.origin(node.statement.span, procedure, hook_id))
         self.marks.append((node.statement.span, Classification.DECLARATIVE))
+        self.marks.append((node.end.span, Classification.DECLARATIVE))
         try:
             return self._walk_if_body(node, env, entry, hook_id, procedure, chain)
         finally:
@@ -1800,6 +1907,7 @@ class _Walker:
         exited, negated = _false(), _true()
         joined: list[tuple[Pred, dict[str, _Bind]]] = []
         for branch in node.branches:
+            self.marks.append((branch.statement.span, Classification.DECLARATIVE))
             preproc = _preproc_branch(branch)
             if preproc is False:
                 continue
@@ -4122,6 +4230,8 @@ def _read_module(
     helpers: set[str],
     targets: dict[str, Routine],
     plan_name: str | None,
+    bindings: tuple[_HandlerUse, ...] | None = None,
+    previous_targets: dict[str, Routine] | None = None,
 ) -> ExtensionReading:
     origin = _origin(
         layer, metadata_kind, metadata_name, source, source.span(0, min(1, len(source.text))), None
@@ -4153,6 +4263,12 @@ def _read_module(
     walker = _Walker(
         source, layer, metadata_kind, metadata_name, by_name, version, trust, plan_name
     )
+    walker.targets = targets
+    walker.ambiguous_routines = {
+        routine.name.casefold()
+        for routine in routines
+        if sum(item.name.casefold() == routine.name.casefold() for item in routines) > 1
+    }
     hooks: list[Hook] = []
     try:
         hooks = _collect_hooks(parsed, source, layer, metadata_kind, metadata_name, targets, walker)
@@ -4162,12 +4278,53 @@ def _read_module(
             source,
             LayerSkip(aborted.reason, aborted.origin, ("manager",), aborted.reason, ("manager",)),
         )
+    bindings = _local_handler_uses(walker.operations) if bindings is None else bindings
+    for offset, operation in enumerate(walker.operations):
+        events = (
+            (operation.field_path[0],)
+            if (
+                operation.kind == OperationKind.SET
+                and operation.field_path
+                and operation.field_path[0] in EVENT_SIGNATURES
+            )
+            else tuple(event.event for event in operation.value.events)
+            if operation.kind == OperationKind.ADD
+            and isinstance(operation.value, (ObjectRule, ProcessingRule))
+            else ()
+        )
+        for event in events:
+            if event in EVENT_INVOCATIONS:
+                continue
+            scope = ("binding:" + operation.target_ref + ":" + event,)
+            walker.skips.append(
+                LayerSkip(
+                    "unsupported_event",
+                    operation.origin,
+                    scope,
+                    "Событие читателем не поддержано: " + event,
+                    scope,
+                    operation.preds,
+                    operation_offset=offset,
+                )
+            )
+            walker.marks.append((operation.origin.span, Classification.UNKNOWN))
+    hooks = _check_event_signatures(hooks, walker, bindings)
+    routines, previous_calls = _extension_roles(
+        parsed, hooks, walker, targets, bindings, previous_targets or {}
+    )
+    routines_by_id = {routine.entity_id: routine for routine in routines}
+    hooks = [replace(hook, routine=routines_by_id[hook.routine.entity_id]) for hook in hooks]
     marks = list(walker.marks)
     for _routine, header, _tree in parsed:
         marks.append((header.span, Classification.DECLARATIVE))
+    for statement in lex(source).statements:
+        if statement.head in ("конецпроцедуры", "конецфункции", "перем"):
+            marks.append((statement.span, Classification.DECLARATIVE))
     for code, span in warnings:
-        _ = code
         marks.append((span, Classification.UNKNOWN))
+        walker.skips.append(
+            LayerSkip("bsl_syntax", walker.origin(span, None), ("manager",), code, ("manager",))
+        )
     tokens = tokenize(source.text)
     coverage = build_coverage(source, tokens, marks, (routine.span for routine in routines))
     seen: dict[str, int] = {}
@@ -4194,16 +4351,576 @@ def _read_module(
         tuple(skips),
         source,
         coverage,
+        previous_calls,
     )
+
+
+def _local_handler_uses(operations: Sequence[LayerOperation]) -> tuple[_HandlerUse, ...]:
+    """Предварительные привязки одного файла; окончательные даёт композиция."""
+    uses = []
+    for operation in operations:
+        if operation.kind == OperationKind.ADD and isinstance(
+            operation.value, (ObjectRule, ProcessingRule)
+        ):
+            rule = operation.value
+            uses.extend(
+                _HandlerUse(
+                    rule.entity_id,
+                    rule.name,
+                    event.event,
+                    event.target_name,
+                    "send" if event.event == "ПриОтправкеДанных" else "receive",
+                )
+                for event in rule.events
+            )
+        if (
+            operation.kind == OperationKind.SET
+            and operation.field_path
+            and operation.field_path[0] in EVENT_SIGNATURES
+            and isinstance(operation.value, Expr)
+            and operation.value.literal_type == "string"
+            and _UNIT in operation.target_ref
+        ):
+            event = operation.field_path[0]
+            uses.append(
+                _HandlerUse(
+                    operation.target_ref,
+                    operation.target_ref.split(_UNIT)[-1],
+                    event,
+                    str(operation.value.literal_value),
+                    "send" if event == "ПриОтправкеДанных" else "receive",
+                )
+            )
+    return tuple(uses)
+
+
+def resolve_handler_bindings(
+    reading: ExtensionReading,
+    source: EdDocument,
+    contexts: Sequence[EffectiveContext],
+    layer: LayerDescriptor,
+    helpers: frozenset[str],
+    previous_contexts: Sequence[EffectiveContext] = (),
+    previous_routines: Sequence[Routine] = (),
+    indirect_calls: Sequence[PreviousCall] = (),
+) -> ExtensionReading:
+    """Уточняет семантику собственного кода по действующим и базовым привязкам.
+
+    Повторно читается только этот файл; общий документ из текстов не собирается.
+    """
+    if not any(hook.target_name.casefold() in _DISPATCH_NAMES for hook in reading.hooks):
+        return reading
+    old = {}
+    previous_targets = {
+        routine.entity_id: routine for routine in (*source.routines, *previous_routines)
+    }
+    if not previous_contexts:
+        for context in contexts:
+            for rule in (*source.pko, *source.pod):
+                for binding in rule.events:
+                    old[context.direction, context.headers_only, rule.entity_id, binding.event] = (
+                        binding.target_name,
+                        binding.target_id,
+                    )
+    for context in previous_contexts:
+        for version in context.entities:
+            if not isinstance(version.payload, (ObjectRule, ProcessingRule)):
+                continue
+            for binding in version.payload.events:
+                chain = next(
+                    (
+                        c
+                        for c in context.dispatch_chains
+                        if c.target_name == binding.target_name
+                        and c.kind
+                        == (
+                            EVENT_INVOCATIONS[binding.event].kind
+                            if binding.event in EVENT_INVOCATIONS
+                            else "procedure"
+                        )
+                    ),
+                    None,
+                )
+                selected = None
+                if chain:
+                    for link in reversed(
+                        [link for link in chain.links if link.hook and link.hook.kind == "around"]
+                    ):
+                        if link.case:
+                            selected = link.case
+                            break
+                        if not link.continues:
+                            break
+                    else:
+                        selected = next(
+                            (link.case for link in chain.links if link.hook is None and link.case),
+                            None,
+                        )
+                target_id = binding.target_id
+                if selected and selected.target.reference_parts:
+                    target_id = next(
+                        (
+                            r.entity_id
+                            for r in previous_targets.values()
+                            if r.span.file_id == selected.span.file_id
+                            and r.name.casefold() == selected.target.reference_parts[0].casefold()
+                        ),
+                        None,
+                    )
+                old[
+                    context.direction,
+                    context.headers_only,
+                    version.payload.entity_id,
+                    binding.event,
+                ] = (binding.target_name, target_id)
+    uses = set()
+    for context in contexts:
+        active_files = {}
+        for chain in context.dispatch_chains:
+            arounds = [link for link in chain.links if link.hook and link.hook.kind == "around"]
+            for link in reversed(arounds):
+                if link.case is not None:
+                    active_files[chain.kind, chain.target_name] = link.case.span.file_id
+                    break
+                if not link.continues:
+                    break
+            else:
+                case = next(
+                    (link.case for link in chain.links if link.hook is None and link.case), None
+                )
+                if case is not None:
+                    active_files[chain.kind, chain.target_name] = case.span.file_id
+        for version in context.entities:
+            rule = version.payload
+            if not isinstance(rule, (ObjectRule, ProcessingRule)) or version.state == "deleted":
+                continue
+            for binding in rule.events:
+                direction = (
+                    "send"
+                    if binding.event in {"ПриОтправкеДанных", "ВыборкаДанных"}
+                    else "receive"
+                    if binding.event
+                    in {
+                        "ПриКонвертацииДанныхXDTO",
+                        "ПередЗаписьюПолученныхДанных",
+                        "ПослеЗагрузкиВсехДанных",
+                    }
+                    else None
+                )
+                if direction is not None and direction != context.direction:
+                    continue
+                uses.add(
+                    _HandlerUse(
+                        rule.entity_id,
+                        rule.name,
+                        binding.event,
+                        binding.target_name,
+                        context.direction,
+                        context.headers_only,
+                        old.get(
+                            (
+                                context.direction,
+                                context.headers_only,
+                                rule.entity_id,
+                                binding.event,
+                            ),
+                            ("", None),
+                        )[0],
+                        version.collection,
+                        active_files.get(
+                            (
+                                EVENT_INVOCATIONS[binding.event].kind
+                                if binding.event in EVENT_INVOCATIONS
+                                else "procedure",
+                                binding.target_name,
+                            ),
+                            "",
+                        ),
+                        old.get(
+                            (
+                                context.direction,
+                                context.headers_only,
+                                rule.entity_id,
+                                binding.event,
+                            ),
+                            ("", None),
+                        )[1],
+                    )
+                )
+                for call in indirect_calls:
+                    target = next(
+                        (r for r in reading.routines if r.entity_id == call.target_id), None
+                    )
+                    if (
+                        target
+                        and target.span.file_id == reading.source.file_id
+                        and call.rule_id == rule.entity_id
+                        and call.event == binding.event
+                    ):
+                        previous = old.get(
+                            (
+                                context.direction,
+                                context.headers_only,
+                                rule.entity_id,
+                                binding.event,
+                            ),
+                            ("", None),
+                        )
+                        uses.add(
+                            _HandlerUse(
+                                rule.entity_id,
+                                rule.name,
+                                binding.event,
+                                call.target_name,
+                                context.direction,
+                                context.headers_only,
+                                previous[0],
+                                version.collection,
+                                reading.source.file_id,
+                                previous[1],
+                            )
+                        )
+    origin = reading.hooks[0].origin
+    return _read_module(
+        reading.source,
+        layer,
+        origin.metadata_kind,
+        origin.metadata_name,
+        source.manager_version,
+        set(helpers),
+        {routine.name.casefold(): routine for routine in source.routines},
+        None,
+        tuple(
+            sorted(uses, key=lambda use: (use.rule_id, use.event, use.direction, use.headers_only))
+        ),
+        previous_targets,
+    )
+
+
+def _check_event_signatures(hooks, walker, bindings):
+    """Каждая литеральная ветка должна вызываться с параметрами своего события."""
+    result = []
+    rejected = set()
+    for hook in hooks:
+        if hook.routine.routine_kind != "procedure":
+            result.append(hook)
+            continue
+        for operation in walker.operations:
+            if operation.hook_id != hook.id or operation.kind != OperationKind.DISPATCH:
+                continue
+            case = operation.value
+            if not isinstance(case, DispatcherCase) or not case.target.reference_parts:
+                continue
+            routine = walker.routines.get(case.target.reference_parts[0].casefold())
+            uses = [use for use in bindings if use.target_name == case.literal_name]
+            signatures = [EVENT_INVOCATIONS.get(use.event) for use in uses]
+            valid = bool(uses) and all(
+                signature
+                and signature.kind == "procedure"
+                and invocation_keys_match(signature, case.arguments)
+                and routine
+                and accepts_arguments(routine[0].parameters, len(case.arguments))
+                for signature in signatures
+            )
+            if valid:
+                continue
+            rejected.add(operation.id)
+            scope = (
+                tuple(
+                    dict.fromkeys(
+                        _ref(
+                            use.collection,
+                            "ИмяПКО" if use.collection == "pko" else "Имя",
+                            use.rule_name,
+                        )
+                        for use in uses
+                    )
+                )
+                if uses and all(s and s.kind == "procedure" for s in signatures)
+                else (case.entity_id,)
+            )
+            walker.skips.append(
+                LayerSkip(
+                    "event_signature",
+                    walker.origin(case.span, hook.routine.name, hook.id),
+                    scope,
+                    (
+                        "Событие читателем не поддержано: " + ", ".join(use.event for use in uses)
+                        if uses and not all(signatures)
+                        else "Сигнатура не проверена: ветка без действующей привязки"
+                        if not uses
+                        else case.raw_text
+                    ),
+                    scope,
+                )
+            )
+            walker.marks.append((case.span, Classification.UNKNOWN))
+        result.append(hook)
+    walker.operations = [
+        replace(operation, resolution="unknown") if operation.id in rejected else operation
+        for operation in walker.operations
+    ]
+    return result
+
+
+def _handler_skip(walker, routine, span, use, reason, scope):
+    walker.skips.append(
+        LayerSkip(
+            reason,
+            walker.origin(span, routine.name),
+            (scope,),
+            walker.source.text[span.char_start : span.char_end],
+            (scope,),
+            preds=(
+                Pred.atom("direction_is", use.direction),
+                Pred.atom("headers" if use.headers_only else "not_headers"),
+            ),
+        )
+    )
+    walker.marks.append((span, Classification.UNKNOWN))
+
+
+def _body_calls(tokens):
+    """Вызовы с диапазоном аргументов, включая вложенные выражения; без строк и комментариев."""
+    for index, token in enumerate(tokens):
+        if token.kind != "identifier" or (index and tokens[index - 1].value == "."):
+            continue
+        end = index + 1
+        while (
+            end + 1 < len(tokens)
+            and tokens[end].value == "."
+            and tokens[end + 1].kind == "identifier"
+        ):
+            end += 2
+        if end >= len(tokens) or tokens[end].value != "(":
+            continue
+        depth = 1
+        close = end + 1
+        while close < len(tokens) and depth:
+            depth += (tokens[close].value == "(") - (tokens[close].value == ")")
+            close += 1
+        if not depth:
+            yield (
+                _join(tokens[index:end]).casefold(),
+                split_arguments(tokens[end + 1 : close - 1]),
+                end,
+                close,
+            )
+
+
+def handler_rule_touches(reading: ExtensionReading):
+    """Дешёвая лексическая подсказка; строки, комментарии и псевдонимы не учитываются."""
+    tables = {
+        "правилаконвертацииобъектов",
+        "правилаобработкиданных",
+        "правилаконвертациипредопределенныхданных",
+    }
+    for routine in reading.routines:
+        if not routine.roles & {"handler", "handler_helper"}:
+            continue
+        text = reading.source.text[routine.body_span.char_start : routine.body_span.char_end]
+        tokens = tokenize(text)
+        names = {token.folded for token in tokens if token.kind == "identifier"}
+        touched = bool(names & tables)
+        touched |= any(
+            name.startswith("обменданнымиxdtoсервер.")
+            and name.rsplit(".", 1)[-1] in RULE_RETURNING_CALLS
+            for name, *_ in _body_calls(tokens)
+        )
+        for index, token in enumerate(tokens):
+            if token.folded != "конвертациясвойств" or token.kind != "identifier":
+                continue
+            cursor = index + 1
+            while cursor < len(tokens):
+                if (
+                    tokens[cursor].value == "."
+                    and cursor + 1 < len(tokens)
+                    and tokens[cursor + 1].kind == "identifier"
+                ):
+                    cursor += 2
+                elif tokens[cursor].value == "[":
+                    depth = 1
+                    cursor += 1
+                    while cursor < len(tokens) and depth:
+                        depth += (tokens[cursor].value == "[") - (tokens[cursor].value == "]")
+                        cursor += 1
+                else:
+                    break
+            touched |= cursor < len(tokens) and tokens[cursor].value in {"=", "("}
+        if touched:
+            yield routine
+
+
+def _extension_roles(
+    parsed, hooks, walker, targets, bindings, previous_targets
+) -> tuple[list[Routine], tuple[PreviousCall, ...]]:
+    """Собственные обработчики определяются доказанными ветками, а не именами."""
+    hooked = {hook.routine.entity_id for hook in hooks}
+    handler_uses: dict[str, list[_HandlerUse]] = {}
+    for operation in walker.operations:
+        if (
+            operation.kind == OperationKind.DISPATCH
+            and operation.resolution == "applied"
+            and isinstance(operation.value, DispatcherCase)
+            and operation.value.target.reference_parts
+            and operation.value.target.reference_parts[0].casefold() in walker.routines
+        ):
+            routine = walker.routines[operation.value.target.reference_parts[0].casefold()][0]
+            handler_uses.setdefault(routine.entity_id, []).extend(
+                use
+                for use in bindings
+                if use.target_name == operation.value.literal_name
+                and use.active_file_id in (None, walker.source.file_id)
+            )
+    handler_ids = {routine_id for routine_id, uses in handler_uses.items() if uses}
+    handler_ids.update(
+        hook.routine.entity_id
+        for hook in hooks
+        if hook.target_class == "handler" and hook.applicability == "known"
+    )
+    dispatcher_ids = {
+        hook.routine.entity_id for hook in hooks if hook.target_name.casefold() in _DISPATCH_NAMES
+    }
+    routines = []
+    previous_calls = []
+    for routine, _header, tree in parsed:
+        roles = set(routine.roles)
+        if routine.entity_id in dispatcher_ids:
+            roles.add("dispatcher")
+        if routine.entity_id in handler_ids:
+            roles.add("handler")
+            # Непрозрачное тело не перекрывает неизвестное из другого пути вызова.
+            walker.marks.insert(0, (routine.body_span, Classification.OPAQUE_CODE))
+            if routine.entity_id not in hooked and tree and isinstance(tree[0], _Stmt):
+                statement = tree[0].statement
+                call = _call(_bare(statement.tokens))
+                candidates = {
+                    target.name.casefold(): target for target in previous_targets.values()
+                }
+                candidates.update(targets)
+                target = candidates.get(call[0].casefold()) if call else None
+                if target is not None and call is not None and "handler" in target.roles:
+                    actual = tuple(_join(arg).casefold() for arg in call[1])
+                    expected = tuple((param.name or "").casefold() for param in routine.parameters)
+                    for use in set(handler_uses[routine.entity_id]):
+                        previous = previous_targets.get(use.previous_id or "")
+                        if use.previous_name is not None and (
+                            previous is None or previous.entity_id != target.entity_id
+                        ):
+                            _handler_skip(
+                                walker,
+                                routine,
+                                statement.span,
+                                use,
+                                "previous_handler_mismatch",
+                                _ref(
+                                    use.collection,
+                                    "ИмяПКО" if use.collection == "pko" else "Имя",
+                                    use.rule_name,
+                                ),
+                            )
+                    if actual == expected and len(target.parameters) == len(expected):
+                        for use in set(handler_uses[routine.entity_id]):
+                            # Базовая привязка доступна после композиции. До неё
+                            # кандидат в прежний вызов не публикуется как свидетельство.
+                            if use.previous_name is None:
+                                continue
+                            if use.previous_id != target.entity_id:
+                                continue
+                            counted = {}
+
+                            def calls_in(body, stack, counted=counted, target=target):
+                                if body.entity_id in counted:
+                                    return counted[body.entity_id]
+                                count = 0
+                                tokens = tokenize(
+                                    walker.source.text[
+                                        body.body_span.char_start : body.body_span.char_end
+                                    ]
+                                )
+                                for name, *_ in _body_calls(tokens):
+                                    if name == target.name.casefold():
+                                        count += 1
+                                    elif name in walker.routines and name not in stack:
+                                        count += calls_in(walker.routines[name][0], stack | {name})
+                                counted[body.entity_id] = min(count, MAX_CALLS)
+                                return counted[body.entity_id]
+
+                            count = calls_in(routine, {routine.name.casefold()})
+                            previous_calls.append(
+                                PreviousCall(
+                                    routine.entity_id,
+                                    target.entity_id,
+                                    use.previous_name,
+                                    tuple(
+                                        _expr(walker.source, arg, statement.span) for arg in call[1]
+                                    ),
+                                    statement.span,
+                                    use.rule_id,
+                                    use.rule_name,
+                                    use.event,
+                                    count,
+                                )
+                            )
+        routines.append(replace(routine, roles=frozenset(roles)))
+    # Тела и собственные помощники непрозрачны: читатель доказывает связи,
+    # а не отсутствие изменений правил во время обмена.
+    helper_ids = set()
+    pending = [r for r in routines if "handler" in r.roles]
+    visited = set()
+    while pending:
+        caller = pending.pop()
+        if caller.entity_id in visited:
+            continue
+        visited.add(caller.entity_id)
+        tokens = tokenize(
+            walker.source.text[caller.body_span.char_start : caller.body_span.char_end]
+        )
+        for name, *_ in _body_calls(tokens):
+            found = walker.routines.get(name)
+            if found and found[0].entity_id not in handler_ids:
+                helper = found[0]
+                helper_ids.add(helper.entity_id)
+                walker.marks.insert(0, (helper.body_span, Classification.OPAQUE_CODE))
+                pending.append(helper)
+    routines = [
+        replace(routine, roles=routine.roles | {"handler_helper"})
+        if routine.entity_id in helper_ids
+        else routine
+        for routine in routines
+    ]
+    # Непривязанное тело остаётся неизвестным с собственной областью, не всей коллекцией.
+    called_cases = {
+        op.value.target.reference_parts[0].casefold(): op.value.entity_id
+        for op in walker.operations
+        if isinstance(op.value, DispatcherCase) and op.value.target.reference_parts
+    }
+    for routine in routines:
+        if (
+            routine.name.casefold() in called_cases
+            and not routine.roles
+            and routine.body_span.char_end > routine.body_span.char_start
+        ):
+            walker.skips.append(
+                LayerSkip(
+                    "event_signature",
+                    walker.origin(routine.body_span, routine.name),
+                    (called_cases[routine.name.casefold()],),
+                    "Тело без действующей проверенной привязки",
+                    (routine.entity_id,),
+                )
+            )
+    return routines, tuple(dict.fromkeys(previous_calls))
 
 
 def _empty_reading(layer: LayerDescriptor, source: SourceFile, skip: LayerSkip) -> ExtensionReading:
     tokens = ()
+    lexical_error = False
     try:
         tokens = tokenize(source.text)
     except EdFormatError:
-        tokens = ()
-    coverage = build_coverage(source, tokens, (), ())
+        lexical_error = True
+    coverage = build_coverage(source, tokens, (), (), lexical_error=lexical_error)
     return ExtensionReading(layer.id, (), (), (), (skip,), source, coverage)
 
 
@@ -4217,6 +4934,21 @@ def _collect_hooks(
     walker: _Walker,
 ) -> list[Hook]:
     lexical = lex(source)
+    pending_annotation = False
+    for statement in lexical.statements:
+        if (
+            statement.tokens[0].kind == "directive"
+            and parse_annotation(statement.tokens[0].value) is not None
+        ):
+            pending_annotation = True
+        elif statement.head in ("процедура", "функция"):
+            if pending_annotation:
+                walker.annotated_routines.add(statement.tokens[1].folded)
+            pending_annotation = False
+        elif statement.tokens[0].kind != "directive" or not statement.tokens[0].value.startswith(
+            "&"
+        ):
+            pending_annotation = False
     directives: list[tuple[str, str, SourceSpan]] = []
     hooks: list[Hook] = []
     routine_at = {header.span.char_start: (routine, tree) for routine, header, tree in parsed}
@@ -4225,6 +4957,8 @@ def _collect_hooks(
         if statement.tokens[0].kind == "directive" and statement.tokens[0].value.startswith("&"):
             parsed_hook = parse_annotation(statement.tokens[0].value)
             if parsed_hook is None:
+                if statement.tokens[0].value.casefold().startswith(("&насервере", "&наклиенте")):
+                    walker.marks.append((statement.span, Classification.DECLARATIVE))
                 if unrecognized_annotation(statement.tokens[0].value):
                     walker.skip(
                         "unrecognized_annotation",
@@ -4248,6 +4982,7 @@ def _collect_hooks(
                     )
                 continue
             pending.append((parsed_hook[0], parsed_hook[1], statement.span))
+            walker.marks.append((statement.span, Classification.DECLARATIVE))
             continue
         if statement.head in ("процедура", "функция") and pending:
             routine_tree = routine_at.get(statement.span.char_start)
@@ -4334,7 +5069,7 @@ def _bind_hook(
             routine.name,
             (target,),
             routine.raw_text,
-            ("dispatcher",),
+            (_filler_collection(target) or hook_id,),
             hook_id,
         )
     if applicability == Applicability.INVALID and folded in _FILLER_NAMES | _DISPATCH_NAMES | set(
@@ -4350,16 +5085,98 @@ def _bind_hook(
             hook_id,
         )
     continuation = Continuation.UNKNOWN
+    target_class = "modeled"
     if applicability == Applicability.KNOWN and "handler" in (
         known.roles if known else frozenset()
     ):
-        walker.marks.append((routine.body_span, Classification.OPAQUE_CODE))
+        target_class = "handler"
+        walker.marks.insert(0, (routine.body_span, Classification.OPAQUE_CODE))
         continuation = Continuation.ONCE
-    elif applicability == Applicability.KNOWN:
+    elif applicability == Applicability.KNOWN and folded in (
+        _FILLER_NAMES | set(_ROUTE_CALLBACKS) | {"выполнитьпроцедурумодуляменеджера"}
+    ):
         continuation = walker.walk_hook(hook_id, routine, tree, kind, target)
-    elif applicability == Applicability.INVALID and folded in _FILLER_NAMES:
-        continuation = Continuation.UNKNOWN
-    return Hook(hook_id, kind, target, routine, target_origin, continuation, applicability, origin)
+    else:
+        builders, collections = _builder_hook_scopes(targets, folded)
+        target_class = (
+            "function_dispatcher"
+            if folded == "выполнитьфункциюмодуляменеджера"
+            else "handler"
+            if known and "handler" in known.roles
+            else "rule_builder"
+            if collections
+            else "conversion_event"
+            if folded in {name.casefold() for name in CONVERSION_EVENTS}
+            else "base_routine"
+            if known
+            else "missing"
+        )
+        if known is not None or variants:
+            scopes = builders or collections or (hook_id,)
+            walker.skip(
+                "unmodeled_hook",
+                routine.span,
+                routine.name,
+                scopes,
+                (
+                    "Диспетчер функций не моделируется"
+                    if target_class == "function_dispatcher"
+                    else "Перехват не моделируется"
+                )
+                + f": цель {target}; класс {target_class}",
+                scopes,
+                hook_id,
+            )
+        walker.marks.append((routine.body_span, Classification.UNKNOWN))
+    return Hook(
+        hook_id,
+        kind,
+        target,
+        routine,
+        target_origin,
+        continuation,
+        applicability,
+        origin,
+        target_class,
+    )
+
+
+def _builder_hook_scopes(targets, target_name):
+    """Транзитивные цели заполнителей и владельцы правил, без анализа тел обработчиков."""
+    graph = {}
+
+    def reachable(start):
+        pending = [start]
+        visited = set()
+        while pending:
+            name = pending.pop()
+            if name in visited or name not in targets:
+                continue
+            visited.add(name)
+            if name not in graph:
+                graph[name] = tuple(
+                    call[0] for call in _body_calls(tokenize(targets[name].raw_text))
+                )
+            pending.extend(graph[name])
+        return visited
+
+    collections = tuple(
+        dict.fromkeys(
+            _filler_collection(name)
+            for name in _FILLER_NAMES
+            if target_name in reachable(name) and _filler_collection(name)
+        )
+    )
+    builders = (
+        tuple(
+            r.name
+            for name, r in targets.items()
+            if "rule" in r.roles and target_name in reachable(name)
+        )
+        if collections
+        else ()
+    )
+    return builders, collections
 
 
 def filler_calls(source: SourceFile) -> tuple[FillerCall, ...]:
@@ -4731,9 +5548,13 @@ def _recover_parameter_nodes(
             )
 
 
-def dispatcher_unknown(document: EdDocument) -> bool:
+def dispatcher_unknown(document: EdDocument, *, kind: str | None = None) -> bool:
     """Непонятные фрагменты диспетчера, кроме распознанного литерального исключения."""
-    owners = {routine.entity_id for routine in document.routines if "dispatcher" in routine.roles}
+    owners = {
+        routine.entity_id
+        for routine in document.routines
+        if "dispatcher" in routine.roles and (kind is None or routine.routine_kind == kind)
+    }
     for fragment in document.unknown:
         if fragment.owner_id not in owners:
             continue

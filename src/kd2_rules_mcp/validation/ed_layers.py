@@ -12,6 +12,7 @@ from dataclasses import replace
 from itertools import combinations
 
 from kd2_rules_mcp.ed.address import build_addresses, escape_segment
+from kd2_rules_mcp.ed.forms import EVENT_INVOCATIONS, accepts_arguments, invocation_keys_match
 from kd2_rules_mcp.ed.layer_address import LayerAddressIndex, build_layer_addresses
 from kd2_rules_mcp.ed.layer_model import (
     Certainty,
@@ -25,6 +26,7 @@ from kd2_rules_mcp.ed.layer_model import (
     Origin,
     Pred,
 )
+from kd2_rules_mcp.ed.layer_reader import handler_rule_touches
 from kd2_rules_mcp.ed.layers import holds
 from kd2_rules_mcp.ed.model import (
     ObjectRule,
@@ -57,6 +59,7 @@ LAYER_CHECKS = (
     "ed.layer.hook.target_missing",
     "ed.layer.dispatcher.suppressed",
     "ed.layer.hook.control_conflict",
+    "ed.layer.handler.touches_rules",
 )
 _PREFIX = {"pko": "ПКО", "pod": "ПОД", "pkpd": "ПКПД", "parameters": "Параметр"}
 _PROCEDURE = "выполнитьпроцедурумодуляменеджера"
@@ -630,7 +633,7 @@ def _handler_checks(
         for rule in (*source.pko, *source.pod)
         for binding in rule.events
     }
-    chains = {norm_name(chain.target_name): chain for chain in context.dispatch_chains}
+    chains = {(chain.kind, chain.target_name): chain for chain in context.dispatch_chains}
     for version in context.entities:
         rule = version.payload
         if version.state == EntityState.DELETED or not isinstance(
@@ -640,11 +643,10 @@ def _handler_checks(
         for binding in rule.events:
             if not binding.target_name:
                 continue
-            new = norm_name(base_names.get((rule.entity_id, binding.event), "")) != norm_name(
-                binding.target_name
-            )
+            new = base_names.get((rule.entity_id, binding.event), "") != binding.target_name
             check = "ed.layer.handler.unreachable" if new else "ed.layer.dispatcher.suppressed"
-            chain = chains.get(norm_name(binding.target_name))
+            signature = EVENT_INVOCATIONS.get(binding.event)
+            chain = chains.get((signature.kind if signature else "procedure", binding.target_name))
             direction = event_direction(binding.event)
             active_event = context.direction == direction if direction else None
             if active_event is False:
@@ -669,6 +671,76 @@ def _handler_checks(
             )
             if origin is None or origin.layer_id == "base":
                 continue  # прежнее замечание базы остаётся под прежним идентификатором
+            if signature and active_event is None:
+                active_event = True  # ПриОбработке ПОД вызывается в обоих направлениях.
+            selected = None
+            if chain:
+                for link in reversed(
+                    [link for link in chain.links if link.hook and link.hook.kind == "around"]
+                ):
+                    if link.case:
+                        selected = link.case
+                        break
+                    if not link.continues:
+                        break
+                else:
+                    selected = next(
+                        (link.case for link in chain.links if link.hook is None and link.case), None
+                    )
+            if (
+                signature
+                and selected
+                and version.certainty == Certainty.KNOWN
+                and active_event is True
+                and chain
+                and chain.resolution != "unknown"
+                and (
+                    (new and selected.span.file_id in {f.file_id for f in source.files})
+                    or signature.kind == "function"
+                )
+            ):
+                wrong_kind = selected.returns != (signature.kind == "function")
+                wrong_keys = not invocation_keys_match(signature, selected.arguments)
+                callee = next(
+                    (
+                        r
+                        for r in source.routines
+                        if len(selected.target.reference_parts) == 1
+                        and r.name.casefold() == selected.target.reference_parts[0].casefold()
+                        and r.span.file_id == selected.span.file_id
+                    ),
+                    None,
+                )
+                wrong_count = callee is not None and not accepts_arguments(
+                    callee.parameters, len(selected.arguments)
+                )
+                if wrong_kind or wrong_keys or wrong_count:
+                    _issue(
+                        report,
+                        "ed.layer.handler.unreachable",
+                        _address(version, layer=origin.layer_id),
+                        f"Обработчик {binding.target_name}: событие {binding.event} вызывается как "
+                        f"{signature.kind}; ключи исполнителя: {', '.join(signature.keys)}; "
+                        "ветка диспетчера имеет другой способ вызова или параметры",
+                        origin,
+                        error=True,
+                        key=_key(
+                            "ed.handler.missing",
+                            version,
+                            context,
+                            norm_name(binding.target_name),
+                            norm_name(binding.event),
+                        ),
+                    )
+                    continue
+            if signature is None:
+                _skip(
+                    report,
+                    check,
+                    _address(version, layer=origin.layer_id),
+                    f"Событие читателем не поддержано: {binding.event}; {_place(origin)}",
+                )
+                continue
             if (
                 version.certainty != Certainty.KNOWN
                 or active_event is None
@@ -691,7 +763,13 @@ def _handler_checks(
                     check,
                     _address(version, layer=origin.layer_id),
                     f"Обработчик {binding.target_name} назначен правилу {rule.name}, "
-                    "но цепочка диспетчера его не вызывает",
+                    "но цепочка диспетчера его не вызывает"
+                    + (
+                        f"; событие {binding.event} вызывается как function через "
+                        "ВыполнитьФункциюМодуляМенеджера"
+                        if signature and signature.kind == "function"
+                        else ""
+                    ),
                     origin,
                     error=True,
                     key=_key(
@@ -845,13 +923,29 @@ def validate_layers(
             report,
             "ed.layer.reading",
             _place(skip.origin),
-            f"{skip.reason}; affected={', '.join(skip.check_scope)}",
+            f"{skip.reason}; affected={', '.join(skip.check_scope)}; {skip.raw}"
+            if skip.reason in {"unmodeled_hook", "unsupported_event"}
+            else f"{skip.reason}; affected={', '.join(skip.check_scope)}",
         )
     report.skipped.append(
         Skipped("ed.layer.runtime", "Активность и порядок подключения в базе не проверены")
     )
     _hook_checks(layered, report)
     _route_checks(layered, routes, report)
+    for reading in layered.readings:
+        for routine in handler_rule_touches(reading):
+            root = next((hook.origin for hook in reading.hooks), None)
+            if root is None:
+                continue
+            origin = replace(root, span=routine.body_span, procedure=routine.name, hook_id=None)
+            _issue(
+                report,
+                "ed.layer.handler.touches_rules",
+                f"Слой/{escape_segment(reading.layer_id)}/Обработчик/{escape_segment(routine.name)}",
+                f"Обработчик {routine.name} обращается к правилам; "
+                "состав правил во время обмена может отличаться от показанного",
+                origin,
+            )
     for current in (context,) if context is not None else layered.contexts:
         report.direction = current.direction
         _target_checks(layered, current, report)
@@ -891,6 +985,8 @@ def _uncertain_report(
                 f"Определённость {version.certainty}; правило не оценивалось",
             )
     for scope in context.taints:
+        if scope not in {"manager", "filler", "hook", "dispatcher", *_PREFIX}:
+            continue  # неизвестная цепочка/иной перехват не делает состав правил неизвестным
         for check in checks:
             _skip(
                 report,
@@ -1044,40 +1140,62 @@ def validate_effective_links(
         references,
         entries=tuple(ref for ref in references.entries if ref.owner_id not in inactive_handlers),
     )
-    active_ids = {rule.entity_id for rule in (*document.pko, *document.pod)}
-    deleted_ids = {
+    unavailable_ids = {
         version.payload.entity_id
         for version in context.entities
-        if version.state == EntityState.DELETED and version.payload is not None
+        if version.payload is not None
+        and (version.state == EntityState.DELETED or version.certainty != Certainty.KNOWN)
     }
-    inactive_names = {
-        norm_name(rule.name)
-        for rule in (*source.pko, *source.pod)
-        if rule.entity_id not in active_ids | deleted_ids
+    source_ids = {rule.entity_id for rule in (*source.pko, *source.pkpd)}
+    active_ids = {rule.entity_id for rule in (*document.pko, *document.pod, *document.pkpd)}
+    inactive_source_ids = source_ids - unavailable_ids - active_ids
+    # Исключение по направлению не доказывает отсутствия исходной декларации.
+    # Удалённое или неизвестное в текущем контексте правило этим не восстанавливается.
+    declared_pko = frozenset(
+        norm_name(version.payload.name)
+        for other in layered.contexts
+        for version in other.entities
+        if isinstance(version.payload, ObjectRule)
+        and version.payload.entity_id in inactive_source_ids
+        and version.state != EntityState.DELETED
+        and version.certainty == Certainty.KNOWN
+    )
+    declared_rules = declared_pko | frozenset(
+        norm_name(version.payload.name)
+        for other in layered.contexts
+        for version in other.entities
+        if isinstance(version.payload, PredefinedRule)
+        and version.payload.entity_id in inactive_source_ids
+        and version.state != EntityState.DELETED
+        and version.certainty == Certainty.KNOWN
+    )
+    received_pods = (
+        {use.rule_id for use in source.rule_uses if use.direction in ("receive", "both")}
+        - unavailable_ids
+        - active_ids
+    )
+    declared_pod_formats = frozenset(
+        version.payload.format_selection.value
+        for other in layered.contexts
+        for version in other.entities
+        if isinstance(version.payload, ProcessingRule)
+        and version.payload.entity_id in received_pods
+        and version.state != EntityState.DELETED
+        and version.certainty == Certainty.KNOWN
+        and version.payload.format_selection.value
+    )
+    original_bindings = {
+        event.entity_id: event for rule in (*source.pko, *source.pod) for event in rule.events
     }
-    for rule in document.pko:
-        for prop in (
-            *rule.properties,
-            *(prop for group in rule.groups for prop in group.properties),
-        ):
-            if norm_name(prop.conversion_rule) in inactive_names:
-                uncertain.add(("ed.reference.property_rule_missing", prop.entity_id))
-    for rule in document.pod:
-        if any(norm_name(ref.name) in inactive_names for ref in rule.used_pko):
-            uncertain.add(("ed.reference.pod_pko_missing", rule.entity_id))
-    unproven = [
-        reference
-        for reference in references.entries
-        if reference.name is not None and norm_name(reference.name) in inactive_names
-    ]
-    unproven_ordinals = {reference.ordinal for reference in unproven}
-    references = replace(
-        references,
-        entries=tuple(
-            reference
-            for reference in references.entries
-            if reference.ordinal not in unproven_ordinals
-        ),
+    unscoped_rules = {use.rule_id for use in source.rule_uses if use.direction is None}
+    baseline_bindings = frozenset(
+        event.entity_id
+        for rule in (*document.pko, *document.pod)
+        for event in rule.events
+        if rule.entity_id in unscoped_rules
+        and event.entity_id in original_bindings
+        and original_bindings[event.entity_id].target_name == event.target_name
+        and event.resolution != "invalid_signature"
     )
     report = validate_links(
         document,
@@ -1087,14 +1205,24 @@ def validate_effective_links(
         uncertain=frozenset(uncertain),
         preserved=frozenset(preserved),
         context=context,
+        declared_pko=declared_pko,
+        declared_rules=declared_rules,
+        declared_pod_formats=declared_pod_formats,
+        baseline_bindings=baseline_bindings,
     )
-    for reference in unproven:
-        _skip(
-            report,
-            "ed.reference.code_rule_missing",
-            index.by_id[reference.owner_id][0],
-            "Условие упоминания правила другого направления в теле метода неизвестно",
-        )
+    for rule in (*document.pko, *document.pod):
+        for binding in rule.events:
+            if binding.resolution == "invalid_signature" and event_direction(binding.event) in (
+                None,
+                context.direction,
+            ):
+                _skip(
+                    report,
+                    "ed.handler.missing",
+                    index.by_id[rule.entity_id][0],
+                    f"Несовместимая сигнатура {binding.event}: ошибка объяснена "
+                    "ed.layer.handler.unreachable; повторное замечание подавлено",
+                )
     _uncertain_report(layered, context, report, "links")
     unknown_handlers = {
         norm_name(chain.target_name)

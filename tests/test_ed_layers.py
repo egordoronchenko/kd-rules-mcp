@@ -863,8 +863,8 @@ def test_dispatcher_cases():
 """,
     )
     resolved = {item.target_name: item.resolution for item in _send(after).dispatch_chains}
-    assert resolved["НовоеИмя"] == "call"
-    assert resolved["Известное"] == "call"
+    assert resolved["Известное"] == "unknown"
+    assert any(skip.reason == "opaque_dispatch" for skip in after.skipped)
     throwing = read_manager_text(
         base_text.replace(
             "    КонецЕсли;\nКонецПроцедуры",
@@ -887,7 +887,7 @@ def test_dispatcher_cases():
 """,
     )
     thrown_map = {item.target_name: item.resolution for item in _send(thrown).dispatch_chains}
-    assert thrown_map["НовоеИмя"] == "throws"
+    assert thrown_map["Известное"] == "unknown"
     before = _overlay(
         document,
         """\
@@ -898,7 +898,7 @@ def test_dispatcher_cases():
     )
     assert {item.target_name: item.resolution for item in _send(before).dispatch_chains}[
         "Известное"
-    ] == "call"
+    ] == "unknown"
 
 
 def test_around_without_fallback_and_two_layers(demo):
@@ -916,8 +916,9 @@ def test_around_without_fallback_and_two_layers(demo):
 """,
     )
     muted_map = {item.target_name: item.resolution for item in _send(muted).dispatch_chains}
-    assert muted_map["ТолькоНовое"] == "call"
     assert muted_map["ПКО_Товар_ПриОтправкеДанных"] == "no_call"
+    assert muted_map["ТолькоНовое"] == "unknown"
+    assert any(skip.reason == "event_signature" for skip in muted.skipped)
     first = _reading(
         demo.base,
         """\
@@ -954,8 +955,8 @@ def test_around_without_fallback_and_two_layers(demo):
     )
     layered = compose_manager(demo.base, readings=[first, second])
     both = {item.target_name: item.resolution for item in _send(layered).dispatch_chains}
-    assert both["ИмяОдин"] == "call"
-    assert both["ИмяДва"] == "call"
+    assert both["ИмяОдин"] == "unknown"
+    assert both["ИмяДва"] == "unknown"
     assert both["ПКО_Товар_ПриОтправкеДанных"] == "call"
 
 

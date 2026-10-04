@@ -1132,13 +1132,13 @@ def test_instead_without_continue_taints_the_area():
         "    Возврат;\n"
         "КонецПроцедуры\n",
     )
-    assert "helper_replaced" in {skip.reason for skip in helper.skipped}
+    assert "unmodeled_hook" in {skip.reason for skip in helper.skipped}
     assert rule_view(_context(helper, "send")).certainty == Certainty.UNKNOWN
     procedure = _overlay(
         _demo(),
         '&Вместо("ДобавитьПКО_Товар")\nПроцедура Подмена(ПравилаКонвертации)\nКонецПроцедуры\n',
     )
-    assert "rule_procedure_replaced" in {skip.reason for skip in procedure.skipped}
+    assert "unmodeled_hook" in {skip.reason for skip in procedure.skipped}
     assert _certainty(procedure, "send") == Certainty.UNKNOWN
     kept = _overlay(
         _demo(),
@@ -1253,9 +1253,9 @@ def test_dispatcher_elseif_and_dead_call():
         + '&Вместо("ВыполнитьПроцедуруМодуляМенеджера")\n'
         + "Процедура Доп_Диспетчер(ИмяПроцедуры, Параметры)\n"
         + '    Если ИмяПроцедуры = "А_Обработчик" Тогда\n'
-        + "        А_Обработчик(Параметры);\n"
+        + "        А_Обработчик(Параметры.П);\n"
         + '    ИначеЕсли ИмяПроцедуры = "Б_Обработчик" Тогда\n'
-        + "        Б_Обработчик(Параметры);\n"
+        + "        Б_Обработчик(Параметры.П);\n"
         + "    Иначе\n"
         + "        ПродолжитьВызов(ИмяПроцедуры, Параметры);\n"
         + "    КонецЕсли;\n"
@@ -1267,8 +1267,9 @@ def test_dispatcher_elseif_and_dead_call():
     chains = {
         item.target_name: item.resolution for item in _context(layered, "send").dispatch_chains
     }
-    assert chains["А_Обработчик"] == "call"
-    assert chains["Б_Обработчик"] == "call"
+    assert chains["А_Обработчик"] == "unknown"  # ветка не привязана к событию
+    assert chains["Б_Обработчик"] == "unknown"  # сигнатура не соответствует отправке
+    assert any(skip.reason == "event_signature" for skip in layered.skipped)
     dead = (
         '&Вместо("ВыполнитьПроцедуруМодуляМенеджера")\n'
         "Процедура Доп_Диспетчер(ИмяПроцедуры, Параметры)\n"
@@ -1279,7 +1280,8 @@ def test_dispatcher_elseif_and_dead_call():
         "КонецПроцедуры\n"
     )
     result = _overlay(_demo(), dead)
-    assert result.status == LayerStatus.COMPLETE
+    assert result.status == LayerStatus.PARTIAL
+    assert any(skip.reason == "opaque_dispatch" for skip in result.skipped)
 
 
 def test_base_condition_survives_a_layer_edit():

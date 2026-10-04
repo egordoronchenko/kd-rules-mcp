@@ -19,6 +19,7 @@ from .model import (
     Expr,
     Field,
     Guard,
+    HandlerBinding,
     ObjectRule,
     Parameter,
     PredefinedRule,
@@ -97,10 +98,12 @@ SKIP_REASONS = frozenset(
         "conditional_call",
         "duplicate_hook",
         "dynamic_code",
+        "event_signature",
         "filler_error",
         "goto",
-        "helper_replaced",
         "helper_unverified",
+        "unmodeled_hook",
+        "unsupported_event",
         "identity_mismatch",
         "incomplete_rule",
         "loop",
@@ -119,9 +122,9 @@ SKIP_REASONS = frozenset(
         "opaque_exception",
         "opaque_flow",
         "opaque_return",
+        "previous_handler_mismatch",
         "recursion",
         "resource_limit",
-        "rule_procedure_replaced",
         "tainted_collection",
         "unknown_call",
         "unknown_field",
@@ -200,6 +203,31 @@ class Hook:
     continuation: str
     applicability: str
     origin: Origin
+    target_class: str = "modeled"
+
+
+@dataclass(frozen=True, slots=True)
+class HandlerBodyChange:
+    """Достоверный факт перехвата тела, без утверждений о его исполнении."""
+
+    kind: str
+    target_name: str
+    origin: Origin
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LayerHandlerBinding(HandlerBinding):
+    body_changes: tuple[HandlerBodyChange, ...] = ()
+
+    @property
+    def body_modified(self) -> bool:
+        return bool(self.body_changes)
+
+
+HANDLER_EXECUTION_NOTE = (
+    "Показаны статический состав правил после заполнения и связи событий с процедурами; "
+    "действия кода обработчиков во время обмена не определяются."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +339,21 @@ class EffectiveContext:
 
 
 @dataclass(frozen=True, slots=True)
+class PreviousCall:
+    """Первый прямой вызов прежнего обработчика; число включает собственных помощников."""
+
+    routine_id: str
+    target_id: str
+    target_name: str
+    arguments: tuple[Expr, ...]
+    span: SourceSpan
+    rule_id: str
+    rule_name: str
+    event: str
+    call_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class ExtensionReading:
     """Разбор одного модуля расширения. Операции ещё не наложены на базовый документ."""
 
@@ -321,6 +364,14 @@ class ExtensionReading:
     skips: tuple[LayerSkip, ...]
     source: SourceFile
     coverage: Coverage
+    previous_calls: tuple[PreviousCall, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveDocument(EdDocument):
+    """Вход прежних проверок с доказанными вызовами тел через границы слоёв."""
+
+    previous_calls: tuple[PreviousCall, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +394,11 @@ class LayeredManager:
     # включая операции с ложной защитой «цель отсутствует».
     source_document: EdDocument | None = None
     readings: tuple[ExtensionReading, ...] = ()
+
+    @property
+    def previous_calls(self) -> tuple[PreviousCall, ...]:
+        """Свидетельства обёрток с сохранением файла и диапазона вызова."""
+        return tuple(call for reading in self.readings for call in reading.previous_calls)
 
 
 @runtime_checkable
@@ -398,7 +454,16 @@ def rule_view(context: EffectiveContext) -> RuleView:
     pkpd = tuple(item for item in payloads(PredefinedRule) if isinstance(item, PredefinedRule))
     parameters = tuple(item for item in payloads(Parameter) if isinstance(item, Parameter))
     ranks = [version.certainty for version in context.entities]
-    if context.taints or any(rank == Certainty.UNKNOWN for rank in ranks):
+    if set(context.taints) & {
+        "manager",
+        "filler",
+        "hook",
+        "dispatcher",
+        "pko",
+        "pod",
+        "pkpd",
+        "parameters",
+    } or any(rank == Certainty.UNKNOWN for rank in ranks):
         certainty = Certainty.UNKNOWN
     elif any(rank == Certainty.CONDITIONAL for rank in ranks):
         certainty = Certainty.CONDITIONAL

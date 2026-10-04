@@ -13,6 +13,8 @@ def build_coverage(
     tokens: tuple[Token, ...],
     marks: Iterable[tuple[SourceSpan, Classification]],
     entity_spans: Iterable[SourceSpan],
+    *,
+    lexical_error: bool = False,
 ) -> Coverage:
     """Поздние метки уточняют ранние; trivia не становится пониманием BSL."""
     size = len(source.text)
@@ -21,7 +23,7 @@ def build_coverage(
         painted[span.char_start : span.char_end] = bytes([KINDS.index(kind)]) * (
             span.char_end - span.char_start
         )
-    classes = bytearray(size)
+    classes = bytearray([3 if lexical_error else 0]) * size
     for token in tokens:
         if token.kind != "comment":
             classes[token.start : token.end] = painted[token.start : token.end]

@@ -322,6 +322,11 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
     ) -> _Inputs:
         # Открытые идентификаторы проверяются даже при попадании в кэш.
         doc_project = self._ed_project(refs[0])
+        if doc_project.layered is not None:
+            raise ValueError(
+                "Авторинг снимка со слоями пока не поддерживается; "
+                "откройте менеджер без расширений (extensions=[])"
+            )
         schema_project = self._schema_project(refs[1])
         self._require_structure(refs[2])
         key = (project, configuration, *refs)

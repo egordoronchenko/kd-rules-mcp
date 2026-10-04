@@ -2,8 +2,8 @@
 
 Сканер смотрит только токены лексора: строки и комментарии кодом не считаются.
 Имена не вычисляются. Вычисляемое выражение в известной позиции даёт запись с
-`name=None`. Направление берётся из RuleUse владельцев привязки и не
-распространяется по вызовам.
+`name=None`. Направление берётся из RuleUse владельцев привязки; в проекции оно
+распространяется на проверенных помощников и доказанные прежние вызовы.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 
+from .forms import EVENT_INVOCATIONS
+from .layer_model import EffectiveDocument
 from .lexer import Token, lex, split_arguments, tokenize
 from .model import DispatcherCase, EdDocument, Expr, Routine, SourceFile, SourceSpan
 
@@ -48,7 +50,7 @@ KINDS: tuple[ReferenceKind, ...] = (
     "format_property",
     "received_property",
 )
-_INDEXED_ROLES = frozenset({"handler", "algorithm", "event", "callback"})
+_INDEXED_ROLES = frozenset({"handler", "handler_helper", "algorithm", "event", "callback"})
 # Наиболее специальный корень побеждает, чтобы не учитывать цепочку дважды.
 _FAMILIES: tuple[tuple[str, ReferenceKind], ...] = (
     ("дополнительныесвойства", "additional_key"),
@@ -170,6 +172,87 @@ def build_references(document: EdDocument) -> ReferenceIndex:
     sources = {source.file_id: source for source in document.files}
     starts: dict[str, set[int]] = {}
     drafts: list[_Draft] = []
+    aliases: dict[str, dict[str, str]] = defaultdict(dict)
+    routines = {r.entity_id: r for r in document.routines}
+    for rule in (*document.pko, *document.pod):
+        for binding in rule.events:
+            routine = routines.get(binding.target_id or "")
+            signature = EVENT_INVOCATIONS.get(binding.event)
+            if (
+                routine
+                and signature
+                and document.files
+                and routine.span.file_id != document.files[0].file_id
+            ):
+                case = next(
+                    (
+                        case
+                        for case in document.dispatcher_cases
+                        if case.literal_name == binding.target_name
+                        and case.span.file_id == routine.span.file_id
+                    ),
+                    None,
+                )
+                keys = (
+                    tuple(arg.reference_parts[-1] for arg in case.arguments if arg.reference_parts)
+                    if case
+                    else ()
+                )
+                for formal, key in zip(routine.parameters, keys, strict=False):
+                    if formal.name:
+                        canonical = key.casefold()
+                        if canonical == "объектобработки":
+                            canonical = (
+                                "данныеxdto"
+                                if directions.get(routine.entity_id) == "receive"
+                                else "данныеиб"
+                            )
+                        aliases[routine.entity_id][formal.name.casefold()] = canonical
+    previous = document.previous_calls if isinstance(document, EffectiveDocument) else ()
+    helpers = {
+        (r.span.file_id, r.name.casefold()): r
+        for r in document.routines
+        if "handler_helper" in r.roles
+    }
+    changed = bool(helpers or previous)
+    while changed:
+        size = sum(len(values) for values in aliases.values())
+        for call in previous:
+            target = routines.get(call.target_id)
+            signature = EVENT_INVOCATIONS.get(call.event)
+            if (
+                target
+                and signature
+                and document.files
+                and target.span.file_id != document.files[0].file_id
+            ):
+                for formal, argument in zip(target.parameters, call.arguments, strict=False):
+                    if formal.name:
+                        key = argument.raw.casefold()
+                        aliases[target.entity_id][formal.name.casefold()] = aliases[
+                            call.routine_id
+                        ].get(key, key)
+        for routine in document.routines:
+            if routine.span.file_id not in {file_id for file_id, _ in helpers}:
+                continue
+            tokens = tokenize(routine.raw_text)
+            pairs = _bracket_pairs(tokens)
+            for index, token in enumerate(tokens):
+                target = helpers.get((routine.span.file_id, token.folded))
+                if (
+                    not target
+                    or index + 1 not in pairs
+                    or tokens[index + 1].value != "("
+                    or (index and tokens[index - 1].value == ".")
+                ):
+                    continue
+                arguments = split_arguments(tokens[index + 2 : pairs[index + 1]])
+                for formal, arg in zip(target.parameters, arguments, strict=False):
+                    if formal.name and len(arg) == 1:
+                        canonical = aliases[routine.entity_id].get(arg[0].folded, arg[0].folded)
+                        if canonical in {name for name, _ in _FAMILIES}:
+                            aliases[target.entity_id][formal.name.casefold()] = canonical
+        changed = sum(len(values) for values in aliases.values()) != size
     for routine in document.routines:
         if not routine.roles & _INDEXED_ROLES:
             continue
@@ -184,6 +267,7 @@ def build_references(document: EdDocument) -> ReferenceIndex:
                 routine,
                 directions.get(routine.entity_id),
                 starts[source.file_id],
+                aliases.get(routine.entity_id, {}),
             )
         )
     drafts.sort(
@@ -235,13 +319,48 @@ def build_references(document: EdDocument) -> ReferenceIndex:
     )
 
 
-def _directions(document: EdDocument) -> dict[str, ReferenceDirection]:
-    """Объединение направлений RuleUse правил, к которым привязан метод."""
+def binding_owners(document: EdDocument) -> Mapping[str, tuple[str, ...]]:
+    """Владельцы тел; вызовы распространяются только по проверенным связям проекции."""
     owners: dict[str, set[str]] = defaultdict(set)
     for rule in (*document.pko, *document.pod):
         for binding in rule.events:
             if binding.target_id:
                 owners[binding.target_id].add(rule.entity_id)
+    helpers = {
+        (r.span.file_id, r.name.casefold()): r
+        for r in document.routines
+        if "handler_helper" in r.roles
+    }
+    previous = document.previous_calls if isinstance(document, EffectiveDocument) else ()
+    helper_files = {file_id for file_id, _ in helpers}
+    changed = bool(helpers or previous)
+    while changed:
+        changed = False
+        for call in previous:
+            before = len(owners[call.target_id])
+            owners[call.target_id].update(owners.get(call.routine_id, ()))
+            changed |= len(owners[call.target_id]) != before
+        for routine in document.routines:
+            if not owners.get(routine.entity_id) or routine.span.file_id not in helper_files:
+                continue
+            tokens = tokenize(routine.raw_text)
+            for index, token in enumerate(tokens):
+                target = helpers.get((routine.span.file_id, token.folded))
+                if (
+                    target
+                    and index + 1 < len(tokens)
+                    and tokens[index + 1].value == "("
+                    and (not index or tokens[index - 1].value != ".")
+                ):
+                    before = len(owners[target.entity_id])
+                    owners[target.entity_id].update(owners[routine.entity_id])
+                    changed |= len(owners[target.entity_id]) != before
+    return MappingProxyType({key: tuple(sorted(value)) for key, value in owners.items()})
+
+
+def _directions(document: EdDocument) -> dict[str, ReferenceDirection]:
+    """Объединение направлений RuleUse правил, к которым привязан метод."""
+    owners = binding_owners(document)
     uses: dict[str, set[str]] = defaultdict(set)
     for use in document.rule_uses:
         if use.rule_id and use.direction == "both":
@@ -267,6 +386,7 @@ def _scan_routine(
     routine: Routine,
     direction: ReferenceDirection | None,
     statement_starts: set[int],
+    aliases: Mapping[str, str] = MappingProxyType({}),
 ) -> list[_Draft]:
     base = routine.body_span.char_start
     tokens = tuple(
@@ -334,7 +454,10 @@ def _scan_routine(
         ):
             identifiers.append(tokens[cursor + 1])
             cursor += 2
-        folded = [item.folded for item in identifiers]
+        folded = [
+            aliases.get(item.folded, item.folded) if i == 0 else item.folded
+            for i, item in enumerate(identifiers)
+        ]
         arguments = (
             split_arguments(tokens[cursor + 1 : pairs[cursor]])
             if cursor in pairs and tokens[cursor].value == "("

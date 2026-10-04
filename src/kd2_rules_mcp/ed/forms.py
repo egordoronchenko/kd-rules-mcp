@@ -1,5 +1,7 @@
 """Формы писателя КД 3; имена 1С остаются в исходном написании."""
 
+from dataclasses import dataclass
+
 # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/
 # ШаблоныТекстовМодулей/Ext/Template.txt:1 — интерфейсы 1/2/3.
 MANAGER_VERSIONS = frozenset((1, 2, 3))
@@ -70,6 +72,84 @@ EVENT_SIGNATURES: dict[str, tuple[tuple[str, ...], ...]] = {
     ),
     "ПослеЗагрузкиВсехДанных": (("Объект",),),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class EventInvocation:
+    """Все ключи структуры исполнителя; ветка вправе использовать подмножество."""
+
+    kind: str
+    keys: tuple[str, ...]
+    evidence: str
+
+
+# Формы веток: reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/
+# ШаблоныТекстовМодулей/Ext/Template.txt:75-91; ObjectModule.bsl:3250-3258.
+# Ключи ниже — все ключи структуры исполнителя, не обязательный порядок аргументов.
+# ПриОбработке: писатель меняет имя формального, но НЕ ключ вызова (3254,3258).
+# Для прочих событий старого писателя в этом исполнителе нет структуры вызова:
+# они остаются распознаваемыми полями, но семантика расширения не доказывается.
+EVENT_INVOCATIONS = {
+    "ПриОбработке": EventInvocation(
+        "procedure",
+        ("ОбъектОбработки", "ИспользованиеПКО", "КомпонентыОбмена"),
+        "XDTO:8436-8438,8444",
+    ),
+    "ВыборкаДанных": EventInvocation("function", ("КомпонентыОбмена",), "XDTO:8490,8493"),
+    "ПриОтправкеДанных": EventInvocation(
+        "procedure",
+        EVENT_SIGNATURES["ПриОтправкеДанных"][0],
+        "XDTO:8549-8552,8558",
+    ),
+    "ПриКонвертацииДанныхXDTO": EventInvocation(
+        "procedure",
+        EVENT_SIGNATURES["ПриКонвертацииДанныхXDTO"][0],
+        "XDTO:8601-8603,8609",
+    ),
+    "ПередЗаписьюПолученныхДанных": EventInvocation(
+        "procedure",
+        EVENT_SIGNATURES["ПередЗаписьюПолученныхДанных"][0],
+        "XDTO:8656-8659,8665",
+    ),
+    "ПослеЗагрузкиВсехДанных": EventInvocation(
+        "procedure",
+        ("Объект", "КомпонентыОбмена", "ОбъектМодифицирован"),
+        "XDTO:7198-7202; Template.txt:91",
+    ),
+    "АлгоритмПоиска": EventInvocation(
+        "procedure",
+        ("ДанныеИБ", "ПолученныеДанные", "КомпонентыОбмена"),
+        "XDTO:8701-8706",
+    ),
+}
+
+# Экспортные функции, возвращающие строку правила. Только лексическая подсказка,
+# без обещания проследить возвращённое значение или доказать безопасность тела.
+# XDTO:22-26,502-518,4493-4519. ПОДПоИмени и ПОДПоОбъектуМетаданных не экспортны.
+RULE_RETURNING_CALLS = frozenset(
+    name.casefold()
+    for name in (
+        "ИнициализироватьПравилоКонвертацииОбъекта",
+        "ПКОПоИмени",
+        "ПОДПоТипуСсылкиXDTO",
+        "ПОДПоТипуОбъектаXDTO",
+    )
+)
+
+
+def accepts_arguments(parameters, count: int) -> bool:
+    """Оставленные аргументы должны иметь значения по умолчанию."""
+    return count <= len(parameters) and all(p.default is not None for p in parameters[count:])
+
+
+def invocation_keys_match(invocation: EventInvocation, arguments) -> bool:
+    """Каждый передаваемый ключ существует; порядок и полнота не требуются."""
+    keys = {key.casefold() for key in invocation.keys}
+    return all(
+        len(arg.reference_parts) == 2 and arg.reference_parts[-1].casefold() in keys
+        for arg in arguments
+    )
+
 
 # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/
 # ШаблоныТекстовМодулей/Ext/Template.txt:43-54.

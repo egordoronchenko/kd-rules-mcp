@@ -98,6 +98,40 @@ EXPECTED_TOOLS = {
 }
 
 
+@pytest.mark.anyio
+async def test_ed_layer_parameters_and_responses(service: Kd2Service, monkeypatch) -> None:
+    from kd2_rules_mcp.service import ed_routes as routes_service
+    from tests import session_inputs
+
+    assert session_inputs._orig_read_routes is not None
+    monkeypatch.setattr(routes_service, "read_routes", session_inputs._orig_read_routes)
+    root = DATA / "ed/layers"
+    async with Client(create_server(service)) as client:
+        opened = await _call(
+            client,
+            "ed_open",
+            path=str((root / "base/CommonModules/МенеджерДемо/Ext/Module.bsl").resolve()),
+            configuration_path=str((root / "base").resolve()),
+            extensions=[str((root / "b").resolve())],
+        )
+        ident = opened["project_id"]
+        assert opened["composition_status"] == "complete"
+        listed = await _call(client, "ed_list", project_id=ident, kind="hook", limit=1)
+        hook = listed["items"][0]
+        result = await _call(
+            client, "ed_get", project_id=ident, address=hook["address"], direction="send"
+        )
+        assert result["kind"] == "hook"
+        located = await _call(
+            client, "ed_locate", project_id=ident, file_id=hook["file_id"], line=hook["line_start"]
+        )
+        assert located["matches"]["items"][0]["kind"] == "hook"
+        report = await _call(client, "ed_validate", project_id=ident, direction=None)
+        assert len(report["composition"]["contexts"]) == 2
+        error = await _error(client, "ed_open", extensions=[])
+        assert error["code"] == "invalid_argument"
+
+
 async def test_ed_tools(service: Kd2Service) -> None:
     async with Client(create_server(service)) as client:
         opened = await _call(client, "ed_open", path=str((DATA / "ed/manager_v2.bsl").resolve()))
@@ -230,14 +264,16 @@ async def test_ed_validate_profile_tools(service: Kd2Service, tmp_path) -> None:
             project_id=project,
             schema_id=schema,
             structure_id=structure,
-            direction="send",
+            direction="both",
         )
-        assert report["profile"]["direction"] == "send"
+        assert report["profile"]["direction"] == "both"
         assert report["coverage"]["checked"] > 0 and not report["issues"]["items"]
         for parameter, value, code in [
             ("schema_id", "missing", "ed_schema_not_found"),
             ("structure_id", "missing", "structure_not_found"),
             ("direction", "other", "invalid_argument"),
+            ("direction", "send", "invalid_argument"),
+            ("direction", "receive", "invalid_argument"),
         ]:
             failure = await _error(client, "ed_validate", project_id=project, **{parameter: value})
             assert failure["code"] == code

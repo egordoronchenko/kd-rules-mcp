@@ -27,6 +27,19 @@ from kd2_rules_mcp.service.ed_views import short
 DATA = Path(__file__).parent / "data/ed"
 
 
+@pytest.mark.parametrize("version", [2, 3])
+def test_plain_snapshot_responses_byte_identical_with_explicit_empty_extensions(service, version):
+    from tests.test_service_ed_layers import encoded, legacy_validate
+
+    path = str((DATA / f"manager_v{version}.bsl").resolve())
+    opened = service.ed_open(path)
+    explicit = service.ed_open(path, configuration_path="unused", extensions=[])
+    assert encoded(explicit) == encoded({**opened, "reused": True})
+    assert encoded(service.ed_validate(opened["project_id"])) == encoded(
+        legacy_validate(service, opened["project_id"])
+    )
+
+
 @pytest.fixture
 def service(tmp_path):
     return Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))

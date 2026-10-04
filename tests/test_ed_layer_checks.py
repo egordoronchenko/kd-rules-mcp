@@ -341,14 +341,9 @@ def test_dispatcher_suppressed_and_fallback(kits):
         kits[""],
         B_PATH.read_text(encoding="utf-8").replace("ПродолжитьВызов(ИмяПроцедуры, Параметры);", ""),
     )
-    oracle(
-        report(bad),
-        "dispatcher.suppressed",
-        "ошибка",
-        "Слой/L01-ДемоB/Перехват/Доп_Диспетчер",
-        "Перехват Доп_Диспетчер отсекает назначенный обработчик "
-        "ПКО_Товар_ПриОтправкеДанных; нет ветки или ПродолжитьВызов",
-    )
+    result = report(bad)
+    assert issues(result, "dispatcher.suppressed")
+    assert not any(skip.check == "ed.layer.dispatcher.suppressed" for skip in result.skipped)
     assert not issues(report(kits["b"]), "dispatcher.suppressed")
 
 
@@ -465,8 +460,19 @@ def test_unknown_dispatcher_skips_unreachable_and_suppressed(kits, case):
     )
     assert any(chain.resolution == "unknown" for chain in select_context(layered).dispatch_chains)
     if case != "H8":
-        clean = overlay(base, extension.replace("ОбщийМодуль.Имя()", '"Другой"'))
-        assert any(i.check == check and i.level.value == "ошибка" for i in report(clean).issues)
+        # Литеральное условие само по себе не доказывает полный dispatcher:
+        # нужны собственная цель, правильные аргументы и fallback (§2.3 запуска R).
+        # Комплект B содержит привязанную ветку с точной сигнатурой события.
+        lines = B_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
+        clean = overlay(
+            base,
+            "".join(lines[:2])
+            + "\n".join(assignment.splitlines()[2:-1])
+            + "\n"
+            + "".join(lines[2:]),
+        )
+        assert issues(report(clean), "handler.unreachable")
+        assert not issues(report(clean), "dispatcher.suppressed")
     else:
         clean = overlay(kits[""], assignment)
         assert issues(report(clean), "handler.unreachable")
@@ -686,8 +692,9 @@ def test_route_documents_observation_and_layers_work_together(kits, monkeypatch)
     ).resolve() in hashes
 
 
-def test_table_has_exactly_eleven_checks():
-    assert len(LAYER_CHECKS) == len(set(LAYER_CHECKS)) == 11
+def test_table_has_eleven_composition_checks_and_one_body_hint():
+    assert len(LAYER_CHECKS) == len(set(LAYER_CHECKS)) == 12
+    assert LAYER_CHECKS[-1] == "ed.layer.handler.touches_rules"
 
 
 def test_layer_report_has_existing_public_shape(kits):

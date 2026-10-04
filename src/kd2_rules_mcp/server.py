@@ -129,6 +129,12 @@ registration_build, черновик обратного направления �
 Сервер читает модуль менеджера обмена через универсальный формат EnterpriseData.
 Порядок: ed_open → ed_overview → ed_list / ed_get / ed_locate → ed_validate.
 Снимки ED живут в памяти; перечитать изменённый файл — ed_close и ed_open.
+Слои: ed_open по path + configuration_path + упорядоченные extensions, либо project + module.
+У проекта extensions=null берёт настройку, [] явно отключает расширения.
+ed_list/get показывают действующие правила по direction/headers_only и происхождение;
+Слой/<id>/… — исходная ревизия. ed_validate проверяет контекст и ed.layer.*;
+для маршрутов слоя передайте route_profile_id. Неизвестный код отражается в skipped.
+Активность расширений и порядок в базе статически не проверяются.
 Схема формата XDTO: ed_schema_open с явной версией → ed_schema_types / ed_schema_type.
 Схемы только в памяти; перечитать пакет — ed_schema_close и ed_schema_open.
 XSD не поддерживается.
@@ -966,20 +972,48 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def ed_open(
         path: Annotated[
-            str,
+            str | None,
             Field(
                 description=(
                     "Путь к модулю менеджера обмена (`…/CommonModules/<Имя>/Ext/Module.bsl`), "
                     "как на машине агента"
                 )
             ),
-        ],
+        ] = None,
+        configuration_path: Annotated[
+            str | None,
+            Field(
+                description="Корень основной XML-выгрузки с Configuration.xml; "
+                "нужен с path и непустыми extensions"
+            ),
+        ] = None,
+        extensions: Annotated[
+            list[str] | None,
+            Field(
+                description="Упорядоченные корни выгрузок расширений; null с project — "
+                "настройка проекта, [] — без расширений, список — замена настройки"
+            ),
+        ] = None,
+        project: Annotated[
+            str | None, Field(description="Проект из project_list; вместо path, вместе с module")
+        ] = None,
+        module: Annotated[
+            str | None, Field(description="Точное имя общего модуля менеджера; только с project")
+        ] = None,
+        configuration: Annotated[
+            str, Field(description="Конфигурация проекта из project_list; по умолчанию full")
+        ] = "full",
     ) -> dict[str, Any]:
         """Открывает неизменяемый снимок менеджера EnterpriseData только в памяти.
 
         Повторное открытие возвращает прежний снимок и source_changed; перечитать — ed_close/open.
+        Ровно один режим: path или project + module. Со слоями добавляет composition_status,
+        layers, contexts, effective_counts, changes_summary, skipped_summary.
+        Регистрация не поддержана.
         """
-        return await call(service.ed_open, path)
+        return await call(
+            service.ed_open, path, configuration_path, extensions, project, module, configuration
+        )
 
     @server.tool()
     async def ed_overview(
@@ -987,7 +1021,8 @@ def create_server(service: Kd2Service) -> MCPServer:
     ) -> dict[str, Any]:
         """Обзор ED: счётчики, покрытие, упоминания версий и сводка диагностик.
 
-        complete означает структурную полноту чтения, а не корректность обмена.
+        Со слоем complete означает статический состав после заполнения и связи событий
+        с процедурами. Действия тел обработчиков во время обмена не определяются.
         """
         return await call(service.ed_overview, project_id)
 
@@ -999,7 +1034,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(
                 description=(
                     "Вид: pko, pks, pktch, pod, pkpd, parameter, algorithm, handler, "
-                    "dispatcher, support, unknown, version, diagnostic"
+                    "dispatcher, support, unknown, version, diagnostic; со слоями — "
+                    "layer, change, hook, layer_unknown"
                 )
             ),
         ],
@@ -1016,10 +1052,37 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         offset: Offset = 0,
         limit: Limit = 50,
+        direction: Annotated[
+            str | None,
+            Field(
+                description="Контекст слоя: send, receive; null — объединение с пометкой contexts"
+            ),
+        ] = None,
+        headers_only: Annotated[
+            bool, Field(description="Контекст заполнения только заголовков для менеджера версии 3")
+        ] = False,
+        layer: Annotated[
+            str | None, Field(description="Идентификатор слоя из ed_open или ed_list(kind=layer)")
+        ] = None,
+        entity_id: Annotated[
+            str | None,
+            Field(description="История одной сущности: logical_id из ed_get, только kind=change"),
+        ] = None,
     ) -> dict[str, Any]:
         """Страница сущностей ED в порядке исходника; фильтры сторон объединяются AND."""
         return await call(
-            service.ed_list, project_id, kind, text, format_object, metadata_object, offset, limit
+            service.ed_list,
+            project_id,
+            kind,
+            text,
+            format_object,
+            metadata_object,
+            offset,
+            limit,
+            direction,
+            headers_only,
+            layer,
+            entity_id,
         )
 
     @server.tool()
@@ -1048,10 +1111,22 @@ def create_server(service: Kd2Service) -> MCPServer:
         text_limit: Annotated[
             int, Field(description="Размер страницы текста, от 1 до 8000 символов", ge=1, le=8000)
         ] = 2000,
+        direction: Annotated[
+            str | None,
+            Field(
+                description="Контекст слоя: send или receive; "
+                "null возвращает варианты при различии полей"
+            ),
+        ] = None,
+        headers_only: Annotated[
+            bool, Field(description="Заполнение только заголовков менеджера версии 3")
+        ] = False,
     ) -> dict[str, Any]:
         """Поля и страницы детей, областей, тегов, условий и диагностик сущности ED.
 
         По умолчанию исходного текста нет. ПКС группы доступны через отдельный get группы.
+        Слой/<id>/… читает ревизию; действующее правило содержит state, layer_id, origins,
+        changed_fields, certainty. requires_context требует выбрать direction и headers_only.
         """
         return await call(
             service.ed_get,
@@ -1063,19 +1138,25 @@ def create_server(service: Kd2Service) -> MCPServer:
             include_text,
             text_offset,
             text_limit,
+            direction,
+            headers_only,
         )
 
     @server.tool()
     async def ed_locate(
         project_id: Annotated[str, Field(description="Идентификатор снимка из ed_open")],
         line: Annotated[
-            int, Field(description="Номер физической строки единственного файла, начиная с 1", ge=1)
+            int, Field(description="Номер физической строки выбранного файла, начиная с 1", ge=1)
         ],
         offset: Offset = 0,
         limit: Limit = 50,
+        file_id: Annotated[
+            str | None,
+            Field(description="Файл из source_files: база или расширение; null — базовый файл"),
+        ] = None,
     ) -> dict[str, Any]:
         """Классификация строки ED и страница сущностей: внутренняя, предки, связанные правила."""
-        return await call(service.ed_locate, project_id, line, offset, limit)
+        return await call(service.ed_locate, project_id, line, offset, limit, file_id)
 
     @server.tool()
     async def ed_validate(
@@ -1129,12 +1210,23 @@ def create_server(service: Kd2Service) -> MCPServer:
             ),
         ] = None,
         direction: Annotated[
-            str,
+            str | None,
             Field(
-                description="Направление проверки: send, receive или both; both объединяет "
-                "замечания двух проходов"
+                description="Направление проверки слоя: send, receive или both; null и both "
+                "объединяют замечания двух проходов. Без слоя send/receive отклоняются"
             ),
         ] = "both",
+        headers_only: Annotated[
+            bool,
+            Field(description="Проверить контекст заполнения только заголовков менеджера версии 3"),
+        ] = False,
+        route_profile_id: Annotated[
+            str | None,
+            Field(
+                description="Профиль из ed_routes с теми же расширениями для ed.layer.route.*; "
+                "без него — skipped"
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Проверяет открытый модуль менеджера: связность, со схемой и структурой — декларации.
 
@@ -1159,6 +1251,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             direction,
             section,
             address_prefix,
+            headers_only,
+            route_profile_id,
         )
 
     @server.tool()
@@ -1291,8 +1385,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         configuration: Annotated[
             str,
             Field(
-                description="Конфигурация проекта; выбирает основную выгрузку, расширения не "
-                "накладываются. С path и profile_id допустимо только значение full"
+                description="Конфигурация проекта; расширения из настройки или extensions. "
+                "С path и profile_id допустимо только значение full"
             ),
         ] = "full",
         path: Annotated[
@@ -1333,8 +1427,15 @@ def create_server(service: Kd2Service) -> MCPServer:
                 "его не вытеснит давность; при тех же байтах идентификатор не меняется"
             ),
         ] = False,
+        extensions: Annotated[
+            list[str] | None,
+            Field(
+                description="Упорядоченные корни расширений; null с project — из настройки, "
+                "[] — без расширений, список — замена; с profile_id не задаётся"
+            ),
+        ] = None,
     ) -> dict[str, Any]:
-        """Читает маршруты версий формата одной основной выгрузки.
+        """Читает маршруты версий формата основной выгрузки и явно выбранных расширений.
 
         Ровно один источник: project, path или profile_id. Снимок только в памяти.
         Повтор без force возвращает прежний и помечает stale, если файлы изменились.
@@ -1350,6 +1451,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             offset,
             limit,
             force,
+            extensions,
         )
 
     @server.tool()
