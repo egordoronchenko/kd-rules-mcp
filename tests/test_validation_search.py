@@ -91,7 +91,7 @@ def test_get_method_and_no_handler() -> None:
 @pytest.mark.parametrize("corpus_file", corpus_params(EXCHANGE_KINDS))
 def test_corpus_runs(corpus_file: CorpusFile) -> None:
     """На корпусе проверка отрабатывает без исключений."""
-    rules = load_exchange_rules(corpus_file.path.read_bytes())
+    rules = load_exchange_rules(corpus_file.path)
     check_search_params(rules)
     check_search_objects(rules)
 

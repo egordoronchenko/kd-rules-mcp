@@ -276,7 +276,7 @@ def test_exchange_against_registration_is_rejected() -> None:
 def test_corpus_diff_matches_canonical(item: CorpusFile) -> None:
     """Дифф макета с собой и с round-trip пуст ровно тогда, когда равны канонические формы."""
     raw = item.path.read_bytes()
-    document = load_rules(raw)
+    document = load_rules(item.path)
     dumped = dump_rules(document)
     assert diff_rules(document, document) == []
     diff_empty = diff_rules(document, load_rules(dumped)) == []

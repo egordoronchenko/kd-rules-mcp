@@ -204,6 +204,8 @@ uv run ruff format; uv run ruff check; uvx pyright
 uv run pytest
 ```
 
+Быстрый прогон без тестов с меткой `slow`: `uv run pytest -q -m "not slow"`. Готовность задачи проверяет полный `uv run pytest`.
+
 Тесты на синтетических данных (`tests/data`) идут всегда. Остальные включаются переменными окружения, без них
 пропускаются с причиной:
 

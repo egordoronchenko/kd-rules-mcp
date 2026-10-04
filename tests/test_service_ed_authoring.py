@@ -3,7 +3,7 @@
 import copy
 import json
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,21 @@ from kd2_rules_mcp.service import Kd2Service, Settings
 from kd2_rules_mcp.service import ed_authoring as module
 from tests.test_ed_authoring_model import DATA, IDENTITY, OPERATION
 from tests.test_service_ed_routes import _xml
+
+
+def all_items(call, **arguments):
+    """Обходит страницу по фактически возвращённому продолжению, без потери записей."""
+    result = call(**arguments)
+    rows = list(result["items"])
+    while result["has_more"]:
+        next_offset = result["next_offset"]
+        assert next_offset > result["offset"]
+        following = call(**(arguments | {"offset": next_offset}))
+        assert following["total"] == result["total"]
+        rows.extend(following["items"])
+        result = following
+    assert len(rows) == result["total"]
+    return rows
 
 
 def make_dump(root: Path) -> None:
@@ -165,10 +180,10 @@ def test_preview_write_repeat_and_both_deliveries(setup):
     assert viewed["status"] == "ready" and not viewed["written"]
     scope = viewed["scopes"][0]
     assert scope["version_scope"] == "manager" and scope["directions"] == ["send"]
-    assert Path(scope["manager_path"]).as_posix().endswith("Менеджер2/Ext/Module.bsl")
+    assert scope["manager"] == "Менеджер2" and scope["plan_count"] == 1
     assert scope["plans"][0]["plan"] == "ПланФормата"
-    assert {e["key"] for e in scope["plans"][0]["entries"]} == {"1.20", "1.21"}
-    assert scope["without_node"] == {"status": "partial", "entries": []}
+    assert scope["plans"][0]["versions"] == ["1.20", "1.21"]
+    assert scope["without_node"] == {"status": "partial", "versions": []}
     assert content(service.workspace.root) == before
     destination = Path(viewed["output_dir"])
     assert not destination.exists()
@@ -336,7 +351,7 @@ def test_candidates_both_kinds_and_build_pages(setup):
     found = service.ed_authoring_candidates(
         target, "format", configuration_attribute="Заметка", limit=1
     )
-    assert found["has_more"] and found["items"][0]["auto"] is False
+    assert found["has_more"] and found["auto"] is False
     full = service.ed_authoring_candidates(
         target, "format", configuration_attribute="Заметка", limit=200
     )
@@ -350,10 +365,14 @@ def test_candidates_both_kinds_and_build_pages(setup):
     config = service.ed_authoring_candidates(target, "configuration", format_property="Комментарий")
     assert any(i["name"] == "Заметка" and i["compatible"] for i in config["items"])
     viewed = preview(setup, limit=1)
-    rest = preview(setup, offset=1, limit=200)
-    whole = preview(setup, limit=200)
-    assert viewed["items"] + rest["items"] == whole["items"]
-    assert viewed["build_hash"] == rest["build_hash"] == whole["build_hash"]
+    rows = list(viewed["items"])
+    while viewed["has_more"]:
+        continued = preview(setup, offset=viewed["next_offset"], limit=200)
+        assert continued["build_hash"] == viewed["build_hash"]
+        assert continued["validation"] == viewed["validation"]
+        rows.extend(continued["items"])
+        viewed = continued
+    assert len(rows) == viewed["total"]
     details = failure(
         lambda: service.ed_authoring_candidates(target | {"pko_address": "ПКО/Нет"}, "format"),
         "ed_authoring_precondition",
@@ -602,3 +621,189 @@ def test_new_foreign_extension_module_makes_preview_stale(setup):
     )
     failure(lambda: write((service, args, root), viewed), "ed_authoring_stale")
     assert not Path(viewed["output_dir"]).exists()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"section": "unknown"},
+        {"section": []},
+        {"section": "issues_before", "mode": "write"},
+        {"section": "scopes", "mode": "write"},
+        {"level": "error"},
+        {"level": True},
+        {"check_prefix": 1},
+        {"address_prefix": False},
+    ],
+)
+def test_build_section_arguments_are_validated_before_work(setup, options, monkeypatch):
+    service, _, _ = setup
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Некорректный запрос не должен читать входы")
+
+    monkeypatch.setattr(service, "_inputs_for", unexpected)
+    failure(lambda: preview(setup, **options), "invalid_argument")
+
+
+def test_summary_sections_filters_and_full_bundle_are_independent(setup, monkeypatch):
+    from kd2_rules_mcp.authoring.ed.model import ValidationDelta
+    from kd2_rules_mcp.authoring.ed.render import render_authoring
+    from kd2_rules_mcp.service.ed_authoring_views import json_size
+    from kd2_rules_mcp.validation.report import Issue, Level, Skipped
+
+    original = module.prepare_authoring
+    captured = []
+    old = tuple(
+        Issue(Level.WARNING, "legacy.warning", "ПКО/Старое", f"Старое {i}") for i in range(100)
+    )
+    new = Issue(Level.ERROR, "review.new", "ПКО/Товар/ПКС/Комментарий", "Новое в другой версии")
+    unchecked = Skipped("review.unchecked", "Не проверено ПКО/Товар/ПКС/Комментарий")
+
+    def prepare(*args, **kwargs):
+        prepared = original(*args, **kwargs)
+        selected, other = prepared.selected_profiles[0], prepared.other_profiles[0]
+        selected = replace(
+            selected,
+            before=replace(selected.before, issues=old, skipped=()),
+            after=replace(selected.after, issues=old[1:], skipped=()),
+            delta=ValidationDelta((), old[:1], ()),
+        )
+        other = replace(
+            other,
+            before=replace(other.before, issues=(), skipped=()),
+            after=replace(other.after, issues=(new,), skipped=(unchecked,)),
+            delta=ValidationDelta((new,), (), (unchecked,)),
+        )
+        prepared = replace(prepared, selected_profiles=(selected,), other_profiles=(other,))
+        captured.append(prepared)
+        return prepared
+
+    monkeypatch.setattr(module, "prepare_authoring", prepare)
+    summary = preview(setup)
+    assert json_size(summary) <= 4096
+    assert summary["section"] == "summary"
+    assert set(summary["validation"]["before"]) == {"errors", "warnings", "skipped"}
+    assert set(summary["validation"]["after"]) == {"errors", "warnings", "skipped"}
+    assert summary["validation"]["before"]["warnings"] == 100
+    assert summary["validation"]["after"]["warnings"] == 99
+    assert summary["validation"]["delta"]["disappeared_warnings"] == 1
+    rows = all_items(lambda **options: preview(setup, **options))
+    assert {r["kind"] for r in rows} == {
+        "notice",
+        "issue_new",
+        "issue_disappeared",
+        "skipped_new",
+        "file",
+    }
+    assert [r["message"] for r in rows if r["kind"] == "issue_disappeared"] == ["Старое 0"]
+    assert [r["message"] for r in rows if r["kind"] == "issue_new"] == ["Новое в другой версии"]
+    encoded = json.dumps(summary, ensure_ascii=False)
+    assert "call_chain" not in encoded and "variants" not in encoded
+    assert "issue_before" not in encoded and "issue_after" not in encoded
+    for section, expected in (("issues_before", 100), ("issues_after", 99)):
+        response = preview(
+            setup,
+            section=section,
+            level="предупреждение",
+            check_prefix="legacy.",
+            address_prefix="пко/старое",
+            limit=2,
+        )
+        assert response["total"] == expected and len(response["items"]) == 2
+        assert response["validation"] == summary["validation"]
+        assert response["build_hash"] == summary["build_hash"]
+    filtered = preview(setup, section="issues_after", level="ошибка", check_prefix="review.")
+    assert filtered["total"] == 1 and filtered["items"][0]["message"] == "Новое в другой версии"
+    boundary = preview(setup, section="issues_after", address_prefix="ПКО/Стар")
+    assert boundary["total"] == 0  # Префикс адреса — сегмент, не подстрока.
+    skipped = preview(setup, section="skipped", check_prefix="review.", address_prefix="ПКО/Товар")
+    assert skipped["total"] == 1 and skipped["items"][0]["phase"] == "after"
+    runtime = preview(setup, section="skipped", check_prefix="runtime.")
+    assert {r["check"] for r in runtime["items"]} == set(summary["runtime_unverified"])
+    for response in (filtered, boundary, skipped, runtime):
+        assert response["validation"] == summary["validation"]
+    same = preview(setup, level="ошибка", check_prefix="no-match", address_prefix="ПКО/Нет")
+    assert same == summary
+    service, _, _ = setup
+    entry = next(iter(service._authoring_inputs.values()))
+    expected = render_authoring(captured[-1], service._descriptions(entry, captured[-1].operations))
+    assert write(setup, summary)["status"] == "written"
+    actual = content(Path(summary["output_dir"]))
+    assert actual["validation.json"] == expected.files["validation.json"]
+    assert actual["instruction.md"] == expected.files["instruction.md"]
+
+
+def test_scopes_flat_rows_keep_variants_without_call_chains(setup, monkeypatch):
+    from kd2_rules_mcp.ed.route_model import VariantInfo
+
+    service, _, _ = setup
+    original = service._inputs_for
+
+    def inputs(*args, **kwargs):
+        entry = original(*args, **kwargs)
+        routes = entry.value.routes
+        plan = routes.plans[0]
+        source = replace(plan.entries[0].source, call_chain=(entry.value.document.pko[0].span,))
+        variants = tuple(VariantInfo(f"v{i}", f"v{i}", source) for i in range(5))
+        plan = replace(
+            plan, variants=variants, entries=tuple(replace(e, source=source) for e in plan.entries)
+        )
+        routes = replace(routes, plans=(plan,), without_node_entries=(plan.entries[0],))
+        return replace(entry, value=replace(entry.value, routes=routes))
+
+    monkeypatch.setattr(service, "_inputs_for", inputs)
+    summary = preview(setup)
+    assert summary["scopes"][0]["plans"][0]["versions"] == ["1.20", "1.21"]
+    detail = preview(setup, section="scopes", limit=3)
+    assert detail["total"] == 11 and detail["has_more"]
+    rows = all_items(lambda **options: preview(setup, **options), section="scopes", limit=3)
+    assert {r["variant"] for r in rows if r["plan"]} == {"v0", "v1", "v2", "v3", "v4"}
+    assert rows[-1]["plan"] is None
+    assert all(isinstance(r["source"], str) and ":" in r["source"] for r in rows)
+    assert "call_chain" not in json.dumps(detail)
+    assert detail["validation"] == summary["validation"]
+
+
+def test_candidates_hundreds_of_properties_have_bounded_pages(setup):
+    from kd2_rules_mcp.service.ed_authoring_views import json_size
+
+    service, args, root = setup
+    path = root / "XDTOPackages/Формат120/Ext/Package.bin"
+    schema = etree.parse(str(path)).getroot()
+    namespace = "http://v8.1c.ru/8.1/xdto"
+    owner = schema.find(f"{{{namespace}}}objectType[@name='Справочник.Товары']")
+    assert owner is not None
+    for number in range(500):
+        etree.SubElement(
+            owner,
+            f"{{{namespace}}}property",
+            name=f"Реквизит{number:03}",
+            type="xs:string",
+            lowerBound="0",
+        )
+    path.write_bytes(etree.tostring(schema))
+    service.ed_schema_close(args["operations"][0]["target"]["schema_id"])
+    opened = service.ed_schema_open(
+        "1.20", project="Пример", configuration="Main", package="Формат120"
+    )
+    service.structure_load_project("Пример", "Main", structure_id="fiction-main", force=True)
+    target = args["operations"][0]["target"] | {"project": "Пример", "configuration": "Main"}
+    target["schema_id"] = opened["schema_id"]
+
+    def call(**options):
+        response = service.ed_authoring_candidates(
+            target, "format", text="Реквизит", configuration_attribute="Заметка", **options
+        )
+        assert json_size(response) <= 4096
+        return response
+
+    first = call()
+    assert first["total"] == 500 and first["has_more"] and first["next_offset"] < 50
+    assert json_size(first) <= 4096
+    assert set(first["items"][0]) == {"name", "path", "type", "compatible", "reason"}
+    assert first["auto"] is False
+    assert all(row["compatible"] for row in first["items"])
+
+    rows = all_items(call)
+    assert [r["name"] for r in rows] == [f"Реквизит{i:03}" for i in range(500)]

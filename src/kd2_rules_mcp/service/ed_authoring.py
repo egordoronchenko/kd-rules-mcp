@@ -483,21 +483,22 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                         "name": c.name,
                         "path": c.path,
                         "type": list(c.types),
-                        "qualifiers": dict(c.qualifiers),
-                        "occupied": False,
                         "compatible": c.compatible,
                         "reason": c.reason,
-                        "source": c.source,
-                        "auto": c.auto,
                     }
                     for c in found
                 ]
-                return {
-                    "target": canonical_target,
-                    "scope": {"version_scope": "manager"},
-                    "skipped": skipped,
-                    **views.page(rows, offset, limit),
-                }
+                return views.compact_page(
+                    {
+                        "target": canonical_target,
+                        "scope": {"version_scope": "manager"},
+                        "auto": False,
+                        "skipped": skipped,
+                    },
+                    rows,
+                    offset,
+                    limit,
+                )
             except AuthoringPreconditionError as error:
                 raise _failure(error) from error
             except (OSError, UnicodeError) as error:
@@ -749,8 +750,15 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         acknowledged_notices: list[str] | None = None,
         offset: int = 0,
         limit: int = 50,
+        section: str = "summary",
+        level: str | None = None,
+        check_prefix: str | None = None,
+        address_prefix: str | None = None,
     ) -> dict[str, Any]:
         validate_page(offset, limit)
+        views.validate_options(section, level, check_prefix, address_prefix)
+        if mode == "write" and section != "summary":
+            raise ValueError("mode=write допускает только section=summary")
         _text(project, "project")
         _text(configuration, "configuration")
         if mode not in ("preview", "write"):
@@ -960,9 +968,11 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     offset=offset,
                     limit=limit,
                     inputs=[entries[refs].value for refs in groups],
+                    section=section,
+                    level=level,
+                    check_prefix=check_prefix,
+                    address_prefix=address_prefix,
                 )
-                for scope in result["scopes"]:
-                    scope["manager_path"] = self._host_text(scope["manager_path"])
                 return result
             except AuthoringPreconditionError as error:
                 mapped = _failure(error)

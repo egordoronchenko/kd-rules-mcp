@@ -119,7 +119,7 @@ def test_corpus_algorithm_issues_match_xml(item: CorpusFile) -> None:
         str(element.get("Имя", "")).rstrip().casefold()
         for element in parse_xml(raw).iterfind("Алгоритмы//Алгоритм")
     }
-    for issue in check_algorithm_refs(load_exchange_rules(raw)).issues:
+    for issue in check_algorithm_refs(load_exchange_rules(item.path)).issues:
         assert issue.level is Level.ERROR, item.id
         assert issue.address, item.id
         match = _ISSUE_NAME.search(issue.message)

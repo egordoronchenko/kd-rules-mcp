@@ -29,7 +29,7 @@ def _codes(root: etree._Element, path: str) -> list[str]:
 @pytest.mark.parametrize("item", corpus_params(EXCHANGE_KINDS))
 def test_exchange_rules_import(item: CorpusFile) -> None:
     raw = _raw(item)
-    rules = load_exchange_rules(raw)
+    rules = load_exchange_rules(item.path)
     root = parse_xml(raw)
     assert [r.code.strip() for r in rules.pko()] == _codes(
         root, "ПравилаКонвертацииОбъектов//Правило"
@@ -43,14 +43,14 @@ def test_exchange_rules_import(item: CorpusFile) -> None:
 @pytest.mark.parametrize("item", corpus_params(EXCHANGE_KINDS))
 def test_exchange_rules_round_trip(item: CorpusFile) -> None:
     raw = _raw(item)
-    out = dump_rules(load_exchange_rules(raw))
+    out = dump_rules(load_exchange_rules(item.path))
     assert canonical_diff(canonical_form(raw), canonical_form(out)) == []
 
 
 @pytest.mark.parametrize("item", corpus_params(REGISTRATION_KINDS))
 def test_registration_rules_round_trip(item: CorpusFile) -> None:
     raw = _raw(item)
-    rules = load_registration_rules(raw)
+    rules = load_registration_rules(item.path)
     root = parse_xml(raw)
     assert len(rules.plan_content()) == len(root.findall("СоставПланаОбмена/Элемент"))
     assert [r.code.strip() for r in rules.rules()] == _codes(
@@ -64,7 +64,7 @@ def test_registration_rules_round_trip(item: CorpusFile) -> None:
 @pytest.mark.parametrize("item", corpus_params(EXCHANGE_KINDS))
 def test_exchange_rules_header(item: CorpusFile) -> None:
     """В заголовке правил заданы имена конфигураций источника и приёмника."""
-    rules = load_exchange_rules(_raw(item))
+    rules = load_exchange_rules(item.path)
     assert rules.source_name
     assert rules.target_name
 
@@ -72,5 +72,5 @@ def test_exchange_rules_header(item: CorpusFile) -> None:
 @pytest.mark.parametrize("item", corpus_params(REGISTRATION_KINDS))
 def test_registration_rules_name_their_exchange_plan(item: CorpusFile) -> None:
     """Правила регистрации из макета плана обмена ссылаются на этот же план."""
-    rules = load_registration_rules(_raw(item))
+    rules = load_registration_rules(item.path)
     assert rules.exchange_plan == item.exchange_plan

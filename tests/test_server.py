@@ -141,9 +141,23 @@ async def test_ed_authoring_tools(setup):
         candidates = await _call(
             client, "ed_authoring_candidates", target=target, kind="format", limit=1
         )
-        assert candidates["items"] and candidates["items"][0]["auto"] is False
-        preview = await _call(client, "ed_authoring_build", **args)
+        assert candidates["items"] and candidates["auto"] is False
+        result = await client.call_tool("ed_authoring_build", args)
+        assert not result.is_error and result.structured_content is not None
+        assert len("".join(getattr(item, "text", "") for item in result.content).encode()) <= 4096
+        preview = result.structured_content
         assert preview["status"] == "ready"
+        issues = await _call(
+            client,
+            "ed_authoring_build",
+            **args,
+            section="issues_after",
+            level="предупреждение",
+            check_prefix="ed.",
+            address_prefix="пко",
+        )
+        assert issues["section"] == "issues_after"
+        assert issues["validation"] == preview["validation"]
         error = await _error(client, "ed_authoring_build", **args, mode="write")
         assert error["code"] == "ed_authoring_stale"
         written = await _call(

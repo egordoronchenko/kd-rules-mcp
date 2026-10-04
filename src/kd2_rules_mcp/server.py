@@ -1502,6 +1502,24 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         offset: Offset = 0,
         limit: Limit = 50,
+        section: Annotated[
+            str,
+            Field(
+                description=(
+                    "Раздел: summary, issues_before, issues_after, scopes или skipped; "
+                    "write — только summary"
+                )
+            ),
+        ] = "summary",
+        level: Annotated[
+            str | None, Field(description="Отбор замечаний: ошибка или предупреждение")
+        ] = None,
+        check_prefix: Annotated[
+            str | None, Field(description="Префикс проверки для issues_before/issues_after/skipped")
+        ] = None,
+        address_prefix: Annotated[
+            str | None, Field(description="Префикс адреса правила, без учёта регистра")
+        ] = None,
     ) -> dict[str, Any]:
         """Проверяет до/после и порождает комплект прямых ПКС.
 
@@ -1521,6 +1539,10 @@ def create_server(service: Kd2Service) -> MCPServer:
             acknowledged_notices,
             offset,
             limit,
+            section,
+            level,
+            check_prefix,
+            address_prefix,
         )
 
     return server

@@ -34,6 +34,26 @@ def pytest_configure(config: pytest.Config) -> None:
     reference = ROOT / "reference" / "kd2-cfg"
     if "KD2_REFERENCE_DIR" not in os.environ and reference.is_dir():
         os.environ["KD2_REFERENCE_DIR"] = str(reference)
+    # До импорта тестов: читатели ещё не привязаны в модулях сервиса.
+    from tests.session_inputs import install
+
+    install()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Удаляет временные копии структур корпуса."""
+    from tests.session_inputs import cleanup
+
+    cleanup()
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Метка `slow` на тесте сервиса пилота: файл правит параллельная задача."""
+    slow = pytest.mark.slow
+    for item in items:
+        nodeid = item.nodeid.replace("\\", "/")
+        if "::test_service_pilot" in nodeid:
+            item.add_marker(slow)
 
 
 def _project_dumps() -> list[Path]:
