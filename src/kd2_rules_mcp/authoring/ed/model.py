@@ -102,6 +102,20 @@ class AddHeaderProperty:
 class CanonicalHeaderProperty(AddHeaderProperty):
     """Операция после разрешения имён по уже прочитанным входам."""
 
+    _canonical_id: str = field(default="", init=False, repr=False, compare=False)
+
+    def is_canonical(self) -> bool:
+        return bool(self._canonical_id) and self._canonical_id == self.operation_id
+
+
+def _canonical_operation(
+    target: AuthoringTarget, attribute: str, property_name: str, draft: AttributeDraft | None
+) -> CanonicalHeaderProperty:
+    """Закрытая фабрика канонизатора; replace и публичный конструктор не дают свидетельства."""
+    operation = CanonicalHeaderProperty(target, attribute, property_name, draft)
+    object.__setattr__(operation, "_canonical_id", operation.operation_id)
+    return operation
+
 
 def order_operations(operations: tuple[AddHeaderProperty, ...]) -> tuple[AddHeaderProperty, ...]:
     """Повтор решения — no-op; независимые решения сортируются по §3.3."""

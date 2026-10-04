@@ -27,6 +27,7 @@ class ChecksMixin(ServiceBase):
         check_prefix: str | None,
         offset: int,
         limit: int,
+        exchange_project_id: str | None = None,
     ) -> dict[str, Any]:
         with self._lock, self._sides(source_structure, target_structure) as (source, target):
             document = self._document(project_id)
@@ -38,7 +39,8 @@ class ChecksMixin(ServiceBase):
                 report.extend(check_search_objects(document, target))
                 report.extend(check_exchange_plan(document, source, target))
             elif isinstance(document, RegistrationRules):
-                report.extend(check_registration(document, source))
+                exchange = self._exchange(exchange_project_id) if exchange_project_id else None
+                report.extend(check_registration(document, source, exchange_rules=exchange))
         return report_view(report, level, check_prefix, offset, limit)
 
     def handlers_export(self, project_id: str, folder: str, limit: int) -> dict[str, Any]:

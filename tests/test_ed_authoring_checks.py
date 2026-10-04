@@ -385,6 +385,65 @@ def test_canonical_full_path_preserves_agent_path_form():
     assert '"ОбщиеСвойстваОбъектовФормата.Комментарий"' in prepared.generated_hook.source.text
 
 
+@pytest.mark.parametrize("name", ["Заметка", " ЗАМЕТКА "])
+def test_attribute_edge_spaces_are_canonical(name):
+    op = replace(OPERATION, configuration_attribute=name, new_attribute=None)
+    result = prepare_authoring(inputs(), (op,), IDENTITY, version_scope="manager")
+    assert result.operations[0].configuration_attribute == "Заметка"
+
+
+def test_invalid_attribute_reports_original_input():
+    bad = " Зам етка "
+    with pytest.raises(AuthoringPreconditionError) as caught:
+        prepare_authoring(
+            inputs(),
+            (replace(OPERATION, configuration_attribute=bad, new_attribute=None),),
+            IDENTITY,
+            version_scope="manager",
+        )
+    assert caught.value.failures[0].message == (
+        f"Недопустимый идентификатор «{bad}» или префикс нового реквизита"
+    )
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_missing_value_notice_reason_matches_executor_branch(full):
+    name = "ОбщиеСвойстваОбъектовФормата.Комментарий" if full else "Комментарий"
+    op = replace(OPERATION, target=replace(TARGET, direction="receive"), format_property=name)
+    result = prepare_authoring(inputs(), (op,), IDENTITY, version_scope="manager")
+    notice = next(n for n in result.notices if n.id == "ed.author.missing_value_clears")
+    reason = "Для полного пути с точкой" if full else "Защита сравнивает имена разных сторон"
+    assert reason in notice.message
+
+
+def test_exact_property_name_wins_case_ambiguity():
+    from kd2_rules_mcp.authoring.ed.canonical import canonical_property
+    from kd2_rules_mcp.ed.schema.profile import ValidationProfile
+
+    value = inputs()
+    schema = value.schemas["1.20"]
+    assert isinstance(schema, EdSchema)
+    profile = ValidationProfile.build(schema, "1.20", "send")
+    assert profile.schema is not None
+    typ = next(
+        t for t in profile.schema.types.values() if t.qname and t.qname.local == "Справочник.Товары"
+    )
+    rows = profile.effective[typ.id]
+    original, path = next((p, path) for p, path in rows if p.name.local == "Комментарий")
+    lower = replace(original, id="lower", name=replace(original.name, local="комментарий"))
+    profile = replace(
+        profile,
+        properties={**profile.properties, "lower": lower},
+        effective={
+            **profile.effective,
+            typ.id: (*rows, (lower, (*path[:-1], replace(path[-1], local="комментарий")))),
+        },
+    )
+    assert canonical_property(profile, typ, "Комментарий") == "Комментарий"
+    assert canonical_property(profile, typ, "комментарий") == "комментарий"
+    assert canonical_property(profile, typ, "КОММЕНТАРИЙ") is None
+
+
 @pytest.mark.parametrize(
     "bad",
     [

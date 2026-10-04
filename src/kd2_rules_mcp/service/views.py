@@ -7,9 +7,8 @@ from typing import Any
 from kd2_rules_mcp.authoring.candidates import Candidate, Confidence
 from kd2_rules_mcp.authoring.edits import CONVERSION_KIND, EditResult
 from kd2_rules_mcp.authoring.registration import (
-    ObjectFilter,
-    PlanFilter,
     RegistrationObject,
+    parse_registration_object,
 )
 from kd2_rules_mcp.errors import Kd2Error, ObjectNotFoundError
 from kd2_rules_mcp.kd2.diff import TEXT_LIMIT, clip
@@ -533,35 +532,5 @@ def edit_view(result: EditResult) -> dict[str, Any]:
 
 
 def registration_object(item: Mapping[str, Any]) -> RegistrationObject:
-    """Объект правил регистрации из словаря инструмента (плоские отборы через «И»)."""
-    name = str(item.get("metadata_name", "")).strip()
-    if not name:
-        raise Kd2Error("У объекта правил регистрации нет «metadata_name»")
-    plan_filters = tuple(
-        PlanFilter(
-            plan_property=str(entry.get("plan_property", "")),
-            object_property=str(entry.get("object_property", "")),
-            property_type=str(entry.get("property_type", "")),
-            comparison=str(entry.get("comparison", "")),
-            constant=bool(entry.get("constant", False)),
-        )
-        for entry in item.get("plan_filters", ()) or ()
-    )
-    object_filters = tuple(
-        ObjectFilter(
-            object_property=str(entry.get("object_property", "")),
-            property_type=str(entry.get("property_type", "")),
-            comparison=str(entry.get("comparison", "")),
-            constant_value=str(entry.get("constant_value", "")),
-        )
-        for entry in item.get("object_filters", ()) or ()
-    )
-    return RegistrationObject(
-        metadata_name=name,
-        code=str(item.get("code", "")),
-        name=str(item.get("name", "")),
-        comment=str(item.get("comment", "")),
-        unload_mode=str(item.get("unload_mode", "")),
-        plan_filters=plan_filters,
-        object_filters=object_filters,
-    )
+    """Объект правил регистрации из словаря инструмента."""
+    return parse_registration_object(item)

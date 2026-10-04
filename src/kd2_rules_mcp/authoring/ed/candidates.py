@@ -297,7 +297,7 @@ def occupied_properties(
             ids.update(resolved.property_ids)
             # Реквизит строки ТЧ не занимает одноимённый реквизит шапки.
             if group is None:
-                attributes.add(prop.configuration_property.casefold())
+                attributes.add(prop.configuration_property.strip(" ").casefold())
     return ids, attributes, unknown
 
 

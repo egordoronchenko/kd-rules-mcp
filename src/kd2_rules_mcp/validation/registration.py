@@ -4,12 +4,23 @@
 Читатель БСП — `DataProcessors/ЗагрузкаПравилРегистрацииОбъектов/Ext/ObjectModule.bsl`,
 исполнитель — `CommonModules/ОбменДаннымиСобытия/Ext/Module.bsl`,
 писатель КД — `reference/kd2-cfg/DataProcessors/ВыгрузкаРегистрации/Ext/ObjectModule.bsl`.
+
+`registration.autoregistration` — предупреждение. При авторегистрации «Разрешить»
+`ВыполнитьПравилаРегистрацииОбъектовДляПланаОбмена` при записи не вызывается
+(ОбменДаннымиСобытия:1389-1414); признак — `АвтоРегистрацияРазрешена`
+(ОбменДаннымиПовтИсп:851-859). Объект при этом регистрирует платформа, поэтому
+это не ошибка файла правил.
+
+`registration.no_pvd` — предупреждение. Выборка изменений берёт только метаданные
+включённых ПВД (БСП:17931-17938, БСП:18210-18236; `Отключить` снимает `Включить`,
+БСП:6768). Квитанция удаляет регистрацию по номеру сообщения (БСП:17439-17445)
+и не затрагивает изменение, которое в выборку не попало.
 """
 
 import sqlite3
 from dataclasses import dataclass
 
-from kd2_rules_mcp.kd2.model import Node, RegistrationRules
+from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
 from kd2_rules_mcp.structures.queries import (
     MAX_LIMIT,
     NotFound,
@@ -43,11 +54,14 @@ _STRUCTURE_CHECKS = (
     "registration.object_property",
     "registration.unload_mode",
     "registration.plan_content",
+    "registration.autoregistration",
+    "registration.no_pvd",
 )
 
 _NO_STRUCTURE = "структура конфигурации-источника не загружена"
 _NO_PLAN_CONTENT = "в менеджере регистрации нет состава плана обмена"
 _NO_OBJECT_SETTINGS = "объект настройки менеджера регистрации недоступен"
+_NO_EXCHANGE_RULES = "проект правил обмена не передан"
 
 
 @dataclass(slots=True)
@@ -135,6 +149,7 @@ def check_registration(
     *,
     has_plan_content: bool = True,
     has_object_settings: bool = True,
+    exchange_rules: ExchangeRules | None = None,
 ) -> ValidationReport:
     """Проверяет правила регистрации против структуры источника.
 
@@ -146,6 +161,9 @@ def check_registration(
     `has_object_settings` — `ОбъектНастройки` можно проверять. В менеджере регистрации
     объекта настройки нет, адаптер передаёт False. По умолчанию оба флага сохраняют
     проверку обычного файла `ПравилаРегистрации`.
+
+    `exchange_rules` — правила обмена этого плана. Без них `registration.no_pvd`
+    пропускается: не с чем сравнить состав.
     """
     report = ValidationReport()
     if structure is None:
@@ -175,8 +193,14 @@ def check_registration(
         if plan is not None:
             _check_plan_filters(report, rule, plan, obj, index)
             _check_unload_mode(report, rule, plan)
+            _check_autoregistration(report, rule, plan, obj)
         if obj is not None:
             _check_object_filters(report, rule, obj, index)
+    if plan is not None:
+        if exchange_rules is None:
+            report.skip("registration.no_pvd", _NO_EXCHANGE_RULES)
+        else:
+            _check_no_pvd(report, rules, plan, exchange_rules)
     if not has_object_settings:
         report.skip("registration.settings_type", _NO_OBJECT_SETTINGS)
     return report
@@ -226,6 +250,8 @@ def _load_plan(
             "registration.plan_property",
             "registration.unload_mode",
             "registration.plan_content",
+            "registration.autoregistration",
+            "registration.no_pvd",
         ):
             report.skip(check, reason)
         return None
@@ -393,6 +419,85 @@ def _check_unload_mode(report: ValidationReport, rule: Node, plan: _Plan) -> Non
             f"Правило «{_title(rule)}»: реквизит режима выгрузки «{name}» не найден"
             f" у плана обмена «{plan.name}»",
         )
+
+
+def _check_autoregistration(
+    report: ValidationReport, rule: Node, plan: _Plan, obj: _Obj | None
+) -> None:
+    """ПРО объекта с авторегистрацией «Разрешить» при записи не исполняется.
+
+    `АвтоРегистрацияРазрешена` истинна только для элемента состава с
+    `АвтоРегистрация = Разрешить` (ОбменДаннымиПовтИсп:851-859). Тогда ветка
+    правил регистрации при записи пропускается (ОбменДаннымиСобытия:1389-1414).
+    Объекта нет в составе — это `registration.plan_membership`, здесь не повторяется:
+    у отсутствующего элемента признак ложен (ОбменДаннымиПовтИсп:855-856).
+    """
+    if obj is None or plan.content.get(obj.type_name) is not True:
+        return
+    report.warning(
+        "registration.autoregistration",
+        rule_address(rule),
+        f"Правило «{_title(rule)}»: у объекта «{obj.full_name}» в составе плана обмена "
+        f"«{plan.name}» авторегистрация «Разрешить»: правила регистрации при записи "
+        "не исполняются",
+    )
+
+
+def _check_no_pvd(
+    report: ValidationReport, rules: RegistrationRules, plan: _Plan, exchange: ExchangeRules
+) -> None:
+    """Тип состава плана без включённого ПВД не выгружается и не снимается с регистрации.
+
+    В фильтр `ВыбратьИзменения` попадают метаданные только включённых ПВД
+    (БСП:17931-17938, БСП:18210-18236). Тип берётся из непустого `ОбъектВыборки`
+    (БСП:6810-6812); пустой объект выборки тип не задаёт. `Отключить` выключает ПВД
+    (БСП:6768).
+
+    Предупреждение — только для типа, изменения которого регистрируются: у него есть
+    загружаемое ПРО либо в составе плана стоит авторегистрация «Разрешить». Тип с запретом
+    авторегистрации и без ПРО не регистрируется вовсе (так в составе типовых планов стоят
+    объекты, которые эта сторона только получает) — зависать нечему.
+    """
+    covered = _enabled_pvd_types(exchange)
+    with_rule = {
+        str(rule.get("ОбъектНастройки")).strip() for rule in rules.rules() if _loaded(rule)
+    }
+    for type_name in sorted(plan.content):
+        if type_name in covered:
+            continue
+        if type_name in with_rule:
+            how = "изменения регистрирует правило регистрации"
+        elif plan.content[type_name]:
+            how = "изменения регистрирует платформа (авторегистрация «Разрешить»)"
+        else:
+            continue
+        report.warning(
+            "registration.no_pvd",
+            _address_for_type(rules, type_name, plan.name),
+            f"Объект «{type_name}» входит в состав плана обмена «{plan.name}», {how}, "
+            "а включённого ПВД с таким ОбъектВыборки нет: зарегистрированное изменение "
+            "не попадает в выборку выгрузки и регистрация не снимается",
+        )
+
+
+def _enabled_pvd_types(rules: ExchangeRules) -> set[str]:
+    """Типы `ОбъектВыборки` включённых ПВД. Пустой объект выборки тип не покрывает."""
+    covered: set[str] = set()
+    for rule in rules.pvd():
+        if rule.attrs.get("Отключить") is True:
+            continue
+        type_name = str(rule.get("ОбъектВыборки")).strip()
+        if type_name:
+            covered.add(type_name)
+    return covered
+
+
+def _address_for_type(rules: RegistrationRules, type_name: str, plan_name: str) -> str:
+    """Адрес ПРО этого типа, если правило загружается; иначе адрес плана."""
+    for rule in rules.rules():
+        if _loaded(rule) and str(rule.get("ОбъектНастройки")) == type_name:
+            return rule_address(rule)
+    return f"ПланОбмена «{plan_name}»"
 
 
 def _check_plan_content(report: ValidationReport, rules: RegistrationRules, plan: _Plan) -> None:

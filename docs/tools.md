@@ -12,7 +12,7 @@
 
 <!-- tools:begin — генерирует scripts/dump_tools.py, руками не править -->
 
-Инструментов: 46.
+Инструментов: 48.
 
 | Группа | Инструменты |
 |---|---|
@@ -25,6 +25,7 @@
 | Чтение EnterpriseData | [`ed_open`](#ed_open), [`ed_overview`](#ed_overview), [`ed_list`](#ed_list), [`ed_get`](#ed_get), [`ed_locate`](#ed_locate), [`ed_validate`](#ed_validate), [`ed_close`](#ed_close) |
 | Схема формата EnterpriseData | [`ed_schema_open`](#ed_schema_open), [`ed_schema_types`](#ed_schema_types), [`ed_schema_type`](#ed_schema_type), [`ed_schema_close`](#ed_schema_close) |
 | Маршруты EnterpriseData | [`ed_routes`](#ed_routes), [`ed_route_compare`](#ed_route_compare) |
+| Авторинг EnterpriseData | [`ed_authoring_candidates`](#ed_authoring_candidates), [`ed_authoring_build`](#ed_authoring_build) |
 
 ## Проекты и структуры
 
@@ -389,6 +390,7 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 | `check_prefix` | string \| null | `null` | Префикс идентификатора проверки: format., structure.… |
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+| `exchange_project_id` | string \| null | `null` | Проект правил обмена этого плана. Для правил регистрации проверяет, что у объекта состава есть включённое ПВД. Пусто — проверка пропускается. Для проекта правил обмена параметр не используется |
 
 ### `rules_diff`
 
@@ -431,15 +433,17 @@ ZIP правил для загрузки в БСП: файлы байт в ба�
 
 ### `registration_build`
 
-Правила регистрации из состава плана обмена в новый рабочий проект.
+Правила регистрации из состава плана обмена.
+
+Новый проект или правка отборов уже открытого проекта правил регистрации.
 
 | Параметр | Тип | По умолчанию | Описание |
 |---|---|---|---|
 | `structure_id` | string | обязательный | Структура конфигурации, где живёт план обмена |
 | `exchange_plan` | string | обязательный | План обмена: имя или `ПланОбмена.Имя` |
 | `rules_project_id` | string \| null | `null` | Проект правил обмена: объекты берутся из его ПВД, если objects нет |
-| `objects` | array of object \| null | `null` | Явный выбор: [{"metadata_name": "Справочник.X", "name"?, "code"?, "unload_mode"?, "plan_filters"?: [{"plan_property", "object_property", "property_type", "comparison", "constant"}], "object_filters"?: [{"object_property", "property_type", "comparison", "constant_value"}]}]; отборы соединяются через «И» |
-| `project_id` | string \| null | `null` | Свой идентификатор нового проекта правил; пусто — выводится из источника и вида |
+| `objects` | array of object \| null | `null` | Явный выбор объектов. Плоский список отборов соединяется через «И». Элемент плана: plan_property, object_property, property_type, comparison, constant. Элемент объекта: object_property, property_type, comparison, constant_value. Группа: {operator: И\|ИЛИ, items: [элемент или группа]}. В группе — константа реквизита узла (constant=true, object_property — литерал) и значение табличной части ([ТабличнаяЧасть].Реквизит). comparison: Равно, НеРавно, Больше, БольшеИлиРавно, Меньше, МеньшеИлиРавно. Неизвестный вид сравнения или вид группы — invalid_argument |
+| `project_id` | string \| null | `null` | Идентификатор проекта. Пусто — новый. Если это уже проект правил регистрации, отборы названных объектов заменяются, остальные правила не меняются |
 
 ### `correspondent_draft`
 
@@ -648,12 +652,57 @@ XML и имя, под которым свойство пишут в правил
 | `offset` | integer ≥ 0 | `0` | Смещение страницы |
 | `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
 
+## Авторинг EnterpriseData
+
+### `ed_authoring_candidates`
+
+Свободные свойства формата и реквизиты владельца ПКО; auto=false.
+
+Решения принимает агент.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `target` | object | обязательный | Цель: project, configuration, plan, variant, format_version, direction, pko_address, project_id, schema_id, structure_id открытых снимков |
+| `kind` | string | обязательный | Вид свободных кандидатов: format или configuration |
+| `text` | string | `""` | Подстрока имени или пути без учёта регистра |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+| `configuration_attribute` | string \| null | `null` | Уже выбранный реквизит для проверки совместимости кандидатов формата |
+| `format_property` | string \| null | `null` | Уже выбранное свойство формата для проверки реквизитов |
+
+### `ed_authoring_build`
+
+Проверяет до/после и порождает комплект прямых ПКС.
+
+Write атомарно обновляет только собственный результат в workspace; база не вызывается.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `project` | string | обязательный | Проект из project_list |
+| `configuration` | string | обязательный | Явная конфигурация проекта, включая full |
+| `extension` | object | обязательный | Идентичность: name, prefix, synonym, version, compatibility_mode |
+| `operations` | array of object | обязательный | До 100 прямых ПКС: target с тремя идентификаторами снимков, configuration_attribute, format_property, необязательный new_attribute (name, synonym, primitive, qualifiers) |
+| `version_scope` | string \| null | `null` | Явное согласие на область manager; null даёт отказ ядра |
+| `mode` | string | `"preview"` | preview без записи или write с хешем и подтверждениями |
+| `delivery` | string | `"extension"` | Форма выдачи: extension или manual |
+| `output_dir` | string \| null | `null` | Вычисленный каталог workspace/ed-authoring/<name>-<uuid8>; обычно не задаётся |
+| `expected_preview_hash` | string \| null | `null` | build_hash текущего preview, обязателен для write |
+| `acknowledged_notices` | array of string \| null | `null` | Все идентификаторы required_acknowledgements текущего preview |
+| `offset` | integer ≥ 0 | `0` | Смещение страницы |
+| `limit` | integer 1…200 | `50` | Размер страницы, не больше 200 |
+
 ## Коды ошибок
 
 Ошибка инструмента — JSON `{"code", "message", …}` в тексте ошибки MCP; код — по первому подходящему классу исключения (порядок строк важен: подклассы раньше базовых).
 
 | Код | Класс | Когда | Дополнительные поля |
 |---|---|---|---|
+| `ed_authoring_ack_required` | `EdAuthoringAckRequiredError` | Нужны подтверждения конкретных замечаний для текущего preview_hash. | — |
+| `ed_authoring_stale` | `EdAuthoringStaleError` | Изменились входные файлы, решения preview или прежний manifest. | — |
+| `ed_authoring_path` | `EdAuthoringPathError` | Каталог вне workspace, чужое содержимое, символическая ссылка или junction. | — |
+| `ed_authoring_resource_limit` | `EdAuthoringResourceLimitError` | Превышен предел операций, менеджеров, профилей или файлов комплекта. | — |
+| `ed_authoring_io` | `EdAuthoringIoError` | Ошибка чтения или атомарной записи; прежний комплект сохранён. | — |
+| `ed_authoring_precondition` | `EdAuthoringPreconditionError` | Предусловия автора не выполнены; подробности — failures и summary. | — |
 | `ed_schema_not_found` | `EdSchemaNotFoundError` | Схема формата не открыта. | — |
 | `ed_schema_type_not_found` | `EdSchemaTypeNotFoundError` | Тип отсутствует в открытой схеме. | — |
 | `ed_schema_read_error` | `EdSchemaReadError` | Файл пакета XDTO недоступен. | — |
@@ -950,3 +999,52 @@ Summary относится ко всему отчёту, фильтры и `offs
 `ed_route_profile_not_found`, `ed_route_read_error`, `ed_route_format`, `ed_route_resource_limit`,
 `rejected` (проект или конфигурация не найдены). Ошибка чтения схемы выбранного URI в сравнение
 не попадает: соответствующая проверка уходит в `skipped`, статус пары — `unknown`.
+
+### Авторинг EnterpriseData
+
+`ed_authoring_candidates` предлагает свободные реквизиты и свойства схемы без автоматического выбора.
+`ed_authoring_build` сначала показывает решение и проверки в режиме preview, затем записывает
+проверенный комплект в рабочую папку в режиме write. Обновляет только собственные неизменённые
+файлы результата; инструкции для ручного внесения порождаются из той же модели. MCP не запускает
+конфигуратор и не подключается к базе для установки.
+
+В `target` передаются `plan`, `variant` (или null), `format_version`, `direction` (send/receive),
+`pko_address`, `project_id` из `ed_open`, `schema_id` из `ed_schema_open` выбранной версии и
+`structure_id` из `structure_load_project`. В candidates также нужны явные `project` и
+`configuration`; в build они передаются один раз для всего вызова. Операция содержит `target`,
+`configuration_attribute`, `format_property` и необязательный `new_attribute`: `name`, `synonym`,
+`primitive` (string/boolean/number/date), `qualifiers` по закрытому профилю автора.
+Совместимость кандидатов проверяется при переданном `configuration_attribute` или `format_property`;
+без пары `compatible=null`, `auto=false`. Текст фильтра — подстрока без учёта регистра.
+
+Область действия подтверждается явным `version_scope="manager"`. Другие версии этого менеджера
+показываются отдельными замечаниями; критерий «нет новых замечаний» относится к выбранным профилям.
+Формы выдачи — `extension` и `manual`; `extension_with_load` появится вместе со скриптом загрузки.
+Preview ничего не создаёт. Write требует `expected_preview_hash`, равный `build_hash` ответа preview,
+и все конкретные идентификаторы из `required_acknowledgements` в `acknowledged_notices`.
+Хеш preview связывает проверку с исходными хешами, каноническими решениями, формой выдачи и хешами
+порождённых файлов manifest; в самом manifest сохранён исходный хеш подготовки ядра.
+
+Ответ build содержит `status` (ready/written/unchanged), `build_hash`, `output_dir` путём агента,
+`runtime_verified`, `scopes`, `change_counts`, `validation`, `required_acknowledgements` и единую
+страницу `items` с kind=issue_before/issue_after/notice/skipped/file. В file — имя, размер и SHA-256;
+полный BSL в ответ не включается. Summary и scopes полные; offset/limit влияют только на страницу.
+Полный отчёт находится в `validation.json`. Статические проверки не проверяют живой обмен.
+
+Пределы: 100 операций за вызов, 16 менеджеров, 64 профиля версий, 1000 файлов / 32 МиБ результата;
+offset ≥ 0, limit 1..200, не больше 200 строк разных видов на странице. Кэш входов — до 32 записей
+и 128 МиБ исходных текстов, вытеснение по давности. Хранимого проекта авторинга и draft_id нет.
+Дополнение читает прежний manifest из вычисленного каталога
+`workspace/ed-authoring/<name>-<первые 8 символов UUID основной конфигурации>/` и сохраняет прежние
+решения, UUID и один перехватчик на менеджер. Чужой или изменённый файл блокирует запись.
+Другой output_dir, rules_dir, ссылки и junction запрещены. При ошибке публикации прежний комплект
+сохраняется; установка выполняется человеком по инструкции.
+
+Коды: `invalid_argument`; `project_not_found`, `ed_schema_not_found`, `structure_not_found` для
+открытых снимков; `ed_authoring_precondition` с failures[{id,address,message,source:{file,line}}]
+и summary; `ed_authoring_ack_required` с required_acknowledgements и preview_hash;
+`ed_authoring_stale` при изменении входа, хеша preview или прежнего комплекта во время записи;
+`ed_authoring_path` для чужого каталога/файлов, ссылок или выхода из workspace;
+`ed_authoring_resource_limit` с resource/limit/actual; `ed_authoring_io` для чтения/публикации.
+Непрочитанная схема другой версии остаётся замечанием `other_version_unverified`, а отказы ядра
+сохраняют свои идентификаторы и происхождение.

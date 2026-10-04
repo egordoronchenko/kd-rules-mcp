@@ -8,10 +8,12 @@
 `СоставПланаОбмена` пропускает (222–226), но КД его пишет — поэтому пишем и мы (Д9).
 """
 
+from __future__ import annotations
+
 import sqlite3
 import uuid
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -62,7 +64,7 @@ class PlanFilterGroup:
     """
 
     operator: str
-    items: tuple["PlanFilter | PlanFilterGroup", ...] = ()
+    items: tuple[PlanFilter | PlanFilterGroup, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +89,7 @@ class ObjectFilterGroup:
     """Группа отбора по объекту (ВыгрузкаРегистрации:387–398)."""
 
     operator: str
-    items: tuple["ObjectFilter | ObjectFilterGroup", ...] = ()
+    items: tuple[ObjectFilter | ObjectFilterGroup, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,8 +114,10 @@ class RegistrationObject:
     unload_mode: str = ""
     disabled: bool = False
     valid: bool = True
-    plan_filters: tuple[PlanFilter | PlanFilterGroup, ...] = ()
-    object_filters: tuple[ObjectFilter | ObjectFilterGroup, ...] = ()
+    # None — список не передавали (при правке проекта отбор не меняется).
+    # Пустой кортеж — отбора нет; при правке проекта такой отбор снимается.
+    plan_filters: tuple[PlanFilter | PlanFilterGroup, ...] | None = None
+    object_filters: tuple[ObjectFilter | ObjectFilterGroup, ...] | None = None
     before_processing: str = ""
     on_processing: str = ""
     on_processing_extra: str = ""
@@ -126,6 +130,131 @@ class RegistrationBuild:
 
     document: RegistrationRules
     warnings: list[str]
+
+
+# Имена перечисления ВидыСравнения (reference/kd2-cfg/Enums/ВидыСравнения.xml).
+# Читатель неизвестное значение оставляет оператором «=»
+# (ЗагрузкаПравилРегистрацииОбъектов:993-1004).
+_COMPARISONS = frozenset(
+    {"Равно", "НеРавно", "Больше", "БольшеИлиРавно", "Меньше", "МеньшеИлиРавно"}
+)
+# Имена перечисления БулевыОперации (reference/kd2-cfg/Enums/БулевыОперации.xml).
+_OPERATORS = frozenset({"И", "ИЛИ"})
+
+
+def parse_registration_object(item: Mapping[str, Any]) -> RegistrationObject:
+    """Объект правил регистрации из словаря `registration_build`.
+
+    Плоский список отборов — прежнее соединение через «И» (корень отбора у читателя
+    всегда «И», ЗагрузкаПравилРегистрацииОбъектов:1203). Группа — `operator` «И» или
+    «ИЛИ» и `items`. Читатель группы рекурсивен и глубину не ограничивает
+    (ЗагрузкаПравилРегистрацииОбъектов:597-599, :638-640). Неизвестный вид сравнения
+    и неизвестный вид группы — `ValueError`: иначе читатель молча подменит оператор.
+    """
+    name = str(item.get("metadata_name", "")).strip()
+    if not name:
+        raise ValueError("У объекта правил регистрации нет «metadata_name»")
+    return RegistrationObject(
+        metadata_name=name,
+        code=str(item.get("code", "")),
+        name=str(item.get("name", "")),
+        comment=str(item.get("comment", "")),
+        unload_mode=str(item.get("unload_mode", "")),
+        plan_filters=_filter_list(item, "plan_filters", _plan_entry),
+        object_filters=_filter_list(item, "object_filters", _object_entry),
+    )
+
+
+def _filter_list[T](
+    item: Mapping[str, Any], key: str, parse: Callable[[Mapping[str, Any]], T]
+) -> tuple[T, ...] | None:
+    """Ключа нет — None (отбор не задан). Пустой список и null — снять отбор."""
+    if key not in item:
+        return None
+    raw = item[key]
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"«{key}» должен быть списком условий и групп")
+    return tuple(parse(_as_mapping(entry, key)) for entry in raw)
+
+
+def _as_mapping(entry: object, where: str) -> Mapping[str, Any]:
+    if not isinstance(entry, Mapping):
+        raise ValueError(f"Элемент «{where}» должен быть объектом")
+    return entry
+
+
+def _plan_entry(entry: Mapping[str, Any]) -> PlanFilter | PlanFilterGroup:
+    if "operator" in entry:
+        return _group(entry, "plan_filters", _plan_entry, PlanFilterGroup)
+    comparison = str(entry.get("comparison", ""))
+    _check_comparison(comparison, "отбора по свойствам плана обмена")
+    constant = _flag(entry.get("constant", False), "constant")
+    return PlanFilter(
+        plan_property=str(entry.get("plan_property", "")),
+        object_property=str(entry.get("object_property", "")),
+        property_type=str(entry.get("property_type", "")),
+        comparison=comparison,
+        constant=constant,
+    )
+
+
+def _object_entry(entry: Mapping[str, Any]) -> ObjectFilter | ObjectFilterGroup:
+    if "operator" in entry:
+        return _group(entry, "object_filters", _object_entry, ObjectFilterGroup)
+    comparison = str(entry.get("comparison", ""))
+    _check_comparison(comparison, "отбора по свойствам объекта")
+    return ObjectFilter(
+        object_property=str(entry.get("object_property", "")),
+        property_type=str(entry.get("property_type", "")),
+        comparison=comparison,
+        constant_value=str(entry.get("constant_value", "")),
+    )
+
+
+def _group[T](
+    entry: Mapping[str, Any],
+    where: str,
+    parse: Callable[[Mapping[str, Any]], T],
+    make: Callable[[str, tuple[T, ...]], T],
+) -> T:
+    operator = str(entry.get("operator", ""))
+    _check_operator(operator)
+    raw = entry.get("items")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"Группа отбора «{operator}» в «{where}» без элементов не принимается")
+    items = tuple(parse(_as_mapping(child, where)) for child in raw)
+    return make(operator, items)
+
+
+def _flag(value: object, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"«{name}» должен быть логическим значением")
+
+
+def _check_comparison(value: str, where: str) -> None:
+    """Пустой вид писатель не выводит; неизвестный читатель превращает в «=»."""
+    if value and value not in _COMPARISONS:
+        allowed = ", ".join(sorted(_COMPARISONS))
+        raise ValueError(
+            f"Вид сравнения «{value}» {where} не принимается: читатель запишет его"
+            f" в запрос как «=». Допустимы: {allowed}"
+        )
+
+
+def _check_operator(value: str) -> None:
+    """«И» и «ИЛИ» — имена БулевыОперации. Иное слово попадает в текст запроса плана
+    (ЗагрузкаПравилРегистрацииОбъектов:744) либо считается «ИЛИ» у отбора объекта (:646).
+    """
+    if value not in _OPERATORS:
+        shown = value or "пусто"
+        raise ValueError(
+            f"Вид группы отбора «{shown}» не принимается: нужно «И» или «ИЛИ». "
+            "Другое значение читатель отбора по плану подставит в запрос как есть, "
+            "а читатель отбора по объекту сочтёт «ИЛИ»"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +300,14 @@ def build_registration_rules(
     content_types = {type_name for type_name, _flag in content}
     specs, from_rules = _selection(exchange_rules, objects, warnings)
     rules = _rules(
-        connection, specs, from_rules, content_types, plan.name if plan else exchange_plan, warnings
+        connection,
+        specs,
+        from_rules,
+        content_types,
+        plan.name if plan else exchange_plan,
+        warnings,
+        plan,
+        _PropertyTables(connection),
     )
     document = _document(
         connection, plan, exchange_plan, content, rules, name, comment, created_at, identifier
@@ -250,6 +386,8 @@ def _rules(
     content_types: set[str],
     plan_name: str,
     warnings: list[str],
+    plan: _Meta | None,
+    tables: _PropertyTables,
 ) -> list[Node]:
     missing: list[str] = []
     outside_default: list[str] = []
@@ -270,7 +408,7 @@ def _rules(
                 outside_default.append(meta.full_name)
                 continue
             outside_explicit.append(meta.full_name)
-        nodes.append(_pro(spec, meta, codes.next(spec.code)))
+        nodes.append(_pro(_with_tables(tables, spec, meta, plan), meta, codes.next(spec.code)))
     _warn_lists(warnings, missing, outside_default, outside_explicit, plan_name)
     return nodes
 
@@ -350,9 +488,17 @@ def _pro(spec: RegistrationObject, meta: _Meta, code: str) -> Node:
 
 
 def _attach[T](
-    rule: Node, kind_name: str, tag: str, items: Sequence[T], build: Callable[[T], Node]
+    rule: Node,
+    kind_name: str,
+    tag: str,
+    items: Sequence[T] | None,
+    build: Callable[[T], Node],
 ) -> None:
-    """Вложенный отбор пишется, только если агент задал элементы."""
+    """Вложенный отбор пишется, только если агент задал элементы.
+
+    None и пустой список — контейнер не заполняется. Писатель пустое дерево всё равно
+    открывает: сериализатор выводит тег по политике ALWAYS.
+    """
     if not items:
         return
     node = Node.new(kind_name, tag)
@@ -362,10 +508,14 @@ def _attach[T](
 
 def _plan_filter(item: PlanFilter | PlanFilterGroup) -> Node:
     if isinstance(item, PlanFilterGroup):
+        _check_operator(item.operator)
+        if not item.items:
+            raise ValueError("Группа отбора без элементов не принимается")
         group = Node.new("plan_filter_group", "Группа")
         _put(group, "БулевоЗначениеГруппы", item.operator)
         group.items.extend(_plan_filter(child) for child in item.items)
         return group
+    _check_comparison(item.comparison, "отбора по свойствам плана обмена")
     node = Node.new("plan_filter_item", "ЭлементОтбора")
     node.values["ЭтоСтрокаКонстанты"] = item.constant
     _put(node, "ТипСвойстваОбъекта", item.property_type)
@@ -379,10 +529,14 @@ def _plan_filter(item: PlanFilter | PlanFilterGroup) -> Node:
 
 def _object_filter(item: ObjectFilter | ObjectFilterGroup) -> Node:
     if isinstance(item, ObjectFilterGroup):
+        _check_operator(item.operator)
+        if not item.items:
+            raise ValueError("Группа отбора без элементов не принимается")
         group = Node.new("object_filter_group", "Группа")
         _put(group, "БулевоЗначениеГруппы", item.operator)
         group.items.extend(_object_filter(child) for child in item.items)
         return group
+    _check_comparison(item.comparison, "отбора по свойствам объекта")
     node = Node.new("object_filter_item", "ЭлементОтбора")
     _put(node, "ТипСвойстваОбъекта", item.property_type)
     _put(node, "ВидСравнения", item.comparison)
@@ -554,3 +708,234 @@ def _meta(row: sqlite3.Row) -> _Meta:
     kind = str(row["kind"])
     name = str(row["name"])
     return _Meta(f"{kind}.{name}", str(row["type_name"]), kind, name, str(row["synonym"]))
+
+
+class _PropertyTables:
+    """Таблицы свойств отбора, как их пишет КД (ВыгрузкаРегистрации:339-343, :382-383).
+
+    Читатель БСП таблицы пропускает, но типовой макет их содержит: без них построенная
+    группа не совпадёт с макетом побайтово. Строка берётся из структуры, если агент
+    её не задал. Неразрешённый путь таблицу не получает — условие при этом пишется.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+        self._props: dict[str, dict[str, tuple[str, bool, tuple[str, ...]]]] = {}
+        self._by_type: dict[str, str | None] = {}
+
+    def rows(self, full_name: str, raw: str, *, plan: bool) -> tuple[FilterProperty, ...]:
+        """Цепочка `Наименование/Тип/Вид` по пути свойства. Пусто — путь не разобран."""
+        if not raw:
+            return ()
+        tabular = ""
+        attribute = raw
+        if plan:
+            tabular, attribute = _split_plan_property(raw)
+        built: list[FilterProperty] = []
+        current = full_name
+        prefix = ""
+        if tabular:
+            field = self._props_of(current).get(tabular)
+            if field is None or field[0] != "ТабличнаяЧасть":
+                return ()
+            # Имя табличной части в макете — в скобках, без типа
+            # (ДобавитьЭлемент пустой Тип не пишет).
+            built.append(FilterProperty(f"[{tabular}]", "", "ТабличнаяЧасть"))
+            prefix = tabular
+        segments = [part for part in attribute.split(".") if part]
+        if not segments:
+            return ()
+        for index, segment in enumerate(segments):
+            path = f"{prefix}.{segment}" if prefix else segment
+            field = self._props_of(current).get(path)
+            if field is None:
+                return ()
+            kind, is_group, types = field
+            type_name = ""
+            if not is_group:
+                if len(types) != 1:
+                    return ()
+                type_name = types[0]
+            built.append(FilterProperty(segment, type_name, kind))
+            if index == len(segments) - 1:
+                break
+            if is_group:
+                prefix = path
+                continue
+            owner = self._full_by_type(types[0])
+            if owner is None:
+                return ()
+            current = owner
+            prefix = ""
+        return tuple(built)
+
+    def _props_of(self, full_name: str) -> dict[str, tuple[str, bool, tuple[str, ...]]]:
+        cached = self._props.get(full_name)
+        if cached is not None:
+            return cached
+        kind, _, name = full_name.partition(".")
+        rows = self._connection.execute(
+            "SELECT p.path, p.kind, p.is_group, IFNULL(ts.types, '') AS types "
+            "FROM properties AS p JOIN objects AS o ON o.id = p.object_id "
+            "LEFT JOIN type_sets AS ts ON ts.id = p.type_set_id "
+            "WHERE o.kind = ? AND o.name = ?",
+            (kind, name),
+        ).fetchall()
+        loaded: dict[str, tuple[str, bool, tuple[str, ...]]] = {}
+        for row in rows:
+            types = tuple(part for part in str(row["types"]).split("\n") if part)
+            loaded[str(row["path"])] = (str(row["kind"]), bool(row["is_group"]), types)
+        self._props[full_name] = loaded
+        return loaded
+
+    def _full_by_type(self, type_name: str) -> str | None:
+        if type_name not in self._by_type:
+            row = self._connection.execute(
+                "SELECT kind, name FROM objects WHERE type_name = ? AND is_group = 0",
+                (type_name,),
+            ).fetchone()
+            self._by_type[type_name] = None if row is None else f"{row['kind']}.{row['name']}"
+        return self._by_type[type_name]
+
+
+def _split_plan_property(raw: str) -> tuple[str, str]:
+    """`[Организации].Организация` → (`Организации`, `Организация`); без скобок — шапка.
+
+    Как читатель (ЗагрузкаПравилРегистрацииОбъектов:471-484): имя табличной части
+    между скобками, реквизит — после `].`.
+    """
+    open_at = raw.find("[")
+    if open_at < 0:
+        return "", raw
+    close_at = raw.find("]", open_at + 1)
+    if close_at < 0:
+        return "", raw
+    return raw[open_at + 1 : close_at], raw[close_at + 2 :]
+
+
+def _with_tables(
+    tables: _PropertyTables, spec: RegistrationObject, meta: _Meta, plan: _Meta | None
+) -> RegistrationObject:
+    """Дописывает пустые таблицы свойств из структуры. Заданные агентом не трогает."""
+    plan_name = plan.full_name if plan is not None else ""
+    plan_filters = (
+        _fill_plan(tables, meta.full_name, plan_name, spec.plan_filters)
+        if spec.plan_filters
+        else spec.plan_filters
+    )
+    object_filters = (
+        _fill_object(tables, meta.full_name, spec.object_filters)
+        if spec.object_filters
+        else spec.object_filters
+    )
+    if plan_filters is spec.plan_filters and object_filters is spec.object_filters:
+        return spec
+    return replace(spec, plan_filters=plan_filters, object_filters=object_filters)
+
+
+def _fill_plan(
+    tables: _PropertyTables,
+    object_name: str,
+    plan_name: str,
+    items: tuple[PlanFilter | PlanFilterGroup, ...],
+) -> tuple[PlanFilter | PlanFilterGroup, ...]:
+    filled: list[PlanFilter | PlanFilterGroup] = []
+    for item in items:
+        if isinstance(item, PlanFilterGroup):
+            filled.append(
+                PlanFilterGroup(
+                    item.operator, _fill_plan(tables, object_name, plan_name, item.items)
+                )
+            )
+            continue
+        plan_props = item.plan_properties
+        if not plan_props and plan_name and item.plan_property:
+            plan_props = tables.rows(plan_name, item.plan_property, plan=True)
+        object_props = item.object_properties
+        # Константа — литерал в СвойствоОбъекта, таблицы свойств объекта у неё нет (макеты).
+        if not item.constant and not object_props and item.object_property:
+            object_props = tables.rows(object_name, item.object_property, plan=False)
+        if plan_props != item.plan_properties or object_props != item.object_properties:
+            item = replace(item, plan_properties=plan_props, object_properties=object_props)
+        filled.append(item)
+    return tuple(filled)
+
+
+def _fill_object(
+    tables: _PropertyTables,
+    object_name: str,
+    items: tuple[ObjectFilter | ObjectFilterGroup, ...],
+) -> tuple[ObjectFilter | ObjectFilterGroup, ...]:
+    filled: list[ObjectFilter | ObjectFilterGroup] = []
+    for item in items:
+        if isinstance(item, ObjectFilterGroup):
+            filled.append(
+                ObjectFilterGroup(item.operator, _fill_object(tables, object_name, item.items))
+            )
+            continue
+        props = item.object_properties
+        if not props and item.object_property:
+            props = tables.rows(object_name, item.object_property, plan=False)
+        if props != item.object_properties:
+            item = replace(item, object_properties=props)
+        filled.append(item)
+    return tuple(filled)
+
+
+def replace_registration_filters(
+    document: RegistrationRules,
+    built: RegistrationRules,
+    specs: Sequence[RegistrationObject],
+) -> None:
+    """Заменяет отборы названных объектов. Остальные правила и заголовок не трогает.
+
+    Объекта ещё нет в проекте — правило из сборки добавляется в конец списка.
+    `plan_filters`/`object_filters` со значением None у описания не меняют свой отбор;
+    пустой кортеж снимает его.
+    """
+    by_name = {str(rule.get("ОбъектМетаданныхИмя")): rule for rule in document.rules()}
+    section = document.section("ПравилаРегистрацииОбъектов")
+    used = {rule.code for rule in document.rules()}
+    for rule in built.rules():
+        full_name = str(rule.get("ОбъектМетаданныхИмя"))
+        spec = _spec_for(specs, full_name, str(rule.get("ОбъектНастройки")))
+        current = by_name.get(full_name)
+        if current is None:
+            _avoid_code_clash(rule, used)
+            section.items.append(rule)
+            by_name[full_name] = rule
+            continue
+        if spec is None or spec.plan_filters is not None:
+            _set_filter(
+                current, "ОтборПоСвойствамПланаОбмена", rule.child("ОтборПоСвойствамПланаОбмена")
+            )
+        if spec is None or spec.object_filters is not None:
+            _set_filter(current, "ОтборПоСвойствамОбъекта", rule.child("ОтборПоСвойствамОбъекта"))
+
+
+def _spec_for(
+    specs: Sequence[RegistrationObject], full_name: str, type_name: str
+) -> RegistrationObject | None:
+    for spec in specs:
+        if spec.metadata_name in (full_name, type_name):
+            return spec
+    return None
+
+
+def _avoid_code_clash(rule: Node, used: set[str]) -> None:
+    if rule.code not in used:
+        used.add(rule.code)
+        return
+    number = 1
+    while f"{number:09d}" in used:
+        number += 1
+    code = f"{number:09d}"
+    used.add(code)
+    rule.values["Код"] = code
+
+
+def _set_filter(rule: Node, tag: str, child: Node | None) -> None:
+    if child is None:
+        rule.children.pop(tag, None)
+    else:
+        rule.children[tag] = child

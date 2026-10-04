@@ -163,7 +163,7 @@ def extension_conflicts(
                     or annotation[1].value != "("
                     or annotation[2].kind != "string"
                     or annotation[3].value != ")"
-                ):
+                ) or not valid_identifier(annotation[2].value.strip(" ")):
                     result.append(
                         (
                             file,
@@ -171,16 +171,7 @@ def extension_conflicts(
                             "Неизвестная аннотация менеджера",
                         )
                     )
-                elif annotation[0].folded in (
-                    "перед",
-                    "после",
-                    "вместо",
-                    "изменениеиконтроль",
-                    "before",
-                    "after",
-                    "around",
-                    "changeandvalidate",
-                ) and annotation[2].folded in (
+                elif annotation[2].value.strip(" ").casefold() in (
                     FILLER.casefold(),
                     "добавитьпкс",
                     rule.procedure_name.casefold(),
@@ -629,6 +620,11 @@ def validate_preconditions(
                     )
                 )
         if target.direction == "receive" and op.configuration_attribute != op.format_property:
+            reason = (
+                "Для полного пути с точкой исполнитель не отмечает отсутствие свойства. "
+                if "." in op.format_property
+                else "Защита сравнивает имена разных сторон. "
+            )
             notices.append(
                 Notice(
                     "ed.author.missing_value_clears",
@@ -637,7 +633,7 @@ def validate_preconditions(
                     f"ПКС «{op.configuration_attribute} ← {op.format_property}»: "
                     f"в обычном пути получения отсутствие «{op.format_property}» "
                     f"в сообщении может очистить «{op.configuration_attribute}» "
-                    "найденного объекта. Защита сравнивает имена разных сторон. "
+                    f"найденного объекта. {reason}"
                     "Сохранение прежнего значения не обеспечено",
                 )
             )

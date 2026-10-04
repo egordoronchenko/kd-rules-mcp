@@ -427,13 +427,15 @@ def test_model_normalized_immutable_ids_and_runtime():
 
 @pytest.mark.parametrize("annotation", ["Перед", "После", "Вместо", "ИзменениеИКонтроль"])
 @pytest.mark.parametrize("procedure", [FILLER, "ДобавитьПКС", "ДобавитьПКО_Товар"])
-def test_extension_intercepts_all_three_targets(annotation, procedure):
+@pytest.mark.parametrize("padding", ["", " "])
+def test_extension_intercepts_all_three_targets(annotation, procedure, padding):
     value = inputs()
     file = "foreign/CommonModules/Менеджер2/Ext/Module.bsl"
     value = refreshed(
         value,
         extension_sources={
-            file: f'&{annotation}("{procedure}")\nПроцедура Чужая()\nКонецПроцедуры\n'
+            file: f'&{annotation}("{padding}{procedure}{padding}")\n'
+            "Процедура Чужая()\nКонецПроцедуры\n"
         },
     )
     with pytest.raises(AuthoringPreconditionError) as caught:
@@ -441,7 +443,7 @@ def test_extension_intercepts_all_three_targets(annotation, procedure):
     failure = next(f for f in caught.value.failures if f.id == "ed.author.extension_conflict")
     assert (failure.address, failure.message, failure.file, failure.line) == (
         "ПКО/Товар",
-        f"Чужое расширение влияет на операцию: {procedure}",
+        f"Чужое расширение влияет на операцию: {padding}{procedure}{padding}",
         file,
         1,
     )
@@ -458,6 +460,35 @@ def test_extension_non_intercepts_are_clean(annotation):
         },
     )
     validate_preconditions(value, (OPERATION,), IDENTITY, version_scope="manager")
+
+
+def test_extension_invalid_interception_identifier():
+    value = refreshed(
+        inputs(),
+        extension_sources={
+            "foreign/CommonModules/Менеджер2/Ext/Module.bsl": '&После("Не идентификатор")\n'
+        },
+    )
+    with pytest.raises(AuthoringPreconditionError) as caught:
+        validate_preconditions(value, (OPERATION,), IDENTITY, version_scope="manager")
+    assert caught.value.failures[0].id == "ed.author.extension_conflict"
+    assert caught.value.failures[0].message == (
+        "Чужое расширение влияет на операцию: Неизвестная аннотация менеджера"
+    )
+
+
+@pytest.mark.parametrize("attribute,occupied", [(" Заметка ", True), (" Иное ", False)])
+def test_existing_pks_attribute_padding_occupancy(attribute, occupied):
+    value = inputs()
+    prop = replace(value.document.pko[0].properties[0], configuration_property=attribute)
+    value = rule_changed(value, properties=(prop,))
+    op = replace(OPERATION, configuration_attribute="Заметка", new_attribute=None)
+    if occupied:
+        with pytest.raises(AuthoringPreconditionError) as caught:
+            validate_preconditions(value, (op,), IDENTITY, version_scope="manager")
+        assert caught.value.failures[0].id == "ed.author.configuration_attribute_occupied"
+    else:
+        validate_preconditions(value, (op,), IDENTITY, version_scope="manager")
 
 
 @pytest.mark.parametrize(

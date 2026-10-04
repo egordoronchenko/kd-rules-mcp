@@ -13,6 +13,7 @@ from kd2_rules_mcp.errors import DuplicateRuleError, RuleNotFoundError
 from kd2_rules_mcp.kd2.model import ExchangeRules
 from kd2_rules_mcp.server import create_server
 from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
+from tests.test_service_ed_authoring import setup as setup
 
 DATA = Path(__file__).parent / "data"
 DUMP = DATA / "xmldump" / "main"
@@ -46,6 +47,8 @@ async def _error(client: Client, tool: str, /, **arguments: Any) -> dict[str, An
 
 
 EXPECTED_TOOLS = {
+    "ed_authoring_candidates",
+    "ed_authoring_build",
     "ed_schema_open",
     "ed_schema_types",
     "ed_schema_type",
@@ -113,6 +116,7 @@ async def test_ed_tools(service: Kd2Service) -> None:
         assert "reason" not in report["skipped"]
         error = await _error(client, "ed_validate", project_id="missing")
         assert error["code"] == "project_not_found"
+
         error = await _error(client, "ed_validate", project_id=project, level="нет")
         assert error["code"] == "invalid_argument"
         error = await _error(client, "ed_get", project_id=project, address="ПКО/Нет")
@@ -125,6 +129,32 @@ async def test_ed_tools(service: Kd2Service) -> None:
         assert closed["closed"] is True
         error = await _error(client, "ed_overview", project_id=project)
         assert error["code"] == "project_not_found"
+
+
+async def test_ed_authoring_tools(setup):
+    service, args, _ = setup
+    target = args["operations"][0]["target"] | {
+        "project": args["project"],
+        "configuration": args["configuration"],
+    }
+    async with Client(create_server(service)) as client:
+        candidates = await _call(
+            client, "ed_authoring_candidates", target=target, kind="format", limit=1
+        )
+        assert candidates["items"] and candidates["items"][0]["auto"] is False
+        preview = await _call(client, "ed_authoring_build", **args)
+        assert preview["status"] == "ready"
+        error = await _error(client, "ed_authoring_build", **args, mode="write")
+        assert error["code"] == "ed_authoring_stale"
+        written = await _call(
+            client,
+            "ed_authoring_build",
+            **args,
+            mode="write",
+            expected_preview_hash=preview["build_hash"],
+            acknowledged_notices=preview["required_acknowledgements"],
+        )
+        assert written["status"] == "written"
 
 
 async def test_ed_schema_tools(service: Kd2Service) -> None:
@@ -400,6 +430,22 @@ async def test_rules_tools(service: Kd2Service) -> None:
         )
         assert registration["kind"] == "registration"
         assert registration["counts"]["registration_rules"] == 1
+        rejected = await _error(
+            client,
+            "registration_build",
+            structure_id="dump",
+            exchange_plan="Обмен",
+            objects=[
+                {
+                    "metadata_name": "Справочник.Контрагенты",
+                    "plan_filters": [
+                        {"operator": "НЕ", "items": [{"plan_property": "ДатаНачала"}]}
+                    ],
+                }
+            ],
+        )
+        assert rejected["code"] == "invalid_argument"
+        assert "ИЛИ" in rejected["message"]
 
 
 async def test_unknown_structure_lists_loaded(service: Kd2Service) -> None:

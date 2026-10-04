@@ -4,7 +4,13 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from kd2_rules_mcp.authoring.correspondent import mirror_rules
-from kd2_rules_mcp.authoring.registration import build_registration_rules
+from kd2_rules_mcp.authoring.registration import (
+    build_registration_rules,
+    replace_registration_filters,
+)
+from kd2_rules_mcp.authoring.workspace import RulesProject
+from kd2_rules_mcp.errors import Kd2Error
+from kd2_rules_mcp.kd2.model import RegistrationRules
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.views import clip, page_limit, registration_object
 
@@ -23,11 +29,39 @@ class GenerateMixin(ServiceBase):
         with self._lock, self._structure(structure_id) as conn:
             exchange = self._exchange(rules_project_id) if rules_project_id else None
             specs = [registration_object(item) for item in objects] if objects else None
+            existing = self._registration_project(project_id)
             build = build_registration_rules(
                 conn, exchange_plan, exchange_rules=exchange, objects=specs
             )
+            if existing is not None:
+                if not specs:
+                    raise ValueError(
+                        "Чтобы заменить отборы в существующем проекте правил регистрации, "
+                        "передайте objects"
+                    )
+                document = existing.document
+                if not isinstance(document, RegistrationRules):
+                    raise Kd2Error(f"Проект «{project_id}» не загружен")
+                replace_registration_filters(document, build.document, specs)
+                self.workspace.mark_modified(existing.id)
+                return {**self._project_view(existing), "warnings": build.warnings}
             project = self.workspace.add(build.document, project_id, label=f"reg-{exchange_plan}")
             return {**self._project_view(project), "warnings": build.warnings}
+
+    def _registration_project(self, project_id: str | None) -> RulesProject | None:
+        """Открытый проект правил регистрации с этим идентификатором, иначе None.
+
+        Занятый идентификатор правил обмена — ошибка: новый проект туда не пишется.
+        """
+        if not project_id or project_id not in self.workspace.ids():
+            return None
+        project = self.workspace.get(project_id)
+        document = project.document
+        if isinstance(document, RegistrationRules):
+            return project
+        raise Kd2Error(
+            f"Идентификатор «{project_id}» занят проектом правил обмена, а не правилами регистрации"
+        )
 
     def correspondent_draft(
         self,

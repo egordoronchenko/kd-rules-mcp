@@ -92,6 +92,8 @@ def test_manager_without_structure_skips_instead_of_inventing_content() -> None:
         "registration.object_property",
         "registration.unload_mode",
         "registration.plan_content",
+        "registration.autoregistration",
+        "registration.no_pvd",
         "registration.settings_type",
     }
 

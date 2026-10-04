@@ -15,8 +15,8 @@ from .model import (
     AddHeaderProperty,
     AuthoringInputs,
     AuthoringPreconditionError,
-    CanonicalHeaderProperty,
     Failure,
+    _canonical_operation,
     order_operations,
 )
 
@@ -28,6 +28,9 @@ def canonical_property(
     value = value.strip(" ")
     if not value or any(c.isspace() or unicodedata.category(c).startswith("C") for c in value):
         return None
+    exact = profile.resolve(typ, value)
+    if exact.status == "resolved" and len(exact.property_ids) == 1:
+        return value
     folded = context.folded_profiles.get(id(profile)) if context else None
     if folded is None:
         folded = replace(
@@ -109,14 +112,26 @@ def canonicalize_operations(
             )
         key, _ = metadata_key(rule.configuration_object.value)
         owner = inputs.structure.objects.get(key) if key else None
-        rows = owner.property(op.configuration_attribute) if owner else ()
+        requested_attribute = op.configuration_attribute.strip(" ")
+        from .hook import valid_identifier
+
+        if not valid_identifier(requested_attribute):
+            failures.append(
+                Failure(
+                    "ed.author.identifier_conflict",
+                    target.pko_address,
+                    f"Недопустимый идентификатор «{op.configuration_attribute}» "
+                    "или префикс нового реквизита",
+                )
+            )
+        rows = owner.property(requested_attribute) if owner else ()
         attribute = (
             op.new_attribute.name
             if op.new_attribute
-            and op.new_attribute.name.casefold() == op.configuration_attribute.casefold()
+            and op.new_attribute.name.casefold() == requested_attribute.casefold()
             else rows[0].path
             if len(rows) == 1
-            else op.configuration_attribute
+            else requested_attribute
         )
         profile = context.profile(target.format_version, target.direction)
         applicable = context.applicable(inputs.document, target.format_version, target.direction)
@@ -133,7 +148,7 @@ def canonicalize_operations(
                     rule.span.line_start,
                 )
             )
-        operation_type = CanonicalHeaderProperty if prop is not None else AddHeaderProperty
+        operation_type = _canonical_operation if prop is not None else AddHeaderProperty
         result.append(
             operation_type(target, attribute, prop or op.format_property, op.new_attribute)
         )

@@ -53,7 +53,8 @@ def render_authoring(
     if bool(previous_manifest) != (previous_files is not None):
         refuse("owned_content_changed", "Прежний manifest и все файлы нужны вместе")
     if not prepared.operations or any(
-        not isinstance(op, CanonicalHeaderProperty) for op in prepared.operations
+        not isinstance(op, CanonicalHeaderProperty) or not op.is_canonical()
+        for op in prepared.operations
     ):
         refuse("unprepared_operations", "Нужны канонические операции результата подготовки")
     if any(not c.delta.no_new_issues for c in prepared.selected_profiles):

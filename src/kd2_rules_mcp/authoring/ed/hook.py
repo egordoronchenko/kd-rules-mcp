@@ -172,8 +172,10 @@ def generate_hook(
         validate_preconditions(
             inputs, operations, identity, version_scope="manager", context=context
         )
-    if not all(isinstance(op, CanonicalHeaderProperty) for op in operations):
-        raise ValueError("Для генерации требуются разрешённые операции или AuthoringInputs")
+    if not all(isinstance(op, CanonicalHeaderProperty) and op.is_canonical() for op in operations):
+        raise ValueError(
+            "Для генерации требуются операции, созданные канонизатором, или AuthoringInputs"
+        )
     operations = order_operations(operations)
     failures = identifier_failures(base, operations, identity)
     if failures:

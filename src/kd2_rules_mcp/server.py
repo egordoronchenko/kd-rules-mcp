@@ -36,6 +36,12 @@ from kd2_rules_mcp.errors import (
     DanglingReferenceError,
     DuplicateProjectError,
     DuplicateRuleError,
+    EdAuthoringAckRequiredError,
+    EdAuthoringIoError,
+    EdAuthoringPathError,
+    EdAuthoringPreconditionError,
+    EdAuthoringResourceLimitError,
+    EdAuthoringStaleError,
     EdFormatError,
     EdReadError,
     EdResourceLimitError,
@@ -69,6 +75,12 @@ logger = logging.getLogger("kd2_rules_mcp")
 
 # Код ошибки по классу; порядок важен — подклассы раньше базовых.
 ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (EdAuthoringAckRequiredError, "ed_authoring_ack_required"),
+    (EdAuthoringStaleError, "ed_authoring_stale"),
+    (EdAuthoringPathError, "ed_authoring_path"),
+    (EdAuthoringResourceLimitError, "ed_authoring_resource_limit"),
+    (EdAuthoringIoError, "ed_authoring_io"),
+    (EdAuthoringPreconditionError, "ed_authoring_precondition"),
     (EdSchemaNotFoundError, "ed_schema_not_found"),
     (EdSchemaTypeNotFoundError, "ed_schema_type_not_found"),
     (EdSchemaReadError, "ed_schema_read_error"),
@@ -114,13 +126,15 @@ structure_load_xml / structure_load_md83exp по путям) →
 registration_build, черновик обратного направления — correspondent_draft.
 Смысловые решения принимает агент.
 Списки постраничные (offset, limit ≤ 200, has_more). Ошибки — JSON с полем code.
-Сервер читает модуль менеджера обмена через универсальный формат EnterpriseData только для чтения.
+Сервер читает модуль менеджера обмена через универсальный формат EnterpriseData.
 Порядок: ed_open → ed_overview → ed_list / ed_get / ed_locate → ed_validate.
 Снимки ED живут в памяти; перечитать изменённый файл — ed_close и ed_open.
 Схема формата XDTO: ed_schema_open с явной версией → ed_schema_types / ed_schema_type.
 Схемы только в памяти; перечитать пакет — ed_schema_close и ed_schema_open.
 XSD не поддерживается.
-Маршруты версий формата: ed_routes двух выгрузок → ed_route_compare."""
+Маршруты версий формата: ed_routes двух выгрузок → ed_route_compare.
+Доработка прямой ПКС: снимки → ed_authoring_candidates → ed_authoring_build preview → write
+с хешем и подтверждениями; установка человеком."""
 
 StructureId = Annotated[
     str, Field(description="Идентификатор структуры в кэше (structure_list), например `zup-full`")
@@ -191,6 +205,8 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
     """JSON ошибки инструмента: код, текст и сведения для выбора действия."""
     code = next((code for kind, code in ERROR_CODES if isinstance(error, kind)), "internal")
     payload: dict[str, Any] = {"code": code, "message": str(error)}
+    if isinstance(error, EdAuthoringPreconditionError):
+        payload.update(error.details)
     if isinstance(error, StructureNotFoundError) and service is not None:
         payload["structures"] = service.store.ids()
     if isinstance(error, ObjectNotFoundError):
@@ -770,6 +786,16 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         offset: Offset = 0,
         limit: Limit = 50,
+        exchange_project_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Проект правил обмена этого плана. Для правил регистрации проверяет, "
+                    "что у объекта состава есть включённое ПВД. Пусто — проверка пропускается. "
+                    "Для проекта правил обмена параметр не используется"
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Проверяет формат, структуры и ссылки на алгоритмы (или правила регистрации).
 
@@ -784,6 +810,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             check_prefix,
             offset,
             limit,
+            exchange_project_id,
         )
 
     @server.tool()
@@ -866,11 +893,14 @@ def create_server(service: Kd2Service) -> MCPServer:
             list[dict[str, Any]] | None,
             Field(
                 description=(
-                    'Явный выбор: [{"metadata_name": "Справочник.X", "name"?, "code"?, '
-                    '"unload_mode"?, "plan_filters"?: [{"plan_property", "object_property", '
-                    '"property_type", "comparison", "constant"}], "object_filters"?: '
-                    '[{"object_property", "property_type", "comparison", '
-                    '"constant_value"}]}]; отборы соединяются через «И»'
+                    "Явный выбор объектов. Плоский список отборов соединяется через «И». "
+                    "Элемент плана: plan_property, object_property, property_type, comparison, "
+                    "constant. Элемент объекта: object_property, property_type, comparison, "
+                    "constant_value. Группа: {operator: И|ИЛИ, items: [элемент или группа]}. "
+                    "В группе — константа реквизита узла (constant=true, object_property — "
+                    "литерал) и значение табличной части ([ТабличнаяЧасть].Реквизит). "
+                    "comparison: Равно, НеРавно, Больше, БольшеИлиРавно, Меньше, МеньшеИлиРавно. "
+                    "Неизвестный вид сравнения или вид группы — invalid_argument"
                 )
             ),
         ] = None,
@@ -878,13 +908,17 @@ def create_server(service: Kd2Service) -> MCPServer:
             str | None,
             Field(
                 description=(
-                    "Свой идентификатор нового проекта правил; "
-                    "пусто — выводится из источника и вида"
+                    "Идентификатор проекта. Пусто — новый. Если это уже проект правил "
+                    "регистрации, отборы названных объектов заменяются, остальные правила "
+                    "не меняются"
                 )
             ),
         ] = None,
     ) -> dict[str, Any]:
-        """Правила регистрации из состава плана обмена в новый рабочий проект."""
+        """Правила регистрации из состава плана обмена.
+
+        Новый проект или правка отборов уже открытого проекта правил регистрации.
+        """
         return await call(
             service.registration_build,
             structure_id,
@@ -1376,6 +1410,115 @@ def create_server(service: Kd2Service) -> MCPServer:
             section,
             level,
             check_prefix,
+            offset,
+            limit,
+        )
+
+    @server.tool()
+    async def ed_authoring_candidates(
+        target: Annotated[
+            dict[str, Any],
+            Field(
+                description=(
+                    "Цель: project, configuration, plan, variant, format_version, direction, "
+                    "pko_address, project_id, schema_id, structure_id открытых снимков"
+                )
+            ),
+        ],
+        kind: Annotated[
+            str, Field(description="Вид свободных кандидатов: format или configuration")
+        ],
+        text: Annotated[str, Field(description="Подстрока имени или пути без учёта регистра")] = "",
+        offset: Offset = 0,
+        limit: Limit = 50,
+        configuration_attribute: Annotated[
+            str | None,
+            Field(
+                description="Уже выбранный реквизит для проверки совместимости кандидатов формата"
+            ),
+        ] = None,
+        format_property: Annotated[
+            str | None, Field(description="Уже выбранное свойство формата для проверки реквизитов")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Свободные свойства формата и реквизиты владельца ПКО; auto=false.
+
+        Решения принимает агент.
+        """
+        return await call(
+            service.ed_authoring_candidates,
+            target,
+            kind,
+            text,
+            offset,
+            limit,
+            configuration_attribute,
+            format_property,
+        )
+
+    @server.tool()
+    async def ed_authoring_build(
+        project: Annotated[str, Field(description="Проект из project_list")],
+        configuration: Annotated[
+            str, Field(description="Явная конфигурация проекта, включая full")
+        ],
+        extension: Annotated[
+            dict[str, Any],
+            Field(description="Идентичность: name, prefix, synonym, version, compatibility_mode"),
+        ],
+        operations: Annotated[
+            list[dict[str, Any]],
+            Field(
+                description=(
+                    "До 100 прямых ПКС: target с тремя идентификаторами снимков, "
+                    "configuration_attribute, format_property, необязательный "
+                    "new_attribute (name, synonym, primitive, qualifiers)"
+                )
+            ),
+        ],
+        version_scope: Annotated[
+            str | None, Field(description="Явное согласие на область manager; null даёт отказ ядра")
+        ] = None,
+        mode: Annotated[
+            str, Field(description="preview без записи или write с хешем и подтверждениями")
+        ] = "preview",
+        delivery: Annotated[
+            str, Field(description="Форма выдачи: extension или manual")
+        ] = "extension",
+        output_dir: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Вычисленный каталог workspace/ed-authoring/<name>-<uuid8>; обычно не задаётся"
+                )
+            ),
+        ] = None,
+        expected_preview_hash: Annotated[
+            str | None, Field(description="build_hash текущего preview, обязателен для write")
+        ] = None,
+        acknowledged_notices: Annotated[
+            list[str] | None,
+            Field(description="Все идентификаторы required_acknowledgements текущего preview"),
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Проверяет до/после и порождает комплект прямых ПКС.
+
+        Write атомарно обновляет только собственный результат в workspace; база не вызывается.
+        """
+        return await call(
+            service.ed_authoring_build,
+            project,
+            configuration,
+            extension,
+            operations,
+            version_scope,
+            mode,
+            delivery,
+            output_dir,
+            expected_preview_hash,
+            acknowledged_notices,
             offset,
             limit,
         )

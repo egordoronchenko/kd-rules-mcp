@@ -54,6 +54,7 @@ def operation_dict(op: AddHeaderProperty) -> dict:
 
 def operation_from_dict(value: dict) -> AddHeaderProperty:
     draft = AttributeDraft(**value["new_attribute"]) if value["new_attribute"] else None
+    # Прочитанная метка не даёт свидетельства канонизации для генератора.
     op = CanonicalHeaderProperty(
         AuthoringTarget(**value["target"]),
         value["configuration_attribute"],

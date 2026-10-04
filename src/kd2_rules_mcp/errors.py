@@ -8,6 +8,34 @@ class Kd2Error(Exception):
     """Базовая ошибка сервера правил КД 2."""
 
 
+class EdAuthoringPreconditionError(Kd2Error):
+    """Предусловия автора не выполнены; подробности — failures и summary."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
+
+class EdAuthoringAckRequiredError(EdAuthoringPreconditionError):
+    """Нужны подтверждения конкретных замечаний для текущего preview_hash."""
+
+
+class EdAuthoringStaleError(EdAuthoringPreconditionError):
+    """Изменились входные файлы, решения preview или прежний manifest."""
+
+
+class EdAuthoringPathError(EdAuthoringPreconditionError):
+    """Каталог вне workspace, чужое содержимое, символическая ссылка или junction."""
+
+
+class EdAuthoringResourceLimitError(EdAuthoringPreconditionError):
+    """Превышен предел операций, менеджеров, профилей или файлов комплекта."""
+
+
+class EdAuthoringIoError(EdAuthoringPreconditionError):
+    """Ошибка чтения или атомарной записи; прежний комплект сохранён."""
+
+
 class EdSchemaNotFoundError(Kd2Error):
     """Схема формата не открыта."""
 

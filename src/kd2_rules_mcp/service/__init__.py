@@ -12,9 +12,7 @@
 
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.checks import ChecksMixin
-from kd2_rules_mcp.service.ed import EdMixin
-from kd2_rules_mcp.service.ed_routes import EdRoutesMixin
-from kd2_rules_mcp.service.ed_schema import EdSchemaMixin
+from kd2_rules_mcp.service.ed_authoring import EdAuthoringMixin
 from kd2_rules_mcp.service.generate import GenerateMixin
 from kd2_rules_mcp.service.matching import MatchingMixin
 from kd2_rules_mcp.service.paths import PathMap, Settings
@@ -25,9 +23,7 @@ __all__ = ["Kd2Service", "PathMap", "Settings"]
 
 
 class Kd2Service(
-    EdRoutesMixin,
-    EdSchemaMixin,
-    EdMixin,
+    EdAuthoringMixin,
     StructuresMixin,
     MatchingMixin,
     RulesMixin,

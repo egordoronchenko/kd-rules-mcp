@@ -335,3 +335,18 @@ def test_whitelist_is_enforced_by_production_generation(monkeypatch):
 def test_raw_generation_requires_read_inputs_for_canonical_names():
     with pytest.raises(ValueError, match="AuthoringInputs"):
         generate_hook(inputs().document, (OPERATION,), IDENTITY)
+
+
+def test_public_canonical_marker_cannot_bypass_resolution():
+    from kd2_rules_mcp.authoring.ed.canonical import canonicalize_operations
+    from kd2_rules_mcp.authoring.ed.model import CanonicalHeaderProperty
+
+    value = inputs()
+    forged = CanonicalHeaderProperty(OPERATION.target, "заметка", " НетТакого ")
+    with pytest.raises(ValueError, match="созданные канонизатором"):
+        generate_hook(value.document, (forged,), IDENTITY)
+    canonical = canonicalize_operations(value, (OPERATION,))
+    assert generate_hook(value.document, canonical, IDENTITY).calls
+    changed = replace(canonical[0], format_property="НетТакого")
+    with pytest.raises(ValueError, match="созданные канонизатором"):
+        generate_hook(value.document, (changed,), IDENTITY)
