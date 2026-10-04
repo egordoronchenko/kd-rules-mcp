@@ -1,5 +1,6 @@
 """Нарушение и чистая граница каждой конфигурационной проверки."""
 
+import os
 import sqlite3
 from collections import Counter
 from dataclasses import replace
@@ -60,6 +61,10 @@ def test_session_reuses_unchanged_structure_snapshot(
             "('Справочник', 'Б', 'СправочникСсылка.Б')"
         )
         connection.commit()
+        # Размер файла прежний (та же страница), а время записи под нагрузкой может совпасть
+        # с предыдущим: отметку времени сдвигаем явно, иначе тест плавает.
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
         changed = StructureSnapshot.load(connection)
     finally:
         connection.close()

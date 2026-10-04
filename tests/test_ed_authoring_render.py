@@ -659,6 +659,201 @@ def test_instruction_real_uri_and_explained_route_states():
     assert "Пояснение" in text
 
 
+def test_v1_kit_plus_handler_keeps_object_uuids_and_rejects_tamper():
+    """Переход на форму с обработчиками — явный просмотр; UUID объектов остаются."""
+    from kd2_rules_mcp.authoring.ed.artifacts import previous_artifact
+    from kd2_rules_mcp.authoring.ed.model import PreserveMissingHeaderProperty
+    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from tests.test_ed_authoring_handlers import handler_inputs
+
+    op = replace(OPERATION, target=replace(TARGET, direction="receive"))
+    # Менеджер первого среза без диспетчера не проходит предусловие обработчика.
+    value = prepare_authoring(handler_inputs(), (op,), IDENTITY, version_scope="manager")
+    assert value.preparation_inputs is not None
+    first = render_authoring(value, descriptions())
+    assert first.manifest.schema_version == 1
+    prop = first.manifest.operations[0]
+    preserve = PreserveMissingHeaderProperty(prop.target, prop.operation_id)
+    plan = prepare_handler_operations(
+        value.preparation_inputs, (prop, preserve), IDENTITY, version_scope="manager"
+    )
+    migrated = render_handlers_authoring(
+        value.preparation_inputs,
+        plan,
+        IDENTITY,
+        descriptions(),
+        previous_manifest=first.manifest,
+        previous_files=first.files,
+    )
+    fresh = render_handlers_authoring(value.preparation_inputs, plan, IDENTITY, descriptions())
+    assert migrated.manifest.schema_version == 2
+    assert migrated.manifest.generator_version == "ed-authoring/2"
+    assert migrated.manifest.identity_map == first.manifest.identity_map
+    assert migrated.manifest.procedures
+    assert all("runtime_verified" in item for item in migrated.manifest.handler_bindings)
+    for path, payload in first.files.items():
+        if path.endswith(".xml"):
+            assert migrated.files[path] == payload
+    module = next(
+        path for path in migrated.files if path.startswith("modules/") and path.endswith(".bsl")
+    )
+    text = migrated.files[module].decode("utf-8")
+    assert '&Вместо("ВыполнитьПроцедуруМодуляМенеджера")' in text
+    assert "ПередЗаписьюПолученныхДанных" in text
+    assert 'ДобавитьПКС(Правило.Свойства, "доп_Заметка", "Комментарий");' in text
+    assert "Пример" not in migrated.instruction
+    assert "добавлен обработчик события" in migrated.instruction
+    assert "безопасном режиме" in migrated.instruction
+    assert fresh.files == migrated.files
+    repeated = render_handlers_authoring(
+        value.preparation_inputs,
+        plan,
+        IDENTITY,
+        descriptions(),
+        previous_manifest=migrated.manifest,
+        previous_files=migrated.files,
+    )
+    assert repeated.status == "unchanged"
+    assert repeated.files == migrated.files
+    assert previous_artifact(migrated.files) == migrated.manifest
+    damaged = dict(migrated.files)
+    damaged[module] = damaged[module].replace(
+        "\t\tВозврат;".encode(), "\t\tВозврат; // edit".encode(), 1
+    )
+    with pytest.raises(AuthoringPreconditionError) as error:
+        previous_artifact(damaged)
+    assert error.value.failures[0].id == "ed.author.owned_content_changed"
+    forged = replace(
+        migrated.manifest,
+        procedures=tuple(
+            {**dict(item), "body_sha256": "0" * 64} if item.get("role") == "handler" else dict(item)
+            for item in migrated.manifest.procedures
+        ),
+    )
+    forged_files = dict(migrated.files)
+    forged_files["manifest.json"] = forged.to_bytes()
+    with pytest.raises(AuthoringPreconditionError) as error:
+        previous_artifact(forged_files)
+    assert error.value.failures[0].id == "ed.author.owned_content_changed"
+
+
+def test_handler_only_xml_matches_v1_on_an_existing_attribute():
+    """XML комплекта без прямых ПКС совпадает с v1 на существующем реквизите."""
+    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from tests.test_ed_authoring_handlers import handler, handler_inputs
+
+    value = handler_inputs()
+    existing = replace(OPERATION, configuration_attribute="Заметка", new_attribute=None)
+    first = render_authoring(
+        prepare_authoring(value, (existing,), IDENTITY, version_scope="manager"), descriptions()
+    )
+    plan = prepare_handler_operations(value, (handler(),), IDENTITY, version_scope="manager")
+    only = render_handlers_authoring(value, plan, IDENTITY, descriptions())
+    # По смыслу ни одного файла нет лишь в одном комплекте: оба без нового реквизита.
+    assert sorted(set(first.files) - set(only.files)) == []
+    assert sorted(set(only.files) - set(first.files)) == []
+    differ = sorted(path for path, payload in only.files.items() if first.files[path] != payload)
+    assert differ == [
+        "extension/CommonModules/Менеджер2/Ext/Module.bsl",
+        "instruction.md",
+        "manifest.json",
+        "modules/CommonModules/Менеджер2/Ext/Module.bsl",
+        "validation.json",
+    ]
+    for path, payload in first.files.items():
+        if path.endswith(".xml"):
+            assert only.files[path] == payload
+
+
+def test_direct_only_plan_is_refused_and_empty_preparation_stays_closed():
+    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from tests.test_ed_authoring_handlers import handler_inputs
+
+    value = handler_inputs()
+    plan = prepare_handler_operations(value, (OPERATION,), IDENTITY, version_scope="manager")
+    with pytest.raises(AuthoringPreconditionError) as error:
+        render_handlers_authoring(value, plan, IDENTITY, descriptions())
+    assert error.value.failures[0].id == "ed.author.unprepared_operations"
+    assert (
+        error.value.failures[0].message
+        == "комплект только из прямых ПКС собирается `render_authoring`"
+    )
+    with pytest.raises(ValueError, match="хотя бы одна операция"):
+        prepare_authoring(value, (), IDENTITY, version_scope="manager")
+    with pytest.raises(AuthoringPreconditionError) as error:
+        render_authoring(replace(prepared(), operations=()), descriptions())
+    assert error.value.failures[0].id == "ed.author.unprepared_operations"
+
+
+def test_version_two_adds_and_drops_an_operation_only_when_named():
+    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from tests.test_ed_authoring_handlers import handler, handler_inputs
+
+    value = handler_inputs()
+    send = handler()
+    receive = handler("ПередЗаписьюПолученныхДанных")
+    first_plan = prepare_handler_operations(value, (send,), IDENTITY, version_scope="manager")
+    first = render_handlers_authoring(value, first_plan, IDENTITY, descriptions())
+    second_plan = prepare_handler_operations(
+        value, (send, receive), IDENTITY, version_scope="manager"
+    )
+    second = render_handlers_authoring(
+        value,
+        second_plan,
+        IDENTITY,
+        descriptions(),
+        previous_manifest=first.manifest,
+        previous_files=first.files,
+    )
+    assert second.status == "ready"
+    assert second.manifest.schema_version == 2
+    assert second.manifest.identity_map == first.manifest.identity_map
+    for path, payload in first.files.items():
+        if path.endswith(".xml"):
+            assert second.files[path] == payload
+    added = {op.operation_id for op in second.manifest.handler_operations} - {
+        op.operation_id for op in first.manifest.handler_operations
+    }
+    assert len(added) == 1
+    added_id = next(iter(added))
+    with pytest.raises(AuthoringPreconditionError) as error:
+        render_handlers_authoring(
+            value,
+            first_plan,
+            IDENTITY,
+            descriptions(),
+            previous_manifest=second.manifest,
+            previous_files=second.files,
+        )
+    assert error.value.failures[0].id == "ed.author.owned_content_changed"
+    assert added_id in error.value.failures[0].message
+    dropped = render_handlers_authoring(
+        value,
+        first_plan,
+        IDENTITY,
+        descriptions(),
+        previous_manifest=second.manifest,
+        previous_files=second.files,
+        drop_operations=frozenset({added_id}),
+    )
+    assert dropped.files == first.files
+    with pytest.raises(AuthoringPreconditionError) as error:
+        render_handlers_authoring(
+            value,
+            first_plan,
+            IDENTITY,
+            descriptions(),
+            previous_manifest=second.manifest,
+            previous_files=second.files,
+            drop_operations=frozenset({"нет-такой-операции"}),
+        )
+    assert error.value.failures[0].id == "ed.author.unprepared_operations"
+
+
 def test_receive_instruction_golden():
     op = replace(OPERATION, target=replace(TARGET, direction="receive"))
     text = render_authoring(prepared(operations=(op,)), descriptions()).instruction
@@ -857,7 +1052,7 @@ def test_resources_in_built_wheel(tmp_path):
     assert result.returncode == 0, result.stderr
     wheel = next(tmp_path.glob("*.whl"))
     with zipfile.ZipFile(wheel) as archive:
-        for name in ("instruction.md", "xml_profile_2_20.json"):
+        for name in ("instruction.md", "handlers_instruction.md", "xml_profile_2_20.json"):
             packaged = archive.read("kd2_rules_mcp/authoring/ed/templates/" + name)
             assert (
                 packaged

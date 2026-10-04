@@ -33,6 +33,64 @@ def test_artifact_name_and_previous_ownership():
         assert caught.value.failures[0].id == "ed.author.owned_content_changed"
 
 
+def test_handler_kit_procedure_hash_rejects_a_rewritten_manifest():
+    """Согласованный хеш файла не прячет чужой отпечаток тела процедуры."""
+    from kd2_rules_mcp.authoring.ed.model import PreserveMissingHeaderProperty
+    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd2_rules_mcp.validation.ed_authoring import prepare_authoring, prepare_handler_operations
+    from tests.test_ed_authoring_handlers import handler_inputs
+    from tests.test_ed_authoring_model import IDENTITY, OPERATION, TARGET
+
+    op = replace(OPERATION, target=replace(TARGET, direction="receive"))
+    value = prepare_authoring(handler_inputs(), (op,), IDENTITY, version_scope="manager")
+    assert value.preparation_inputs is not None
+    first = render_authoring(value, descriptions())
+    prop = first.manifest.operations[0]
+    plan = prepare_handler_operations(
+        value.preparation_inputs,
+        (prop, PreserveMissingHeaderProperty(prop.target, prop.operation_id)),
+        IDENTITY,
+        version_scope="manager",
+    )
+    migrated = render_handlers_authoring(
+        value.preparation_inputs,
+        plan,
+        IDENTITY,
+        descriptions(),
+        previous_manifest=first.manifest,
+        previous_files=first.files,
+    )
+    owned = previous_artifact(migrated.files)
+    assert owned is not None and owned.schema_version == 2
+    xml = dict(migrated.files)
+    configuration = "extension/Configuration.xml"
+    configuration_uuid = migrated.manifest.identity_map.objects["configuration"]
+    xml[configuration] = xml[configuration].replace(
+        configuration_uuid.encode("utf-8"),
+        b"00000000-0000-0000-0000-000000000099",
+        1,
+    )
+    assert xml[configuration] != migrated.files[configuration]
+    with pytest.raises(AuthoringPreconditionError) as caught:
+        previous_artifact(xml)
+    assert caught.value.failures[0].id == "ed.author.owned_content_changed"
+    from kd2_rules_mcp.authoring.ed.manifest import sha256
+
+    module = next(path for path in migrated.files if path.endswith("Module.bsl"))
+    rewritten = dict(migrated.files)
+    rewritten[module] = rewritten[module].replace(
+        "\t\tВозврат;".encode(), "\t\tВозврат; // edit".encode(), 1
+    )
+    manifest = replace(
+        migrated.manifest,
+        file_hashes={**migrated.manifest.file_hashes, module: sha256(rewritten[module])},
+    )
+    rewritten["manifest.json"] = manifest.to_bytes()
+    with pytest.raises(AuthoringPreconditionError) as caught:
+        previous_artifact(rewritten)
+    assert caught.value.failures[0].id == "ed.author.owned_content_changed"
+
+
 def test_relative_inputs_and_change_groups_preserve_payloads():
     first = render_authoring(prepared(), descriptions())
     bundle = with_source_hashes(

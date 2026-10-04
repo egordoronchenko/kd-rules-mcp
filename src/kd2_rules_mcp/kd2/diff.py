@@ -26,7 +26,13 @@ from kd2_rules_mcp.kd2.model import (
     RulesDocument,
 )
 from kd2_rules_mcp.kd2.schema import Child, Scalar, kind
-from kd2_rules_mcp.validation.address import pks_address, pks_segments, pkz_address, rule_address
+from kd2_rules_mcp.validation.address import (
+    pks_address,
+    pks_segments,
+    pkz_address,
+    pro_addresses,
+    rule_address,
+)
 from kd2_rules_mcp.validation.handlers import ALGORITHM_EVENT, EVENT_AREAS
 
 # Поля заголовка, которые писатель КД заполняет заново при каждой выгрузке.
@@ -77,7 +83,35 @@ _EXCHANGE_LISTS: tuple[tuple[str, str, str], ...] = (
     ("Обработки", "header", "plain"),
 )
 
-ChangeKind = Literal["added", "removed", "changed"]
+ChangeKind = Literal["added", "removed", "changed", "moved"]
+
+# Обработчики ПРО, которые читает загрузчик БСП (ЗПР:327–349).
+_PRO_HANDLERS = (
+    "ПередОбработкой",
+    "ПриОбработке",
+    "ПриОбработкеДополнительный",
+    "ПослеОбработки",
+)
+_PLAN_FILTER = "ОтборПоСвойствамПланаОбмена"
+_OBJECT_FILTER = "ОтборПоСвойствамОбъекта"
+_PLAN_FILTER_FIELDS = (
+    "ЭтоСтрокаКонстанты",
+    "ТипСвойстваОбъекта",
+    "СвойствоПланаОбмена",
+    "ВидСравнения",
+    "СвойствоОбъекта",
+)
+_OBJECT_FILTER_FIELDS = (
+    "ТипСвойстваОбъекта",
+    "ВидСравнения",
+    "СвойствоОбъекта",
+    "Вид",
+    "ЗначениеКонстанты",
+)
+_PROPERTY_TABLES = ("ТаблицаСвойствОбъекта", "ТаблицаСвойствПланаОбмена")
+# Первые строки тела добавленного алгоритма, запроса или параметра.
+_PREVIEW_LINES = 8
+_PREVIEW_CHARS = 400
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +125,9 @@ class RuleChange:
     old: str | None = None
     new: str | None = None
     handler_diff: list[str] | None = None
+    # Размер и первые строки тела добавленного алгоритма, запроса или параметра.
+    size: int | None = None
+    preview: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,18 +217,8 @@ def _diff_registration(
         compare_shell=True,
         out=out,
     )
-    _diff_list(
-        left.root.child("ПравилаРегистрацииОбъектов"),
-        right.root.child("ПравилаРегистрацииОбъектов"),
-        section="registration",
-        mode="pro",
-        pko_code="",
-        prefix="",
-        parent_address="",
-        order=False,
-        compare_shell=True,
-        out=out,
-    )
+    _diff_registration_groups(left, right, out)
+    _diff_registration_rules(left, right, out)
 
 
 def _diff_list(
@@ -236,9 +263,9 @@ def _diff_list(
             order=order,
             out=out,
         )
-    for address, _, _ in right_rows:
+    for address, node, _path in right_rows:
         if address not in left_keys:
-            out.append(RuleChange(section, address, "added"))
+            out.append(_added_change(section, address, node))
     if order and mode in ("pks", "pkz"):
         _diff_order(left_rows, right_rows, section=section, address=parent_address, out=out)
 
@@ -362,10 +389,6 @@ def _local_key(node: Node, mode: str, pko_code: str, _index: int) -> str:
         if node.kind.name == "pkz":
             return pkz_address(pko_code, str(node.values.get("Источник", "")))
         return f"ПКО «{pko_code}» / {rule_address(node)}"
-    if mode == "pro" and node.kind.name == "pro":
-        meta = str(node.values.get("ОбъектМетаданныхИмя", "")).strip()
-        base = rule_address(node)
-        return f"{base} / {meta}" if meta else base
     if mode == "plan":
         return f"состав «{node.values.get('Тип', '')}»"
     if mode == "filter":
@@ -575,7 +598,11 @@ def clip(text: str) -> str:
 
 
 def _handler_lines(old: str, new: str) -> list[str] | None:
-    """Unified diff внутри обработчика, без заголовков файлов, не длиннее предела ответа."""
+    """Unified diff внутри обработчика, без заголовков файлов, не длиннее предела ответа.
+
+    Длинный дифф режется пополам: начало и конец, между ними пометка обрезки.
+    Если в полном диффе есть и удалённые, и добавленные строки, обе группы остаются.
+    """
     if old.splitlines() == new.splitlines():
         return None
     lines = [
@@ -583,9 +610,328 @@ def _handler_lines(old: str, new: str) -> list[str] | None:
         for line in difflib.unified_diff(old.splitlines(), new.splitlines(), n=1, lineterm="")
         if not line.startswith("---") and not line.startswith("+++")
     ]
-    text = "\n".join(lines)
-    if len(text) <= TEXT_LIMIT:
+    if _chars(lines) <= TEXT_LIMIT:
         return lines
-    kept = text[:TEXT_LIMIT].splitlines()
-    kept.append(_TRUNCATED)
-    return kept
+    return _clip_diff_lines(lines)
+
+
+def _chars(lines: list[str]) -> int:
+    return len("\n".join(lines)) if lines else 0
+
+
+def _is_diff_sign(line: str, sign: str) -> bool:
+    return line.startswith(sign) and not line.startswith(sign * 3)
+
+
+def _fit_count(lines: list[str], budget: int) -> int:
+    """Сколько строк с начала умещается в бюджет символов. Хотя бы одна, если список не пуст."""
+    if not lines or budget <= 0:
+        return 0
+    size = 0
+    count = 0
+    for line in lines:
+        extra = len(line) if count == 0 else len(line) + 1
+        if count and size + extra > budget:
+            break
+        if count == 0 and len(line) > budget:
+            return 1
+        size += extra
+        count += 1
+    return count
+
+
+def _clip_diff_lines(lines: list[str]) -> list[str]:
+    """Начало и конец диффа в пределах `TEXT_LIMIT`, место обрезки помечено."""
+    half = TEXT_LIMIT // 2
+    head_n = _fit_count(lines, half)
+    tail_budget = TEXT_LIMIT - _chars(lines[:head_n])
+    tail_n = _fit_count(list(reversed(lines)), tail_budget)
+    if head_n + tail_n > len(lines):
+        tail_n = len(lines) - head_n
+    head = list(lines[:head_n])
+    tail = list(lines[len(lines) - tail_n :]) if tail_n else []
+    head, tail = _cover_diff_signs(lines, head, tail)
+    if head and tail and head_n + len(tail) > len(lines):
+        # После подстановки знака куски наложились: оставляем знак и режем хвост.
+        overlap = head_n + len(tail) - len(lines)
+        tail = tail[overlap:]
+    body = head + tail
+    while body and _chars(body) > TEXT_LIMIT and len(body) > 2:
+        # Снимаем строку рядом с серединой, но не последнюю «-» и не последнюю «+».
+        drop = _droppable(body)
+        if drop is None:
+            break
+        del body[drop]
+        head, tail = body, []
+    if not tail:
+        return [*head, _TRUNCATED]
+    if not head:
+        return [_TRUNCATED, *tail]
+    return [*head, _TRUNCATED, *tail]
+
+
+def _cover_diff_signs(
+    lines: list[str], head: list[str], tail: list[str]
+) -> tuple[list[str], list[str]]:
+    """В обрезке остаётся хотя бы одна удалённая и одна добавленная строка, если они были."""
+    kept = head + tail
+    for sign, into_head in (("-", True), ("+", False)):
+        if any(_is_diff_sign(line, sign) for line in kept):
+            continue
+        found = next((line for line in lines if _is_diff_sign(line, sign)), None)
+        if found is None:
+            continue
+        if into_head:
+            head = [found, *head[1:]] if head else [found]
+        else:
+            tail = [*tail[:-1], found] if tail else [found]
+        kept = head + tail
+    return head, tail
+
+
+def _droppable(lines: list[str]) -> int | None:
+    """Индекс строки, которую можно снять, не потеряв последний «-» или «+»."""
+    last_minus = next(
+        (index for index in range(len(lines) - 1, -1, -1) if _is_diff_sign(lines[index], "-")),
+        None,
+    )
+    last_plus = next(
+        (index for index in range(len(lines) - 1, -1, -1) if _is_diff_sign(lines[index], "+")),
+        None,
+    )
+    protected = {index for index in (last_minus, last_plus) if index is not None}
+    middle = len(lines) // 2
+    for shift in range(len(lines)):
+        for index in (middle - shift, middle + shift):
+            if 0 <= index < len(lines) and index not in protected:
+                return index
+    return None
+
+
+def _added_change(section: str, address: str, node: Node) -> RuleChange:
+    preview = _added_preview(node)
+    if preview is None:
+        return RuleChange(section, address, "added")
+    size, text = preview
+    return RuleChange(section, address, "added", size=size, preview=text or None)
+
+
+def _added_preview(node: Node) -> tuple[int, str] | None:
+    """Размер и первые строки тела добавленного алгоритма, запроса или параметра."""
+    if node.kind.name in ("algorithm", "query"):
+        raw = node.values.get("Текст", "")
+    elif node.kind.name == "parameter":
+        raw = node.attrs.get("ПослеЗагрузкиПараметра", "")
+    else:
+        return None
+    body = normalize_newlines(str(raw or ""))
+    lines: list[str] = []
+    total = 0
+    for line in body.splitlines()[:_PREVIEW_LINES]:
+        piece = line if len(line) <= 120 else line[:120] + "…"
+        extra = len(piece) if not lines else len(piece) + 1
+        if lines and total + extra > _PREVIEW_CHARS:
+            break
+        lines.append(piece)
+        total += extra
+    return len(body), "\n".join(lines)
+
+
+def _diff_registration_groups(
+    left: RegistrationRules, right: RegistrationRules, out: list[RuleChange]
+) -> None:
+    """Оболочки групп ПРО по пути кодов. Правила внутри сопоставляются отдельно."""
+    left_rows = _registration_groups(left)
+    right_rows = {address: node for address, node in _registration_groups(right)}
+    left_keys = {address for address, _node in left_rows}
+    for address, node in left_rows:
+        other = right_rows.get(address)
+        if other is None:
+            out.append(RuleChange("registration", address, "removed"))
+            continue
+        _diff_maps(_field_map(node), _field_map(other), "registration", address, out)
+    for address in right_rows:
+        if address not in left_keys:
+            out.append(RuleChange("registration", address, "added"))
+
+
+def _registration_groups(document: RegistrationRules) -> list[tuple[str, Node]]:
+    section = document.root.child("ПравилаРегистрацииОбъектов")
+    found: list[tuple[str, Node]] = []
+
+    def visit(node: Node | None, prefix: str) -> None:
+        if node is None:
+            return
+        for item in node.items:
+            if not item.is_group:
+                continue
+            path = f"{prefix}/{item.code}" if prefix else item.code
+            found.append((f"группа ПРО «{path}»", item))
+            visit(item, path)
+
+    visit(section, "")
+    return found
+
+
+def _diff_registration_rules(
+    left: RegistrationRules, right: RegistrationRules, out: list[RuleChange]
+) -> None:
+    """ПРО сопоставляются по объекту метаданных, группа в адрес не входит."""
+    left_rows = _pro_rows(left)
+    right_rows = _pro_rows(right)
+    right_by_address = {address: (node, group) for address, node, group in right_rows}
+    left_keys = {address for address, _node, _group in left_rows}
+    for address, node, group in left_rows:
+        other = right_by_address.get(address)
+        if other is None:
+            out.append(RuleChange("registration", address, "removed"))
+            continue
+        _diff_pro(node, other[0], address, group, other[1], out)
+    for address, _node, _group in right_rows:
+        if address not in left_keys:
+            out.append(RuleChange("registration", address, "added"))
+
+
+def _pro_rows(document: RegistrationRules) -> list[tuple[str, Node, str]]:
+    section = document.root.child("ПравилаРегистрацииОбъектов")
+    nodes = document.rules()
+    groups = _pro_groups(section)
+    return [
+        (address, node, groups.get(id(node), ""))
+        for address, node in zip(pro_addresses(nodes), nodes, strict=True)
+    ]
+
+
+def _pro_groups(section: Node | None) -> dict[int, str]:
+    """Путь кодов групп над правилом. У правила в корне раздела путь пустой."""
+    paths: dict[int, str] = {}
+
+    def visit(node: Node, prefix: str) -> None:
+        for item in node.items:
+            if item.is_group:
+                nested = f"{prefix}/{item.code}" if prefix else item.code
+                visit(item, nested)
+            else:
+                paths[id(item)] = prefix
+
+    if section is not None:
+        visit(section, "")
+    return paths
+
+
+def _diff_pro(
+    left: Node,
+    right: Node,
+    address: str,
+    left_group: str,
+    right_group: str,
+    out: list[RuleChange],
+) -> None:
+    if left_group != right_group:
+        out.append(
+            RuleChange(
+                "registration",
+                address,
+                "moved",
+                field="group",
+                old=left_group,
+                new=right_group,
+            )
+        )
+    left_fields = _field_map(left)
+    right_fields = _field_map(right)
+    for name in _PRO_HANDLERS:
+        left_fields.pop(name, None)
+        right_fields.pop(name, None)
+        _diff_pro_handler(left, right, address, name, out)
+    _diff_maps(left_fields, right_fields, "registration", address, out)
+    _diff_pro_filter(left, right, address, _PLAN_FILTER, plan=True, out=out)
+    _diff_pro_filter(left, right, address, _OBJECT_FILTER, plan=False, out=out)
+
+
+def _diff_pro_handler(
+    left: Node, right: Node, address: str, name: str, out: list[RuleChange]
+) -> None:
+    old = _handler_text(left, name)
+    new = _handler_text(right, name)
+    if old == new:
+        return
+    if old and not new:
+        out.append(RuleChange("registration", address, "removed", field=name, old=clip(old)))
+        return
+    if new and not old:
+        out.append(RuleChange("registration", address, "added", field=name, new=clip(new)))
+        return
+    lines = _handler_lines(old, new)
+    if lines is not None:
+        out.append(RuleChange("registration", address, "changed", field=name, handler_diff=lines))
+
+
+def _handler_text(node: Node, name: str) -> str:
+    value = node.values.get(name, "")
+    if not isinstance(value, str):
+        return ""
+    return normalize_newlines(value).strip()
+
+
+def _diff_pro_filter(
+    left: Node,
+    right: Node,
+    address: str,
+    tag: str,
+    *,
+    plan: bool,
+    out: list[RuleChange],
+) -> None:
+    old = _filter_text(left.child(tag), plan=plan)
+    new = _filter_text(right.child(tag), plan=plan)
+    if old == new:
+        return
+    if old and not new:
+        out.append(RuleChange("registration", address, "removed", field=tag, old=clip(old)))
+        return
+    if new and not old:
+        out.append(RuleChange("registration", address, "added", field=tag, new=clip(new)))
+        return
+    out.append(
+        RuleChange("registration", address, "changed", field=tag, old=clip(old), new=clip(new))
+    )
+
+
+def _filter_text(node: Node | None, *, plan: bool) -> str:
+    if node is None or not node.items:
+        return ""
+    return "\n".join(_filter_lines(node, plan=plan, depth=0))
+
+
+def _filter_lines(node: Node, *, plan: bool, depth: int) -> list[str]:
+    pad = "  " * depth
+    lines: list[str] = []
+    for item in node.items:
+        if item.tag == "Группа":
+            raw = str(item.values.get("БулевоЗначениеГруппы", "")).strip()
+            # Корень отбора — «И» (ЗПР:1203). У группы объекта «И» только при значении «И»,
+            # иначе «ИЛИ» (ЗПР:642–646).
+            operator = raw if plan else ("И" if raw == "И" else "ИЛИ")
+            lines.append(f"{pad}группа {operator}")
+            lines.extend(_filter_lines(item, plan=plan, depth=depth + 1))
+            continue
+        fields = _PLAN_FILTER_FIELDS if plan else _OBJECT_FILTER_FIELDS
+        bits: list[str] = []
+        for tag in fields:
+            value = item.values.get(tag, "")
+            if value not in (None, "", False):
+                bits.append(f"{tag}={value}")
+        for table_tag in _PROPERTY_TABLES:
+            table = item.child(table_tag)
+            if table is None:
+                continue
+            names = [
+                str(row.values.get("Наименование", ""))
+                for row in table.items
+                if str(row.values.get("Наименование", "")).strip()
+            ]
+            if names:
+                bits.append(f"{table_tag}={','.join(names)}")
+        lines.append(f"{pad}{'; '.join(bits)}")
+    return lines

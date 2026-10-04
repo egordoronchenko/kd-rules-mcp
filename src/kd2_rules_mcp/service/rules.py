@@ -15,18 +15,23 @@ from kd2_rules_mcp.authoring.edits import (
 from kd2_rules_mcp.authoring.pack import collect, pack_rules
 from kd2_rules_mcp.errors import Kd2Error
 from kd2_rules_mcp.kd2.diff import SECTIONS, RuleChange, diff_rules, ignored_header_fields
-from kd2_rules_mcp.kd2.model import RulesDocument
+from kd2_rules_mcp.kd2.model import ExchangeRules, RegistrationRules, RulesDocument
 from kd2_rules_mcp.kd2.rules_io import load_rules
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.views import (
+    PKS_SECTION,
+    REGISTRATION_SECTION,
     conversion_view,
     counts,
     edit_view,
+    find_pro,
     listed_rule_rows,
     node_view,
     note_private,
     overview_groups,
     page_limit,
+    parse_detail,
+    pro_view,
     report_summary,
     rule_group,
     slice_rows,
@@ -88,20 +93,41 @@ class RulesMixin(ServiceBase):
             rows = listed_rule_rows(self._document(project_id), section)
         if text:
             needle = text.casefold()
-            rows = [row for row in rows if needle in " ".join(map(str, row.values())).casefold()]
+            if section == PKS_SECTION:
+                rows = [
+                    row
+                    for row in rows
+                    if needle in str(row.get("source", "")).casefold()
+                    or needle in str(row.get("target", "")).casefold()
+                ]
+            else:
+                rows = [
+                    row for row in rows if needle in " ".join(map(str, row.values())).casefold()
+                ]
         return slice_rows(rows, offset, limit)
 
     def rules_get(
         self, project_id: str, kind: str, key: str, owner: str, limit: int
     ) -> dict[str, Any]:
         with self._lock:
-            rules = self._exchange(project_id)
+            document = self._document(project_id)
+            if isinstance(document, RegistrationRules):
+                page_limit(limit)
+                if kind != "pro":
+                    raise Kd2Error(
+                        f"Проект «{project_id}» — правила регистрации. "
+                        f"Доступен вид pro, раздел «{REGISTRATION_SECTION}»"
+                    )
+                node, address, group = find_pro(document, key)
+                return pro_view(node, address, group)
+            if not isinstance(document, ExchangeRules):
+                raise Kd2Error(f"Проект «{project_id}» не загружен")
             if kind == CONVERSION_KIND:
                 page_limit(limit)
-                find_rule(rules, kind, key, owner)
-                return conversion_view(rules)
-            node = find_rule(rules, kind, key, owner)
-            return node_view(node, page_limit(limit), rule_group(rules, node))
+                find_rule(document, kind, key, owner)
+                return conversion_view(document)
+            node = find_rule(document, kind, key, owner)
+            return node_view(node, page_limit(limit), rule_group(document, node))
 
     def rules_save(self, project_id: str, path: str, overwrite: bool) -> dict[str, Any]:
         with self._lock:
@@ -248,23 +274,27 @@ class RulesMixin(ServiceBase):
         section: str | None,
         offset: int,
         limit: int,
+        detail: str | None = None,
     ) -> dict[str, Any]:
         """Смысловой дифф двух сторон: открытый проект или файл правил по пути агента."""
         if section and section not in SECTIONS:
             known = ", ".join(SECTIONS)
             raise Kd2Error(f"Неизвестный раздел «{section}»; разделы: {known}")
+        mode = parse_detail(detail)
         left_ref, left_doc = self._diff_side(left)
         right_ref, right_doc = self._diff_side(right)
         changes = diff_rules(left_doc, right_doc, include_header=include_header, order=order)
         if section:
             changes = [item for item in changes if item.section == section]
+        rows = _brief_rows(changes) if mode == "brief" else [_change_row(item) for item in changes]
         return {
             "left": left_ref,
             "right": right_ref,
             "kind": "registration" if left_doc.root_tag == "ПравилаРегистрации" else "exchange",
+            "detail": mode,
             "ignored_fields": ignored_header_fields(include_header),
             "summary": _diff_summary(changes),
-            "changes": slice_rows([_change_row(item) for item in changes], offset, limit),
+            "changes": slice_rows(rows, offset, limit),
         }
 
     def _diff_side(self, ref: str) -> tuple[dict[str, str], RulesDocument]:
@@ -281,8 +311,24 @@ def _diff_summary(changes: list[RuleChange]) -> dict[str, dict[str, int]]:
     counts: dict[str, dict[str, int]] = {}
     for change in changes:
         bucket = counts.setdefault(change.section, {"added": 0, "removed": 0, "changed": 0})
-        bucket[change.change] += 1
+        if change.change == "moved":
+            bucket["moved"] = bucket.get("moved", 0) + 1
+        else:
+            bucket[change.change] += 1
     return {name: counts[name] for name in SECTIONS if name in counts}
+
+
+def _brief_rows(changes: list[RuleChange]) -> list[dict[str, Any]]:
+    """Адреса без содержимого. Повтор того же вида изменения по адресу схлопывается."""
+    seen: set[tuple[str, str, str]] = set()
+    rows: list[dict[str, Any]] = []
+    for change in changes:
+        key = (change.section, change.address, change.change)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({"section": change.section, "address": change.address, "change": change.change})
+    return rows
 
 
 def _change_row(change: RuleChange) -> dict[str, Any]:
@@ -299,4 +345,8 @@ def _change_row(change: RuleChange) -> dict[str, Any]:
         row["new"] = change.new
     if change.handler_diff is not None:
         row["handler_diff"] = change.handler_diff
+    if change.size is not None:
+        row["size"] = change.size
+    if change.preview:
+        row["preview"] = change.preview
     return row

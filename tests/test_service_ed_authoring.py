@@ -11,11 +11,13 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
+from kd2_rules_mcp.authoring.ed.handlers import operation_from_input
 from kd2_rules_mcp.authoring.ed.manifest import operation_dict
 from kd2_rules_mcp.authoring.ed.xml_dump import M, serialize
 from kd2_rules_mcp.server import error_payload
 from kd2_rules_mcp.service import Kd2Service, Settings
 from kd2_rules_mcp.service import ed_authoring as module
+from tests.test_ed_authoring_handlers import HANDLERS, handler_inputs
 from tests.test_ed_authoring_model import DATA, IDENTITY, OPERATION
 from tests.test_service_ed_routes import _xml
 
@@ -173,6 +175,333 @@ def content(destination):
         for p in destination.rglob("*")
         if p.is_file()
     }
+
+
+def handler_setup(setup, fixture, interface=2):
+    """DTO проходят настоящие файловые снимки сервиса, без подмены подготовки/сборки."""
+    old, arguments, root = setup
+    incoming = fixture.get("previous_input", fixture["input"])
+    previous = next((op for op in incoming if op.get("expected_previous")), None)
+    text = (
+        handler_inputs(
+            interface,
+            event=previous["event"] if previous else None,
+            previous=previous["expected_previous"] if previous else "",
+        )
+        .document.files[0]
+        .text
+    )
+    (root / "CommonModules/Менеджер2/Ext/Module.bsl").write_text(text, encoding="utf-8")
+    if fixture.get("context") == "reference":
+        package = root / "XDTOPackages/Формат120/Ext/Package.bin"
+        package.write_text(
+            (HANDLERS / "reference/format-1.20.bin")
+            .read_text("utf-8")
+            .replace("urn:fiction:1.20", "urn:fiction/1.20"),
+            encoding="utf-8",
+        )
+        path = root / "Catalogs/Товары.xml"
+        doc = etree.parse(str(path)).getroot()
+        node = doc.find(".//{*}Attribute/{*}Properties/{*}Type")
+        assert node is not None
+        node[:] = [
+            etree.fromstring(
+                b'<v8:Type xmlns:v8="http://v8.1c.ru/8.1/data/core" '
+                b'xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config">cfg:CatalogRef.'
+                + "Товары".encode()
+                + b"</v8:Type>"
+            )
+        ]
+        path.write_bytes(serialize(doc))
+    service = Kd2Service(old.settings)
+    refs = {
+        "project_id": service.ed_open(str(root / "CommonModules/Менеджер2/Ext/Module.bsl"))[
+            "project_id"
+        ],
+        "schema_id": service.ed_schema_open(
+            "1.20", project="Пример", configuration="Main", package="Формат120"
+        )["schema_id"],
+        "structure_id": service.structure_load_project(
+            "Пример", "Main", structure_id="fiction-main", force=True
+        )["structure_id"],
+    }
+    arguments = arguments | {"operations": transport_operations(fixture["input"], refs)}
+    return (service, arguments, root), refs
+
+
+def transport_operations(operations, refs):
+    rows = copy.deepcopy(operations)
+    for row in rows:
+        row["target"].pop("project", None)
+        row["target"].pop("configuration", None)
+        row["target"].update(refs)
+    return rows
+
+
+def test_explicit_legacy_kind_preserves_bytes_and_preview_hash(setup):
+    first = preview(setup)
+    raw = copy.deepcopy(setup[1]["operations"])
+    raw[0]["kind"] = "add_header_property"
+    explicit = preview(setup, operations=raw)
+    assert first == explicit
+    written = write(setup, first)
+    before = content(Path(written["output_dir"]))
+    assert write(setup, explicit, operations=raw)["status"] == "unchanged"
+    assert content(Path(written["output_dir"])) == before
+    assert json.loads(before["manifest.json"])["schema_version"] == 1
+
+
+@pytest.mark.parametrize("path", sorted((HANDLERS / "dto").glob("*.json")), ids=lambda p: p.stem)
+@pytest.mark.parametrize("interface", [1, 2, 3])
+def test_handler_dto_service_lifecycle(setup, path, interface):
+    fixture = json.loads(path.read_text("utf-8"))
+    if interface not in fixture["interfaces"]:
+        pytest.skip("DTO не задаёт этот интерфейс")
+    current, refs = handler_setup(setup, fixture, interface)
+    if "previous_input" in fixture:
+        write(current, operations=transport_operations(fixture["previous_input"], refs))
+    options = {"drop_operations": fixture.get("drop_operations", [])}
+    if fixture.get("expected_failure"):
+        refused = failure(lambda: preview(current, **options), "ed_authoring_precondition")
+        assert fixture["expected_failure"] in {f["id"] for f in refused["failures"]}
+        return
+    viewed = preview(current, **options)
+    assert viewed["summary"]["layer"] == {
+        "certain": True,
+        "unknown_lines": 0,
+        "unresolved_dispatch": 0,
+        "new_issues": 0,
+    }
+    assert not viewed["summary"]["runtime_verified"]
+    assert '"body":' not in json.dumps(viewed, ensure_ascii=False)
+    service, arguments, _ = current
+    rows = all_items(
+        service.ed_authoring_build, **arguments, **options, section="operations", limit=1
+    )
+    assert [r["operation_id"] for r in rows] == fixture["operation_ids"]
+    for row in rows:
+        if "body" in row:
+            assert row["body_sha256"] == module.sha256(row["body"].encode())
+            assert row["body_origin"] in ("agent", "preset")
+    refused = failure(
+        lambda: service.ed_authoring_build(
+            **arguments, **options, mode="write", expected_preview_hash=viewed["build_hash"]
+        ),
+        "ed_authoring_ack_required",
+    )
+    assert refused["required_acknowledgements"]
+    written = write(current, viewed, **options)
+    destination = Path(written["output_dir"])
+    before = content(destination)
+    assert json.loads(before["manifest.json"])["schema_version"] == 2
+    golden = (
+        HANDLERS / "golden" / path.stem / ("module.bsl" if interface in (1, 2) else "module-v3.bsl")
+    )
+    assert (
+        next(b for n, b in before.items() if n.startswith("modules/") and n.endswith(".bsl"))
+        == golden.read_bytes()
+    )
+    assert write(current)["status"] == "unchanged"
+    assert content(destination) == before
+    extra = copy.deepcopy(setup[1]["operations"][0])
+    extra["target"] = extra["target"] | refs | {"pko_address": "ПКО/Заказ", "direction": "send"}
+    added = preview(current, operations=[extra])
+    assert added["build_hash"] != viewed["build_hash"]
+    failure(lambda: write(current, viewed, operations=[extra]), "ed_authoring_stale")
+    write(current, added, operations=[extra])
+    extra_id = service._operation(extra, "Пример", "Main")[0].operation_id
+    dropped = preview(current, drop_operations=[extra_id])
+    write(current, dropped, drop_operations=[extra_id])
+    assert content(destination) == before
+    for name in before:
+        if name.endswith("Module.bsl"):
+            (destination / name).write_bytes(before[name] + b"\n// changed body\n")
+            break
+    refused = failure(lambda: preview(current), "ed_authoring_precondition")
+    assert refused["failures"][0]["id"] == "ed.author.owned_content_changed"
+
+
+def test_v1_migration_and_dropping_last_handler_keeps_v2(setup):
+    prop = copy.deepcopy(setup[1]["operations"][0])
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    prop["target"] = current[1]["operations"][0]["target"]
+    legacy = write(current, operations=[prop])
+    old = json.loads((Path(legacy["output_dir"]) / "manifest.json").read_text("utf-8"))
+    viewed = preview(current)
+    assert viewed["summary"]["migration"] == {"from": 1, "to": 2}
+    assert "версии 1" in viewed["changes"][0]
+    failure(lambda: write(current, legacy), "ed_authoring_stale")
+    written = write(current, viewed)
+    new = json.loads((Path(written["output_dir"]) / "manifest.json").read_text("utf-8"))
+    assert old["identity_map"] == new["identity_map"]
+    handler_id = next(
+        r["operation_id"] for r in new["operations"] if r.get("kind") == "set_object_handler"
+    )
+    dropped = preview(current, operations=[prop], drop_operations=[handler_id])
+    assert dropped["summary"]["schema_version"] == 2 and dropped["summary"]["handlers"] == 0
+    write(current, dropped, operations=[prop], drop_operations=[handler_id])
+    assert write(current, operations=[prop])["status"] == "unchanged"
+
+
+def test_handler_body_replacement_requires_drop_and_changes_preview(setup):
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    first = write(current)
+    old_id = operation_from_input(fixture["input"][0]).operation_id
+    incoming = copy.deepcopy(current[1]["operations"])
+    incoming[0]["body"] = "Возврат;\n// Новое тело\n"
+    refused = failure(lambda: preview(current, operations=incoming), "ed_authoring_precondition")
+    assert refused["failures"][0]["id"] == "ed.author.handler_slot_conflict"
+    viewed = preview(current, operations=incoming, drop_operations=[old_id])
+    assert viewed["build_hash"] != first["build_hash"]
+    failure(
+        lambda: write(current, first, operations=incoming, drop_operations=[old_id]),
+        "ed_authoring_stale",
+    )
+    write(current, viewed, operations=incoming, drop_operations=[old_id])
+
+
+def test_v2_concurrent_write_and_folder_change(setup, monkeypatch):
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    viewed = preview(current)
+    assert write(current, viewed)["status"] == "written"
+    assert write(current, viewed)["status"] == "unchanged"
+    service = current[0]
+    original = service._write_artifact
+
+    def concurrent(destination, files, previous, entries):
+        path = next(p for p in destination.rglob("Module.bsl"))
+        path.write_bytes(path.read_bytes() + b"\n// concurrent\n")
+        return original(destination, files, previous, entries)
+
+    monkeypatch.setattr(service, "_write_artifact", concurrent)
+    failure(lambda: write(current, viewed), "ed_authoring_stale")
+    assert any(b"// concurrent" in b for b in content(Path(viewed["output_dir"])).values())
+
+
+@pytest.mark.parametrize("body", ["// " + "x" * 65536, "Возврат;\n" * 2001], ids=["bytes", "lines"])
+def test_handler_body_limits_and_summary_without_body(setup, body):
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    fixture["input"][0]["body"] = body
+    current, _ = handler_setup(setup, fixture)
+    failure(lambda: preview(current), "ed_authoring_resource_limit")
+
+
+def test_large_body_only_on_operations_page_and_stale_inputs(setup, caplog):
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    fixture["input"][0]["body"] = "// BODY_SENTINEL_" + "x" * 5000 + "\nВозврат;\n"
+    current, _ = handler_setup(setup, fixture)
+    caplog.set_level(logging.INFO, logger=module.__name__)
+    viewed = preview(current)
+    assert "BODY_SENTINEL" not in json.dumps(viewed) and "BODY_SENTINEL" not in caplog.text
+    page = preview(current, section="operations")
+    assert "BODY_SENTINEL" in page["items"][0]["body"]
+    assert not page["has_more"] and page["next_offset"] == 1
+    first = write(current, viewed)
+    path = current[2] / "CommonModules/Менеджер2/Ext/Module.bsl"
+    path.write_text(path.read_text("utf-8") + "\n// Новый снимок\n", encoding="utf-8")
+    fresh = reopen_authoring(current)
+    new = preview(fresh)
+    assert new["build_hash"] != first["build_hash"]
+    failure(lambda: write(fresh, first), "ed_authoring_stale")
+    write(fresh, new)
+
+
+def test_handlers_layer_rejects_new_issue_in_generated_module(setup, monkeypatch):
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    original = module.render_handlers_authoring
+
+    def tampered(*args, **kwargs):
+        bundle = original(*args, **kwargs)
+        files = {
+            p: b.replace(b'"' + "Товар".encode() + b'"', b'"' + "Заказ".encode() + b'"')
+            if p.endswith("Module.bsl")
+            else b
+            for p, b in bundle.files.items()
+        }
+        return replace(bundle, files=files)
+
+    monkeypatch.setattr(module, "render_handlers_authoring", tampered)
+    refused = failure(lambda: preview(current), "ed_authoring_precondition")
+    assert "ed.author.new_issues" in {f["id"] for f in refused["failures"]}
+
+
+def test_body_failure_does_not_expose_body_text(setup):
+    fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    fixture["input"][0]["body"] = 'ДанныеXDTO.Вставить(Имя + "BODY_SENTINEL", 1);'
+    current, _ = handler_setup(setup, fixture)
+    refused = failure(lambda: preview(current), "ed_authoring_precondition")
+    assert "BODY_SENTINEL" not in json.dumps(refused)
+    assert "ed.author.body_dynamic_reference" in {f["id"] for f in refused["failures"]}
+
+
+@pytest.mark.parametrize("scenario", ["set-send", "preserve-receive"])
+def test_v2_two_managers_survive_service_restart(setup, scenario, monkeypatch):
+    fixture = json.loads((HANDLERS / f"dto/{scenario}.json").read_text("utf-8"))
+    current, refs = handler_setup(setup, fixture)
+    service, args, root = current
+    configuration = etree.parse(str(root / "Configuration.xml")).getroot()
+    children = configuration[0].find(f"{{{M}}}ChildObjects")
+    assert children is not None
+    etree.SubElement(children, f"{{{M}}}ExchangePlan").text = "ВторойПлан"
+    (root / "Configuration.xml").write_bytes(serialize(configuration))
+    path = root / "ExchangePlans/ВторойПлан/Ext/ManagerModule.bsl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        (root / "ExchangePlans/ПланФормата/Ext/ManagerModule.bsl")
+        .read_text("utf-8")
+        .replace("Менеджер2", "Менеджер1"),
+        encoding="utf-8",
+    )
+    (root / "ExchangePlans/ВторойПлан.xml").write_text(
+        _xml("ВторойПлан", "").replace("XDTOPackage", "ExchangePlan"), encoding="utf-8"
+    )
+    (root / "CommonModules/Менеджер1/Ext/Module.bsl").write_text(
+        handler_inputs(1).document.files[0].text, encoding="utf-8"
+    )
+    service.structure_load_project("Пример", "Main", structure_id=refs["structure_id"], force=True)
+    first = write(current)
+    second_fixture = json.loads((HANDLERS / "dto/set-send.json").read_text("utf-8"))
+    second = transport_operations(second_fixture["input"], refs)[0]
+    second["target"].update(
+        plan="ВторойПлан",
+        pko_address="ПКО/Заказ",
+        project_id=service.ed_open(str(root / "CommonModules/Менеджер1/Ext/Module.bsl"))[
+            "project_id"
+        ],
+    )
+    second["body"] = "Возврат;\n"
+    rows = all_items(
+        lambda **options: preview(current, operations=[second], **options), section="operations"
+    )
+    bodies = {row["handler_name"]: row["body"] for row in rows if "body" in row}
+    body_bytes = sum(len(body.encode("utf-8")) for body in bodies.values())
+    assert module.MAX_HANDLER_BODY_BYTES == 1024 * 1024
+    # Уменьшенная граница проверяет сумму двух менеджеров, включая порождённый preset.
+    monkeypatch.setattr(module, "MAX_HANDLER_BODY_BYTES", body_bytes - 1)
+    failure(lambda: preview(current, operations=[second]), "ed_authoring_resource_limit")
+    monkeypatch.setattr(module, "MAX_HANDLER_BODY_BYTES", body_bytes)
+    written = write(current, operations=[second])
+    destination = Path(written["output_dir"])
+    files = content(destination)
+    manifest = module.previous_artifact(files)
+    assert manifest is not None and len(manifest.handler_operations) == 2
+    assert len(manifest.handler_bindings) == 2 and len(manifest.procedures) == 4
+    assert all("module" in record for record in manifest.procedures)
+    assert len(written["scopes"]) == 2 and written["summary"]["handlers"] == 2
+    restarted = Kd2Service(service.settings)
+    second["target"]["project_id"] = restarted.ed_open(
+        str(root / "CommonModules/Менеджер1/Ext/Module.bsl")
+    )["project_id"]
+    second["target"]["schema_id"] = restarted.ed_schema_open(
+        "1.20", project="Пример", configuration="Main", package="Формат120"
+    )["schema_id"]
+    fresh = restarted, args | {"operations": [second]}, root
+    assert write(fresh)["status"] == "unchanged"
+    assert content(destination) == files and first["output_dir"] == written["output_dir"]
 
 
 def reopen_authoring(setup, *, root=None):

@@ -6,15 +6,26 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from typing import Any
 
+from kd2_rules_mcp.authoring.ed.handlers import HandlerOperationsPlan, operation_kind
 from kd2_rules_mcp.authoring.ed.manifest import sha256
-from kd2_rules_mcp.authoring.ed.model import AuthoringInputs, PreparedAuthoring
+from kd2_rules_mcp.authoring.ed.model import (
+    AddAlgorithmicHeaderProperty,
+    AddHeaderProperty,
+    AuthoringInputs,
+    PreparedAuthoring,
+    PreserveMissingHeaderProperty,
+    SetObjectHandler,
+    operation_dependencies,
+    order_operations,
+)
 from kd2_rules_mcp.authoring.ed.render import RenderedAuthoring
 from kd2_rules_mcp.ed.route_model import RouteEntry, RouteProfile
 from kd2_rules_mcp.service.ed_views import address_matches, skipped_addresses
+from kd2_rules_mcp.validation.ed_authoring_handlers import preset_procedure_text
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
 from kd2_rules_mcp.validation.report import Issue, Level, Skipped
 
-SECTIONS = ("summary", "issues_before", "issues_after", "scopes", "skipped")
+SECTIONS = ("summary", "issues_before", "issues_after", "scopes", "skipped", "operations")
 PAGE_BYTES = 4096
 
 
@@ -164,6 +175,8 @@ def build_view(
     address_prefix: str | None = None,
     rebuild: bool = False,
     changed_inputs: Mapping[str, Sequence[str]] | None = None,
+    handler_plans: Sequence[HandlerOperationsPlan] = (),
+    migration: bool = False,
 ) -> dict[str, Any]:
     rows: list[dict] = []
     scopes, scope_rows = [], []
@@ -183,15 +196,18 @@ def build_view(
         changes = {change.operation_id: change for change in prepared.projection_after.changes}
         for operation in prepared.operations:
             change = changes[operation.operation_id]
-            changed_rules.add((manager, change.owner_id))
+            if not handler_plans:
+                changed_rules.add((manager, change.owner_id))
             if operation.new_attribute:
                 owner, _ = metadata_key(rules[change.owner_id].configuration_object.value)
                 added_attributes.add((owner, operation.new_attribute.name.casefold()))
         source = inputs[number] if number < len(inputs) else prepared.preparation_inputs
+        operations = handler_plans[number].operations if handler_plans else prepared.operations
+        changed_rules.update((manager, op.target.pko_address) for op in operations if handler_plans)
         scope, detail = _scope(
             source.routes if source else None,
             manager,
-            sorted({op.target.direction for op in prepared.operations}),
+            sorted({op.target.direction for op in operations}),
         )
         scopes.append(scope)
         scope_rows.extend(detail)
@@ -250,7 +266,7 @@ def build_view(
             ):
                 direction = next(
                     op.target.direction
-                    for op in prepared.operations
+                    for op in operations
                     if op.operation_id == notice.operation_id
                 )
                 for version in notice.version_keys:
@@ -280,6 +296,8 @@ def build_view(
         )
     elif section == "scopes":
         rows = scope_rows
+    elif section == "operations":
+        rows = operation_rows(bundle, handler_plans)
     other = Counter(other_states.values())
     base = {
         "section": section,
@@ -294,7 +312,11 @@ def build_view(
         "scopes": scopes,
         "change_counts": {
             "pko_changed": len(changed_rules),
-            "pks_added": len(bundle.manifest.operations),
+            "pks_added": len(bundle.manifest.operations)
+            + sum(
+                isinstance(op, AddAlgorithmicHeaderProperty)
+                for op in bundle.manifest.handler_operations
+            ),
             "attributes_added": len(added_attributes),
         },
         "validation": {
@@ -314,8 +336,101 @@ def build_view(
         },
         "required_acknowledgements": list(bundle.manifest.notices),
     }
+    if handler_plans:
+        report = json.loads(bundle.files["validation.json"])
+        reports = report.get("managers", [report])
+        layer_rows = [r["layer"] for r in reports]
+        base["summary"] = {
+            "handlers": sum(len(p.bindings) for p in handler_plans),
+            "presets": sum(
+                isinstance(op, PreserveMissingHeaderProperty)
+                for p in handler_plans
+                for op in p.operations
+            ),
+            "algorithmic_properties": sum(
+                isinstance(op, AddAlgorithmicHeaderProperty)
+                for p in handler_plans
+                for op in p.operations
+            ),
+            "runtime_verified": False,
+            "bindings": {
+                "runtime_verified": 0,
+                "runtime_unverified": sum(len(p.bindings) for p in handler_plans),
+            },
+            "body_unparsed": sum(r["body_refs"]["unparsed"] for r in reports),
+            "layer": {
+                "certain": all(r["certain"] for r in layer_rows),
+                **{
+                    k: sum(r[k] for r in layer_rows)
+                    for k in ("unknown_lines", "unresolved_dispatch", "new_issues")
+                },
+            },
+            "template_evidence": {
+                "verified_bindings": sum(
+                    b.runtime_verified for p in handler_plans for b in p.bindings
+                )
+            },
+            "schema_version": 2,
+            "migration": {"from": 1, "to": 2} if migration else None,
+        }
+        base["changes"] = ["Миграция прежнего комплекта версии 1 в версию 2"] if migration else []
     return (
         compact_page(base, rows, offset, limit)
-        if section == "summary"
+        if section in ("summary", "operations")
         else base | page(rows, offset, limit)
     )
+
+
+def operation_rows(bundle: RenderedAuthoring, plans: Sequence[HandlerOperationsPlan]) -> list[dict]:
+    """Тела доступны только здесь; preset показывает тело всей общей привязки."""
+    operations = order_operations(
+        (*bundle.manifest.operations, *bundle.manifest.handler_operations)
+    )
+    by_id = {op.operation_id: op for op in operations}
+    bindings = {ident: b for p in plans for b in p.bindings for ident in b.operation_ids}
+    rows = []
+    for op in operations:
+        row = {
+            "operation_id": op.operation_id,
+            "kind": operation_kind(op),
+            "target": asdict(op.target),
+            "dependencies": list(operation_dependencies(op)),
+        }
+        if isinstance(op, (AddHeaderProperty, AddAlgorithmicHeaderProperty)):
+            row.update(
+                configuration_attribute=op.configuration_attribute,
+                format_property=op.format_property,
+            )
+        if isinstance(op, AddAlgorithmicHeaderProperty):
+            row["conversion_rule"] = op.conversion_rule
+        elif isinstance(op, AddHeaderProperty) and op.new_attribute:
+            draft = op.new_attribute
+            row["new_attribute"] = {
+                "name": draft.name,
+                "synonym": draft.synonym,
+                "primitive": draft.primitive,
+                "qualifiers": dict(draft.qualifiers),
+            }
+        binding = bindings.get(op.operation_id)
+        if isinstance(op, AddAlgorithmicHeaderProperty):
+            binding = bindings.get(op.handler_operation_id)
+        if binding:
+            row.update(
+                event=binding.event, handler_name=binding.handler_name, runtime_verified=False
+            )
+        if isinstance(op, SetObjectHandler):
+            body = op.body
+            row.update(body=body, body_sha256=sha256(body.encode("utf-8")), body_origin="agent")
+        elif isinstance(op, PreserveMissingHeaderProperty) and binding:
+            pairs = []
+            for ident in binding.operation_ids:
+                preset = by_id[ident]
+                assert isinstance(preset, PreserveMissingHeaderProperty)
+                prop = by_id[preset.property_operation_id]
+                assert isinstance(prop, AddHeaderProperty)
+                pairs.append((prop.format_property, prop.configuration_attribute))
+            procedure = preset_procedure_text(binding.handler_name, tuple(pairs))
+            body = procedure[procedure.index("\n") + 1 : procedure.rindex("КонецПроцедуры")]
+            row.update(body=body, body_sha256=sha256(body.encode("utf-8")), body_origin="preset")
+        rows.append(row)
+    return rows

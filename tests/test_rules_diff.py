@@ -144,7 +144,7 @@ def test_duplicate_pro_code_includes_metadata_and_ordinal() -> None:
     changes = diff_rules(left, right)
     assert len(changes) == 1
     assert changes[0].section == "registration"
-    assert changes[0].address == "ПРО «000000002» / Справочник.Организации #2"
+    assert changes[0].address == "ПРО «Справочник.Организации»#2"
     assert changes[0].field == "Комментарий"
 
 
@@ -223,8 +223,11 @@ def test_long_text_is_truncated() -> None:
     assert len(handler) == 1
     lines = handler[0].handler_diff
     assert lines is not None
-    assert lines[-1] == "… усечено"
-    assert len("\n".join(lines[:-1])) <= TEXT_LIMIT
+    assert "… усечено" in lines
+    body = [line for line in lines if line != "… усечено"]
+    assert len("\n".join(body)) <= TEXT_LIMIT
+    assert any(line.startswith("-") and not line.startswith("---") for line in body)
+    assert any(line.startswith("+") and not line.startswith("+++") for line in body)
 
 
 def test_volatile_header_is_ignored_unless_requested(tmp_path: Path) -> None:

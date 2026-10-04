@@ -32,6 +32,11 @@ from kd2_rules_mcp.validation.handlers import EVENT_AREAS
 
 DRAFT_COMMENT = "Черновик правил корреспондента (зеркалирование ПКО): требует проверки агентом"
 MANUAL = "перенести вручную"
+# События конвертации не зависят от выбранных ПКО: каждое встречается в списке один раз.
+CONVERSION_NOTE = "общее для всех правил: перенести вручную один раз"
+NO_TARGET_PROPERTY = (
+    "у зеркального ПКС нет свойства приёмника: в исходном правиле не заполнен источник"
+)
 
 # Разделы и события, которые принадлежат направлению исходных правил.
 _DROPPED_SECTIONS = (
@@ -121,7 +126,7 @@ def _mirror_header(root: Node, result: MirrorResult) -> None:
     for event in [tag for (kind_name, tag) in EVENT_AREAS if kind_name == "exchange_rules"]:
         code = root.values.pop(event, None)
         if isinstance(code, str) and code.strip():
-            result.handlers.append(Handler("Конвертация", event, code))
+            result.handlers.append(Handler("Конвертация", event, code, CONVERSION_NOTE))
     for tag in _DROPPED_SECTIONS:
         if root.children.pop(tag, None) is not None:
             result.notes.append(
@@ -201,7 +206,14 @@ def _check_reference(node: Node, codes: set[str], address: str, result: MirrorRe
     ref = str(node.values.get("КодПравилаКонвертации", "")).strip()
     if ref and ref not in codes:
         del node.values["КодПравилаКонвертации"]
-        result.notes.append(f"{address}: ссылка на ПКО «{ref}» вне выборки очищена")
+        target = node.child("Приемник")
+        type_name = str(target.attrs.get("Тип", "")).strip() if target is not None else ""
+        if type_name:
+            result.notes.append(
+                f"{address}: нет ПКО для типа «{type_name}» (ссылка на «{ref}» вне выборки очищена)"
+            )
+        else:
+            result.notes.append(f"{address}: нет ПКО «{ref}» в выборке, ссылка очищена")
 
 
 def _object(structure: sqlite3.Connection, type_name: str) -> sqlite3.Row | None:
@@ -218,8 +230,14 @@ def _property_problem(
     """Причина выключить ПКС по структуре нового приёмника или пустая строка."""
     target = node.child("Приемник")
     name = str(target.attrs.get("Имя", "")) if target is not None else ""
+    parameter = str(node.values.get("ИмяПараметраДляПередачи", "")).strip()
     if not name:
-        return "у зеркального ПКС нет свойства приёмника"
+        if parameter:
+            return (
+                f"ПКС-параметр «{parameter}»: нет свойства в структуре обратного приёмника "
+                "(правило передаёт параметр, а не реквизит)"
+            )
+        return NO_TARGET_PROPERTY
     if structure is None or object_row is None:
         return ""
     property_path = ".".join(_target_names(path))
@@ -228,13 +246,32 @@ def _property_problem(
         (object_row["id"], property_path),
     ).fetchone()
     if found is None:
-        return f"свойства «{property_path}» нет у «{object_row['type_name']}» в структуре"
+        return (
+            f"в структуре обратного приёмника у «{object_row['type_name']}» "
+            f"нет свойства «{property_path}»"
+        )
     type_name = str(target.attrs.get("Тип", "")) if target is not None else ""
     if type_name and type_name not in _PRIMITIVE_TYPES and _object(structure, type_name) is None:
-        return f"типа «{type_name}» нет в структуре нового приёмника"
+        return f"в структуре обратного приёмника нет типа «{type_name}»"
     return ""
 
 
 def _target_names(path: str) -> list[str]:
-    """Имена свойств по пути ПКС; звенья без приёмника (`(имя)`, `#N`) пропускаются."""
-    return [part for part in path.split("/") if part and part[0] not in "(#"]
+    """Имена свойств приёмника по пути ПКС.
+
+    Звенья без приёмника (`(имя)`, `#N`) пропускаются. В звене `источник→приёмник`
+    берётся приёмник.
+    """
+    names: list[str] = []
+    for part in path.split("/"):
+        if not part or part[0] in "(#":
+            continue
+        plain = part.replace("[поиск]", "")
+        head, sep, tail = plain.rpartition("#")
+        if sep and head and tail.isdigit():
+            plain = head
+        if "→" in plain:
+            plain = plain.split("→")[-1]
+        if plain and plain[0] not in "(#":
+            names.append(plain)
+    return names

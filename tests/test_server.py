@@ -13,6 +13,8 @@ from kd2_rules_mcp.errors import DuplicateRuleError, RuleNotFoundError
 from kd2_rules_mcp.kd2.model import ExchangeRules
 from kd2_rules_mcp.server import create_server
 from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
+from tests.test_ed_authoring_handlers import HANDLERS
+from tests.test_service_ed_authoring import handler_setup
 from tests.test_service_ed_authoring import setup as setup
 
 DATA = Path(__file__).parent / "data"
@@ -203,6 +205,59 @@ async def test_ed_authoring_tools(setup):
             acknowledged_notices=preview["required_acknowledgements"],
         )
         assert written["status"] == "written"
+
+
+@pytest.mark.parametrize(
+    "scenario", ["set-send", "preserve-receive", "algorithmic-send", "algorithmic-receive-refused"]
+)
+async def test_ed_authoring_handler_operations_tools(setup, scenario):
+    fixture = json.loads((HANDLERS / "dto" / (scenario + ".json")).read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    service, args, _ = current
+    async with Client(create_server(service)) as client:
+        if "expected_failure" in fixture:
+            error = await _error(client, "ed_authoring_build", **args)
+            assert error["code"] == "ed_authoring_precondition"
+            assert fixture["expected_failure"] in {f["id"] for f in error["failures"]}
+            return
+        viewed = await _call(client, "ed_authoring_build", **args)
+        assert viewed["summary"]["handlers"] == 1
+        assert viewed["summary"]["layer"]["certain"]
+        assert '"body":' not in json.dumps(viewed)
+        page = await _call(client, "ed_authoring_build", **args, section="operations", limit=1)
+        assert len(page["items"]) == 1
+        if page["has_more"]:
+            following = await _call(
+                client,
+                "ed_authoring_build",
+                **args,
+                section="operations",
+                offset=page["next_offset"],
+                limit=1,
+            )
+            assert following["items"][0]["operation_id"] != page["items"][0]["operation_id"]
+        error = await _error(
+            client,
+            "ed_authoring_build",
+            **args,
+            mode="write",
+            expected_preview_hash=viewed["build_hash"],
+        )
+        assert error["code"] == "ed_authoring_ack_required"
+        write_args = dict(
+            mode="write",
+            expected_preview_hash=viewed["build_hash"],
+            acknowledged_notices=viewed["required_acknowledgements"],
+        )
+        assert (await _call(client, "ed_authoring_build", **args, **write_args))[
+            "status"
+        ] == "written"
+        assert (await _call(client, "ed_authoring_build", **args, **write_args))[
+            "status"
+        ] == "unchanged"
+        bad = [args["operations"][0] | {"kind": "unknown"}]
+        error = await _error(client, "ed_authoring_build", **(args | {"operations": bad}))
+        assert error["code"] == "invalid_argument"
 
 
 async def test_ed_schema_tools(service: Kd2Service) -> None:

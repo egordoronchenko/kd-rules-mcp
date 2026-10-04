@@ -148,6 +148,91 @@ def bsl_string(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
+def header_property_lines(
+    attribute: str,
+    format_property: str,
+    *,
+    algorithmic: bool = False,
+    conversion_rule: str = "",
+) -> tuple[str, ...]:
+    """Защита поиска ПКС и один вызов. Прямая ПКС — три аргумента, алгоритмическая — флаг 1."""
+    attribute_literal = bsl_string(attribute)
+    property_literal = bsl_string(format_property)
+    if algorithmic:
+        call = (
+            "ДобавитьПКС(Правило.Свойства, "
+            f"{attribute_literal}, {property_literal}, 1, {bsl_string(conversion_rule)});"
+        )
+    else:
+        call = f"ДобавитьПКС(Правило.Свойства, {attribute_literal}, {property_literal});"
+    return (
+        f'Свойство = Правило.Свойства.Найти({property_literal}, "СвойствоФормата");',
+        "Если Свойство = Неопределено Тогда",
+        "\t" + call,
+        "КонецЕсли;",
+    )
+
+
+def event_assignment_line(event: str, handler_name: str) -> str:
+    """Имя обработчика задаётся прямо: исходное поле уже проверено до порождения."""
+    return f"Правило.{event} = {bsl_string(handler_name)};"
+
+
+def generate_handler_fill(
+    prefix: str,
+    interface: int,
+    rules: tuple[tuple[str, str, tuple[str, ...]], ...],
+) -> str:
+    """Один перехват заполнителя §5.1/§5.2. Внутренние строки уже содержат свой отступ."""
+    if interface not in (1, 2, 3):
+        raise ValueError("Интерфейс заполнителя: 1, 2 или 3")
+    v3 = interface == 3
+    parameters = (
+        "КомпонентыОбмена, ПравилаКонвертации, ТолькоЗаголовки"
+        if v3
+        else "НаправлениеОбмена, ПравилаКонвертации"
+    )
+    comment = (
+        "// Сформировано из решений автора. Заголовочный проход не изменяет правила."
+        if v3
+        else "// Сформировано из решений автора. Пересобирать комплект целиком."
+    )
+    lines = [
+        comment,
+        f'&После("{FILLER}")',
+        f"Процедура {prefix + FILLER}({parameters})",
+        "",
+    ]
+
+    def emit(depth: int, line: str) -> None:
+        lines.append("\t" * depth + line)
+
+    grouped = {(direction, name): inner for direction, name, inner in rules}
+    extra = int(v3)
+    if v3:
+        emit(1, "Если Не ТолькоЗаголовки Тогда")
+    for direction in ("send", "receive"):
+        selected = sorted((key for key in grouped if key[0] == direction), key=lambda key: key[1])
+        if not selected:
+            continue
+        depth = 1 + extra
+        variable = "КомпонентыОбмена.НаправлениеОбмена" if v3 else "НаправлениеОбмена"
+        literal = "Отправка" if direction == "send" else "Получение"
+        emit(depth, f'Если {variable} = "{literal}" Тогда')
+        for key in selected:
+            emit(depth + 1, f'Правило = ПравилаКонвертации.Найти({bsl_string(key[1])}, "ИмяПКО");')
+            emit(depth + 1, "Если Правило <> Неопределено Тогда")
+            for inner in grouped[key]:
+                emit(depth + 2, inner)
+            emit(depth + 1, "КонецЕсли;")
+        emit(depth, "КонецЕсли;")
+    if v3:
+        emit(1, "КонецЕсли;")
+    lines.append("")
+    lines.append("КонецПроцедуры")
+    return "\n".join(lines) + "\n"
+
+
 def generate_hook(
     base: EdDocument,
     operations: tuple[AddHeaderProperty, ...],

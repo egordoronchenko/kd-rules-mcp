@@ -1,0 +1,62 @@
+{
+  "bindings": [
+    {
+      "event": "ПриКонвертацииДанныхXDTO",
+      "handler_name": "доп_ПКО_d8019c171759fb7f",
+      "manager_interface": 2,
+      "operation_ids": [
+        "de137f2296881b25638f4a41490eab6bdd13b3fc5282dfdb337fc59ac7b932c3"
+      ],
+      "parameters": [
+        "ДанныеXDTO",
+        "ПолученныеДанные",
+        "КомпонентыОбмена"
+      ],
+      "previous_arguments": [
+        "ДанныеXDTO",
+        "ПолученныеДанные",
+        "КомпонентыОбмена"
+      ],
+      "previous_branch_hash": "916030df86a54562cfa4ab29a3a3bbf1bc91fbc8cbaaabfae355f6bd5c8864d6",
+      "previous_name": "Типовой",
+      "previous_routine_hash": "eb4b6b0ab291be4f24afd90dd0194a29c631b322b101575f00dd4530dd76eae7",
+      "runtime_verified": false,
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_d8019c171759fb7f"
+  ],
+  "generator_version": "ed-authoring/2",
+  "procedures": [
+    {
+      "body_sha256": "f7fb485b8fdd12a0e5038fd83e1766567168451f8d3c5d41c91a3bf8b6b391ea",
+      "name": "доп_Диспетчер",
+      "role": "dispatcher",
+      "runtime_verified": false
+    },
+    {
+      "body_sha256": "9ae00cf746ca9e435b5a88bbdebce3badf2542ab7b21aba5439ac0b7114519c9",
+      "event": "ПриКонвертацииДанныхXDTO",
+      "name": "доп_ПКО_d8019c171759fb7f",
+      "origin": "agent",
+      "parameters": [
+        "ДанныеXDTO",
+        "ПолученныеДанные",
+        "КомпонентыОбмена"
+      ],
+      "role": "handler",
+      "runtime_verified": false
+    }
+  ],
+  "schema_version": 2
+}

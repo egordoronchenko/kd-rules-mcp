@@ -1,0 +1,103 @@
+{
+  "bindings": [
+    {
+      "event": "ПередЗаписьюПолученныхДанных",
+      "handler_name": "доп_ПКО_710c7a9db97eca49",
+      "manager_interface": 2,
+      "operation_ids": [
+        "6075a313a9fd56638c0ea80c0fdc5a45ec66c882325557a3e91c69ddcb9abc4d"
+      ],
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "previous_arguments": [],
+      "previous_branch_hash": "",
+      "previous_name": "",
+      "previous_routine_hash": "",
+      "runtime_verified": true,
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Заказ",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    },
+    {
+      "event": "ПередЗаписьюПолученныхДанных",
+      "handler_name": "доп_ПКО_f827df9e22fff383",
+      "manager_interface": 2,
+      "operation_ids": [
+        "8b2977685751099628c2e54a3d2be14cc43fd996fc131f17b5197fb78e3d286c"
+      ],
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "previous_arguments": [],
+      "previous_branch_hash": "",
+      "previous_name": "",
+      "previous_routine_hash": "",
+      "runtime_verified": true,
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_710c7a9db97eca49",
+    "доп_ПКО_f827df9e22fff383"
+  ],
+  "generator_version": "ed-authoring/2",
+  "procedures": [
+    {
+      "body_sha256": "508acf52ac43ccd8338d77afb1d813d7bfe4b8d45631aab8cc0781d0d038d92c",
+      "name": "доп_Диспетчер",
+      "role": "dispatcher",
+      "runtime_verified": true
+    },
+    {
+      "body_sha256": "400bf5fde3cebc9f9966a8c6f5db7d632b31ea27dc3779ad3682314e51b9ce81",
+      "event": "ПередЗаписьюПолученныхДанных",
+      "name": "доп_ПКО_710c7a9db97eca49",
+      "origin": "preset",
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "role": "handler",
+      "runtime_verified": true
+    },
+    {
+      "body_sha256": "9add74b315afc23dc430d04aecaec1239019eea23f5e399524aed0038ef807ea",
+      "event": "ПередЗаписьюПолученныхДанных",
+      "name": "доп_ПКО_f827df9e22fff383",
+      "origin": "preset",
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "role": "handler",
+      "runtime_verified": true
+    }
+  ],
+  "schema_version": 2
+}

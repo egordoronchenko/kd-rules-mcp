@@ -159,8 +159,9 @@ RuleKind = Annotated[
     Field(
         description=(
             "Вид правила: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, "
-            "conversion. conversion — события конвертации, один экземпляр на файл; "
-            "rule_create и rule_delete для него отклоняются"
+            "conversion, pro. conversion — события конвертации, один экземпляр на файл; "
+            "rule_create и rule_delete для него отклоняются. pro — правило регистрации "
+            "на проекте правил регистрации"
         )
     ),
 ]
@@ -169,8 +170,10 @@ RuleKey = Annotated[
     Field(
         description=(
             "Адрес правила: код (ПКО, ПВД, ПОД), имя (алгоритм, запрос, параметр), путь ПКС "
-            "`группа/…/свойство-приёмник` или имя значения источника ПКЗ. При совпадении имён "
-            "в одном контейнере к звену ПКС добавляются квалификаторы `[поиск]` и `#N`. "
+            "`группа/…/свойство-приёмник` или имя значения источника ПКЗ. Пустой приёмник "
+            "ПКС адресуется источником, ПКС-параметр — именем параметра; `#N` и оба имени — "
+            "только если иначе не различить. Для pro — объект метаданных "
+            "(`ПРО «Справочник.Имя»`, при повторе `#N`) или код. "
             "Для conversion — пустая строка или `Конвертация` (в ответах адрес `Конвертация`)"
         )
     ),
@@ -430,8 +433,31 @@ def create_server(service: Kd2Service) -> MCPServer:
         confidence: ConfidenceFilter = None,
         offset: Offset = 0,
         limit: Limit = 50,
+        rules_project_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Проект правил обмена: отметить, покрыта ли пара ПКС указанного ПКО. "
+                    "Пусто — ответ без отметок, как раньше"
+                )
+            ),
+        ] = None,
+        code: Annotated[
+            str | None,
+            Field(
+                description="Код ПКО, чьи ПКС считаются покрытием пары. Вместе с rules_project_id"
+            ),
+        ] = None,
+        uncovered: Annotated[
+            bool,
+            Field(description="Только пары, которые не покрыты ПКС указанного ПКО"),
+        ] = False,
     ) -> dict[str, Any]:
-        """Кандидаты ПКС пары объектов; `auto=false` — не применять без решения агента."""
+        """Кандидаты ПКС пары объектов; `auto=false` — не применять без решения агента.
+
+        С `rules_project_id` и `code` у пары есть `covered` и, если покрыта, `pks` —
+        адреса ПКС. Без этих параметров ключей покрытия нет.
+        """
         return await call(
             service.match_properties,
             source_structure,
@@ -441,6 +467,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             confidence,
             offset,
             limit,
+            rules_project_id,
+            code,
+            uncovered,
         )
 
     @server.tool()
@@ -521,17 +550,30 @@ def create_server(service: Kd2Service) -> MCPServer:
             str,
             Field(
                 description=(
-                    "Раздел: pko, pvd, pod, algorithms, queries, parameters, conversion; "
-                    "у правил регистрации — registration. conversion — одна строка, "
+                    "Раздел: pko, pvd, pod, algorithms, queries, parameters, pks, conversion; "
+                    "у правил регистрации — registration. pks — ПКС всех ПКО, отбор text "
+                    "по имени источника или приёмника. conversion — одна строка, "
                     "события конвертации"
                 )
             ),
         ],
-        text: Annotated[str | None, Field(description="Подстрока кода, имени или типа")] = None,
+        text: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Подстрока кода, имени или типа. В разделе pks — подстрока имени "
+                    "источника или приёмника"
+                )
+            ),
+        ] = None,
         offset: Offset = 0,
         limit: Limit = 50,
     ) -> dict[str, Any]:
-        """Правила раздела коротко: адрес, код, наименование, источник и приёмник."""
+        """Правила раздела коротко: адрес, код, наименование, источник и приёмник.
+
+        Раздел registration — объект метаданных, код, группа, отключено, есть ли отборы
+        и обработчики. Раздел pks — ПКС всего проекта.
+        """
         return await call(service.rules_list, project_id, section, text, offset, limit)
 
     @server.tool()
@@ -542,10 +584,12 @@ def create_server(service: Kd2Service) -> MCPServer:
         owner: Owner = "",
         limit: Annotated[int, Field(description="Сколько ПКС и ПКЗ показать", ge=1)] = 100,
     ) -> dict[str, Any]:
-        """Одно правило правил обмена: поля, стороны, список ПКС и ПКЗ; длинный код обрезается.
+        """Одно правило: поля, стороны, список ПКС и ПКЗ; длинный код обрезается.
 
         Вид conversion — заполненные события конвертации (имя, число строк, текст с тем же
         пределом, что у других обработчиков) и реквизиты заголовка, которые уже лежат в модели.
+        Вид pro на проекте правил регистрации — отборы, реквизиты свойств, обработчики
+        (тексты обрезаны, как у ПКО) и реквизит режима выгрузки.
         """
         return await call(service.rules_get, project_id, kind, key, owner, limit)
 
@@ -859,14 +903,32 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         offset: Offset = 0,
         limit: Limit = 50,
+        detail: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Уровень подробности: полный (full) — как раньше; кратко (brief) — "
+                    "счётчики и страница адресов без содержимого. Допустимы полный, кратко, "
+                    "краткий, full, brief"
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Смысловой дифф двух версий правил одного вида: что добавлено, удалено или изменено.
 
         Сторона — открытый проект или файл. Ответ — сводка по разделам и страница изменений,
-        без XML.
+        без XML. `detail=brief` оставляет в странице только адреса.
         """
         return await call(
-            service.rules_diff, left, right, include_header, order, section, offset, limit
+            service.rules_diff,
+            left,
+            right,
+            include_header,
+            order,
+            section,
+            offset,
+            limit,
+            detail,
         )
 
     @server.tool()
@@ -930,6 +992,9 @@ def create_server(service: Kd2Service) -> MCPServer:
         """Правила регистрации из состава плана обмена.
 
         Новый проект или правка отборов уже открытого проекта правил регистрации.
+        Если `project_id` — уже открытый проект регистрации, в `warnings` и `losses`
+        перечислены правила, у которых сборка потеряла отборы или обработчики.
+        Сами правила от этого предупреждения не меняются.
         """
         return await call(
             service.registration_build,
@@ -963,7 +1028,12 @@ def create_server(service: Kd2Service) -> MCPServer:
             ),
         ] = None,
     ) -> dict[str, Any]:
-        """Черновик правил обратного направления; обработчики — «перенести вручную»."""
+        """Черновик правил обратного направления; обработчики — «перенести вручную».
+
+        События конвертации перечисляются один раз: они общие для всех правил.
+        Причина отключения ПКС называет, чего нет: источника, свойства или типа
+        в структуре обратного приёмника, ПКО для типа.
+        """
         return await call(
             service.correspondent_draft,
             project_id,
@@ -1578,9 +1648,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             list[dict[str, Any]],
             Field(
                 description=(
-                    "До 100 прямых ПКС: target с тремя идентификаторами снимков, "
-                    "configuration_attribute, format_property, необязательный "
-                    "new_attribute (name, synonym, primitive, qualifiers)"
+                    "До 100 операций: kind=add_header_property (по умолчанию), "
+                    "set_object_handler, preserve_missing_header_property, "
+                    "add_algorithmic_header_property; target с тремя идентификаторами снимков"
                 )
             ),
         ],
@@ -1614,7 +1684,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             str,
             Field(
                 description=(
-                    "Раздел: summary, issues_before, issues_after, scopes или skipped; "
+                    "Раздел: summary, operations (тела), issues_before, issues_after, "
+                    "scopes или skipped; "
                     "write — только summary"
                 )
             ),
@@ -1637,11 +1708,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             ),
         ] = None,
     ) -> dict[str, Any]:
-        """Проверяет до/после и порождает комплект прямых ПКС.
+        """Порождает ПКС шапки, обработчики ПКО и шаблон сохранения отсутствующих свойств.
 
-        Write атомарно обновляет только собственный результат в workspace; база не вызывается.
-        При изменении входов прежние и новые операции проверяются заново. Summary показывает
-        rebuild и changed_input_groups; имена изменившихся входов — страницы items input_changed.
+        Preview проверяет слой; write с хешем и подтверждениями обновляет комплект в workspace.
         """
         return await call(
             service.ed_authoring_build,

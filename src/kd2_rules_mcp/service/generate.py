@@ -6,7 +6,10 @@ from typing import Any
 from kd2_rules_mcp.authoring.correspondent import mirror_rules
 from kd2_rules_mcp.authoring.registration import (
     build_registration_rules,
+    loss_warning,
+    registration_losses,
     replace_registration_filters,
+    snapshot_registration,
 )
 from kd2_rules_mcp.authoring.workspace import RulesProject
 from kd2_rules_mcp.errors import Kd2Error
@@ -42,9 +45,15 @@ class GenerateMixin(ServiceBase):
                 document = existing.document
                 if not isinstance(document, RegistrationRules):
                     raise Kd2Error(f"Проект «{project_id}» не загружен")
+                before = snapshot_registration(document)
                 replace_registration_filters(document, build.document, specs)
                 self.workspace.mark_modified(existing.id)
-                return {**self._project_view(existing), "warnings": build.warnings}
+                losses = registration_losses(before, document)
+                warnings = [*build.warnings, *(loss_warning(item) for item in losses)]
+                view = {**self._project_view(existing), "warnings": warnings}
+                if losses:
+                    view["losses"] = losses
+                return view
             project = self.workspace.add(build.document, project_id, label=f"reg-{exchange_plan}")
             return {**self._project_view(project), "warnings": build.warnings}
 

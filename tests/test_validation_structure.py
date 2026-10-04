@@ -10,6 +10,7 @@ import pytest
 
 from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
 from kd2_rules_mcp.structures.store import StructureStore
+from kd2_rules_mcp.validation.address import pks_candidates, side_name
 from kd2_rules_mcp.validation.report import Issue, Level, ValidationReport
 from kd2_rules_mcp.validation.structure import _listed_types, check_rule, check_structures
 
@@ -130,16 +131,24 @@ def test_tabular_section_paths_and_group_kind(sides: tuple[sqlite3.Connection, .
         )
         + "</Группа>"
     )
-    report = check(sides, rules_xml(pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, group)))
+    xml = rules_xml(pko_xml("Номенклатура", NOMENCLATURE, NOMENCLATURE, group))
+    report = check(sides, xml)
     assert [(i.check, i.address) for i in report.issues] == [
         # В приёмнике (без расширения) у ТЧ Товары нет колонки Аналитика.
-        # Две группы с приёмником Товары различаются позицией в контейнере.
-        ("structure.pks_target", "ПКО «Номенклатура» / ПКС Товары#1/Аналитика"),
+        # Группы с одним приёмником различаются источником, а не позицией.
+        ("structure.pks_target", "ПКО «Номенклатура» / ПКС Спецификация→Товары/Аналитика"),
         # Набора движений Товары у справочника нет — его свойства в источнике не проверяются.
-        ("structure.pks_source", "ПКО «Номенклатура» / ПКС Товары#2"),
+        ("structure.pks_source", "ПКО «Номенклатура» / ПКС Товары"),
         # Своя ПКС ссылается на это ПКО, ПВД нет — выгрузка только ссылкой.
         ("structure.pko_ref_only", "ПКО «Номенклатура»"),
     ]
+    properties = load_exchange_rules(xml).pko()[0].child("Свойства")
+    assert properties is not None
+    # Прежние адреса по позиции по-прежнему находят те же группы.
+    first = pks_candidates(properties, "Товары#1")
+    second = pks_candidates(properties, "Товары#2")
+    assert len(first) == 1 and side_name(first[0][1], "Источник") == "Спецификация"
+    assert len(second) == 1 and side_name(second[0][1], "Источник") == "Товары"
     assert "«НаборДвиженийРегистраНакопления»" in report.issues[1].message
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -26,6 +27,7 @@ from kd2_rules_mcp.structures.queries import (
     exchange_plan_content,
     find_object,
 )
+from kd2_rules_mcp.validation.address import pro_addresses
 
 _FORMAT_VERSION = "2.01"  # ВыгрузкаРегистрации:686
 
@@ -1013,3 +1015,126 @@ def _set_filter(rule: Node, tag: str, child: Node | None) -> None:
         rule.children.pop(tag, None)
     else:
         rule.children[tag] = child
+
+
+# Обработчики, которые читает загрузчик БСП (ЗПР:327–349).
+_LOSS_HANDLERS = (
+    "ПередОбработкой",
+    "ПриОбработке",
+    "ПриОбработкеДополнительный",
+    "ПослеОбработки",
+)
+_LOSS_PLAN = "ОтборПоСвойствамПланаОбмена"
+_LOSS_OBJECT = "ОтборПоСвойствамОбъекта"
+_LOSS_PLAN_FIELDS = (
+    "ЭтоСтрокаКонстанты",
+    "ТипСвойстваОбъекта",
+    "СвойствоПланаОбмена",
+    "ВидСравнения",
+    "СвойствоОбъекта",
+)
+_LOSS_OBJECT_FIELDS = (
+    "ТипСвойстваОбъекта",
+    "ВидСравнения",
+    "СвойствоОбъекта",
+    "Вид",
+    "ЗначениеКонстанты",
+)
+
+
+def snapshot_registration(document: RegistrationRules) -> list[dict[str, Any]]:
+    """Отборы и обработчики правил до правки. Снимок нужен, потому что правка мутирует узлы."""
+    nodes = document.rules()
+    snaps: list[dict[str, Any]] = []
+    for address, node in zip(pro_addresses(nodes), nodes, strict=True):
+        snaps.append(
+            {
+                "address": address,
+                "id": id(node),
+                "plan": _loss_leaves(node.child(_LOSS_PLAN), plan=True),
+                "object": _loss_leaves(node.child(_LOSS_OBJECT), plan=False),
+                "handlers": {
+                    name: text for name in _LOSS_HANDLERS if (text := _loss_handler(node, name))
+                },
+            }
+        )
+    return snaps
+
+
+def registration_losses(
+    snaps: Sequence[Mapping[str, Any]], document: RegistrationRules
+) -> list[dict[str, Any]]:
+    """Правила, у которых после сборки пропали отборы или обработчики снимка.
+
+    Считаются элементы отбора и непустые обработчики, которых в результате нет.
+    Сами правила функция не меняет.
+    """
+    current = {id(node): node for node in document.rules()}
+    losses: list[dict[str, Any]] = []
+    for snap in snaps:
+        node = current.get(snap["id"])
+        filters = _missing(
+            list(snap["plan"]),
+            _loss_leaves(node.child(_LOSS_PLAN), plan=True) if node is not None else [],
+        ) + _missing(
+            list(snap["object"]),
+            _loss_leaves(node.child(_LOSS_OBJECT), plan=False) if node is not None else [],
+        )
+        handlers = 0
+        for name, text in snap["handlers"].items():
+            new = _loss_handler(node, str(name)) if node is not None else ""
+            if text != new:
+                handlers += 1
+        if filters or handlers:
+            losses.append({"address": snap["address"], "filters": filters, "handlers": handlers})
+    return losses
+
+
+def loss_warning(item: Mapping[str, Any]) -> str:
+    """Строка предупреждения о потерянных отборах и обработчиках одного правила."""
+    return (
+        f"{item['address']}: в результате нет {item['filters']} отборов "
+        f"и {item['handlers']} обработчиков, которые были в проекте"
+    )
+
+
+def _loss_handler(node: Node, name: str) -> str:
+    value = node.values.get(name, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _loss_leaves(node: Node | None, *, plan: bool) -> list[str]:
+    if node is None:
+        return []
+    keys: list[str] = []
+
+    def walk(current: Node) -> None:
+        for item in current.items:
+            if item.tag == "Группа":
+                walk(item)
+            else:
+                keys.append(_loss_leaf(item, plan=plan))
+
+    walk(node)
+    return keys
+
+
+def _loss_leaf(item: Node, *, plan: bool) -> str:
+    fields = _LOSS_PLAN_FIELDS if plan else _LOSS_OBJECT_FIELDS
+    parts = []
+    for tag in fields:
+        value = item.values.get(tag, "")
+        if value not in (None, "", False):
+            parts.append(f"{tag}={value}")
+    return ";".join(parts)
+
+
+def _missing(old: list[str], new: list[str]) -> int:
+    counts = Counter(new)
+    lost = 0
+    for key in old:
+        if counts[key]:
+            counts[key] -= 1
+        else:
+            lost += 1
+    return lost

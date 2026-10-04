@@ -1,0 +1,103 @@
+{
+  "bindings": [
+    {
+      "event": "ПриОтправкеДанных",
+      "handler_name": "доп_ПКО_7ff9ee2e8e2dc3bc",
+      "manager_interface": 2,
+      "operation_ids": [
+        "b7486fd60be9866ed4eeaa52b4b3e6d07cf05ca1192c5af6c70823365051b044"
+      ],
+      "parameters": [
+        "ДанныеИБ",
+        "ДанныеXDTO",
+        "КомпонентыОбмена",
+        "СтекВыгрузки"
+      ],
+      "previous_arguments": [],
+      "previous_branch_hash": "",
+      "previous_name": "",
+      "previous_routine_hash": "",
+      "runtime_verified": false,
+      "target": {
+        "configuration": "Main",
+        "direction": "send",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Заказ",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    },
+    {
+      "event": "ПередЗаписьюПолученныхДанных",
+      "handler_name": "доп_ПКО_f827df9e22fff383",
+      "manager_interface": 2,
+      "operation_ids": [
+        "8b2977685751099628c2e54a3d2be14cc43fd996fc131f17b5197fb78e3d286c"
+      ],
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "previous_arguments": [],
+      "previous_branch_hash": "",
+      "previous_name": "",
+      "previous_routine_hash": "",
+      "runtime_verified": true,
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_7ff9ee2e8e2dc3bc",
+    "доп_ПКО_f827df9e22fff383"
+  ],
+  "generator_version": "ed-authoring/2",
+  "procedures": [
+    {
+      "body_sha256": "f6042cdee01b96b1583c7f62c7b2f2f3a2a4b52ab2b56524a6eef045fa348ab7",
+      "name": "доп_Диспетчер",
+      "role": "dispatcher",
+      "runtime_verified": false
+    },
+    {
+      "body_sha256": "b683634b050de21cfe2a9c6bcfe77c4eff557974bae64545ba92d748899ac257",
+      "event": "ПриОтправкеДанных",
+      "name": "доп_ПКО_7ff9ee2e8e2dc3bc",
+      "origin": "agent",
+      "parameters": [
+        "ДанныеИБ",
+        "ДанныеXDTO",
+        "КомпонентыОбмена",
+        "СтекВыгрузки"
+      ],
+      "role": "handler",
+      "runtime_verified": false
+    },
+    {
+      "body_sha256": "9add74b315afc23dc430d04aecaec1239019eea23f5e399524aed0038ef807ea",
+      "event": "ПередЗаписьюПолученныхДанных",
+      "name": "доп_ПКО_f827df9e22fff383",
+      "origin": "preset",
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "role": "handler",
+      "runtime_verified": true
+    }
+  ],
+  "schema_version": 2
+}

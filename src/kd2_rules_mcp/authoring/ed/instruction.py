@@ -1,7 +1,7 @@
 """Полная инструкция §4.2: только решения подготовки, без машинных путей."""
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from importlib.resources import files
 from string import Template
 
@@ -9,9 +9,18 @@ from kd2_rules_mcp.ed.address import build_addresses
 from kd2_rules_mcp.ed.model import ObjectRule
 from kd2_rules_mcp.ed.schema.model import EdSchema
 
+from .handlers import HandlerBindingPlan, HandlerOperationsPlan, operation_kind
 from .hook import bsl_string
 from .manifest import Delivery
-from .model import FILLER, PreparedAuthoring
+from .model import (
+    FILLER,
+    AddAlgorithmicHeaderProperty,
+    AddHeaderProperty,
+    Operation,
+    PreparedAuthoring,
+    PreserveMissingHeaderProperty,
+    SetObjectHandler,
+)
 from .xml_dump import PROFILE_NAME, DumpMetadata
 
 
@@ -310,6 +319,179 @@ def render_instruction(
                 )
     result = re.sub(r"(?<![\w:/])(?:[A-Za-z]:[\\/]|\\\\)[^\s|`<>]+", "[исходный файл]", result)
     return re.sub(r"\n{3,}", "\n\n", result).rstrip() + "\n"
+
+
+def render_handlers_instruction(
+    plan: HandlerOperationsPlan,
+    *,
+    extension_name: str,
+    prefix: str,
+    build_hash: str,
+    interface: int,
+    delivery: Delivery,
+    paths: tuple[str, ...],
+    projects: tuple[str, ...] = (),
+    form_evidence: Mapping[str, bool] | None = None,
+) -> str:
+    """Инструкция §7. Подстановки только для применимых событий и preset.
+
+    ``form_evidence`` — проверена ли живым обменом форма привязки (по имени процедуры): это
+    свидетельство стенда, а не проверка данного комплекта в базе. Без него берётся признак
+    привязки.
+    """
+    template = (
+        files("kd2_rules_mcp.authoring.ed")
+        .joinpath("templates/handlers_instruction.md")
+        .read_text("utf-8")
+    )
+    has_preset = any(isinstance(op, PreserveMissingHeaderProperty) for op in plan.operations)
+    for condition, active in (
+        ("has_preset", has_preset),
+        ("no_preset", not has_preset),
+        ("extension", delivery == "extension"),
+        ("manual", delivery != "extension"),
+    ):
+        template = re.sub(
+            r"\[if " + re.escape(condition) + r"\]\n(.*?)\[/if\]\n",
+            lambda match, active=active: match[1] if active else "",
+            template,
+            flags=re.S,
+        )
+    names = _pko_labels(plan.operations, plan.bindings)
+    paragraphs = []
+    for binding in _bindings_in_order(plan):
+        label = names.get(binding.target.pko_address, binding.target.pko_address)
+        text = (
+            f"Для правила {label}, направление {direction_label(binding.target.direction)}, "
+            f"добавлен обработчик события {binding.event}. "
+            f"В правиле назначено имя {binding.handler_name}."
+        )
+        if binding.previous_name:
+            text += (
+                f" Сначала вызывается типовой обработчик {binding.previous_name}, "
+                "затем код доработки."
+            )
+        paragraphs.append(text)
+    preserves = []
+    by_id = {op.operation_id: op for op in plan.operations}
+    for op in plan.operations:
+        if not isinstance(op, PreserveMissingHeaderProperty):
+            continue
+        prop = by_id.get(op.property_operation_id)
+        if not isinstance(prop, AddHeaderProperty):
+            continue
+        preserves.append(
+            f"Если в сообщении нет свойства {prop.format_property}, обработчик возвращает "
+            f"реквизиту {prop.configuration_attribute} найденного объекта прежнее значение: "
+            "без обработчика "
+            "обычная загрузка реквизит очищает. У нового объекта реквизит остаётся с начальным "
+            "значением. Пустое значение отправитель в сообщение не пишет, поэтому очистить "
+            "реквизит приёмника пустым значением нельзя — сохранится прежнее; для намеренной "
+            "очистки нужна отдельная договорённость сторон. Подписки и обработчики конфигурации "
+            "при записи объекта могут изменить реквизит независимо от этого правила."
+        )
+    evidence = {
+        binding.handler_name: binding.runtime_verified
+        if form_evidence is None
+        else form_evidence.get(binding.handler_name, False)
+        for binding in plan.bindings
+    }
+    unverified = tuple(name for name, proven in evidence.items() if not proven)
+    if unverified:
+        status = (
+            "Формы обработчиков, которые ещё не проверялись живым обменом на стенде, "
+            "перечислены ниже."
+        )
+    else:
+        status = "Формы всех обработчиков комплекта проверены живым обменом на стенде."
+    header_note = (
+        "У интерфейса 3 проход ТолькоЗаголовки не меняет правила; "
+        "полный проход выполняет перечисленные операции."
+        if interface == 3
+        else ""
+    )
+    result = Template(template).substitute(
+        {
+            "extension_name": extension_name,
+            "prefix": prefix,
+            "build_hash": build_hash,
+            "manager_version": str(interface),
+            "handler_paragraphs": "\n\n".join(paragraphs) or "Нет",
+            "operations_table": table(
+                ("Вид", "Направление", "ПКО", "Событие или свойство", "Операция"),
+                tuple(_operation_row(op, names) for op in plan.operations),
+            ),
+            "bindings_table": table(
+                ("ПКО", "Событие", "Процедура", "Прежний обработчик", "Форма проверена обменом"),
+                tuple(
+                    (
+                        names.get(binding.target.pko_address, binding.target.pko_address),
+                        binding.event,
+                        binding.handler_name,
+                        binding.previous_name or "Нет",
+                        "Да" if evidence[binding.handler_name] else "Нет",
+                    )
+                    for binding in _bindings_in_order(plan)
+                ),
+            ),
+            "preserve_paragraphs": "\n\n".join(preserves),
+            "runtime_verified": str(plan.runtime_verified).lower(),
+            "runtime_status": status,
+            "unverified_table": table(
+                ("Форма не проверена обменом",), ((name,) for name in unverified)
+            )
+            if unverified
+            else "",
+            "header_pass_note": header_note,
+            "files_table": table(("Файл",), ((path,) for path in sorted(paths))),
+            "delivery": "готовая выгрузка" if delivery == "extension" else "ручное внесение",
+        }
+    )
+    for project in sorted(
+        {*projects, *(op.target.project for op in plan.operations)}, key=len, reverse=True
+    ):
+        if project:
+            result = re.sub(
+                r"https?://[^\s|`<>]+|" + re.escape(project),
+                lambda match: (
+                    match[0] if match[0].startswith(("http://", "https://")) else "[проект]"
+                ),
+                result,
+            )
+    return re.sub(r"\n{3,}", "\n\n", result).rstrip() + "\n"
+
+
+def _bindings_in_order(plan: HandlerOperationsPlan) -> tuple[HandlerBindingPlan, ...]:
+    by_name = {binding.handler_name: binding for binding in plan.bindings}
+    if plan.dispatcher_order and set(plan.dispatcher_order) == set(by_name):
+        return tuple(by_name[name] for name in plan.dispatcher_order)
+    return plan.bindings
+
+
+def _pko_labels(
+    operations: tuple[Operation, ...], bindings: tuple[HandlerBindingPlan, ...]
+) -> dict[str, str]:
+    labels = {}
+    for op in (*operations, *bindings):
+        address = op.target.pko_address
+        labels[address] = address.removeprefix("ПКО/")
+    return labels
+
+
+def _operation_row(op: Operation, names: dict[str, str]) -> tuple[str, str, str, str, str]:
+    if isinstance(op, SetObjectHandler):
+        detail = op.event
+    elif isinstance(op, (AddHeaderProperty, AddAlgorithmicHeaderProperty)):
+        detail = op.configuration_attribute + " ↔ " + op.format_property
+    else:
+        detail = "сохранение при отсутствии свойства"
+    return (
+        operation_kind(op),
+        direction_label(op.target.direction),
+        names.get(op.target.pko_address, op.target.pko_address),
+        detail,
+        op.operation_id,
+    )
 
 
 def _route_explanation(state: str) -> str:

@@ -10,10 +10,11 @@ from kd2_rules_mcp.ed.address import build_addresses
 from kd2_rules_mcp.ed.model import ObjectRule
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
 
+from .handler_render import procedure_block
 from .hook import valid_identifier
 from .identity import IdentityMap, refuse
 from .manifest import ArtifactManifest, json_bytes, sha256, validate_previous
-from .model import SourceSet, digest, order_operations
+from .model import AddHeaderProperty, SourceSet, digest, order_operations
 from .render import RenderedAuthoring
 from .xml_dump import M, serialize
 
@@ -32,7 +33,36 @@ def previous_artifact(files: Mapping[str, bytes]) -> ArtifactManifest | None:
         refuse("owned_content_changed", "Каталог не содержит собственного manifest")
     manifest = ArtifactManifest.from_bytes(files["manifest.json"])
     validate_previous(manifest, files)
+    if manifest.schema_version >= 2:
+        _handler_bodies_match(manifest, files)
     return manifest
+
+
+def _handler_bodies_match(manifest: ArtifactManifest, files: Mapping[str, bytes]) -> None:
+    """Отпечаток процедуры ловит правку тела при согласованно переписанном хеше файла."""
+    modules = {
+        path.removeprefix("modules/").removeprefix("extension/"): payload.decode("utf-8")
+        for path, payload in files.items()
+        if path.startswith("modules/") and path.endswith("Module.bsl")
+    }
+    for path, text in modules.items():
+        extension = files.get("extension/" + path)
+        if extension is not None and extension.decode("utf-8") != text:
+            refuse("owned_content_changed", "Модули комплекта с обработчиками различаются")
+    for record in manifest.procedures:
+        name = str(record["name"])
+        module = record.get("module")
+        if (module is None and len(modules) != 1) or (module is not None and module not in modules):
+            refuse("owned_content_changed", "Не определён модуль процедуры", name)
+        text = modules[str(module)] if module is not None else next(iter(modules.values()))
+        try:
+            block = procedure_block(text, name)
+        except ValueError:
+            refuse("owned_content_changed", "Порождённая процедура отсутствует в модуле", name)
+        if sha256(block.encode("utf-8")) != record["body_sha256"]:
+            refuse(
+                "owned_content_changed", "Тело порождённой процедуры не совпадает с manifest", name
+            )
 
 
 def with_source_hashes(bundle: RenderedAuthoring, sources: Mapping[str, str]) -> RenderedAuthoring:
@@ -121,7 +151,11 @@ def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring
             left_children[:] = [merged[k] for k in sorted(merged)]
             left[0].append(left_children)
             files[path] = serialize(left)
-    operations = order_operations(tuple(op for b in bundles for op in b.manifest.operations))
+    operations = order_operations(
+        tuple(
+            op for b in bundles for op in (*b.manifest.operations, *b.manifest.handler_operations)
+        )
+    )
     source = first.manifest.source_set
     combined_source = SourceSet(
         source.project,
@@ -150,11 +184,27 @@ def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring
         identity_map=IdentityMap(first.manifest.identity_map.artifact_uuid, objects, borrowed),
         source_set=combined_source,
         source_hashes=sources,
-        operations=operations,
+        operations=tuple(op for op in operations if isinstance(op, AddHeaderProperty)),
         file_hashes={p: sha256(b) for p, b in sorted(files.items())},
         build_hash=build_hash,
         unverified=tuple(dict.fromkeys(s for b in bundles for s in b.manifest.unverified)),
         notices=tuple(n for b in bundles for n in b.manifest.notices),
+        schema_version=max(b.manifest.schema_version for b in bundles),
+        generator_version="ed-authoring/2"
+        if any(b.manifest.schema_version == 2 for b in bundles)
+        else first.manifest.generator_version,
+        handler_operations=tuple(op for op in operations if not isinstance(op, AddHeaderProperty)),
+        procedures=tuple(
+            dict(r) | {"module": b.prepared.generated_hook.source.path.removeprefix("modules/")}
+            for b in bundles
+            for r in b.manifest.procedures
+        ),
+        handler_bindings=tuple(
+            dict(r) | {"module": b.prepared.generated_hook.source.path.removeprefix("modules/")}
+            for b in bundles
+            for r in b.manifest.handler_bindings
+        ),
+        dispatcher_order=tuple(name for b in bundles for name in b.manifest.dispatcher_order),
     )
     files["manifest.json"] = manifest.to_bytes()
     return RenderedAuthoring(files, manifest, instruction, "ready", first.prepared)

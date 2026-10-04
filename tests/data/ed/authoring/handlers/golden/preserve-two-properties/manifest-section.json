@@ -1,0 +1,61 @@
+{
+  "bindings": [
+    {
+      "event": "ПередЗаписьюПолученныхДанных",
+      "handler_name": "доп_ПКО_f827df9e22fff383",
+      "manager_interface": 2,
+      "operation_ids": [
+        "8b2977685751099628c2e54a3d2be14cc43fd996fc131f17b5197fb78e3d286c",
+        "e28d45d833a2a653c01a79b2c4507a5122381f6b534facfc598f4f70ab2e4807"
+      ],
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "previous_arguments": [],
+      "previous_branch_hash": "",
+      "previous_name": "",
+      "previous_routine_hash": "",
+      "runtime_verified": true,
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_f827df9e22fff383"
+  ],
+  "generator_version": "ed-authoring/2",
+  "procedures": [
+    {
+      "body_sha256": "70ceec28ec61ba33b0032db3d832ef550e19b68810b2454905c7f13f0b32aabe",
+      "name": "доп_Диспетчер",
+      "role": "dispatcher",
+      "runtime_verified": true
+    },
+    {
+      "body_sha256": "fc122fdab7a99c7e8c9ead1a57dd8a5356215dcfd85612f83dcda2bcc55b8fbb",
+      "event": "ПередЗаписьюПолученныхДанных",
+      "name": "доп_ПКО_f827df9e22fff383",
+      "origin": "preset",
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "role": "handler",
+      "runtime_verified": true
+    }
+  ],
+  "schema_version": 2
+}

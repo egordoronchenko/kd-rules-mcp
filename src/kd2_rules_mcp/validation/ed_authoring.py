@@ -17,11 +17,13 @@ from kd2_rules_mcp.authoring.ed.model import (
     AuthoringPreconditionError,
     ExtensionIdentity,
     Failure,
+    GeneratedHook,
     Notice,
     Operation,
     PreparedAuthoring,
     ProfileComparison,
     ProfileReport,
+    Projection,
     ValidationDelta,
     digest,
     runtime_verified,
@@ -35,7 +37,7 @@ from kd2_rules_mcp.authoring.ed.operations import (
     validate_preconditions,
 )
 from kd2_rules_mcp.ed.address import build_addresses, escape_segment
-from kd2_rules_mcp.ed.model import EdDocument, ObjectRule
+from kd2_rules_mcp.ed.model import EdDocument, ObjectRule, SourceFile
 from kd2_rules_mcp.ed.refs import build_references
 from kd2_rules_mcp.ed.schema.model import EdSchema
 from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
@@ -84,6 +86,7 @@ def _cached_checker(
     function: Callable[..., ValidationReport],
     applicable: Applicability,
     addresses: tuple[str, ...] = (),
+    full_skip_addresses: bool = False,
 ) -> Callable[..., ValidationReport]:
     """Локальная зависимость неизменного checker, без подмены глобалов и общей памяти.
 
@@ -120,6 +123,12 @@ def _cached_checker(
                     for key, instances in self.skips.items()
                     if any(_belongs(address, addresses) for address in instances.values())
                 }
+            if full_skip_addresses:
+                self.report.issues = list(dict.fromkeys(self.report.issues))
+                for (check, reason), instances in sorted(self.skips.items()):
+                    names = list(dict.fromkeys(instances.values()))
+                    self.report.skip(check, f"{reason}: {len(instances)}; " + ", ".join(names))
+                return self.report
             return super().finish()
 
     original = cast(Any, function)
@@ -148,6 +157,7 @@ def check_profile(
     context: AuthoringContext | None = None,
     links: ValidationReport | None = None,
     addresses: tuple[str, ...] = (),
+    full_skip_addresses: bool = False,
 ) -> ProfileReport:
     """Тот же порядок трёх проверок, что у ed_validate; связность всего модуля."""
     index = context.index(document) if context else build_addresses(document)
@@ -171,12 +181,12 @@ def check_profile(
         else link_report
     )
     report.extend(
-        _cached_checker(validate_schema, applicable, addresses)(
+        _cached_checker(validate_schema, applicable, addresses, full_skip_addresses)(
             document, schema, index, profile, snapshot
         )
     )
     report.extend(
-        _cached_checker(validate_structure, applicable, addresses)(
+        _cached_checker(validate_structure, applicable, addresses, full_skip_addresses)(
             document, snapshot, index, profile
         )
     )
@@ -725,5 +735,44 @@ def prepare_authoring(
         skipped,
         build_hash,
         runtime_verified(inputs.document.manager_version),
+        preparation_inputs=inputs,
+    )
+
+
+def _prepare_metadata_shell(
+    inputs: AuthoringInputs, identity: ExtensionIdentity
+) -> PreparedAuthoring:
+    """Проекция «до» и путь менеджера для XML без операций первого среза.
+
+    Публичный prepare_authoring по-прежнему требует хотя бы одну прямую ПКС.
+    Белый список generate_hook тоже не принимает пустой набор: ему нужен вызов
+    ДобавитьПКС. В комплект обработчиков текст перехватчика первого среза не входит,
+    выгрузке достаточно имени менеджера в пути модуля.
+    """
+    manager = manager_for_document(inputs)
+    if manager is None or inputs.document.manager_version not in (1, 2, 3):
+        from kd2_rules_mcp.authoring.ed.identity import refuse
+
+        refuse(
+            "metadata_profile_unsupported",
+            "Не определено имя менеджера проверенного перехватчика",
+        )
+    path = f"modules/CommonModules/{manager.name}/Ext/Module.bsl"
+    source = SourceFile("generated-handler-shell", path, "", digest(""), (0,))
+    hook = GeneratedHook(source, {}, {}, {})
+    return PreparedAuthoring(
+        (),
+        identity,
+        inputs.document,
+        Projection(inputs.document, (), str(inputs.document.parse_status), 0, True),
+        inputs.structure,
+        inputs.source_set,
+        hook,
+        (),
+        (),
+        (),
+        (),
+        "",
+        False,
         preparation_inputs=inputs,
     )

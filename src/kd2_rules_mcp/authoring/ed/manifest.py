@@ -18,12 +18,14 @@ from .model import (
     AuthoringTarget,
     CanonicalHeaderProperty,
     ExtensionIdentity,
+    Operation,
     PreparedAuthoring,
     SourceSet,
 )
 
 Delivery = Literal["extension", "manual"]
 GENERATOR_VERSION = "ed-authoring/1"
+GENERATOR_VERSION_V2 = "ed-authoring/2"
 
 
 def sha256(content: bytes) -> str:
@@ -52,15 +54,26 @@ def operation_dict(op: AddHeaderProperty) -> dict:
     }
 
 
-def operation_from_dict(value: dict) -> AddHeaderProperty:
-    draft = AttributeDraft(**value["new_attribute"]) if value["new_attribute"] else None
-    # Прочитанная метка не даёт свидетельства канонизации для генератора.
-    op = CanonicalHeaderProperty(
-        AuthoringTarget(**value["target"]),
-        value["configuration_attribute"],
-        value["format_property"],
-        draft,
-    )
+def operation_from_dict(value: dict) -> Operation:
+    if value.get("kind", "add_header_property") == "add_header_property":
+        draft = AttributeDraft(**value["new_attribute"]) if value["new_attribute"] else None
+        # Прочитанная метка не даёт свидетельства канонизации для генератора.
+        op: Operation = CanonicalHeaderProperty(
+            AuthoringTarget(**value["target"]),
+            value["configuration_attribute"],
+            value["format_property"],
+            draft,
+        )
+    else:
+        from .handlers import operation_from_input
+
+        payload = {
+            key: item for key, item in value.items() if key not in ("operation_id", "dependencies")
+        }
+        try:
+            op = operation_from_input(payload)
+        except (KeyError, TypeError, ValueError):
+            refuse("owned_content_changed", "Решения в manifest изменены")
     if op.operation_id != value["operation_id"]:
         refuse("owned_content_changed", "Решения в manifest изменены")
     return op
@@ -82,13 +95,33 @@ class ArtifactManifest:
     runtime_verified: bool
     unverified: tuple[str, ...]
     notices: tuple[str, ...]
+    procedures: tuple[Mapping[str, object], ...] = ()
+    handler_bindings: tuple[Mapping[str, object], ...] = ()
+    dispatcher_name: str = ""
+    dispatcher_order: tuple[str, ...] = ()
+    # Не в operations: сервис первого среза читает это поле как прямые ПКС.
+    handler_operations: tuple[Operation, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_hashes", MappingProxyType(dict(self.source_hashes)))
         object.__setattr__(self, "file_hashes", MappingProxyType(dict(self.file_hashes)))
 
     def to_dict(self) -> dict:
-        return {
+        if self.schema_version == 1:
+            if self.handler_operations:
+                refuse(
+                    "owned_content_changed", "Манифест первой версии содержит операции обработчиков"
+                )
+            operations = [operation_dict(op) for op in self.operations]
+        else:
+            from .handlers import canonical_operation_dict
+            from .model import order_operations
+
+            operations = [
+                canonical_operation_dict(op)
+                for op in order_operations((*self.operations, *self.handler_operations))
+            ]
+        payload = {
             "schema_version": self.schema_version,
             "generator_version": self.generator_version,
             "identity": asdict(self.identity),
@@ -100,7 +133,7 @@ class ArtifactManifest:
             "base_configuration_uuid": self.base_configuration_uuid,
             "source_set": asdict(self.source_set),
             "source_hashes": dict(self.source_hashes),
-            "operations": [operation_dict(op) for op in self.operations],
+            "operations": operations,
             "file_hashes": dict(self.file_hashes),
             "build_hash": self.build_hash,
             "delivery": self.delivery,
@@ -108,6 +141,12 @@ class ArtifactManifest:
             "unverified": list(self.unverified),
             "notices": list(self.notices),
         }
+        if self.schema_version >= 2:
+            payload["bindings"] = [dict(item) for item in self.handler_bindings]
+            payload["dispatcher_name"] = self.dispatcher_name
+            payload["dispatcher_order"] = list(self.dispatcher_order)
+            payload["procedures"] = [dict(item) for item in self.procedures]
+        return payload
 
     def to_bytes(self) -> bytes:
         return json_bytes(self.to_dict())
@@ -150,21 +189,40 @@ class ArtifactManifest:
             value = json.loads(content)
             source = value["source_set"]
             source["extensions"] = tuple(source["extensions"])
+            version = value["schema_version"]
+            parsed = tuple(operation_from_dict(op) for op in value["operations"])
+            headers = tuple(op for op in parsed if isinstance(op, AddHeaderProperty))
+            handlers = {}
+            if version >= 2:
+                handlers = {
+                    "procedures": tuple(value["procedures"]),
+                    "handler_bindings": tuple(value["bindings"]),
+                    "dispatcher_name": value["dispatcher_name"],
+                    "dispatcher_order": tuple(value["dispatcher_order"]),
+                    "handler_operations": tuple(
+                        op for op in parsed if not isinstance(op, AddHeaderProperty)
+                    ),
+                }
+            elif len(headers) != len(parsed):
+                refuse(
+                    "owned_content_changed", "Манифест первой версии содержит операции обработчиков"
+                )
             return cls(
-                value["schema_version"],
+                version,
                 value["generator_version"],
                 ExtensionIdentity(**value["identity"]),
                 IdentityMap(**value["identity_map"]),
                 value["base_configuration_uuid"],
                 SourceSet(**source),
                 value["source_hashes"],
-                tuple(operation_from_dict(op) for op in value["operations"]),
+                headers,
                 value["file_hashes"],
                 value["build_hash"],
                 value["delivery"],
                 value["runtime_verified"],
                 tuple(value["unverified"]),
                 tuple(value["notices"]),
+                **handlers,
             )
         except (KeyError, TypeError, ValueError, UnicodeError):
             refuse("owned_content_changed", "Прежний manifest повреждён")
@@ -173,9 +231,10 @@ class ArtifactManifest:
 
 def validate_previous(manifest: ArtifactManifest, files: Mapping[str, bytes]) -> None:
     """Manifest не хеширует себя: вместо этого сверяется собственное представление."""
+    expected = {1: GENERATOR_VERSION, 2: GENERATOR_VERSION_V2}.get(manifest.schema_version)
     if (
-        manifest.schema_version != 1
-        or manifest.generator_version != GENERATOR_VERSION
+        expected is None
+        or manifest.generator_version != expected
         or set(files) != {*manifest.file_hashes, "manifest.json"}
         or files.get("manifest.json") != manifest.to_bytes()
         or any(sha256(files[p]) != h for p, h in manifest.file_hashes.items() if p in files)

@@ -350,3 +350,30 @@ def test_public_canonical_marker_cannot_bypass_resolution():
     changed = replace(canonical[0], format_property="НетТакого")
     with pytest.raises(ValueError, match="созданные канонизатором"):
         generate_hook(value.document, (changed,), IDENTITY)
+
+
+def test_handler_fill_assigns_event_and_legacy_hook_stays_direct():
+    """Новая форма заполнителя не подменяет комментарий и вызов прямой ПКС первого среза."""
+    from kd2_rules_mcp.authoring.ed.hook import (
+        event_assignment_line,
+        generate_handler_fill,
+        header_property_lines,
+    )
+
+    inner = header_property_lines(
+        "доп_Заметка", "Комментарий", algorithmic=True, conversion_rule=""
+    )
+    inner += (event_assignment_line("ПриОтправкеДанных", "доп_Отправить"),)
+    text = generate_handler_fill("доп_", 2, (("send", "Товар", inner),))
+    assert text.startswith("// Сформировано из решений автора. Пересобирать комплект целиком.\n")
+    assert 'ДобавитьПКС(Правило.Свойства, "доп_Заметка", "Комментарий", 1, "");' in text
+    assert 'Правило.ПриОтправкеДанных = "доп_Отправить";' in text
+    assert text.count("&После") == 1
+    guarded = generate_handler_fill("доп_", 3, (("send", "Товар", inner),))
+    assert "Если Не ТолькоЗаголовки Тогда" in guarded
+    assert "КомпонентыОбмена.НаправлениеОбмена" in guarded
+    value = inputs()
+    legacy = generate_hook(value.document, (OPERATION,), IDENTITY, inputs=value)
+    assert "решений автора" not in legacy.source.text
+    assert "Диспетчер" not in legacy.source.text
+    assert legacy.source.text.count("ДобавитьПКС") == 1

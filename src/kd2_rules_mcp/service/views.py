@@ -10,13 +10,26 @@ from kd2_rules_mcp.authoring.registration import (
     RegistrationObject,
     parse_registration_object,
 )
-from kd2_rules_mcp.errors import Kd2Error, ObjectNotFoundError
+from kd2_rules_mcp.errors import (
+    AmbiguousAddressError,
+    Kd2Error,
+    ObjectNotFoundError,
+    RuleNotFoundError,
+)
 from kd2_rules_mcp.kd2.diff import TEXT_LIMIT, clip
 from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument, rule_code
 from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS
 from kd2_rules_mcp.projects import Base, LocalSettings, base_login, dev_env_login, resolve
 from kd2_rules_mcp.structures.queries import MAX_LIMIT, NotFound, Page
-from kd2_rules_mcp.validation.address import CONVERSION_ADDRESS, rule_address, side_name, walk_pks
+from kd2_rules_mcp.validation.address import (
+    CONVERSION_ADDRESS,
+    pks_address,
+    pro_addresses,
+    pro_label,
+    rule_address,
+    side_name,
+    walk_pks,
+)
 from kd2_rules_mcp.validation.report import Level, ValidationReport
 
 __all__ = ["TEXT_LIMIT", "clip"]
@@ -31,6 +44,32 @@ EXCHANGE_SECTIONS = {
     "parameters": "Параметры",
 }
 REGISTRATION_SECTION = "registration"
+# Виртуальный раздел rules_list: ПКС всех ПКО, без кода владельца.
+PKS_SECTION = "pks"
+# Обработчики ПРО, которые читает загрузчик БСП (ЗПР:327–349).
+PRO_HANDLERS = (
+    "ПередОбработкой",
+    "ПриОбработке",
+    "ПриОбработкеДополнительный",
+    "ПослеОбработки",
+)
+_PLAN_FILTER = "ОтборПоСвойствамПланаОбмена"
+_OBJECT_FILTER = "ОтборПоСвойствамОбъекта"
+_PLAN_FILTER_FIELDS = (
+    "ЭтоСтрокаКонстанты",
+    "ТипСвойстваОбъекта",
+    "СвойствоПланаОбмена",
+    "ВидСравнения",
+    "СвойствоОбъекта",
+)
+_OBJECT_FILTER_FIELDS = (
+    "ТипСвойстваОбъекта",
+    "ВидСравнения",
+    "СвойствоОбъекта",
+    "Вид",
+    "ЗначениеКонстанты",
+)
+_PROPERTY_TABLES = ("ТаблицаСвойствОбъекта", "ТаблицаСвойствПланаОбмена")
 # Поля правила в строке списка rules_list.
 _ROW_FIELDS = (
     "Наименование",
@@ -214,16 +253,32 @@ def section_node(document: RulesDocument, tag: str) -> Node | None:
     return document.root.children.get(tag)
 
 
+def exchange_list_sections() -> str:
+    """Имена разделов `rules_list` у правил обмена."""
+    return ", ".join((*EXCHANGE_SECTIONS, PKS_SECTION, CONVERSION_KIND))
+
+
+def registration_section_error(section: str) -> Kd2Error:
+    """Отказ раздела правил обмена на проекте правил регистрации."""
+    return Kd2Error(
+        f"Раздел «{section}» относится к правилам обмена. "
+        f"У правил регистрации доступен раздел «{REGISTRATION_SECTION}»"
+    )
+
+
 def list_section(document: RulesDocument, section: str) -> Node | None:
     """Узел раздела по имени инструмента. Неизвестный раздел — ошибка, пустого нет — `None`."""
     if isinstance(document, RegistrationRules):
         if section != REGISTRATION_SECTION:
-            raise Kd2Error(f"У правил регистрации один раздел: «{REGISTRATION_SECTION}»")
+            raise registration_section_error(section)
         return section_node(document, "ПравилаРегистрацииОбъектов")
+    if section == PKS_SECTION:
+        return None
     tag = EXCHANGE_SECTIONS.get(section)
     if tag is None:
-        known = ", ".join((*EXCHANGE_SECTIONS, CONVERSION_KIND))
-        raise Kd2Error(f"Неизвестный раздел «{section}»; разделы правил обмена: {known}")
+        raise Kd2Error(
+            f"Неизвестный раздел «{section}»; разделы правил обмена: {exchange_list_sections()}"
+        )
     return section_node(document, tag)
 
 
@@ -268,10 +323,18 @@ def rule_group(document: RulesDocument, node: Node) -> str:
 
 def listed_rule_rows(document: RulesDocument, section: str) -> list[dict[str, Any]]:
     """Строки `rules_list`. Ключ `group` есть только у правила внутри группы."""
+    if section == PKS_SECTION:
+        if isinstance(document, RegistrationRules):
+            raise registration_section_error(section)
+        if not isinstance(document, ExchangeRules):
+            raise Kd2Error(f"Раздел «{section}» есть у правил обмена")
+        return pks_rows(document)
     if section == CONVERSION_KIND:
         if isinstance(document, RegistrationRules):
-            raise Kd2Error(f"У правил регистрации один раздел: «{REGISTRATION_SECTION}»")
+            raise registration_section_error(section)
         return [_conversion_row(document.root)]
+    if section == REGISTRATION_SECTION and isinstance(document, RegistrationRules):
+        return registration_rows(document)
     container = list_section(document, section)
     paths = group_paths(container) if container is not None else {}
     return [rule_row(node, paths.get(id(node), "")) for node in section_rules(document, section)]
@@ -325,6 +388,190 @@ def _reference_text(tag: str, value: Any) -> Any:
     if tag in _RULE_CODE_FIELDS and isinstance(value, str):
         return rule_code(value)
     return value
+
+
+def pks_rows(document: ExchangeRules) -> list[dict[str, Any]]:
+    """ПКС всех ПКО: адрес, код ПКО, имена сторон, признаки поиска и отключения."""
+    rows: list[dict[str, Any]] = []
+    for pko in document.pko():
+        properties = pko.child("Свойства")
+        if properties is None:
+            continue
+        for path, item in walk_pks(properties):
+            if item.is_group:
+                continue
+            rows.append(
+                {
+                    "address": pks_address(pko.code, path),
+                    "code": pko.code,
+                    "source": side_name(item, "Источник"),
+                    "target": side_name(item, "Приемник"),
+                    "search": item.attrs.get("Поиск") is True,
+                    "disabled": item.attrs.get("Отключить") is True,
+                }
+            )
+    return rows
+
+
+def registration_rows(document: RegistrationRules) -> list[dict[str, Any]]:
+    """Строки раздела правил регистрации: объект, код, группа, отборы и обработчики."""
+    section = section_node(document, "ПравилаРегистрацииОбъектов")
+    nodes = document.rules()
+    paths = group_paths(section) if section is not None else {}
+    rows: list[dict[str, Any]] = []
+    for address, node in zip(pro_addresses(nodes), nodes, strict=True):
+        row: dict[str, Any] = {
+            "address": address,
+            "ОбъектМетаданныхИмя": str(node.values.get("ОбъектМетаданныхИмя", "")),
+            "code": node.code,
+            "disabled": node.attrs.get("Отключить") is True,
+            "filters": _has_filter(node),
+            "handlers": _has_handler(node),
+        }
+        group = paths.get(id(node), "")
+        if group:
+            row["group"] = group
+        rows.append(row)
+    return rows
+
+
+def _has_filter(node: Node) -> bool:
+    for tag in (_PLAN_FILTER, _OBJECT_FILTER):
+        child = node.child(tag)
+        if child is not None and child.items:
+            return True
+    return False
+
+
+def _has_handler(node: Node) -> bool:
+    return any(_handler_text(node, name) for name in PRO_HANDLERS)
+
+
+def _handler_text(node: Node, name: str) -> str:
+    value = node.values.get(name, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def find_pro(document: RegistrationRules, key: str) -> tuple[Node, str, str]:
+    """ПРО по адресу, имени объекта или коду. Нет правила или их несколько — ошибка."""
+    section = section_node(document, "ПравилаРегистрацииОбъектов")
+    nodes = document.rules()
+    addresses = pro_addresses(nodes)
+    paths = group_paths(section) if section is not None else {}
+    wanted = key.strip()
+    exact = [index for index, address in enumerate(addresses) if address == wanted]
+    if len(exact) == 1:
+        index = exact[0]
+        return nodes[index], addresses[index], paths.get(id(nodes[index]), "")
+    if len(exact) > 1:
+        raise AmbiguousAddressError(
+            f"Адрес «{wanted}» подходит нескольким правилам",
+            [addresses[index] for index in exact],
+        )
+    by_label = [index for index, node in enumerate(nodes) if pro_label(node) == wanted]
+    by_meta = [
+        index
+        for index, node in enumerate(nodes)
+        if str(node.values.get("ОбъектМетаданныхИмя", "")).strip() == wanted
+    ]
+    by_code = [index for index, node in enumerate(nodes) if node.code == wanted]
+    found = by_label or by_meta or by_code
+    if len(found) == 1:
+        index = found[0]
+        return nodes[index], addresses[index], paths.get(id(nodes[index]), "")
+    if len(found) > 1:
+        options = ", ".join(addresses[index] for index in found)
+        raise AmbiguousAddressError(
+            f"Адрес «{wanted}» подходит нескольким правилам: {options}",
+            [addresses[index] for index in found],
+        )
+    raise RuleNotFoundError(f"Правило регистрации «{wanted}» не найдено")
+
+
+def pro_view(node: Node, address: str, group: str) -> dict[str, Any]:
+    """Одно ПРО: отборы, реквизиты свойств, обработчики и то, что читает БСП.
+
+    `Отключить` пропускает правило (ЗПР:282–286). `Валидное` без `true` — тоже
+    (ЗПР:289–293). `РеквизитРежимаВыгрузки` — имя реквизита узла, значение которого
+    задаёт режим, в том числе «ВыгружатьПриНеобходимости» (ЗПР:309–311); само значение
+    живёт на узле, не в правиле. Корень обоих отборов — «И» (ЗПР:1203).
+    """
+    view: dict[str, Any] = {
+        "kind": "pro",
+        "title": node.kind.title,
+        "address": address,
+        "code": node.code,
+        "ОбъектМетаданныхИмя": str(node.values.get("ОбъектМетаданныхИмя", "")),
+        "disabled": node.attrs.get("Отключить") is True,
+        # Пустого атрибута в модели нет: БСП читает его как Ложь и правило не грузит.
+        "Валидное": node.attrs.get("Валидное") is True,
+    }
+    if group:
+        view["group"] = group
+    for tag in ("ОбъектНастройки", "РеквизитРежимаВыгрузки"):
+        value = str(node.values.get(tag, "")).strip()
+        if value:
+            view[tag] = value
+    plan = _filter_tree(node.child(_PLAN_FILTER), plan=True)
+    obj = _filter_tree(node.child(_OBJECT_FILTER), plan=False)
+    if plan is not None:
+        view[_PLAN_FILTER] = plan
+    if obj is not None:
+        view[_OBJECT_FILTER] = obj
+    handlers = [
+        {"name": name, "lines": len(text.splitlines()) or 1, "text": clip(text)}
+        for name in PRO_HANDLERS
+        if (text := _handler_text(node, name))
+    ]
+    view["handlers"] = handlers
+    fields: dict[str, Any] = {}
+    for tag in ("Наименование", "Описание", "Комментарий", "ОбъектМетаданныхТип"):
+        value = node.values.get(tag)
+        if isinstance(value, str) and value.strip():
+            fields[tag] = clip(value)
+    if fields:
+        view["fields"] = fields
+    return view
+
+
+def _filter_tree(node: Node | None, *, plan: bool) -> dict[str, Any] | None:
+    if node is None or not node.items:
+        return None
+    return {"operator": "И", "items": [_filter_item(item, plan=plan) for item in node.items]}
+
+
+def _filter_item(node: Node, *, plan: bool) -> dict[str, Any]:
+    if node.tag == "Группа":
+        raw = str(node.values.get("БулевоЗначениеГруппы", "")).strip()
+        # Группа плана хранит оператор строкой (ЗПР:601–603).
+        # У группы объекта оператор «И» только при явном «И», иначе «ИЛИ» (ЗПР:642–646).
+        operator = raw if plan else ("И" if raw == "И" else "ИЛИ")
+        return {
+            "group": True,
+            "operator": operator,
+            "items": [_filter_item(item, plan=plan) for item in node.items],
+        }
+    row: dict[str, Any] = {}
+    for tag in _PLAN_FILTER_FIELDS if plan else _OBJECT_FILTER_FIELDS:
+        value = node.values.get(tag)
+        if value not in (None, ""):
+            row[tag] = value
+    for tag in _PROPERTY_TABLES:
+        table = node.child(tag)
+        if table is None or not table.items:
+            continue
+        props = []
+        for item in table.items:
+            prop = {
+                name: item.values[name]
+                for name in ("Наименование", "Тип", "Вид")
+                if item.values.get(name) not in (None, "")
+            }
+            if prop:
+                props.append(prop)
+        if props:
+            row[tag] = props
+    return row
 
 
 def rule_row(node: Node, group: str = "") -> dict[str, Any]:
@@ -508,6 +755,33 @@ _LEVEL_ALIASES = {
     "warning": Level.WARNING.value,
 }
 LEVEL_ALLOWED = "«ошибка», «предупреждение», «error», «warning»"
+
+# `rules_diff`: полный ответ как раньше или страница адресов без содержимого.
+_DETAIL_ALIASES = {
+    "full": "full",
+    "полный": "full",
+    "brief": "brief",
+    "кратко": "brief",
+    "краткий": "brief",
+}
+DETAIL_ALLOWED = "«полный», «кратко», «краткий», «full», «brief»"
+
+
+def parse_detail(detail: str | None) -> str:
+    """Уровень подробности `rules_diff`. Пусто — полный ответ.
+
+    Недопустимое значение — `ValueError` со списком допустимых.
+    """
+    if detail is None or detail == "":
+        return "full"
+    if not isinstance(detail, str):
+        raise ValueError(f"Уровень подробности должен быть строкой. Допустимые: {DETAIL_ALLOWED}")
+    found = _DETAIL_ALIASES.get(detail.casefold())
+    if found is None:
+        raise ValueError(
+            f"Уровень подробности «{detail}» не принимается. Допустимые: {DETAIL_ALLOWED}"
+        )
+    return found
 
 
 def parse_level(level: str | None) -> str | None:

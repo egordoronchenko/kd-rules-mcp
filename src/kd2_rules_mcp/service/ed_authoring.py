@@ -10,7 +10,7 @@ from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from functools import wraps
 from pathlib import Path
 from time import perf_counter
@@ -25,24 +25,45 @@ from kd2_rules_mcp.authoring.ed.artifacts import (
 from kd2_rules_mcp.authoring.ed.candidates import candidates, target_objects
 from kd2_rules_mcp.authoring.ed.canonical import canonical_property
 from kd2_rules_mcp.authoring.ed.context import AuthoringContext
+from kd2_rules_mcp.authoring.ed.handler_render import procedure_block
+from kd2_rules_mcp.authoring.ed.handlers import (
+    HandlerOperationsPlan,
+    merge_operations,
+    operation_from_input,
+)
 from kd2_rules_mcp.authoring.ed.identity import IdentityMap
-from kd2_rules_mcp.authoring.ed.manifest import ArtifactManifest, sha256
+from kd2_rules_mcp.authoring.ed.manifest import ArtifactManifest, json_bytes, sha256
 from kd2_rules_mcp.authoring.ed.model import (
+    AddAlgorithmicHeaderProperty,
     AddHeaderProperty,
-    AttributeDraft,
     AuthoringInputs,
     AuthoringPreconditionError,
     AuthoringTarget,
     ExtensionIdentity,
     Failure,
+    Notice,
+    Operation,
     PreparedAuthoring,
+    PreserveMissingHeaderProperty,
+    ProfileComparison,
+    ProfileReport,
+    SetObjectHandler,
     SourceSet,
     digest,
 )
 from kd2_rules_mcp.authoring.ed.operations import validate_preconditions
-from kd2_rules_mcp.authoring.ed.render import render_authoring
+from kd2_rules_mcp.authoring.ed.render import (
+    RenderedAuthoring,
+    render_authoring,
+    render_handlers_authoring,
+)
 from kd2_rules_mcp.authoring.ed.xml_dump import M, parse_xml, read_description
-from kd2_rules_mcp.ed.address import AmbiguousAddressError, EntityNotFoundError
+from kd2_rules_mcp.ed.address import AmbiguousAddressError, EntityNotFoundError, build_addresses
+from kd2_rules_mcp.ed.layer_model import LayerDescriptor
+from kd2_rules_mcp.ed.layer_reader import read_extension_text
+from kd2_rules_mcp.ed.layers import compose_manager
+from kd2_rules_mcp.ed.model import Classification, ObjectRule
+from kd2_rules_mcp.ed.refs import build_references
 from kd2_rules_mcp.ed.schema import EdSchema
 from kd2_rules_mcp.errors import (
     EdAuthoringAckRequiredError,
@@ -64,7 +85,19 @@ from kd2_rules_mcp.service.ed_routes import (
 from kd2_rules_mcp.service.ed_schema import EdSchemaMixin
 from kd2_rules_mcp.service.ed_views import validate_page
 from kd2_rules_mcp.service.paths import Settings
-from kd2_rules_mcp.validation.ed_authoring import prepare_authoring
+from kd2_rules_mcp.validation.ed_authoring import (
+    check_profile,
+    compare_reports,
+    enforce_delta,
+    prepare_authoring,
+    prepare_handler_operations,
+)
+from kd2_rules_mcp.validation.ed_authoring_handlers import preset_procedure_text
+from kd2_rules_mcp.validation.ed_layers import (
+    validate_effective_links,
+    validate_layers,
+)
+from kd2_rules_mcp.validation.ed_projection import effective_document, select_context
 from kd2_rules_mcp.validation.ed_routes import _format_uri
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
 
@@ -75,6 +108,7 @@ MAX_FILES = 1000
 MAX_BYTES = 32 * 1024 * 1024
 MAX_INPUTS = 32
 MAX_INPUT_BYTES = 128 * 1024 * 1024
+MAX_HANDLER_BODY_BYTES = 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +181,7 @@ class _Inputs:
     stored_bytes: int
     descriptions: dict[str, str]
     prepared_key: str = ""
-    prepared: PreparedAuthoring | None = None
+    prepared: PreparedAuthoring | HandlerOperationsPlan | None = None
 
 
 @dataclass(slots=True)
@@ -177,7 +211,9 @@ def _failure(error: AuthoringPreconditionError) -> EdAuthoringPreconditionError:
                 {
                     "id": f.id,
                     "address": f.address,
-                    "message": f.message,
+                    "message": f"Тело не прошло проверку {f.id}; строка {f.line}"
+                    if f.id.startswith("ed.author.body_")
+                    else f.message,
                     "source": {"file": f.file, "line": f.line},
                 }
                 for f in error.failures
@@ -197,6 +233,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         self._authoring_schemas: OrderedDict[tuple[str, str], _CachedSchema] = OrderedDict()
         self._authoring_schema_bytes = 0
         self._authoring_previews: OrderedDict[str, ArtifactManifest] = OrderedDict()
+        self._authoring_validated: OrderedDict[str, RenderedAuthoring] = OrderedDict()
+        self._authoring_validated_bytes = 0
 
     def _catalog(self):
         """Один и тот же projects.yaml не открываем для каждой выдаваемой строки пути."""
@@ -251,39 +289,46 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
     def _authoring_operation(
         self, raw: object, project: str, configuration: str
     ) -> tuple[AddHeaderProperty, tuple[str, str, str]]:
-        value = _mapping(
-            raw,
-            "operation",
-            {"target", "configuration_attribute", "format_property", "new_attribute"},
-        )
+        """Совместимость прежних внутренних потребителей прямой ПКС."""
+        operation, refs = self._operation(raw, project, configuration)
+        if not isinstance(operation, AddHeaderProperty):
+            raise ValueError("Ожидалась прямая ПКС")
+        return operation, refs
+
+    def _operation(
+        self, raw: object, project: str, configuration: str
+    ) -> tuple[Operation, tuple[str, str, str]]:
+        if not isinstance(raw, dict):
+            raise ValueError("operation: нужен объект")
         try:
-            target, refs = self._authoring_target(value["target"], project, configuration)
-            draft = None
-            if value.get("new_attribute") is not None:
-                data = _mapping(
-                    value["new_attribute"],
-                    "new_attribute",
-                    {"name", "synonym", "primitive", "qualifiers"},
-                )
-                if not isinstance(data.get("qualifiers"), dict):
-                    raise ValueError("qualifiers: нужен словарь")
-                primitive = _text(data["primitive"], "primitive")
-                if primitive not in ("string", "boolean", "number", "date"):
+            if raw.get("new_attribute") is not None and (
+                not isinstance(raw["new_attribute"], dict)
+                or not isinstance(raw["new_attribute"].get("qualifiers"), dict)
+            ):
+                raise ValueError("new_attribute и qualifiers: нужны объекты")
+            target, refs = self._authoring_target(raw["target"], project, configuration)
+            operation = operation_from_input(raw | {"target": asdict(target)})
+            # Форму декодирует ядро; здесь только транспортные типы значений DTO.
+            for descriptor in fields(operation):
+                key, value = descriptor.name, getattr(operation, descriptor.name)
+                if key not in ("target", "new_attribute") and not isinstance(value, str):
+                    raise ValueError("Поля операции должны быть строками")
+            if isinstance(operation, AddHeaderProperty) and operation.new_attribute:
+                draft = operation.new_attribute
+                _text(draft.name, "name")
+                _text(draft.synonym, "synonym")
+                if draft.primitive not in ("string", "boolean", "number", "date"):
                     raise ValueError("primitive: string, boolean, number или date")
-                draft = AttributeDraft(
-                    _text(data["name"], "name"),
-                    _text(data["synonym"], "synonym"),
-                    primitive,
-                    data["qualifiers"],
-                )
-            return AddHeaderProperty(
-                target,
-                _text(value["configuration_attribute"], "configuration_attribute"),
-                _text(value["format_property"], "format_property"),
-                draft,
-            ), refs
-        except KeyError as error:
-            raise ValueError(f"Отсутствует поле операции: {error.args[0]}") from error
+            if isinstance(operation, (AddHeaderProperty, AddAlgorithmicHeaderProperty)):
+                _text(operation.configuration_attribute, "configuration_attribute")
+                _text(operation.format_property, "format_property")
+            if isinstance(operation, PreserveMissingHeaderProperty):
+                _text(operation.property_operation_id, "property_operation_id")
+            if isinstance(operation, AddAlgorithmicHeaderProperty):
+                _text(operation.handler_operation_id, "handler_operation_id")
+            return operation, refs
+        except (KeyError, TypeError, AttributeError) as error:
+            raise ValueError("Неверные поля операции авторинга") from error
 
     @staticmethod
     def _hash_file(path: Path) -> str:
@@ -318,7 +363,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         project: str,
         configuration: str,
         refs: tuple[str, str, str],
-        operations: tuple[AddHeaderProperty, ...] = (),
+        operations: tuple[Operation, ...] = (),
     ) -> _Inputs:
         # Открытые идентификаторы проверяются даже при попадании в кэш.
         doc_project = self._ed_project(refs[0])
@@ -618,12 +663,10 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             entry.descriptions[name] = text
         return entry.descriptions[name]
 
-    def _extension_sources(
-        self, entry: _Inputs, operations: tuple[AddHeaderProperty, ...], index
-    ) -> None:
+    def _extension_sources(self, entry: _Inputs, operations: tuple[Operation, ...], index) -> None:
         names = {entry.value.document.files[0].path.replace("\\", "/").split("CommonModules/")[-1]}
         for op in operations:
-            if op.new_attribute:
+            if isinstance(op, AddHeaderProperty) and op.new_attribute:
                 try:
                     rule = index.find(op.target.pko_address)
                 except (EntityNotFoundError, AmbiguousAddressError):
@@ -979,7 +1022,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 shutil.rmtree(staging)
 
     def _previous_refs(
-        self, operation: AddHeaderProperty, entries: dict[tuple[str, str, str], _Inputs]
+        self, operation: Operation, entries: dict[tuple[str, str, str], _Inputs]
     ) -> tuple[str, str, str]:
         """После перезапуска прежние решения восстанавливаются по карте, без хранимого draft."""
         entry = next(iter(entries.values()))
@@ -1026,7 +1069,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             )
         return opened["project_id"], schema["schema_id"], entry.structure_id
 
-    def _previous_failure(self, error: AuthoringPreconditionError, operation: AddHeaderProperty):
+    def _previous_failure(self, error: AuthoringPreconditionError, operation: Operation):
         mapped = _failure(error)
         for failure in mapped.details["failures"]:
             failure.update(operation_id=operation.operation_id, from_previous=True)
@@ -1034,9 +1077,14 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         return mapped
 
     @staticmethod
-    def _source_hashes(entry: _Inputs) -> dict[str, str]:
+    def _source_hashes(
+        entry: _Inputs, descriptions: Mapping[str, str] | None = None
+    ) -> dict[str, str]:
         """Отпечатки прочитанных входов: пути относительно выгрузки, без обхода диска."""
-        sources = {p: sha256(t.encode("utf-8")) for p, t in entry.descriptions.items()}
+        sources = {
+            p: sha256(t.encode("utf-8"))
+            for p, t in (descriptions if descriptions is not None else entry.descriptions).items()
+        }
         known = dict(entry.route.file_hashes)
         known.update({Path(f.path): f.sha256 for f in entry.value.document.files})
         for schema in entry.value.schemas.values():
@@ -1049,6 +1097,547 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             {p: sha256(t.encode("utf-8")) for p, t in entry.value.extension_sources.items()}
         )
         return sources
+
+    def _handler_limits(self, plan: HandlerOperationsPlan) -> None:
+        bodies = [op.body for op in plan.operations if isinstance(op, SetObjectHandler)]
+        self._limit(
+            sum(len(b.encode("utf-8")) for b in bodies), MAX_HANDLER_BODY_BYTES, "байты тел"
+        )
+        self._limit(len(plan.bindings), 100, "слоты обработчиков")
+        for body in bodies:
+            self._limit(len(body.encode("utf-8")), 64 * 1024, "байты тела")
+            self._limit(len(body.splitlines()), 2000, "строки тела")
+
+    def _validate_handler_layer(
+        self, entry: _Inputs, bundle: RenderedAuthoring, plan: HandlerOperationsPlan
+    ) -> RenderedAuthoring:
+        """Читатель слоя проверяет именно порождённый текст, включая расширения проекта.
+
+        Полный отчёт входит в отпечаток через validation.json. Свидетельства пилота
+        шаблона хранятся отдельно от runtime_verified конкретного комплекта.
+        """
+        document = entry.value.document
+        cache_key = digest(
+            (
+                tuple((p, sha256(b)) for p, b in bundle.files.items()),
+                plan.runtime_verified,
+                tuple(b.runtime_verified for b in plan.bindings),
+                entry.value.source_set,
+            )
+        )
+        if cached := self._authoring_validated.get(cache_key):
+            self._authoring_validated.move_to_end(cache_key)
+            return cached
+        version = document.manager_version
+        module_path = bundle.prepared.generated_hook.source.path.removeprefix("modules/")
+        flagged = {
+            (d.span.file_id, d.span.char_start)
+            for d in document.diagnostics
+            if d.code == "helper_semantics_unverified"
+        }
+        helpers = frozenset(
+            r.name.casefold()
+            for r in document.routines
+            if r.name.casefold() in ("добавитьпкс", "добавитьпктч")
+            and (r.span.file_id, r.span.char_start) not in flagged
+        )
+        targets = {r.name.casefold(): r for r in document.routines}
+        readings = []
+        for number, root in enumerate(entry.roots[1:]):
+            key = f"extensions/{number}/{module_path}"
+            if key in entry.value.extension_sources:
+                readings.append(
+                    read_extension_text(
+                        entry.value.extension_sources[key],
+                        layer=LayerDescriptor(
+                            f"L{number + 1:02d}", number + 1, root.name, str(root), None, ""
+                        ),
+                        version=version,
+                        helpers=helpers,
+                        targets=targets,
+                        path=str(root / module_path),
+                        file_id=key,
+                    )
+                )
+        before_layer = compose_manager(document, readings=readings, version=version)
+        layer_id = "authoring"
+        generated = read_extension_text(
+            bundle.files["modules/" + module_path].decode("utf-8"),
+            layer=LayerDescriptor(
+                layer_id, len(entry.roots), bundle.manifest.identity.name, "<generated>", None, ""
+            ),
+            version=version,
+            helpers=helpers,
+            targets=targets,
+            path="modules/" + module_path,
+            file_id=layer_id + ":" + module_path,
+        )
+        after_layer = compose_manager(document, readings=[*readings, generated], version=version)
+        by_id = {op.operation_id: op for op in plan.operations}
+        body_bytes = 0
+        for binding in plan.bindings:
+            operations = [by_id[ident] for ident in binding.operation_ids]
+            if isinstance(operations[0], SetObjectHandler):
+                body = operations[0].body
+                expected = f"Процедура {binding.handler_name}({', '.join(binding.parameters)})\n"
+                if binding.previous_name:
+                    expected += (
+                        f"\t{binding.previous_name}({', '.join(binding.previous_arguments)});\n"
+                    )
+                expected += body + "КонецПроцедуры\n"
+            else:
+                pairs = []
+                for operation in operations:
+                    assert isinstance(operation, PreserveMissingHeaderProperty)
+                    prop = by_id[operation.property_operation_id]
+                    assert isinstance(prop, AddHeaderProperty)
+                    pairs.append((prop.format_property, prop.configuration_attribute))
+                expected = preset_procedure_text(binding.handler_name, tuple(pairs))
+                body = expected[expected.index("\n") + 1 : expected.rindex("КонецПроцедуры")]
+            self._limit(len(body.encode("utf-8")), 64 * 1024, "байты тела")
+            self._limit(len(body.splitlines()), 2000, "строки тела")
+            body_bytes += len(body.encode("utf-8"))
+            if procedure_block(generated.source.text, binding.handler_name) != expected:
+                raise AuthoringPreconditionError(
+                    (
+                        Failure(
+                            "ed.author.new_issues",
+                            binding.target.pko_address,
+                            "Тело прочитанной процедуры отличается от плана",
+                        ),
+                    )
+                )
+        self._limit(body_bytes, MAX_HANDLER_BODY_BYTES, "байты тел")
+        unknown = generated.coverage.line_classes.count(Classification.UNKNOWN)
+        unresolved = 0
+        certain = not generated.skips and not after_layer.skipped
+        base_index = build_addresses(document)
+        body_known = body_unparsed = 0
+        source_map = []
+        documents, links = {}, {}
+        for direction in ("send", "receive"):
+            before_context = select_context(before_layer, direction)
+            after_context = select_context(after_layer, direction)
+            certain &= not after_context.taints and all(
+                e.certainty == "known" for e in after_context.entities
+            )
+            chains = {c.target_name: c for c in after_context.dispatch_chains}
+            for binding in plan.bindings:
+                if binding.target.direction == direction:
+                    chain = chains.get(binding.handler_name)
+                    unresolved += int(chain is None or chain.resolution != "call")
+            before_doc = effective_document(before_layer, before_context)
+            after_doc = effective_document(after_layer, after_context)
+            documents[direction] = (before_doc, after_doc)
+            links[direction] = (
+                validate_effective_links(before_layer, before_context),
+                validate_effective_links(after_layer, after_context),
+            )
+            enforce_delta(
+                compare_reports(
+                    ProfileReport(
+                        "links",
+                        direction,
+                        tuple(links[direction][0].issues),
+                        tuple(links[direction][0].skipped),
+                    ),
+                    ProfileReport(
+                        "links",
+                        direction,
+                        tuple(links[direction][1].issues),
+                        tuple(links[direction][1].skipped),
+                    ),
+                ),
+                plan.operations,
+                document,
+            )
+            # Объявленные изменения сопоставляем с действующим состоянием обоих направлений.
+            if len(before_doc.pko) != len(after_doc.pko):
+                raise AuthoringPreconditionError(
+                    (Failure("ed.author.new_issues", "", "Изменился состав ПКО"),)
+                )
+            for old, current in zip(before_doc.pko, after_doc.pko, strict=True):
+
+                def prop_key(prop):
+                    return (
+                        prop.configuration_property,
+                        prop.format_property,
+                        prop.algorithm_flag,
+                        prop.conversion_rule,
+                        prop.namespace,
+                        prop.condition_name,
+                    )
+
+                expected_properties = []
+                expected_events = {b.event: b.target_name for b in old.events}
+                for op in plan.operations:
+                    if (
+                        op.target.direction != direction
+                        or base_index.find(op.target.pko_address).entity_id != old.entity_id
+                    ):
+                        continue
+                    if isinstance(op, (AddHeaderProperty, AddAlgorithmicHeaderProperty)):
+                        expected_properties.append(
+                            (
+                                op.configuration_attribute,
+                                op.format_property,
+                                int(isinstance(op, AddAlgorithmicHeaderProperty)),
+                                op.conversion_rule
+                                if isinstance(op, AddAlgorithmicHeaderProperty)
+                                else "",
+                                "",
+                                "",
+                            )
+                        )
+                for binding in plan.bindings:
+                    if (
+                        binding.target.direction == direction
+                        and base_index.find(binding.target.pko_address).entity_id == old.entity_id
+                    ):
+                        expected_events[binding.event] = binding.handler_name
+                from collections import Counter
+
+                if (
+                    Counter(map(prop_key, current.properties))
+                    != Counter(map(prop_key, old.properties)) + Counter(expected_properties)
+                    or {b.event: b.target_name for b in current.events} != expected_events
+                    or any(
+                        getattr(old, key) != getattr(current, key)
+                        for key in (
+                            "name",
+                            "procedure_name",
+                            "declared_name",
+                            "configuration_object",
+                            "format_object",
+                            "group_flag",
+                            "identification",
+                            "groups",
+                            "search_sets",
+                            "extensions",
+                        )
+                    )
+                ):
+                    raise AuthoringPreconditionError(
+                        (
+                            Failure(
+                                "ed.author.new_issues",
+                                "",
+                                "Состав прочитанного слоя отличается от плана",
+                            ),
+                        )
+                    )
+            if any(
+                getattr(before_doc, key) != getattr(after_doc, key)
+                for key in ("pod", "pkpd", "parameters", "rule_uses")
+            ):
+                raise AuthoringPreconditionError(
+                    (Failure("ed.author.new_issues", "", "Изменились незатронутые правила"),)
+                )
+            if version == 3:
+                headers_before = effective_document(
+                    before_layer, select_context(before_layer, direction, True)
+                )
+                headers_after = effective_document(
+                    after_layer, select_context(after_layer, direction, True)
+                )
+                if headers_before.pko != headers_after.pko:
+                    raise AuthoringPreconditionError(
+                        (Failure("ed.author.new_issues", "", "Изменились правила headers_only"),)
+                    )
+            refs = build_references(after_doc)
+            owned_ids = {
+                r.entity_id
+                for r in after_doc.routines
+                if r.span.file_id == generated.source.file_id and "handler" in r.roles
+            }
+            body_known += sum(r.owner_id in owned_ids and r.name is not None for r in refs.entries)
+            body_unparsed += sum(refs.unparsed_by_owner.get(i, 0) for i in owned_ids)
+        layer_before = validate_layers(before_layer)
+        layer_after = validate_layers(after_layer)
+        layer_delta = compare_reports(
+            ProfileReport("layer", "both", tuple(layer_before.issues), tuple(layer_before.skipped)),
+            ProfileReport("layer", "both", tuple(layer_after.issues), tuple(layer_after.skipped)),
+        )
+        if not certain or unknown or unresolved:
+            raise AuthoringPreconditionError(
+                (
+                    Failure(
+                        "ed.author.new_issues",
+                        "",
+                        "Порождённый слой содержит unknown, taint "
+                        "или неразрешённую диспетчеризацию",
+                    ),
+                )
+            )
+        enforce_delta(layer_delta, plan.operations, document)
+        selected = {(op.target.format_version, op.target.direction) for op in plan.operations}
+        comparisons, other_comparisons, expected_skipped = [], [], []
+        authoring_context = AuthoringContext(
+            replace(entry.value, structure=bundle.prepared.structure_after)
+        )
+        authoring_context.target_ids = frozenset(
+            base_index.find(op.target.pko_address).entity_id for op in plan.operations
+        )
+        for key, schema in sorted(entry.value.schemas.items()):
+            if not isinstance(schema, EdSchema):
+                continue
+            for direction in sorted({op.target.direction for op in plan.operations}):
+                reports = []
+                before_doc, after_doc = documents[direction]
+                for doc, link_report in zip((before_doc, after_doc), links[direction], strict=True):
+                    reports.append(
+                        check_profile(
+                            doc if (key, direction) in selected else authoring_context.scope(doc),
+                            schema,
+                            bundle.prepared.structure_after,
+                            key,
+                            direction,
+                            context=authoring_context,
+                            links=link_report,
+                            full_skip_addresses=True,
+                        )
+                    )
+                after_index = build_addresses(after_doc)
+                logical = {
+                    address: base_index.by_id[ident][0]
+                    for ident, addresses in after_index.by_id.items()
+                    if ident in base_index.by_id
+                    for address in addresses
+                }
+                proven, algorithmic_addresses, relevant = [], [], []
+                for op in plan.operations:
+                    if (
+                        isinstance(op, (AddHeaderProperty, AddAlgorithmicHeaderProperty))
+                        and op.target.direction == direction
+                    ):
+                        rule = after_index.find(op.target.pko_address)
+                        assert isinstance(rule, ObjectRule)
+                        for prop in rule.properties:
+                            if (
+                                prop.configuration_property == op.configuration_attribute
+                                and prop.format_property == op.format_property
+                            ):
+                                proven.append(after_index.by_id[prop.entity_id][0])
+                                relevant.append(after_index.by_id[prop.entity_id][0])
+                                if isinstance(op, AddAlgorithmicHeaderProperty):
+                                    algorithmic_addresses.append(
+                                        after_index.by_id[prop.entity_id][0]
+                                    )
+                for binding in plan.bindings:
+                    if binding.target.direction == direction:
+                        rule = after_index.find(binding.target.pko_address)
+                        assert isinstance(rule, ObjectRule)
+                        relevant.extend(
+                            after_index.by_id.get(
+                                b.entity_id,
+                                (binding.target.pko_address + "/Обработчик/" + binding.event,),
+                            )[0]
+                            for b in rule.events
+                            if b.event == binding.event
+                        )
+                delta = compare_reports(
+                    *reports,
+                    logical_addresses=logical,
+                    relevant_addresses=tuple(relevant),
+                    proven_type_addresses=tuple(proven),
+                )
+                for item in reports[1].skipped:
+                    reason = item.reason.partition("; ")[0].rpartition(": ")[0]
+                    if item.check == "ed.schema.type_incompatible" and reason in (
+                        "handler_may_supply",
+                        "non_atomic_type",
+                    ):
+                        for address in algorithmic_addresses:
+                            if address in item.reason.partition("; ")[2].split(", "):
+                                expected_skipped.append(
+                                    {
+                                        "check": item.check,
+                                        "reason": reason,
+                                        "address": address,
+                                        "format_version": key,
+                                        "direction": direction,
+                                    }
+                                )
+                comparison = ProfileComparison(reports[0], reports[1], delta)
+                if (key, direction) in selected:
+                    enforce_delta(delta, plan.operations, document)
+                    comparisons.append(comparison)
+                else:
+                    other_comparisons.append(comparison)
+        for op in plan.operations:
+            binding = next((b for b in plan.bindings if op.operation_id in b.operation_ids), None)
+            routine = next(
+                (r for r in generated.routines if binding and r.name == binding.handler_name), None
+            )
+            if routine:
+                source_map.append(
+                    {
+                        "operation_id": op.operation_id,
+                        "file": routine.span.file_id,
+                        "line_start": routine.span.line_start,
+                        "line_end": routine.span.line_end,
+                    }
+                )
+            elif isinstance(op, (AddHeaderProperty, AddAlgorithmicHeaderProperty)):
+                _, after_doc = documents[op.target.direction]
+                rule = build_addresses(after_doc).find(op.target.pko_address)
+                assert isinstance(rule, ObjectRule)
+                prop = next(
+                    p
+                    for p in rule.properties
+                    if p.configuration_property == op.configuration_attribute
+                    and p.format_property == op.format_property
+                )
+                source_map.append(
+                    {
+                        "operation_id": op.operation_id,
+                        "file": prop.span.file_id,
+                        "line_start": prop.span.line_start,
+                        "line_end": prop.span.line_end,
+                    }
+                )
+        expected_previous = {b.previous_name for b in plan.bindings if b.previous_name}
+        for call in generated.previous_calls:
+            if call.target_name not in expected_previous or call.call_count != 1:
+                raise AuthoringPreconditionError(
+                    (
+                        Failure(
+                            "ed.author.new_issues",
+                            "",
+                            "Прежний обработчик вызывается иначе, чем задано планом",
+                        ),
+                    )
+                )
+        preserved = {
+            op.property_operation_id
+            for op in plan.operations
+            if isinstance(op, PreserveMissingHeaderProperty)
+        }
+        notices = {
+            n.notice_id: n
+            for n in bundle.prepared.notices
+            if not (n.id == "ed.author.missing_value_clears" and n.operation_id in preserved)
+        }
+        notices.update((n.notice_id, n) for n in plan.notices)
+        for op in plan.operations:
+            unavailable = tuple(
+                k for k, schema in entry.value.schemas.items() if not isinstance(schema, EdSchema)
+            )
+            if unavailable:
+                notice = Notice(
+                    "ed.author.other_version_unverified",
+                    op.operation_id,
+                    op.target.pko_address,
+                    "Схемы других версий недоступны",
+                    unavailable,
+                )
+                notices[notice.notice_id] = notice
+            incompatible = tuple(
+                c.before.version
+                for c in other_comparisons
+                if c.before.direction == op.target.direction and not c.delta.no_new_issues
+            )
+            if incompatible:
+                notice = Notice(
+                    "ed.author.other_version_incompatible",
+                    op.operation_id,
+                    op.target.pko_address,
+                    "Доработка несовместима с другими версиями менеджера",
+                    tuple(sorted(set(incompatible))),
+                )
+                notices[notice.notice_id] = notice
+        validation = json.loads(bundle.files["validation.json"])
+
+        def profile_rows(comparisons):
+            return [
+                {
+                    "version": c.before.version,
+                    "direction": c.before.direction,
+                    "before": [i.to_dict() for i in c.before.issues],
+                    "after": [i.to_dict() for i in c.after.issues],
+                    "new": [i.to_dict() for i in c.delta.new],
+                    "disappeared": [i.to_dict() for i in c.delta.disappeared],
+                    "new_relevant_skipped": [s.to_dict() for s in c.delta.new_relevant_skipped],
+                    "skipped_before": [s.to_dict() for s in c.before.skipped],
+                    "skipped_after": [s.to_dict() for s in c.after.skipped],
+                }
+                for c in comparisons
+            ]
+
+        validation.update(
+            selected_profiles=profile_rows(comparisons),
+            other_profiles=profile_rows(other_comparisons),
+            notices=[asdict(n) | {"notice_id": n.notice_id} for n in notices.values()],
+            layer={
+                "certain": bool(certain),
+                "unknown_lines": unknown,
+                "unresolved_dispatch": unresolved,
+                "new_issues": len(layer_delta.new),
+            },
+            layer_before={
+                "issues": [i.to_dict() for i in layer_before.issues],
+                "skipped": [s.to_dict() for s in layer_before.skipped],
+            },
+            layer_after={
+                "issues": [i.to_dict() for i in layer_after.issues],
+                "skipped": [s.to_dict() for s in layer_after.skipped],
+            },
+            expected_semantic_skipped=expected_skipped,
+            handler_slots=[
+                {
+                    "handler_name": b.handler_name,
+                    "event": b.event,
+                    "operation_ids": list(b.operation_ids),
+                    "runtime_verified": False,
+                }
+                for b in plan.bindings
+            ],
+            previous_calls=[
+                {
+                    "target_name": c.target_name,
+                    "rule_name": c.rule_name,
+                    "event": c.event,
+                    "call_count": c.call_count,
+                    "source": {"file": c.span.file_id, "line": c.span.line_start},
+                }
+                for c in generated.previous_calls
+            ],
+            body_refs={"known": body_known, "unparsed": body_unparsed, "bytes": body_bytes},
+            source_map=source_map,
+            template_evidence={
+                "runtime_verified": plan.runtime_verified,
+                "bindings": [
+                    {"handler_name": b.handler_name, "runtime_verified": b.runtime_verified}
+                    for b in plan.bindings
+                ],
+            },
+        )
+        files = dict(bundle.files) | {"validation.json": json_bytes(validation)}
+        manifest = replace(
+            bundle.manifest,
+            notices=tuple(notices),
+            file_hashes={p: sha256(b) for p, b in files.items() if p != "manifest.json"},
+        )
+        files["manifest.json"] = manifest.to_bytes()
+        result = replace(
+            bundle,
+            files=files,
+            manifest=manifest,
+            prepared=replace(
+                bundle.prepared,
+                selected_profiles=tuple(comparisons),
+                other_profiles=tuple(other_comparisons),
+                notices=tuple(notices.values()),
+            ),
+        )
+        size = sum(len(b) for b in result.files.values())
+        if size <= MAX_BYTES:
+            while self._authoring_validated and self._authoring_validated_bytes + size > MAX_BYTES:
+                _, old = self._authoring_validated.popitem(last=False)
+                self._authoring_validated_bytes -= sum(len(b) for b in old.files.values())
+            self._authoring_validated[cache_key] = result
+            self._authoring_validated_bytes += size
+        return result
 
     @_timed_build
     def ed_authoring_build(
@@ -1118,8 +1707,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             or len(set(drop_operations)) != len(drop_operations)
         ):
             raise ValueError("drop_operations: нужен список уникальных идентификаторов операций")
-        parsed = [self._authoring_operation(o, project, configuration) for o in operations]
-        groups: dict[tuple[str, str, str], list[AddHeaderProperty]] = defaultdict(list)
+        parsed = [self._operation(o, project, configuration) for o in operations]
+        groups: dict[tuple[str, str, str], list[Operation]] = defaultdict(list)
         for operation, refs in parsed:
             groups[refs].append(operation)
         self._limit(len({r[0] for r in groups}), MAX_MANAGERS, "менеджеры")
@@ -1159,8 +1748,11 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     artifact_name(identity.name, config_description.uuid), output_dir
                 )
                 previous, previous_files = self._previous(destination)
+                previous_operations = (
+                    (*previous.operations, *previous.handler_operations) if previous else ()
+                )
                 previous_ids = (
-                    {op.operation_id for op in previous.operations} if previous else set()
+                    {op.operation_id for op in previous_operations} if previous else set()
                 )
                 if set(drop_operations) - previous_ids:
                     raise ValueError("drop_operations содержит операцию вне прежнего комплекта")
@@ -1178,7 +1770,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                                 )
                             )
                         )
-                    for op in previous.operations:
+                    for op in previous_operations:
                         if op.operation_id not in retained_ids:
                             continue
                         matches = [
@@ -1212,6 +1804,10 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                         groups[matches[0]].append(op)
                 bundles = []
                 preparations = []
+                handler_plans = []
+                use_handlers = bool(previous and previous.schema_version == 2) or any(
+                    not isinstance(op, AddHeaderProperty) for ops in groups.values() for op in ops
+                )
                 self._limit(len({r[0] for r in entries}), MAX_MANAGERS, "менеджеры")
                 for refs, ops in groups.items():
                     entry = entries[refs]
@@ -1224,6 +1820,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                             raise
                     with _phase("inputs"):
                         self._extension_sources(entry, tuple(ops), self._ed_project(refs[0]).index)
+                    if use_handlers:
+                        ops = list(merge_operations((), tuple(ops)))
                     prepared_key = digest(
                         (tuple(ops), identity, version_scope, entry.value.source_set)
                     )
@@ -1233,7 +1831,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                             opened = self._ed_project(refs[0])
                             context.indices[id(opened.document)] = opened.index
                             context.references = opened.references
-                            for old in ops:
+                            for old in ops if not use_handlers else ():
                                 if old.operation_id in retained_ids:
                                     try:
                                         validate_preconditions(
@@ -1245,24 +1843,68 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                                         )
                                     except AuthoringPreconditionError as error:
                                         raise self._previous_failure(error, old) from error
-                            entry.prepared = prepare_authoring(
-                                entry.value,
-                                tuple(ops),
-                                identity,
-                                version_scope=version_scope,
-                                context=context,
-                                other_rules_only=True,
-                            )
+                            if use_handlers:
+                                entry.prepared = prepare_handler_operations(
+                                    entry.value, tuple(ops), identity, version_scope=version_scope
+                                )
+                            else:
+                                entry.prepared = prepare_authoring(
+                                    entry.value,
+                                    tuple(op for op in ops if isinstance(op, AddHeaderProperty)),
+                                    identity,
+                                    version_scope=version_scope,
+                                    context=context,
+                                    other_rules_only=True,
+                                )
                             entry.prepared_key = prepared_key
                             self._ed_projects[refs[0]] = replace(
                                 opened, references=context.references
                             )
                         prepared = entry.prepared
-                    preparations.append(prepared)
                     with _phase("inputs"):
-                        descriptions = self._descriptions(entry, prepared.operations)
+                        descriptions = self._descriptions(
+                            entry,
+                            tuple(
+                                op
+                                for op in prepared.operations
+                                if isinstance(op, AddHeaderProperty)
+                            ),
+                        )
                     with _phase("render"):
-                        rendered = render_authoring(prepared, descriptions, delivery=delivery)
+                        plan = None
+                        form_evidence: dict[str, bool] = {}
+                        if isinstance(prepared, HandlerOperationsPlan):
+                            self._handler_limits(prepared)
+                            if set(drop_operations) & {
+                                op.operation_id for op in prepared.operations
+                            }:
+                                raise ValueError("Снятая операция остаётся в итоговом наборе")
+                            # Свидетельство пилота шаблона не доказывает исполнение комплекта:
+                            # признак комплекта — Ложь, свидетельство формы — в инструкцию.
+                            form_evidence = {
+                                b.handler_name: b.runtime_verified for b in prepared.bindings
+                            }
+                            plan = replace(
+                                prepared,
+                                dispatcher_name=prepared.dispatcher_name
+                                if prepared.bindings
+                                else "",
+                                runtime_verified=False,
+                                bindings=tuple(
+                                    replace(b, runtime_verified=False) for b in prepared.bindings
+                                ),
+                            )
+                            rendered = render_handlers_authoring(
+                                entry.value,
+                                plan,
+                                identity,
+                                descriptions,
+                                delivery=delivery,
+                                keep_handlers_version=use_handlers,
+                                form_evidence=form_evidence,
+                            )
+                        else:
+                            rendered = render_authoring(prepared, descriptions, delivery=delivery)
                         if previous:
                             current_ids = rendered.manifest.identity_map
                             preserved = IdentityMap(
@@ -1274,13 +1916,52 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                                 current_ids.borrowed,
                             )
                             if preserved != current_ids:
-                                rendered = render_authoring(
-                                    prepared,
-                                    descriptions,
-                                    delivery=delivery,
-                                    identity_map=preserved,
-                                )
-                        bundles.append(with_source_hashes(rendered, self._source_hashes(entry)))
+                                if isinstance(prepared, HandlerOperationsPlan):
+                                    assert plan is not None
+                                    rendered = render_handlers_authoring(
+                                        entry.value,
+                                        plan,
+                                        identity,
+                                        descriptions,
+                                        delivery=delivery,
+                                        identity_map=preserved,
+                                        keep_handlers_version=use_handlers,
+                                        form_evidence=form_evidence,
+                                    )
+                                else:
+                                    rendered = render_authoring(
+                                        prepared,
+                                        descriptions,
+                                        delivery=delivery,
+                                        identity_map=preserved,
+                                    )
+                        if isinstance(prepared, HandlerOperationsPlan):
+                            rendered = self._validate_handler_layer(entry, rendered, prepared)
+                            handler_plans.append(prepared)
+                        preparations.append(rendered.prepared if use_handlers else prepared)
+                        bundles.append(
+                            with_source_hashes(
+                                rendered,
+                                self._source_hashes(entry, descriptions if use_handlers else None),
+                            )
+                        )
+                self._limit(
+                    sum(len(p.operations) for p in preparations)
+                    if not use_handlers
+                    else sum(len(p.operations) for p in handler_plans),
+                    MAX_OPERATIONS,
+                    "операции",
+                )
+                self._limit(sum(len(p.bindings) for p in handler_plans), 100, "слоты обработчиков")
+                self._limit(
+                    sum(
+                        json.loads(b.files["validation.json"])["body_refs"]["bytes"]
+                        for b in bundles
+                        if use_handlers
+                    ),
+                    MAX_HANDLER_BODY_BYTES,
+                    "байты тел",
+                )
                 self._limit(
                     sum(len(p.selected_profiles) + len(p.other_profiles) for p in preparations),
                     MAX_PROFILES,
@@ -1327,6 +2008,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                                 "decisions_changed": viewed is not None
                                 and (
                                     viewed.operations != bundle.manifest.operations
+                                    or viewed.handler_operations
+                                    != bundle.manifest.handler_operations
                                     or viewed.identity != bundle.manifest.identity
                                     or viewed.delivery != bundle.manifest.delivery
                                 ),
@@ -1357,6 +2040,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     address_prefix=address_prefix,
                     rebuild=bool(previous and (changed_inputs or drop_operations)),
                     changed_inputs=changed_inputs,
+                    handler_plans=handler_plans,
+                    migration=bool(previous and previous.schema_version == 1 and use_handlers),
                 )
                 if mode == "preview":
                     self._authoring_previews[build_hash] = bundle.manifest
