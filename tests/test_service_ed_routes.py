@@ -39,6 +39,37 @@ def _page_keys(payload: dict) -> None:
     assert payload["has_more"] == (payload["offset"] + len(payload["items"]) < payload["total"])
 
 
+def test_opened_manager_cache_keeps_route_profiles_and_tool_responses(
+    service, tmp_path, monkeypatch
+):
+    root = tmp_path / "dump"
+    make_dump(root)
+    expected = Kd2Service(
+        Settings(cache_dir=tmp_path / "expected-cache", workspace=tmp_path / "expected-workspace")
+    )
+    ordinary = expected.ed_routes(path=str(root))
+    path = root / "CommonModules/МенеджерОбменаПример/Ext/Module.bsl"
+    opened = service.ed_open(str(path))
+    document = service._ed_project(opened["project_id"]).document
+
+    def forbidden_manager(*args, **kwargs):
+        raise AssertionError("Открытый документ менеджера не должен разбираться повторно")
+
+    monkeypatch.setattr(routes_module, "read_manager", forbidden_manager)
+    snap, reused, stale = service._open_snapshot(
+        root, None, None, False, documents={path: document}, read_files_only=True
+    )
+    assert not reused and not stale
+    assert snap.profile == expected._require_route(ordinary["profile_id"]).profile
+    assert snap.file_hashes[path] == document.files[0].sha256
+    for section in ("summary", "plans", "versions", "variants", "packages", "skipped"):
+        assert service.ed_routes(
+            profile_id=snap.profile.profile_id, section=section
+        ) == expected.ed_routes(profile_id=snap.profile.profile_id, section=section)
+    # Переход к обычному инструменту сохраняет его инвентарную проверку свежести.
+    assert service.ed_routes(path=str(root)) == expected.ed_routes(path=str(root))
+
+
 def _xml(name: str, namespace: str) -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'

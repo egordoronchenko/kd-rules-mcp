@@ -45,7 +45,9 @@ from kd2_rules_mcp.validation.report import Issue, Skipped, ValidationReport
 
 
 def _cached_checker(
-    function: Callable[..., ValidationReport], applicable: Applicability
+    function: Callable[..., ValidationReport],
+    applicable: Applicability,
+    addresses: tuple[str, ...] = (),
 ) -> Callable[..., ValidationReport]:
     """Локальная зависимость неизменного checker, без подмены глобалов и общей памяти.
 
@@ -67,6 +69,23 @@ def _cached_checker(
         def __init__(self, document: EdDocument, index: Any, profile: ValidationProfile):
             init(self, document, index, profile)
 
+        def finish(self) -> ValidationReport:
+            if addresses:
+                self.report.issues = [
+                    i for i in self.report.issues if _belongs(i.address, addresses)
+                ]
+                # Фильтруем до группировки: полный отчёт перечисляет только первые пять адресов.
+                self.skips = {
+                    key: {
+                        ident: address
+                        for ident, address in instances.items()
+                        if _belongs(address, addresses)
+                    }
+                    for key, instances in self.skips.items()
+                    if any(_belongs(address, addresses) for address in instances.values())
+                }
+            return super().finish()
+
     original = cast(Any, function)
     result = FunctionType(
         original.__code__,
@@ -79,6 +98,10 @@ def _cached_checker(
     return result
 
 
+def _belongs(address: str, prefixes: tuple[str, ...]) -> bool:
+    return any(address == p or address.startswith(p + "/") for p in prefixes)
+
+
 def check_profile(
     document: EdDocument,
     schema: EdSchema,
@@ -88,6 +111,7 @@ def check_profile(
     *,
     context: AuthoringContext | None = None,
     links: ValidationReport | None = None,
+    addresses: tuple[str, ...] = (),
 ) -> ProfileReport:
     """Тот же порядок трёх проверок, что у ed_validate; связность всего модуля."""
     index = context.index(document) if context else build_addresses(document)
@@ -102,14 +126,23 @@ def check_profile(
         else Applicability.build(document, profile)
     )
     report = ValidationReport()
-    report.extend(
+    link_report = (
         links if links is not None else validate_links(document, index, build_references(document))
     )
     report.extend(
-        _cached_checker(validate_schema, applicable)(document, schema, index, profile, snapshot)
+        ValidationReport(issues=[i for i in link_report.issues if _belongs(i.address, addresses)])
+        if addresses
+        else link_report
     )
     report.extend(
-        _cached_checker(validate_structure, applicable)(document, snapshot, index, profile)
+        _cached_checker(validate_schema, applicable, addresses)(
+            document, schema, index, profile, snapshot
+        )
+    )
+    report.extend(
+        _cached_checker(validate_structure, applicable, addresses)(
+            document, snapshot, index, profile
+        )
     )
     return ProfileReport(version, direction, tuple(report.issues), tuple(report.skipped))
 
@@ -309,16 +342,31 @@ def prepare_authoring(
     identity: ExtensionIdentity,
     *,
     version_scope: str | None,
+    context: AuthoringContext | None = None,
+    other_rules_only: bool = False,
 ) -> PreparedAuthoring:
-    """Подготовка в памяти: входы → baseline → предусловия → BSL → after/delta."""
-    context = AuthoringContext(inputs)
+    """Подготовка в памяти: входы → baseline → предусловия → BSL → after/delta.
+
+    Сервис включает other_rules_only. Прямые потребители ядра сохраняют полный
+    отчёт остальных версий и побайтовый контракт существующих комплектов B.
+    """
+    context = context or AuthoringContext(inputs)
+    context.other_rules_only = other_rules_only
+    context.selected = frozenset(
+        (op.target.format_version, op.target.direction) for op in operations
+    )
     require_single_version(inputs, operations, context)
     operations = canonicalize_operations(inputs, operations, context)
     if not operations:
         raise ValueError("Нужна хотя бы одна операция")
     selected = sorted({(op.target.format_version, op.target.direction) for op in operations})
     before_index = context.index(inputs.document)
-    before_links = validate_links(inputs.document, before_index, build_references(inputs.document))
+    context.target_ids = frozenset(
+        before_index.find(op.target.pko_address).entity_id for op in operations
+    )
+    before_links = validate_links(
+        inputs.document, before_index, context.reference_index(inputs.document, build_references)
+    )
     baselines = {}
     for version, direction in selected:
         schema = inputs.schemas.get(version)
@@ -352,7 +400,9 @@ def prepare_authoring(
     snapshot = copy_structure_with_attributes(inputs, operations, context)
     after_index = context.index(projection.document)
     after_links = validate_links(
-        projection.document, after_index, build_references(projection.document)
+        projection.document,
+        after_index,
+        context.reference_index(projection.document, build_references),
     )
     logical = {
         address: before_index.by_id[ident][0]
@@ -403,23 +453,28 @@ def prepare_authoring(
         for direction in sorted({op.target.direction for op in operations}):
             if (version, direction) in selected:
                 continue
+            addresses = (
+                tuple(op.target.pko_address for op in operations) if other_rules_only else ()
+            )
             before = check_profile(
-                inputs.document,
+                context.scope(inputs.document) if other_rules_only else inputs.document,
                 schema,
                 inputs.structure,
                 version,
                 direction,
                 context=context,
                 links=before_links,
+                addresses=addresses,
             )
             after = check_profile(
-                projection.document,
+                context.scope(projection.document) if other_rules_only else projection.document,
                 schema,
                 snapshot,
                 version,
                 direction,
                 context=context,
                 links=after_links,
+                addresses=addresses,
             )
             other.append(
                 ProfileComparison(

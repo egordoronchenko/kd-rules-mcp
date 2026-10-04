@@ -89,9 +89,19 @@ class _BuiltStructure:
     elapsed_s: float
 
 
+_VOLATILE_ROOT = Path(tempfile.gettempdir()).resolve()
+
+
 def _file_key(path: Path) -> _FileKey:
-    """Путь, время изменения и размер: правка файла меняет ключ."""
+    """Путь, время изменения и размер: правка файла меняет ключ.
+
+    Файл во временном каталоге ключа не получает (`OSError` — обёртки тогда читают по-настоящему):
+    такие выгрузки тесты переписывают между вызовами и проверяют на них именно повторное чтение,
+    свежесть и учёт прочитанных файлов в сервисе. Кэшируются корпус и статические данные тестов.
+    """
     resolved = path.resolve()
+    if resolved.is_relative_to(_VOLATILE_ROOT):
+        raise OSError("временный файл теста не кэшируется")
     stat = resolved.stat()
     return (str(resolved), stat.st_mtime_ns, stat.st_size)
 
@@ -485,8 +495,9 @@ def install() -> None:
     reader.read_manager = _cached_read_manager
     ed.read_manager = _cached_read_manager
 
+    # Чтение маршрутов не подменяется: сервис маршрутов строит читатель из исходной функции
+    # (учёт прочитанных файлов и уже открытых документов), обёртка это ломает.
     _orig_read_routes = routes.read_routes
-    routes.read_routes = _cached_read_routes
 
     _orig_load_rules = rules_io.load_rules
     rules_io.load_rules = _cached_load_rules

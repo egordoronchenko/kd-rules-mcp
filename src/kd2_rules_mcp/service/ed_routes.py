@@ -6,12 +6,15 @@
 """
 
 from collections import OrderedDict
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from types import FunctionType
+from typing import Any, cast
 
+from kd2_rules_mcp.ed import routes as route_reader
 from kd2_rules_mcp.ed.errors import EdFormatError, EdReadError, EdResourceLimitError
+from kd2_rules_mcp.ed.model import EdDocument
 from kd2_rules_mcp.ed.route_model import RouteProfile
 from kd2_rules_mcp.ed.routes import read_routes
 from kd2_rules_mcp.ed.schema import EdSchema, load_schema
@@ -39,6 +42,17 @@ from kd2_rules_mcp.validation.ed_routes import (
 
 MAX_PROFILES = 32
 MAX_STORED_BYTES = 128 * 1024 * 1024
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    """Свежесть известного файла; отсутствие тоже проверяем без обхода каталога."""
+    try:
+        info = path.stat()
+        return info.st_size, info.st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
 # Что читает `read_routes`: описание конфигурации и четыре каталога. Обход всей выгрузки большой
 # конфигурации (сотни тысяч файлов) занимает десятки секунд при каждом открытии.
 _MANIFEST_FILES = ("Configuration.xml",)
@@ -54,9 +68,11 @@ class _RouteSnapshot:
     host_path: str
     project: str | None
     configuration: str | None
-    manifest: tuple[tuple[str, int, int], ...]
+    manifest: tuple[tuple[str, int, int], ...] | None
     stored_bytes: int
     stale: bool = False
+    read_files: dict[Path, tuple[int, int] | None] = field(default_factory=dict)
+    file_hashes: dict[Path, str] = field(default_factory=dict)
 
 
 class EdRoutesMixin(ServiceBase):
@@ -67,6 +83,9 @@ class EdRoutesMixin(ServiceBase):
         self._routes: OrderedDict[str, _RouteSnapshot] = OrderedDict()
         self._route_roots: dict[str, str] = {}
         self._route_bytes = 0
+        self._route_reads: dict[
+            str, tuple[dict[Path, str], dict[Path, tuple[int, int] | None]]
+        ] = {}
 
     def ed_routes(
         self,
@@ -215,36 +234,62 @@ class EdRoutesMixin(ServiceBase):
         project: str | None,
         configuration: str | None,
         force: bool,
+        *,
+        documents: Mapping[Path, EdDocument] | None = None,
+        read_files_only: bool = False,
+        verify_read_files: bool = True,
     ) -> tuple[_RouteSnapshot, bool, bool]:
         key = str(root)
         if not force:
             with self._lock:
                 snap = self._routes.get(self._route_roots.get(key, ""))
             if snap is not None:
-                stale = _is_stale(snap)
+                stale = (
+                    snap.stale
+                    if read_files_only and not verify_read_files
+                    else (
+                        any(_file_stamp(p) != stamp for p, stamp in snap.read_files.items())
+                        if read_files_only or snap.manifest is None
+                        else _is_stale(snap)
+                    )
+                )
+                if not read_files_only and snap.manifest is None and not stale:
+                    snap.manifest = _manifest(root)
                 with self._lock:
                     current = self._routes.get(snap.profile.profile_id)
                     if current is not None:
                         current.stale = stale
                         self._routes.move_to_end(current.profile.profile_id)
                         return current, True, stale
-        profile = self._read_profile(root)
+        profile = self._read_profile(root, documents=documents)
         if project is not None:
             profile = replace(profile, project=project, configuration=configuration)
-        manifest = _manifest(root) or ()
-        size = _stored_bytes(profile) + _stored_bytes(manifest)
+        manifest = None if read_files_only else _manifest(root) or ()
+        file_hashes, read_files = self._route_reads.pop(str(root), ({}, {}))
+        size = _stored_bytes(profile) + _stored_bytes(manifest) + _stored_bytes(file_hashes)
         host_path = self._host(root)
         with self._lock:
             current = self._routes.get(profile.profile_id)
             if current is not None:
                 current.manifest = manifest
+                current.read_files = read_files
+                current.file_hashes = file_hashes
                 current.stale = False
                 self._routes.move_to_end(profile.profile_id)
                 self._route_roots[key] = profile.profile_id
                 return current, True, False
             self._make_room(size)
             created = _RouteSnapshot(
-                profile, root, host_path, project, configuration, manifest, size, False
+                profile,
+                root,
+                host_path,
+                project,
+                configuration,
+                manifest,
+                size,
+                False,
+                read_files,
+                file_hashes,
             )
             self._routes[profile.profile_id] = created
             self._route_bytes += size
@@ -265,9 +310,89 @@ class EdRoutesMixin(ServiceBase):
                 path: stored for path, stored in self._route_roots.items() if stored != ident
             }
 
-    def _read_profile(self, root: Path) -> RouteProfile:
+    def _read_profile(
+        self, root: Path, *, documents: Mapping[Path, EdDocument] | None = None
+    ) -> RouteProfile:
         try:
-            return read_routes(root)
+            # Локальные зависимости reader: открытый менеджер не читается и не разбирается вновь.
+            # Функции маршрутов и их глобалы остаются неизменными для параллельных вызовов.
+            original_manager = cast(Any, route_reader._Reader._manager)
+            opened = documents or {}
+            observed: dict[Path, tuple[int, int] | None] = {}
+
+            def read_manager(path: Path) -> EdDocument:
+                return opened[path] if path in opened else route_reader.read_manager(path)
+
+            manager = FunctionType(
+                original_manager.__code__,
+                {**original_manager.__globals__, "read_manager": read_manager},
+            )
+            readers = []
+
+            def metadata(path: Path):
+                observed.setdefault(path, _file_stamp(path))
+                return route_reader.package_metadata(path)
+
+            original_packages = cast(Any, route_reader._Reader._read_packages)
+            packages = FunctionType(
+                original_packages.__code__,
+                {**original_packages.__globals__, "package_metadata": metadata},
+            )
+
+            class CachedReader(route_reader._Reader):
+                def __init__(self, path: Path):
+                    super().__init__(path)
+                    readers.append(self)
+
+                def _manager(self, name: str):
+                    canonical = self.inventory.module_names.get(name.casefold(), name)
+                    if name.casefold() in self.inventory.module_names:
+                        path = self.root / "CommonModules" / canonical / "Ext/Module.bsl"
+                        observed.setdefault(path, _file_stamp(path))
+                    return manager(self, name)
+
+                def _xml(self, path: Path):
+                    observed.setdefault(path, _file_stamp(path))
+                    return super()._xml(path)
+
+                def _load_bsl(self, path: Path):
+                    observed.setdefault(path, _file_stamp(path))
+                    return super()._load_bsl(path)
+
+                def _read_packages(self):
+                    # Отсутствие известного файла участвует в выборе маршрута/импорта.
+                    for name in self.inventory.packages:
+                        for relative in (
+                            f"XDTOPackages/{name}.xml",
+                            f"XDTOPackages/{name}/Ext/Package.bin",
+                        ):
+                            path = self.root / relative
+                            if _file_stamp(path) is None:
+                                observed[path] = None
+                    return packages(self)
+
+                def _read_plan(self, name: str):
+                    for relative in (
+                        f"ExchangePlans/{name}.xml",
+                        f"ExchangePlans/{name}/Ext/ManagerModule.bsl",
+                    ):
+                        path = self.root / relative
+                        if _file_stamp(path) is None:
+                            observed[path] = None
+                    return super()._read_plan(name)
+
+            original = cast(Any, read_routes)
+            read = FunctionType(
+                original.__code__, {**original.__globals__, "_Reader": CachedReader}
+            )
+            profile = read(root)
+            hashes = {
+                root / name: fingerprint
+                for reader in readers
+                for name, fingerprint in reader.files.items()
+            }
+            self._route_reads[str(root)] = (hashes, observed)
+            return profile
         except EdResourceLimitError as error:
             raise EdRouteResourceLimitError(str(error)) from error
         except EdFormatError as error:

@@ -1,6 +1,7 @@
 """Критерий выбранных профилей, другие версии, baseline и границы неизвестного."""
 
 from dataclasses import replace
+from functools import partial
 from types import MappingProxyType
 
 import pytest
@@ -20,7 +21,9 @@ from kd2_rules_mcp.validation.ed_authoring import (
     check_profile,
     compare_reports,
     enforce_delta,
-    prepare_authoring,
+)
+from kd2_rules_mcp.validation.ed_authoring import (
+    prepare_authoring as _prepare_authoring,
 )
 from kd2_rules_mcp.validation.report import Issue, Level, Skipped
 from tests.test_ed_authoring_model import (
@@ -32,6 +35,9 @@ from tests.test_ed_authoring_model import (
     refreshed,
     rule_changed,
 )
+
+# Контракт MCP: остальные версии проверяются только для затронутых правил.
+prepare_authoring = partial(_prepare_authoring, other_rules_only=True)
 
 
 def report(issues=(), skipped=(), version="1.20", direction="send"):
@@ -828,11 +834,45 @@ def test_preparation_reuses_indices_profiles_and_does_not_rehash_inputs(monkeypa
     monkeypatch.setattr(Applicability, "build", classmethod(applicability))
     monkeypatch.setattr(SourceSet, "build", unexpected_hash)
     prepared = prepare_authoring(value, (OPERATION,), IDENTITY, version_scope="manager")
-    assert counts == {"addresses": 2, "references": 2, "profile": 2, "applicability": 4}
+    assert counts == {"addresses": 2, "references": 1, "profile": 1, "applicability": 4}
     assert prepared.source_set is value.input_fingerprints
 
 
-def test_cached_checkers_equal_original_reports_and_keep_global_dependencies():
+def test_scoped_document_keeps_conversion_dependencies_and_full_addresses():
+    from kd2_rules_mcp.authoring.ed.context import AuthoringContext
+
+    value = inputs()
+    target, dependency = value.document.pko
+    prop = replace(target.properties[0], conversion_rule=dependency.declared_name)
+    target = replace(target, properties=(prop, *target.properties[1:]))
+    unrelated = replace(
+        dependency, entity_id="unrelated", name="Посторонний", declared_name="Посторонний"
+    )
+    document = replace(value.document, pko=(target, dependency, unrelated))
+    context = AuthoringContext(value)
+    context.target_ids = frozenset((target.entity_id,))
+    scoped = context.scope(document)
+    assert scoped.pko == (target, dependency)
+    assert scoped.routines is document.routines
+    assert context.index(scoped) is context.index(document)
+    assert context.scope(scoped) is scoped
+
+
+def test_reference_cache_rebuilds_when_handler_or_uses_change():
+    from kd2_rules_mcp.authoring.ed.context import AuthoringContext
+    from kd2_rules_mcp.ed.refs import build_references
+
+    value = inputs()
+    context = AuthoringContext(value)
+    original = context.reference_index(value.document, build_references)
+    routine = replace(value.document.routines[0], roles=frozenset(("handler",)))
+    changed = replace(value.document, routines=(routine, *value.document.routines[1:]))
+    result = context.reference_index(changed, build_references)
+    assert result == build_references(changed)
+    assert result is not original
+
+
+def test_cached_checkers_equal_original_reports_and_keep_global_dependencies(monkeypatch):
     from kd2_rules_mcp.ed.address import build_addresses
     from kd2_rules_mcp.ed.refs import build_references
     from kd2_rules_mcp.ed.schema.profile import ValidationProfile
@@ -843,6 +883,24 @@ def test_cached_checkers_equal_original_reports_and_keep_global_dependencies():
 
     value = inputs()
     prepared = prepare_authoring(value, (OPERATION,), IDENTITY, version_scope="manager")
+    original_finish = CheckContext.finish
+
+    def finish_targets(context):
+        # Независимый оракул запускает старые проверки на ПОЛНОМ документе и отбирает
+        # экземпляры skipped до их свёртки в строку (где остаются только пять адресов).
+        prefix = prepared.operations[0].target.pko_address
+
+        def belongs(address):
+            return address == prefix or address.startswith(prefix + "/")
+
+        context.report.issues = [i for i in context.report.issues if belongs(i.address)]
+        context.skips = {
+            key: {i: a for i, a in rows.items() if belongs(a)}
+            for key, rows in context.skips.items()
+            if any(belongs(a) for a in rows.values())
+        }
+        return original_finish(context)
+
     for comparison in (*prepared.selected_profiles, *prepared.other_profiles):
         for document, snapshot, actual in [
             (value.document, value.structure, comparison.before),
@@ -853,8 +911,18 @@ def test_cached_checkers_equal_original_reports_and_keep_global_dependencies():
             index = build_addresses(document)
             profile = ValidationProfile.build(schema, actual.version, actual.direction)
             expected = validate_links(document, index, build_references(document))
-            expected.extend(validate_schema(document, schema, index, profile, snapshot))
-            expected.extend(validate_structure(document, snapshot, index, profile))
+            with monkeypatch.context() as patch:
+                if comparison in prepared.other_profiles:
+                    prefix = prepared.operations[0].target.pko_address
+                    expected.issues = [
+                        i
+                        for i in expected.issues
+                        if i.address == prefix or i.address.startswith(prefix + "/")
+                    ]
+                    expected.skipped = []
+                    patch.setattr(CheckContext, "finish", finish_targets)
+                expected.extend(validate_schema(document, schema, index, profile, snapshot))
+                expected.extend(validate_structure(document, snapshot, index, profile))
             assert (actual.issues, actual.skipped) == (
                 tuple(expected.issues),
                 tuple(expected.skipped),

@@ -1,7 +1,9 @@
 """Контракт C: снимки, ошибки, preview, подтверждения и атомарное дополнение."""
 
 import copy
+import io
 import json
+import logging
 import shutil
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -621,6 +623,173 @@ def test_new_foreign_extension_module_makes_preview_stale(setup):
     )
     failure(lambda: write((service, args, root), viewed), "ed_authoring_stale")
     assert not Path(viewed["output_dir"]).exists()
+
+
+def test_authoring_never_walks_dump_and_reuses_preparation(setup, monkeypatch, caplog):
+    service, args, root = setup
+    opened = service.ed_routes(project="Пример", configuration="Main")
+    snapshot = service._require_route(opened["profile_id"])
+    document = service._ed_project(args["operations"][0]["target"]["project_id"]).document
+    files = []
+    original_open = io.open
+
+    def open_file(path, *args, **kwargs):
+        files.append(Path(path))
+        return original_open(path, *args, **kwargs)
+
+    def forbidden_walk(path, *args, **kwargs):
+        raise AssertionError(f"Авторинг не должен обходить каталоги: {path}")
+
+    def forbidden_prepare(*args, **kwargs):
+        raise AssertionError("Повторный preview/write должен использовать подготовленный результат")
+
+    monkeypatch.setattr(io, "open", open_file)
+    monkeypatch.setattr(Path, "rglob", forbidden_walk)
+    monkeypatch.setattr(Path, "iterdir", forbidden_walk)
+    caplog.set_level(logging.INFO, logger=module.__name__)
+    first = preview(setup)
+    entry = next(iter(service._authoring_inputs.values()))
+    assert entry.route is snapshot and entry.value.document is document
+    assert files.count(root / "CommonModules/Менеджер2/Ext/Module.bsl") == 1  # Только сверка SHA.
+    assert len(caplog.records) == 1
+    assert all(
+        name + "=" in caplog.records[0].message
+        for name in ("inputs", "routes", "schemas", "prepare", "render", "files_read")
+    )
+    monkeypatch.setattr(module, "prepare_authoring", forbidden_prepare)
+    files.clear()
+    repeated = preview(setup)
+    assert repeated == first
+    assert not any(p.is_relative_to(root) for p in files)
+    # Запись нового комплекта тоже не обходит выгрузку (предыдущего каталога ещё нет).
+    result = write(setup, first)
+    assert result["status"] == "written"
+    assert len(caplog.records) == 3
+
+
+def test_route_change_during_preparation_is_stale_and_not_published(setup, monkeypatch):
+    service, _, root = setup
+    original = module.prepare_authoring
+
+    def changed(*args, **kwargs):
+        prepared = original(*args, **kwargs)
+        path = root / "ExchangePlans/ПланФормата/Ext/ManagerModule.bsl"
+        path.write_bytes(path.read_bytes() + b"\n")
+        return prepared
+
+    monkeypatch.setattr(module, "prepare_authoring", changed)
+    failure(lambda: preview(setup), "ed_authoring_stale")
+    assert not (service.workspace.root / "ed-authoring").exists()
+
+
+def test_candidates_also_verify_cached_route_by_read_files(setup):
+    service, args, root = setup
+    preview(setup)
+    path = root / "ExchangePlans/ПланФормата/Ext/ManagerModule.bsl"
+    path.write_bytes(path.read_bytes() + b"\n")
+    target = args["operations"][0]["target"] | {"project": "Пример", "configuration": "Main"}
+    failure(lambda: service.ed_authoring_candidates(target, "format"), "ed_authoring_stale")
+
+
+def test_failed_other_schema_becoming_readable_is_stale(setup):
+    _, _, root = setup
+    path = root / "XDTOPackages/Формат121/Ext/Package.bin"
+    original = path.read_bytes()
+    path.write_bytes(b"")
+    viewed = preview(setup)
+    path.write_bytes(original)
+    failure(lambda: write(setup, viewed), "ed_authoring_stale")
+
+
+def test_missing_import_package_appearing_after_preview_is_stale(setup):
+    service, _, root = setup
+    namespace = "urn:fiction:other"
+    xml = etree.parse(str(root / "Configuration.xml")).getroot()
+    children = xml[0].find(f"{{{M}}}ChildObjects")
+    assert children is not None
+    etree.SubElement(children, f"{{{M}}}XDTOPackage").text = "Другие"
+    (root / "Configuration.xml").write_bytes(serialize(xml))
+    (root / "XDTOPackages/Другие.xml").write_text(_xml("Другие", namespace), encoding="utf-8")
+    package = root / "XDTOPackages/Формат121/Ext/Package.bin"
+    package.write_text(
+        package.read_text("utf-8").replace("urn:fiction:common", namespace), encoding="utf-8"
+    )
+    service.structure_load_project("Пример", "Main", structure_id="fiction-main", force=True)
+    viewed = preview(setup)
+    path = root / "XDTOPackages/Другие/Ext/Package.bin"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        (root / "XDTOPackages/Общие/Ext/Package.bin")
+        .read_text("utf-8")
+        .replace("urn:fiction:common", namespace),
+        encoding="utf-8",
+    )
+    failure(lambda: write(setup, viewed), "ed_authoring_stale")
+
+
+def test_preopened_schema_file_missing_is_stale(setup):
+    _, _, root = setup
+    (root / "XDTOPackages/Общие/Ext/Package.bin").unlink()
+    failure(lambda: preview(setup), "ed_authoring_stale")
+
+
+def test_route_reuse_verifies_every_cached_document_it_consumes(setup):
+    service, _, root = setup
+    manager = root / "CommonModules/Менеджер1/Ext/Module.bsl"
+    service.ed_open(str(manager))
+    manager.write_bytes(manager.read_bytes() + b"\n")
+    plan = root / "ExchangePlans/ПланФормата/Ext/ManagerModule.bsl"
+    plan.write_text(
+        plan.read_text("utf-8").replace(
+            'Версии.Вставить("1.20",',
+            'Версии.Вставить("1.19", Менеджер1);\nВерсии.Вставить("1.20",',
+        ),
+        encoding="utf-8",
+    )
+    failure(lambda: preview(setup), "ed_authoring_stale")
+
+
+def test_foreign_extensions_read_only_known_manager_and_owner_paths(setup, monkeypatch):
+    service, _, root = setup
+    foreign = root.parent / "foreign"
+    foreign.mkdir()
+    xml = etree.parse(str(root / "Configuration.xml")).getroot()
+    children = xml[0].find(f"{{{M}}}ChildObjects")
+    assert children is not None
+    children.clear()
+    (foreign / "Configuration.xml").write_bytes(serialize(xml))
+    owner = foreign / "Catalogs/Товары.xml"
+    owner.parent.mkdir()
+    owner.write_bytes((root / "Catalogs/Товары.xml").read_bytes())
+    manager = foreign / "CommonModules/Менеджер2/Ext/Module.bsl"
+    manager.parent.mkdir(parents=True)
+    manager.write_text("&НаСервере\nПроцедура Чужая()\nКонецПроцедуры\n", encoding="utf-8")
+    unrelated = foreign / "CommonModules/Чужой/Ext/Module.bsl"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("Не читается", encoding="utf-8")
+    catalog = service.settings.projects_file
+    catalog.write_text(
+        catalog.read_text("utf-8") + "        extensions: [../foreign]\n", encoding="utf-8"
+    )
+    service.structure_load_project("Пример", "Main", structure_id="fiction-main", force=True)
+    opened = []
+    original = io.open
+
+    def read(path, *args, **kwargs):
+        path = Path(path)
+        if path.is_relative_to(foreign):
+            opened.append(path)
+        return original(path, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Расширения не обходятся")
+
+    monkeypatch.setattr(io, "open", read)
+    monkeypatch.setattr(Path, "rglob", forbidden)
+    monkeypatch.setattr(Path, "iterdir", forbidden)
+    assert preview(setup)["status"] == "ready"
+    assert set(opened) == {foreign / "Configuration.xml", manager, owner}
+    assert len(opened) == 3
 
 
 @pytest.mark.parametrize(

@@ -1,19 +1,25 @@
 """Авторинг ED: прочитанные снимки, ограниченный кэш входов и запись только в workspace."""
 
 import hashlib
+import json
+import logging
 import os
 import shutil
 import tempfile
 from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
-from contextlib import suppress
-from dataclasses import dataclass
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
+from functools import wraps
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from kd2_rules_mcp.authoring.ed.artifacts import artifact_name, combine_artifacts, previous_artifact
 from kd2_rules_mcp.authoring.ed.candidates import candidates, target_objects
 from kd2_rules_mcp.authoring.ed.canonical import canonical_property
+from kd2_rules_mcp.authoring.ed.context import AuthoringContext
 from kd2_rules_mcp.authoring.ed.manifest import ArtifactManifest, sha256
 from kd2_rules_mcp.authoring.ed.model import (
     AddHeaderProperty,
@@ -23,6 +29,7 @@ from kd2_rules_mcp.authoring.ed.model import (
     AuthoringTarget,
     ExtensionIdentity,
     Failure,
+    PreparedAuthoring,
     SourceSet,
     digest,
 )
@@ -41,11 +48,15 @@ from kd2_rules_mcp.errors import (
 from kd2_rules_mcp.projects import resolve
 from kd2_rules_mcp.service import ed_authoring_views as views
 from kd2_rules_mcp.service.ed import EdMixin
-from kd2_rules_mcp.service.ed_routes import EdRoutesMixin, _is_stale, _load_for_uri, _RouteSnapshot
+from kd2_rules_mcp.service.ed_routes import (
+    EdRoutesMixin,
+    _file_stamp,
+    _load_for_uri,
+    _RouteSnapshot,
+)
 from kd2_rules_mcp.service.ed_schema import EdSchemaMixin
 from kd2_rules_mcp.service.ed_views import validate_page
 from kd2_rules_mcp.service.paths import Settings
-from kd2_rules_mcp.structures.store import dump_fingerprint
 from kd2_rules_mcp.validation.ed_authoring import prepare_authoring
 from kd2_rules_mcp.validation.ed_routes import _format_uri
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
@@ -58,17 +69,85 @@ MAX_BYTES = 32 * 1024 * 1024
 MAX_INPUTS = 32
 MAX_INPUT_BYTES = 128 * 1024 * 1024
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Timing:
+    phases: dict[str, float] = field(
+        default_factory=lambda: dict.fromkeys(
+            ("inputs", "routes", "schemas", "prepare", "render"), 0.0
+        )
+    )
+    files_read: int = 0
+    routes_checked: set[int] = field(default_factory=set)
+    catalogs: dict[Path, Any] = field(default_factory=dict)
+    catalog_stamps: dict[Path, tuple[int, int] | None] = field(default_factory=dict)
+
+
+_timing: ContextVar[_Timing | None] = ContextVar("ed_authoring_timing", default=None)
+
+
+@contextmanager
+def _phase(name: str):
+    start = perf_counter()
+    timing = _timing.get()
+    child_before = sum(timing.phases.values()) if timing else 0.0
+    try:
+        yield
+    finally:
+        if timing:
+            # Вложенные маршруты/схемы исключены из времени входов.
+            timing.phases[name] += (
+                perf_counter() - start - (sum(timing.phases.values()) - child_before)
+            )
+
+
+def _read_count(count: int = 1) -> None:
+    if timing := _timing.get():
+        timing.files_read += count
+
+
+def _timed_build(function):
+    @wraps(function)
+    def call(*args, **kwargs):
+        timing = _Timing()
+        token = _timing.set(timing)
+        start = perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            logger.info(
+                "ed_authoring_build total=%.3fs inputs=%.3fs routes=%.3fs schemas=%.3fs "
+                "prepare=%.3fs render=%.3fs files_read=%d",
+                perf_counter() - start,
+                *(timing.phases[k] for k in timing.phases),
+                timing.files_read,
+            )
+            _timing.reset(token)
+
+    return call
+
 
 @dataclass(slots=True)
 class _Inputs:
     value: AuthoringInputs
-    files: dict[Path, str]
+    files: dict[Path, tuple[int, int] | None]
     route: _RouteSnapshot
     roots: tuple[Path, ...]
     structure_id: str
     structure_fingerprint: str
     stored_bytes: int
     descriptions: dict[str, str]
+    prepared_key: str = ""
+    prepared: PreparedAuthoring | None = None
+
+
+@dataclass(slots=True)
+class _CachedSchema:
+    value: EdSchema | str
+    files: dict[Path, tuple[int, int] | None]
+    stored_bytes: int
 
 
 def _text(value: object, name: str) -> str:
@@ -108,6 +187,20 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         super().__init__(settings)
         self._authoring_inputs: OrderedDict[tuple, _Inputs] = OrderedDict()
         self._authoring_input_bytes = 0
+        self._authoring_schemas: OrderedDict[tuple[str, str], _CachedSchema] = OrderedDict()
+        self._authoring_schema_bytes = 0
+
+    def _catalog(self):
+        """Один и тот же projects.yaml не открываем для каждой выдаваемой строки пути."""
+        timing = _timing.get()
+        if timing is None:
+            return super()._catalog()
+        path = self.settings.projects_file
+        if path not in timing.catalogs:
+            timing.catalog_stamps[path] = _file_stamp(path)
+            _read_count()
+            timing.catalogs[path] = super()._catalog()
+        return timing.catalogs[path]
 
     def _authoring_target(
         self, raw: object, project: str, configuration: str
@@ -186,29 +279,22 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
 
     @staticmethod
     def _hash_file(path: Path) -> str:
+        _read_count()
         with path.open("rb") as stream:
             return hashlib.file_digest(stream, "sha256").hexdigest()
 
     def _verify_inputs(self, entry: _Inputs) -> None:
         changed = []
         try:
-            changed = [self._host(p) for p, h in entry.files.items() if self._hash_file(p) != h]
-            for extension in entry.roots[1:]:
-                expected_files = {p for p in entry.files if p.is_relative_to(extension)}
-                actual_files = {
-                    p
-                    for p in extension.rglob("*")
-                    if p.is_file() and p.suffix.lower() in (".bsl", ".xml")
-                }
-                if actual_files != expected_files:
-                    changed.append(self._host(extension))
-            if _is_stale(entry.route):
-                changed.append(self._host(entry.route.root))
+            changed = [self._host(p) for p, stamp in entry.files.items() if _file_stamp(p) != stamp]
+            if timing := _timing.get():
+                changed.extend(
+                    self._host(p)
+                    for p, stamp in timing.catalog_stamps.items()
+                    if _file_stamp(p) != stamp
+                )
             meta = self.store.meta(entry.structure_id)
-            if (
-                meta.get("input_hash") != entry.structure_fingerprint
-                or dump_fingerprint(entry.roots) != entry.structure_fingerprint
-            ):
+            if meta.get("input_hash") != entry.structure_fingerprint:
                 changed.append("structure:" + entry.structure_id)
         except OSError as error:
             raise EdAuthoringStaleError(
@@ -219,7 +305,13 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 "Входные файлы изменились; перечитайте снимки", {"changed": changed}
             )
 
-    def _inputs_for(self, project: str, configuration: str, refs: tuple[str, str, str]) -> _Inputs:
+    def _inputs_for(
+        self,
+        project: str,
+        configuration: str,
+        refs: tuple[str, str, str],
+        operations: tuple[AddHeaderProperty, ...] = (),
+    ) -> _Inputs:
         # Открытые идентификаторы проверяются даже при попадании в кэш.
         doc_project = self._ed_project(refs[0])
         schema_project = self._schema_project(refs[1])
@@ -228,10 +320,29 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         cached = self._authoring_inputs.get(key)
         if cached is not None:
             self._verify_inputs(cached)
+            if _timing.get() is None:
+                self._check_route(cached.route)
+            self._extension_sources(cached, operations, doc_project.index)
             self._authoring_inputs.move_to_end(key)
             return cached
         root = self._project_root(project, configuration)
-        route, _, stale = self._open_snapshot(root, project, configuration, False)
+        with _phase("routes"):
+            route, reused, stale = self._open_snapshot(
+                root,
+                project,
+                configuration,
+                False,
+                documents={p.path: p.document for p in self._ed_projects.values()},
+                read_files_only=True,
+                verify_read_files=False,
+            )
+            if not reused:
+                _read_count(
+                    len(route.file_hashes)
+                    - sum(
+                        p in route.file_hashes for p in (d.path for d in self._ed_projects.values())
+                    )
+                )
         if stale:
             raise EdAuthoringStaleError(
                 "Снимок маршрутов изменился; повторите ed_routes с force", {}
@@ -239,12 +350,23 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         config = self._catalog().configuration(project, configuration)
         folder = self.settings.project_dirs[project]
         roots = (root, *(resolve(folder, p).resolve() for p in config.extensions))
+        extension_names = []
+        extension_stamps = {}
+        for extension_root in roots[1:]:
+            path = extension_root / "Configuration.xml"
+            before = _file_stamp(path)
+            _read_count()
+            xml = parse_xml("Configuration.xml", path.read_text("utf-8-sig"))[0]
+            if _file_stamp(path) != before:
+                raise EdAuthoringStaleError("Описание расширения изменилось во время чтения", {})
+            extension_stamps[path] = before
+            extension_names.append(xml.findtext(f"{{{M}}}Properties/{{{M}}}Name", ""))
         meta = self.store.meta(refs[2])
         expected = meta.get("input_hash", "")
         if (
             meta.get("source") != "xml"
             or Path(meta.get("source_path", "")).resolve() != root
-            or expected != dump_fingerprint(roots)
+            or json.loads(meta.get("extensions", "[]")) != extension_names
         ):
             raise _failure(
                 AuthoringPreconditionError(
@@ -273,6 +395,16 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 )
             )
         paths: dict[Path, str] = {doc_project.path: document.files[0].sha256}
+        if not reused:
+            # В новый профиль могли войти и другие открытые менеджеры. Их кэш тоже
+            # подтверждаем SHA один раз, прежде чем доверять его версии интерфейса.
+            paths.update(
+                {
+                    p.path: p.document.files[0].sha256
+                    for p in self._ed_projects.values()
+                    if p.path in route.file_hashes
+                }
+            )
         paths[self.settings.projects_file.resolve()] = self._hash_file(self.settings.projects_file)
         schemas: dict[str, EdSchema | str] = {schema_project.format_version: selected}
         manager = next(
@@ -303,22 +435,77 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 if (uri := _format_uri(plan.base_namespace, version)) is not None
             }
             if len(uris) == 1:
-                loaded = _load_for_uri(route, next(iter(uris)))
-                schemas[version] = loaded if isinstance(loaded, EdSchema) else loaded.reason
+                uri = next(iter(uris))
+                cache_key = (route.profile.profile_id, uri)
+                with _phase("schemas"):
+                    cached_schema = self._authoring_schemas.get(cache_key)
+                    if cached_schema and any(
+                        _file_stamp(p) != stamp for p, stamp in cached_schema.files.items()
+                    ):
+                        self._authoring_schema_bytes -= cached_schema.stored_bytes
+                        del self._authoring_schemas[cache_key]
+                    if cache_key not in self._authoring_schemas:
+                        loaded = _load_for_uri(route, uri)
+                        schema_files = {
+                            root / (p.package_path or p.description_path): _file_stamp(
+                                root / (p.package_path or p.description_path)
+                            )
+                            for p in route.profile.packages
+                            if p.namespace == uri
+                        }
+                        size = 0
+                        if isinstance(loaded, EdSchema):
+                            _read_count(sum(len(p.sources) for p in loaded.packages))
+                            schema_files.update(
+                                {
+                                    Path(s.path): _file_stamp(Path(s.path))
+                                    for p in loaded.packages
+                                    for s in p.sources
+                                }
+                            )
+                            size = sum(s.bytes for p in loaded.packages for s in p.sources)
+                        self._authoring_schemas[cache_key] = _CachedSchema(
+                            loaded if isinstance(loaded, EdSchema) else loaded.reason,
+                            schema_files,
+                            size,
+                        )
+                        self._authoring_schema_bytes += size
+                        while (
+                            len(self._authoring_schemas) > MAX_PROFILES
+                            or self._authoring_schema_bytes > MAX_INPUT_BYTES
+                        ):
+                            _, removed = self._authoring_schemas.popitem(last=False)
+                            self._authoring_schema_bytes -= removed.stored_bytes
+                            if not self._authoring_schemas:
+                                break
+                        if cache_key not in self._authoring_schemas:
+                            schemas[version] = (
+                                loaded if isinstance(loaded, EdSchema) else loaded.reason
+                            )
+                            continue
+                    self._authoring_schemas.move_to_end(cache_key)
+                    schemas[version] = self._authoring_schemas[cache_key].value
             else:
                 schemas[version] = "Пакет версии отсутствует или неоднозначен"
         for schema in schemas.values():
             if isinstance(schema, EdSchema):
                 paths.update({Path(s.path): s.sha256 for p in schema.packages for s in p.sources})
+        # Сверка уже открытых снимков один раз; далее — размер/mtime прочитанных файлов.
+        stamps = dict(extension_stamps)
+        for path, fingerprint in paths.items():
+            before = _file_stamp(path)
+            try:
+                actual = self._hash_file(path)
+            except OSError as error:
+                raise EdAuthoringStaleError(
+                    "Открытый снимок недоступен; перечитайте входы", {}
+                ) from error
+            if actual != fingerprint or before != _file_stamp(path):
+                raise EdAuthoringStaleError(
+                    "Открытый снимок изменился; перечитайте входы", {"changed": [self._host(path)]}
+                )
+            stamps[path] = before
         extension_sources: dict[str, str] = {}
-        for number, extension in enumerate(roots[1:]):
-            for path in sorted(extension.rglob("*")):
-                if path.is_file() and path.suffix.lower() in (".bsl", ".xml"):
-                    text = path.read_text("utf-8-sig")
-                    extension_sources[
-                        f"extensions/{number}/" + path.relative_to(extension).as_posix()
-                    ] = text
-                    paths[path] = self._hash_file(path)
         structure, _ = self._ed_structure_snapshot(refs[2])
         source = SourceSet(
             project,
@@ -356,17 +543,101 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             + sum(len(t.encode("utf-8")) for t in extension_sources.values())
         )
         self._limit(size, MAX_INPUT_BYTES, "байты входов")
-        entry = _Inputs(value, paths, route, roots, refs[2], expected, size, {})
+        for (profile_id, _), cached_schema in self._authoring_schemas.items():
+            if profile_id == route.profile.profile_id:
+                stamps.update(cached_schema.files)
+        # Маркеры выгрузки — известные пути; снимок структуры не инвентаризируем вновь.
+        for source_root in roots:
+            for name in ("Configuration.xml", "ConfigDumpInfo.xml"):
+                stamps.setdefault(source_root / name, _file_stamp(source_root / name))
+        entry = _Inputs(value, stamps, route, roots, refs[2], expected, size, {})
+        self._extension_sources(entry, operations, doc_project.index)
         self._verify_inputs(entry)
+        if _timing.get() is None:
+            self._check_route(entry.route)
         while self._authoring_inputs and (
             len(self._authoring_inputs) >= MAX_INPUTS
-            or self._authoring_input_bytes + size > MAX_INPUT_BYTES
+            or self._authoring_input_bytes + entry.stored_bytes > MAX_INPUT_BYTES
         ):
             _, old = self._authoring_inputs.popitem(last=False)
             self._authoring_input_bytes -= old.stored_bytes
         self._authoring_inputs[key] = entry
-        self._authoring_input_bytes += size
+        self._authoring_input_bytes += entry.stored_bytes
         return entry
+
+    def _check_route(self, route: _RouteSnapshot) -> None:
+        """Проверяем открытый профиль один раз за вызов, по его прочитанным файлам."""
+        timing = _timing.get()
+        if timing and id(route) in timing.routes_checked:
+            return
+        with _phase("routes"):
+            if route.stale or any(_file_stamp(p) != stamp for p, stamp in route.read_files.items()):
+                raise EdAuthoringStaleError(
+                    "Снимок маршрутов изменился; повторите ed_routes с force", {}
+                )
+        if timing:
+            timing.routes_checked.add(id(route))
+
+    @staticmethod
+    def _description(entry: _Inputs, name: str) -> str:
+        if name not in entry.descriptions:
+            path = entry.route.root / name
+            before = _file_stamp(path)
+            _read_count()
+            text = path.read_text("utf-8-sig")
+            if before != _file_stamp(path) or (path in entry.files and before != entry.files[path]):
+                raise EdAuthoringStaleError(
+                    "Описание метаданных изменилось", {"changed": [str(path)]}
+                )
+            entry.files[path] = before
+            entry.descriptions[name] = text
+        return entry.descriptions[name]
+
+    def _extension_sources(
+        self, entry: _Inputs, operations: tuple[AddHeaderProperty, ...], index
+    ) -> None:
+        names = {entry.value.document.files[0].path.replace("\\", "/").split("CommonModules/")[-1]}
+        for op in operations:
+            if op.new_attribute:
+                try:
+                    rule = index.find(op.target.pko_address)
+                except (EntityNotFoundError, AmbiguousAddressError):
+                    continue
+                key, _ = metadata_key(rule.configuration_object.value)
+                if key and (owner := entry.value.structure.objects.get(key)):
+                    names.add(
+                        ("Catalogs/" if key[0] == "справочник" else "Documents/")
+                        + owner.name
+                        + ".xml"
+                    )
+        names = {"CommonModules/" + n if n.endswith("/Ext/Module.bsl") else n for n in names}
+        sources = dict(entry.value.extension_sources)
+        for number, root in enumerate(entry.roots[1:]):
+            for name in sorted(names):
+                path = root / name
+                if path in entry.files:
+                    continue
+                before = _file_stamp(path)
+                entry.files[path] = before
+                if before is not None:
+                    _read_count()
+                    sources[f"extensions/{number}/{name}"] = path.read_text("utf-8-sig")
+                    if _file_stamp(path) != before:
+                        raise EdAuthoringStaleError("Расширение изменилось во время чтения", {})
+        if sources != entry.value.extension_sources:
+            size = sum(len(t.encode("utf-8")) for t in sources.values())
+            old_size = sum(len(t.encode("utf-8")) for t in entry.value.extension_sources.values())
+            self._limit(entry.stored_bytes + size - old_size, MAX_INPUT_BYTES, "байты входов")
+            entry.stored_bytes += size - old_size
+            if any(e is entry for e in self._authoring_inputs.values()):
+                self._authoring_input_bytes += size - old_size
+            entry.value = replace(
+                entry.value,
+                extension_sources=sources,
+                source_set=replace(entry.value.source_set, extensions_hash=digest(sources)),
+                input_fingerprints=replace(entry.value.source_set, extensions_hash=digest(sources)),
+            )
+            entry.prepared = None
 
     @staticmethod
     def _limit(count: int, maximum: int, name: str) -> None:
@@ -510,7 +781,6 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
     def _descriptions(
         self, entry: _Inputs, operations: tuple[AddHeaderProperty, ...]
     ) -> dict[str, str]:
-        root = entry.route.root
         needed = {"Configuration.xml"}
         module = (
             entry.value.document.files[0]
@@ -519,9 +789,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             .split("/")[0]
         )
         needed.add("CommonModules/" + module + ".xml")
-        configuration_text = entry.descriptions.get("Configuration.xml") or (
-            root / "Configuration.xml"
-        ).read_text("utf-8-sig")
+        configuration_text = self._description(entry, "Configuration.xml")
         language = parse_xml("Configuration.xml", configuration_text)[0].findtext(
             f"{{{M}}}Properties/{{{M}}}DefaultLanguage", ""
         )
@@ -541,18 +809,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     if owner:
                         kind = "Catalogs" if key[0] == "справочник" else "Documents"
                         needed.add(kind + "/" + owner.name + ".xml")
-        descriptions = {}
-        for name in sorted(needed):
-            path = root / name
-            actual = self._hash_file(path)
-            if path in entry.files and entry.files[path] != actual:
-                raise EdAuthoringStaleError(
-                    "Описание метаданных изменилось", {"changed": [self._host(path)]}
-                )
-            descriptions[name] = entry.descriptions.get(name) or path.read_text("utf-8-sig")
-            entry.descriptions[name] = descriptions[name]
-            entry.files[path] = actual
-        return descriptions
+        return {name: self._description(entry, name) for name in sorted(needed)}
 
     def _require_selected_schema(
         self, target: AuthoringTarget, refs: tuple[str, str, str], inputs: AuthoringInputs
@@ -656,6 +913,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 path.write_bytes(content)
             for entry in entries:
                 self._verify_inputs(entry)
+                self._check_route(entry.route)
             try:
                 _, current = self._previous(destination)
             except (AuthoringPreconditionError, EdAuthoringPathError) as error:
@@ -736,6 +994,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             raise EdAuthoringStaleError("Прежняя схема изменилась; перечитайте снимок", {})
         return opened["project_id"], schema["schema_id"], entry.structure_id
 
+    @_timed_build
     def ed_authoring_build(
         self,
         project: str,
@@ -801,7 +1060,11 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         self._limit(len({r[0] for r in groups}), MAX_MANAGERS, "менеджеры")
         with self._lock:
             try:
-                entries = {refs: self._inputs_for(project, configuration, refs) for refs in groups}
+                with _phase("inputs"):
+                    entries = {
+                        refs: self._inputs_for(project, configuration, refs, tuple(ops))
+                        for refs, ops in groups.items()
+                    }
                 manager_versions: dict[str, str] = {}
                 for op, refs in parsed:
                     manager_path = entries[refs].value.document.files[0].path
@@ -821,12 +1084,10 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                             )
                         )
                     manager_versions[manager_path] = op.target.format_version
-                root = next(iter(entries.values())).route.root
                 first_entry = next(iter(entries.values()))
                 config_description = read_description(
                     "Configuration.xml",
-                    first_entry.descriptions.get("Configuration.xml")
-                    or (root / "Configuration.xml").read_text("utf-8-sig"),
+                    self._description(first_entry, "Configuration.xml"),
                     "Configuration",
                 )
                 destination = self._destination(
@@ -865,7 +1126,10 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                         ]
                         if not matches:
                             refs = self._previous_refs(op, entries)
-                            entries[refs] = self._inputs_for(project, configuration, refs)
+                            with _phase("inputs"):
+                                entries[refs] = self._inputs_for(
+                                    project, configuration, refs, (op,)
+                                )
                             matches = [refs]
                         if len(matches) != 1:
                             raise ValueError("Несколько снимков прежнего менеджера в одном вызове")
@@ -877,17 +1141,35 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     entry = entries[refs]
                     for op in ops:
                         self._require_selected_schema(op.target, refs, entry.value)
-                    prepared = prepare_authoring(
-                        entry.value, tuple(ops), identity, version_scope=version_scope
+                    with _phase("inputs"):
+                        self._extension_sources(entry, tuple(ops), self._ed_project(refs[0]).index)
+                    prepared_key = digest(
+                        (tuple(ops), identity, version_scope, entry.value.source_set)
                     )
+                    with _phase("prepare"):
+                        if entry.prepared is None or entry.prepared_key != prepared_key:
+                            context = AuthoringContext(entry.value)
+                            opened = self._ed_project(refs[0])
+                            context.indices[id(opened.document)] = opened.index
+                            context.references = opened.references
+                            entry.prepared = prepare_authoring(
+                                entry.value,
+                                tuple(ops),
+                                identity,
+                                version_scope=version_scope,
+                                context=context,
+                                other_rules_only=True,
+                            )
+                            entry.prepared_key = prepared_key
+                            self._ed_projects[refs[0]] = replace(
+                                opened, references=context.references
+                            )
+                        prepared = entry.prepared
                     preparations.append(prepared)
-                    bundles.append(
-                        render_authoring(
-                            prepared,
-                            self._descriptions(entry, prepared.operations),
-                            delivery=delivery,
-                        )
-                    )
+                    with _phase("inputs"):
+                        descriptions = self._descriptions(entry, prepared.operations)
+                    with _phase("render"):
+                        bundles.append(render_authoring(prepared, descriptions, delivery=delivery))
                 self._limit(
                     sum(len(p.selected_profiles) + len(p.other_profiles) for p in preparations),
                     MAX_PROFILES,
@@ -940,8 +1222,11 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     sum(len(b) for b in bundle.files.values()), MAX_BYTES, "байты комплекта"
                 )
                 build_hash = sha256(bundle.manifest.to_bytes())
-                for entry in entries.values():
-                    self._verify_inputs(entry)
+                with _phase("inputs"):
+                    for entry in entries.values():
+                        self._verify_inputs(entry)
+                        if mode == "preview":
+                            self._check_route(entry.route)
                 status = "ready"
                 if mode == "write":
                     if expected_preview_hash != build_hash:
