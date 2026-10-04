@@ -3,6 +3,7 @@
 import unicodedata
 from dataclasses import replace
 from types import MappingProxyType
+from typing import cast
 
 from kd2_rules_mcp.ed.address import AmbiguousAddressError, EntityNotFoundError
 from kd2_rules_mcp.ed.model import ObjectRule
@@ -12,10 +13,13 @@ from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
 
 from .context import AuthoringContext
 from .model import (
+    AddAlgorithmicHeaderProperty,
     AddHeaderProperty,
     AuthoringInputs,
     AuthoringPreconditionError,
     Failure,
+    Operation,
+    SetObjectHandler,
     _canonical_operation,
     order_operations,
 )
@@ -69,15 +73,15 @@ def canonical_property(
     return ".".join(names)
 
 
-def canonicalize_operations(
+def canonicalize_operations[T: Operation](
     inputs: AuthoringInputs,
-    operations: tuple[AddHeaderProperty, ...],
+    operations: tuple[T, ...],
     context: AuthoringContext | None = None,
-) -> tuple[AddHeaderProperty, ...]:
+) -> tuple[T, ...]:
     """Не исправляет неизвестные имена; предусловия объясняют неразрешённый вход."""
     context = context or AuthoringContext(inputs)
     index = context.index(inputs.document)
-    result = []
+    result: list[T] = []
     failures = []
     for op in operations:
         try:
@@ -110,6 +114,20 @@ def canonicalize_operations(
             target = replace(
                 target, project=op.target.project, configuration=op.target.configuration
             )
+        if isinstance(op, SetObjectHandler):
+            previous = next(
+                (
+                    r.name
+                    for r in inputs.document.routines
+                    if r.name.casefold() == op.expected_previous.strip(" ").casefold()
+                ),
+                op.expected_previous,
+            )
+            result.append(cast(T, replace(op, target=target, expected_previous=previous)))
+            continue
+        if not isinstance(op, (AddHeaderProperty, AddAlgorithmicHeaderProperty)):
+            result.append(cast(T, replace(op, target=target)))
+            continue
         key, _ = metadata_key(rule.configuration_object.value)
         owner = inputs.structure.objects.get(key) if key else None
         requested_attribute = op.configuration_attribute.strip(" ")
@@ -125,10 +143,10 @@ def canonicalize_operations(
                 )
             )
         rows = owner.property(requested_attribute) if owner else ()
+        draft = op.new_attribute if isinstance(op, AddHeaderProperty) else None
         attribute = (
-            op.new_attribute.name
-            if op.new_attribute
-            and op.new_attribute.name.casefold() == requested_attribute.casefold()
+            draft.name
+            if draft and draft.name.casefold() == requested_attribute.casefold()
             else rows[0].path
             if len(rows) == 1
             else requested_attribute
@@ -149,9 +167,37 @@ def canonicalize_operations(
                 )
             )
         operation_type = _canonical_operation if prop is not None else AddHeaderProperty
-        result.append(
-            operation_type(target, attribute, prop or op.format_property, op.new_attribute)
-        )
+        if isinstance(op, AddAlgorithmicHeaderProperty):
+            conversion = next(
+                (
+                    r.declared_name or r.name
+                    for r in (*inputs.document.pko, *inputs.document.pkpd)
+                    if (r.declared_name or r.name).casefold()
+                    == op.conversion_rule.strip(" ").casefold()
+                ),
+                op.conversion_rule,
+            )
+            result.append(
+                cast(
+                    T,
+                    replace(
+                        op,
+                        target=target,
+                        configuration_attribute=attribute,
+                        format_property=prop or op.format_property,
+                        conversion_rule=conversion,
+                    ),
+                )
+            )
+        else:
+            result.append(
+                cast(T, operation_type(target, attribute, prop or op.format_property, draft))
+            )
     if failures:
         raise AuthoringPreconditionError(tuple(failures))
-    return order_operations(tuple(result))
+    renamed = {
+        old.operation_id: new.operation_id
+        for old, new in zip(operations, result, strict=True)
+        if old.operation_id != new.operation_id
+    }
+    return order_operations(tuple(result), canonical_ids=renamed)

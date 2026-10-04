@@ -1,0 +1,71 @@
+{
+  "bindings": [
+    {
+      "target": {
+        "project": "Пример",
+        "configuration": "Main",
+        "plan": "ПланФормата",
+        "variant": null,
+        "format_version": "1.20",
+        "direction": "receive",
+        "pko_address": "ПКО/Товар"
+      },
+      "event": "ПриКонвертацииДанныхXDTO",
+      "handler_name": "доп_ПКО_d8019c171759fb7f",
+      "parameters": [
+        "ДанныеXDTO",
+        "ПолученныеДанные",
+        "КомпонентыОбмена"
+      ],
+      "operation_ids": [
+        "de137f2296881b25638f4a41490eab6bdd13b3fc5282dfdb337fc59ac7b932c3"
+      ],
+      "previous_name": "Типовой",
+      "previous_arguments": [
+        "ДанныеXDTO",
+        "ПолученныеДанные",
+        "КомпонентыОбмена"
+      ],
+      "previous_branch_hash": "916030df86a54562cfa4ab29a3a3bbf1bc91fbc8cbaaabfae355f6bd5c8864d6",
+      "previous_routine_hash": "eb4b6b0ab291be4f24afd90dd0194a29c631b322b101575f00dd4530dd76eae7",
+      "runtime_verified": false,
+      "manager_interface": 2
+    }
+  ],
+  "canonical_utf8": "[\n  {\n    \"body\": \"Возврат;\\n\",\n    \"chain\": \"after_existing\",\n    \"dependencies\": [],\n    \"event\": \"ПриКонвертацииДанныхXDTO\",\n    \"expected_previous\": \"Типовой\",\n    \"kind\": \"set_object_handler\",\n    \"operation_id\": \"de137f2296881b25638f4a41490eab6bdd13b3fc5282dfdb337fc59ac7b932c3\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"receive\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  }\n]\n",
+  "handler_names": {
+    "de137f2296881b25638f4a41490eab6bdd13b3fc5282dfdb337fc59ac7b932c3": "доп_ПКО_d8019c171759fb7f"
+  },
+  "input": [
+    {
+      "body": "Возврат;\n",
+      "chain": "after_existing",
+      "event": "ПриКонвертацииДанныхXDTO",
+      "expected_previous": "Типовой",
+      "kind": "set_object_handler",
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "interfaces": [
+    1,
+    2,
+    3
+  ],
+  "operation_ids": [
+    "de137f2296881b25638f4a41490eab6bdd13b3fc5282dfdb337fc59ac7b932c3"
+  ],
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_d8019c171759fb7f"
+  ],
+  "manager_interface": 2,
+  "plan_runtime_verified": false
+}

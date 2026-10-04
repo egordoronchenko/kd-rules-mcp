@@ -9,6 +9,7 @@ from typing import Any, cast
 from kd2_rules_mcp.authoring.ed.candidates import compatibility, target_objects
 from kd2_rules_mcp.authoring.ed.canonical import canonicalize_operations
 from kd2_rules_mcp.authoring.ed.context import AuthoringContext
+from kd2_rules_mcp.authoring.ed.handlers import HandlerOperationsPlan, canonical_operations_bytes
 from kd2_rules_mcp.authoring.ed.hook import generate_hook
 from kd2_rules_mcp.authoring.ed.model import (
     AddHeaderProperty,
@@ -17,6 +18,7 @@ from kd2_rules_mcp.authoring.ed.model import (
     ExtensionIdentity,
     Failure,
     Notice,
+    Operation,
     PreparedAuthoring,
     ProfileComparison,
     ProfileReport,
@@ -42,6 +44,40 @@ from kd2_rules_mcp.validation.ed_schema import validate_schema
 from kd2_rules_mcp.validation.ed_structure import validate_structure
 from kd2_rules_mcp.validation.ed_structure_snapshot import CheckContext, StructureSnapshot
 from kd2_rules_mcp.validation.report import Issue, Skipped, ValidationReport
+
+
+def prepare_handler_operations(
+    inputs: AuthoringInputs,
+    operations: tuple[Operation, ...],
+    identity: ExtensionIdentity,
+    *,
+    version_scope: str | None,
+) -> HandlerOperationsPlan:
+    """Запуск A: канонические решения и предусловия, ещё без проекции/отрисовки B."""
+    from .ed_authoring_handlers import validate_handler_operations
+
+    if not operations:
+        raise ValueError("Нужна хотя бы одна операция")
+    if len(operations) > 100:
+        from kd2_rules_mcp.errors import EdAuthoringResourceLimitError
+
+        raise EdAuthoringResourceLimitError("В одном вызове допускается не более 100 операций")
+    context = AuthoringContext(inputs)
+    canonical = canonicalize_operations(inputs, operations, context)
+    notices = validate_preconditions(
+        inputs, canonical, identity, version_scope=version_scope, context=context
+    )
+    _, _, bindings = validate_handler_operations(inputs, canonical, identity, context)
+    return HandlerOperationsPlan(
+        canonical,
+        bindings,
+        notices,
+        canonical_operations_bytes(canonical),
+        runtime_verified=bool(bindings) and all(binding.runtime_verified for binding in bindings),
+        dispatcher_name=identity.prefix + "Диспетчер",
+        dispatcher_order=tuple(sorted(binding.handler_name for binding in bindings)),
+        manager_interface=inputs.document.manager_version or 0,
+    )
 
 
 def _cached_checker(
@@ -241,7 +277,7 @@ def compare_reports(
 
 def enforce_delta(
     delta: ValidationDelta,
-    operations: tuple[AddHeaderProperty, ...],
+    operations: tuple[Operation, ...],
     document: EdDocument,
     context: AuthoringContext | None = None,
 ) -> None:

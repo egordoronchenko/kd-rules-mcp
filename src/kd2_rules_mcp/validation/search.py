@@ -395,23 +395,30 @@ def _is_search(item: Node) -> bool:
 def _receivers(connection: sqlite3.Connection | None) -> dict[str, _Receiver] | None:
     if connection is None:
         return None
+    # Один проход по свойствам вместо двух вложенных выборок на каждый объект: на большой
+    # конфигурации вложенные выборки без индекса по имени перебирали всю таблицу свойств
+    # для каждого объекта (минуты вместо долей секунды).
+    with_group: set[int] = set()
+    with_owner: set[int] = set()
+    for object_id, name in connection.execute(
+        "SELECT object_id, name FROM properties "
+        "WHERE kind = 'Свойство' AND name IN ('ЭтоГруппа', 'Владелец')"
+    ):
+        (with_group if name == "ЭтоГруппа" else with_owner).add(int(object_id))
     rows = connection.execute(
-        "SELECT o.type_name, o.kind, o.attrs, "
-        "EXISTS (SELECT 1 FROM properties AS p WHERE p.object_id = o.id "
-        "AND p.kind = 'Свойство' AND p.name = 'ЭтоГруппа'), "
-        "EXISTS (SELECT 1 FROM properties AS p WHERE p.object_id = o.id "
-        "AND p.kind = 'Свойство' AND p.name = 'Владелец') "
-        "FROM objects AS o WHERE o.is_group = 0"
+        "SELECT o.id, o.type_name, o.kind, o.attrs FROM objects AS o WHERE o.is_group = 0"
     )
     found: dict[str, _Receiver] = {}
-    for type_name, kind, attrs_raw, has_group, has_owner in rows:
+    for object_id, type_name, kind, attrs_raw in rows:
+        has_group = int(object_id) in with_group
+        has_owner = int(object_id) in with_owner
         attrs = _attrs(str(attrs_raw))
         kind_name = str(kind)
         folders = kind_name in _GROUP_KINDS and (
-            bool(has_group) or attrs.get("ВидИерархии") == "ИерархияГруппИЭлементов"
+            has_group or attrs.get("ВидИерархии") == "ИерархияГруппИЭлементов"
         )
         subordinate = kind_name == "Справочник" and (
-            attrs.get("Подчиненный") == "true" or bool(has_owner)
+            attrs.get("Подчиненный") == "true" or has_owner
         )
         found[str(type_name)] = _Receiver(kind_name, folders, subordinate)
     return found

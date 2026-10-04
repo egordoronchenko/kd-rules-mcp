@@ -1,0 +1,205 @@
+{
+  "bindings": [
+    {
+      "target": {
+        "project": "Пример",
+        "configuration": "Main",
+        "plan": "ПланФормата",
+        "variant": null,
+        "format_version": "1.20",
+        "direction": "receive",
+        "pko_address": "ПКО/Товар"
+      },
+      "event": "ПередЗаписьюПолученныхДанных",
+      "handler_name": "доп_ПКО_f827df9e22fff383",
+      "parameters": [
+        "ПолученныеДанные",
+        "ДанныеИБ",
+        "КонвертацияСвойств",
+        "КомпонентыОбмена"
+      ],
+      "operation_ids": [
+        "8b2977685751099628c2e54a3d2be14cc43fd996fc131f17b5197fb78e3d286c",
+        "e28d45d833a2a653c01a79b2c4507a5122381f6b534facfc598f4f70ab2e4807"
+      ],
+      "previous_name": "",
+      "previous_arguments": [],
+      "previous_branch_hash": "",
+      "previous_routine_hash": "",
+      "runtime_verified": true,
+      "manager_interface": 2
+    }
+  ],
+  "canonical_utf8": "[\n  {\n    \"configuration_attribute\": \"Заметка\",\n    \"format_property\": \"Комментарий\",\n    \"new_attribute\": null,\n    \"operation_id\": \"239c8070f97bc3ec8347359316fa82b02add046a112f28514bd3c6678c434f85\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"receive\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  },\n  {\n    \"configuration_attribute\": \"доп_ВтораяЗаметка\",\n    \"format_property\": \"Короткий\",\n    \"new_attribute\": {\n      \"name\": \"доп_ВтораяЗаметка\",\n      \"primitive\": \"string\",\n      \"qualifiers\": {\n        \"string_length\": 50\n      },\n      \"synonym\": \"Вторая заметка\"\n    },\n    \"operation_id\": \"87096a7d67ca4c6175ee221c1c8f35651896c82c3b36a91349079fbdf527b85b\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"receive\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  },\n  {\n    \"dependencies\": [\n      \"239c8070f97bc3ec8347359316fa82b02add046a112f28514bd3c6678c434f85\"\n    ],\n    \"kind\": \"preserve_missing_header_property\",\n    \"operation_id\": \"8b2977685751099628c2e54a3d2be14cc43fd996fc131f17b5197fb78e3d286c\",\n    \"property_operation_id\": \"239c8070f97bc3ec8347359316fa82b02add046a112f28514bd3c6678c434f85\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"receive\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  },\n  {\n    \"dependencies\": [\n      \"87096a7d67ca4c6175ee221c1c8f35651896c82c3b36a91349079fbdf527b85b\"\n    ],\n    \"kind\": \"preserve_missing_header_property\",\n    \"operation_id\": \"e28d45d833a2a653c01a79b2c4507a5122381f6b534facfc598f4f70ab2e4807\",\n    \"property_operation_id\": \"87096a7d67ca4c6175ee221c1c8f35651896c82c3b36a91349079fbdf527b85b\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"receive\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  }\n]\n",
+  "handler_names": {
+    "8b2977685751099628c2e54a3d2be14cc43fd996fc131f17b5197fb78e3d286c": "доп_ПКО_f827df9e22fff383",
+    "e28d45d833a2a653c01a79b2c4507a5122381f6b534facfc598f4f70ab2e4807": "доп_ПКО_f827df9e22fff383"
+  },
+  "input": [
+    {
+      "configuration_attribute": "Заметка",
+      "format_property": "Комментарий",
+      "new_attribute": null,
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    },
+    {
+      "configuration_attribute": "доп_ВтораяЗаметка",
+      "format_property": "Короткий",
+      "new_attribute": {
+        "name": "доп_ВтораяЗаметка",
+        "primitive": "string",
+        "qualifiers": {
+          "string_length": 50
+        },
+        "synonym": "Вторая заметка"
+      },
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    },
+    {
+      "kind": "preserve_missing_header_property",
+      "property_operation_id": "239c8070f97bc3ec8347359316fa82b02add046a112f28514bd3c6678c434f85",
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    },
+    {
+      "kind": "preserve_missing_header_property",
+      "property_operation_id": "87096a7d67ca4c6175ee221c1c8f35651896c82c3b36a91349079fbdf527b85b",
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "interfaces": [
+    1,
+    2,
+    3
+  ],
+  "marker_cases": [
+    {
+      "expected": null,
+      "has_received_data": true,
+      "marker": null,
+      "name": "no-marker"
+    },
+    {
+      "expected": "Комментарий",
+      "has_received_data": false,
+      "marker": "Комментарий",
+      "name": "no-data"
+    },
+    {
+      "expected": "",
+      "has_received_data": true,
+      "marker": "",
+      "name": "empty-marker"
+    },
+    {
+      "expected": "Комментарий,Заметка",
+      "has_received_data": true,
+      "marker": "Комментарий",
+      "name": "format-missing"
+    },
+    {
+      "expected": "Комментарий,Заметка",
+      "has_received_data": true,
+      "marker": "Комментарий,Заметка",
+      "name": "config-already-present"
+    },
+    {
+      "expected": "Заметка",
+      "has_received_data": true,
+      "marker": "Заметка",
+      "name": "config-without-format"
+    },
+    {
+      "expected": "Постороннее",
+      "has_received_data": true,
+      "marker": "Постороннее",
+      "name": "other-property"
+    },
+    {
+      "expected": "СтарыйКомментарий",
+      "has_received_data": true,
+      "marker": "СтарыйКомментарий",
+      "name": "substring"
+    },
+    {
+      "expected": "комментарий",
+      "has_received_data": true,
+      "marker": "комментарий",
+      "name": "exact-case"
+    },
+    {
+      "expected": "Комментарий,Заметка",
+      "has_received_data": true,
+      "marker": "  Комментарий  ",
+      "name": "trim-spaces"
+    },
+    {
+      "expected": "Комментарий,Короткий,Заметка,доп_ВтораяЗаметка",
+      "has_received_data": true,
+      "marker": "Комментарий,Короткий",
+      "name": "two-pairs"
+    },
+    {
+      "expected": "Комментарий,Короткий,Заметка,доп_ВтораяЗаметка",
+      "has_received_data": true,
+      "marker": "Комментарий,Короткий,Заметка,доп_ВтораяЗаметка",
+      "name": "two-pairs-already-present"
+    },
+    {
+      "expected": "Короткий,доп_ВтораяЗаметка",
+      "has_received_data": true,
+      "marker": "Короткий",
+      "name": "second-pair"
+    },
+    {
+      "expected": "Комментарий,Короткий,Заметка,доп_ВтораяЗаметка",
+      "has_received_data": true,
+      "marker": "Комментарий, Короткий ",
+      "name": "spaces-two-pairs"
+    }
+  ],
+  "operation_ids": [
+    "239c8070f97bc3ec8347359316fa82b02add046a112f28514bd3c6678c434f85",
+    "87096a7d67ca4c6175ee221c1c8f35651896c82c3b36a91349079fbdf527b85b",
+    "8b2977685751099628c2e54a3d2be14cc43fd996fc131f17b5197fb78e3d286c",
+    "e28d45d833a2a653c01a79b2c4507a5122381f6b534facfc598f4f70ab2e4807"
+  ],
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_f827df9e22fff383"
+  ],
+  "manager_interface": 2,
+  "plan_runtime_verified": true,
+  "preset_body_file": "preset-body.bsl"
+}

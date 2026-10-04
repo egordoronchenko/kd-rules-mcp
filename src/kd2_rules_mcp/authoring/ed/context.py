@@ -48,6 +48,8 @@ class AuthoringContext:
         self.target_ids: frozenset[str] = frozenset()
         self.scopes: dict[int, EdDocument] = {}
         self.references: ReferenceIndex | None = None
+        # Проверенное тело привязано к operation_id, который включает все его байты.
+        self.handler_bodies: dict[str, Any] = {}
 
     def reference_index(
         self, document: EdDocument, build: Callable[[EdDocument], ReferenceIndex]

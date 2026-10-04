@@ -14,6 +14,7 @@ from kd2_rules_mcp.ed.address import (
     EntityNotFoundError,
     build_addresses,
 )
+from kd2_rules_mcp.ed.errors import EdFormatError
 from kd2_rules_mcp.ed.forms import helper_forms
 from kd2_rules_mcp.ed.lexer import normalized, tokenize
 from kd2_rules_mcp.ed.model import EdDocument, Guard, ObjectRule, PropertyRule
@@ -42,6 +43,8 @@ from .model import (
     Failure,
     GeneratedHook,
     Notice,
+    Operation,
+    PreserveMissingHeaderProperty,
     Projection,
     digest,
     order_operations,
@@ -128,7 +131,7 @@ def validate_owned_content(
 
 
 def extension_conflicts(
-    inputs: AuthoringInputs, op: AddHeaderProperty, context: AuthoringContext | None = None
+    inputs: AuthoringInputs, op: Operation, context: AuthoringContext | None = None
 ) -> tuple[tuple[str, int, str], ...]:
     """Только переданные тексты: аннотации lexer и описания новых реквизитов."""
     selected_manager = manager_for_document(inputs)
@@ -143,10 +146,19 @@ def extension_conflicts(
             # Процедуры с такими именами в другом общем модуле независимы.
             if manager.casefold() not in _path(file).split("/"):
                 continue
-            for token in tokenize(text):
+            try:
+                tokens = tokenize(text)
+            except EdFormatError:
+                result.append((file, 1, "Источник расширения не прочитан лексически"))
+                continue
+            for token in tokens:
                 if token.kind != "directive" or not token.value.startswith("&"):
                     continue
-                annotation = tokenize(token.value[1:])
+                try:
+                    annotation = tokenize(token.value[1:])
+                except EdFormatError:
+                    result.append((file, 1, "Аннотация расширения не прочитана лексически"))
+                    continue
                 intercepts = (
                     "перед",
                     "после",
@@ -176,6 +188,8 @@ def extension_conflicts(
                     FILLER.casefold(),
                     "добавитьпкс",
                     rule.procedure_name.casefold(),
+                    "выполнитьпроцедурумодуляменеджера",
+                    *(b.target_name.casefold() for b in rule.events if b.target_name),
                 ):
                     result.append((file, text.count("\n", 0, token.start) + 1, annotation[2].value))
         elif file.casefold().endswith(".xml") and key:
@@ -211,7 +225,11 @@ def extension_conflicts(
                         list[str],
                         attr.xpath("./*[local-name()='Properties']/*[local-name()='Name']/text()"),
                     )
-                    if names and names[0].casefold() == op.configuration_attribute.casefold():
+                    if (
+                        names
+                        and names[0].casefold()
+                        == getattr(op, "configuration_attribute", "").casefold()
+                    ):
                         result.append((file, attr.sourceline or 1, names[0]))
     return tuple(result)
 
@@ -310,7 +328,7 @@ def _target_partial(document: EdDocument, rule: ObjectRule) -> bool:
 
 def validate_preconditions(
     inputs: AuthoringInputs,
-    operations: tuple[AddHeaderProperty, ...],
+    operations: tuple[Operation, ...],
     identity: ExtensionIdentity,
     *,
     version_scope: str | None,
@@ -480,6 +498,71 @@ def validate_preconditions(
             or not valid_identifier(owner.name)
         ):
             fail("header_ineffective", "Владелец не обычный объект с применимой шапкой")
+        metadata = inputs.metadata_profile
+        if (
+            metadata.dump_version != "2.20"
+            or metadata.run_mode != "ManagedApplication"
+            or metadata.script_variant != "Russian"
+            or metadata.use_purposes != ("PlatformApplication",)
+            or (
+                isinstance(op, AddHeaderProperty)
+                and op.new_attribute
+                and (
+                    op.new_attribute.primitive not in PRIMITIVES
+                    or owner is None
+                    or owner.kind not in ("Справочник", "Документ")
+                )
+            )
+        ):
+            fail(
+                "metadata_profile_unsupported",
+                "Профиль метаданных или нового реквизита не поддержан",
+            )
+        if _target_partial(doc, rule):
+            fail("target_partial", "Unknown влияет на целевой ПКО, helper или путь заполнения")
+        helpers = [r for r in doc.routines if r.name.casefold() == "добавитьпкс"]
+        expected = [
+            normalized(tokenize(text)) for text in helper_forms("ДобавитьПКС", doc.manager_version)
+        ]
+        if (
+            len(helpers) != 1
+            or normalized(tuple(t for t in tokenize(helpers[0].raw_text) if t.kind != "comment"))
+            not in expected
+        ):
+            fail("helper_unverified", "Семантика ДобавитьПКС не подтверждена эталоном")
+        fillers = [r for r in doc.routines if r.name.casefold() == FILLER.casefold()]
+        names = (
+            ("КомпонентыОбмена", "ПравилаКонвертации", "ТолькоЗаголовки")
+            if doc.manager_version == 3
+            else ("НаправлениеОбмена", "ПравилаКонвертации")
+        )
+        if (
+            doc.manager_version not in (1, 2, 3)
+            or len(fillers) != 1
+            or fillers[0].routine_kind != "procedure"
+            or tuple(p.name.casefold() if p.name else "" for p in fillers[0].parameters)
+            != tuple(n.casefold() for n in names)
+            or any(p.by_value for p in fillers[0].parameters)
+        ):
+            fail("manager_signature", "Сигнатура заполнителя не соответствует интерфейсу 1/2/3")
+        for file, line, reason in extension_conflicts(inputs, op, context):
+            fail("extension_conflict", f"Чужое расширение влияет на операцию: {reason}", file, line)
+            if not isinstance(op, AddHeaderProperty):
+                fail(
+                    "handler_foreign_hook",
+                    "Чужой перехват заполнителя, диспетчера или обработчика",
+                    file,
+                    line,
+                )
+            if reason.casefold() == "добавитьпкс":
+                fail(
+                    "helper_unverified",
+                    "Семантика ДобавитьПКС не подтверждена эталоном",
+                    file,
+                    line,
+                )
+        if not isinstance(op, AddHeaderProperty):
+            continue
         attr_rows = owner.property(op.configuration_attribute) if owner else ()
         if op.new_attribute:
             bad_qualifiers = unsupported_qualifiers(op.new_attribute)
@@ -522,61 +605,6 @@ def validate_preconditions(
             in ("foritem", "дляэлемента")
         ):
             fail("header_ineffective", "Владелец не обычный объект с применимой шапкой")
-        metadata = inputs.metadata_profile
-        if (
-            metadata.dump_version != "2.20"
-            or metadata.run_mode != "ManagedApplication"
-            or metadata.script_variant != "Russian"
-            or metadata.use_purposes != ("PlatformApplication",)
-            or (
-                op.new_attribute
-                and (
-                    op.new_attribute.primitive not in PRIMITIVES
-                    or owner is None
-                    or owner.kind not in ("Справочник", "Документ")
-                )
-            )
-        ):
-            fail(
-                "metadata_profile_unsupported",
-                "Профиль метаданных или нового реквизита не поддержан",
-            )
-        if _target_partial(doc, rule):
-            fail("target_partial", "Unknown влияет на целевой ПКО, helper или путь заполнения")
-        helpers = [r for r in doc.routines if r.name.casefold() == "добавитьпкс"]
-        expected = [
-            normalized(tokenize(text)) for text in helper_forms("ДобавитьПКС", doc.manager_version)
-        ]
-        if (
-            len(helpers) != 1
-            or normalized(tuple(t for t in tokenize(helpers[0].raw_text) if t.kind != "comment"))
-            not in expected
-        ):
-            fail("helper_unverified", "Семантика ДобавитьПКС не подтверждена эталоном")
-        fillers = [r for r in doc.routines if r.name.casefold() == FILLER.casefold()]
-        names = (
-            ("КомпонентыОбмена", "ПравилаКонвертации", "ТолькоЗаголовки")
-            if doc.manager_version == 3
-            else ("НаправлениеОбмена", "ПравилаКонвертации")
-        )
-        if (
-            doc.manager_version not in (1, 2, 3)
-            or len(fillers) != 1
-            or fillers[0].routine_kind != "procedure"
-            or tuple(p.name.casefold() if p.name else "" for p in fillers[0].parameters)
-            != tuple(n.casefold() for n in names)
-            or any(p.by_value for p in fillers[0].parameters)
-        ):
-            fail("manager_signature", "Сигнатура заполнителя не соответствует интерфейсу 1/2/3")
-        for file, line, reason in extension_conflicts(inputs, op, context):
-            fail("extension_conflict", f"Чужое расширение влияет на операцию: {reason}", file, line)
-            if reason.casefold() == "добавитьпкс":
-                fail(
-                    "helper_unverified",
-                    "Семантика ДобавитьПКС не подтверждена эталоном",
-                    file,
-                    line,
-                )
         if typ is None or status != "resolved":
             continue
         resolved = profile.resolve(typ, op.format_property)
@@ -633,19 +661,44 @@ def validate_preconditions(
                     target.pko_address,
                     f"ПКС «{op.configuration_attribute} ← {op.format_property}»: "
                     f"в обычном пути получения отсутствие «{op.format_property}» "
-                    f"в сообщении может очистить «{op.configuration_attribute}» "
+                    f"в сообщении очищает «{op.configuration_attribute}» "
                     f"найденного объекта. {reason}"
+                    # КОС:3443–3481 копирует только успешно конвертированные поля;
+                    # XDTO:7022–7047 переносит все ПКС. Пилот H4 подтвердил различие.
+                    # Текст короткий: сводка просмотра ограничена по размеру; подробности
+                    # (явный пустой элемент, что проверено обменом) — в справочнике скилла.
+                    "Объектная конвертация узла реквизит не меняет. "
                     "Сохранение прежнего значения не обеспечено",
                 )
             )
-    failures.extend(identifier_failures(doc, operations, identity))
+    legacy = tuple(op for op in operations if isinstance(op, AddHeaderProperty))
+    failures.extend(identifier_failures(doc, legacy, identity))
+    if any(not isinstance(op, AddHeaderProperty) for op in operations):
+        from kd2_rules_mcp.validation.ed_authoring_handlers import validate_handler_operations
+
+        handler_failures, handler_notices, _ = validate_handler_operations(
+            inputs, operations, identity, context
+        )
+        failures.extend(handler_failures)
+        notices.extend(handler_notices)
+        protected = {
+            op.property_operation_id
+            for op in operations
+            if isinstance(op, PreserveMissingHeaderProperty)
+        }
+        if not handler_failures:
+            notices = [
+                n
+                for n in notices
+                if not (n.id == "ed.author.missing_value_clears" and n.operation_id in protected)
+            ]
     if failures:
         raise AuthoringPreconditionError(tuple(dict.fromkeys(failures)))
     return tuple(notices)
 
 
 def require_single_version(
-    inputs: AuthoringInputs, operations: tuple[AddHeaderProperty, ...], context: AuthoringContext
+    inputs: AuthoringInputs, operations: tuple[Operation, ...], context: AuthoringContext
 ) -> None:
     """Один baseline менеджера, независимо от дальнейшей разрешимости полей."""
     if len({op.target.format_version for op in operations}) <= 1:
@@ -691,7 +744,7 @@ def copy_structure_with_attributes(
     ident = min(minimum, 0) - 1
     drafts = {}
     for op in operations:
-        if op.new_attribute:
+        if isinstance(op, AddHeaderProperty) and op.new_attribute:
             rule, *_ = target_objects(inputs, op.target, context)
             key, _ = metadata_key(rule.configuration_object.value)
             assert key is not None

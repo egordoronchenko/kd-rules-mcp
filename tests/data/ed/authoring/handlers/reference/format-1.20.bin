@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:t="urn:fiction:1.20" xmlns:c="urn:fiction:common" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:fiction:1.20">
+  <import namespace="urn:fiction:common"/>
+  <objectType name="Ключ"><property name="Код" type="xs:string"/></objectType>
+  <objectType name="Справочник.Товары">
+    <property name="КлючевыеСвойства" type="t:Ключ"/>
+    <property name="Ссылка" type="t:Ключ"/>
+    <property name="Владелец" type="t:Ключ" lowerBound="0"/>
+    <property name="AdditionalInfo" type="xs:anyType" lowerBound="0"/>
+    <property name="ОбщиеСвойстваОбъектовФормата" type="c:ОбщиеСвойстваОбъектовФормата" lowerBound="0"/>
+  </objectType>
+  <objectType name="Документ.Заказ" base="t:Справочник.Товары"/>
+</package>

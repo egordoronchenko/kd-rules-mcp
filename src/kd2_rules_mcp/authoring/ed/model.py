@@ -117,21 +117,155 @@ def _canonical_operation(
     return operation
 
 
-def order_operations(operations: tuple[AddHeaderProperty, ...]) -> tuple[AddHeaderProperty, ...]:
-    """Повтор решения — no-op; независимые решения сортируются по §3.3."""
+HandlerEvent = Literal[
+    "ПриОтправкеДанных", "ПриКонвертацииДанныхXDTO", "ПередЗаписьюПолученныхДанных"
+]
+HandlerChain = Literal["none", "after_existing"]
+
+
+def normalize_body(body: str) -> str:
+    """Только окончания строк и один завершающий LF; литералы не переписываются."""
+    return body.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+
+
+@dataclass(frozen=True, slots=True)
+class SetObjectHandler:
+    target: AuthoringTarget
+    event: HandlerEvent
+    body: str
+    expected_previous: str
+    chain: HandlerChain
+
+    def __post_init__(self) -> None:
+        if self.event not in (
+            "ПриОтправкеДанных",
+            "ПриКонвертацииДанныхXDTO",
+            "ПередЗаписьюПолученныхДанных",
+        ) or self.chain not in ("none", "after_existing"):
+            raise ValueError("Неизвестное событие или режим цепочки обработчика")
+        object.__setattr__(self, "body", normalize_body(self.body))
+
+    @property
+    def operation_id(self) -> str:
+        return digest(
+            (
+                "set_object_handler",
+                self.target,
+                (self.event, self.body, self.expected_previous, self.chain),
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PreserveMissingHeaderProperty:
+    target: AuthoringTarget
+    property_operation_id: str
+
+    @property
+    def operation_id(self) -> str:
+        return digest(("preserve_missing_header_property", self.target, self.property_operation_id))
+
+
+@dataclass(frozen=True, slots=True)
+class AddAlgorithmicHeaderProperty:
+    target: AuthoringTarget
+    configuration_attribute: str
+    format_property: str
+    handler_operation_id: str
+    conversion_rule: str = ""
+
+    @property
+    def operation_id(self) -> str:
+        return digest(
+            (
+                "add_algorithmic_header_property",
+                self.target,
+                (
+                    self.configuration_attribute,
+                    self.format_property,
+                    self.handler_operation_id,
+                    self.conversion_rule,
+                ),
+            )
+        )
+
+
+Operation = (
+    AddHeaderProperty
+    | SetObjectHandler
+    | PreserveMissingHeaderProperty
+    | AddAlgorithmicHeaderProperty
+)
+
+
+def operation_dependencies(operation: Operation) -> tuple[str, ...]:
+    if isinstance(operation, PreserveMissingHeaderProperty):
+        return (operation.property_operation_id,)
+    if isinstance(operation, AddAlgorithmicHeaderProperty):
+        return (operation.handler_operation_id,)
+    return ()
+
+
+def _dependency_message(
+    operation: Operation, present: Mapping[str, Operation], canonical_ids: Mapping[str, str]
+) -> str:
+    """Канонический идентификатор называется, когда зависимость смотрит на имя до канонизации."""
+    text = f"Операция {operation.operation_id}: отсутствующая или циклическая зависимость"
+    expected = [
+        canonical_ids[dependency]
+        for dependency in operation_dependencies(operation)
+        if dependency not in present
+        and dependency in canonical_ids
+        and canonical_ids[dependency] in present
+    ]
+    if expected:
+        text += "; ожидался канонический идентификатор " + ", ".join(expected)
+    return text
+
+
+def order_operations[T: Operation](
+    operations: tuple[T, ...], *, canonical_ids: Mapping[str, str] | None = None
+) -> tuple[T, ...]:
+    """Топологический порядок; legacy сохраняет прежнюю сортировку и идентичность."""
     unique = {op.operation_id: op for op in operations}
-    return tuple(
-        sorted(
-            unique.values(),
+    aliases = canonical_ids or {}
+    result: list[T] = []
+    pending = dict(unique)
+    while pending:
+        ready = [
+            op
+            for op in pending.values()
+            if all(
+                dependency in unique and dependency not in pending
+                for dependency in operation_dependencies(op)
+            )
+        ]
+        if not ready:
+            raise AuthoringPreconditionError(
+                tuple(
+                    Failure(
+                        "ed.author.handler_property_dependency",
+                        op.target.pko_address,
+                        _dependency_message(op, unique, aliases),
+                    )
+                    for op in pending.values()
+                )
+            )
+        first = min(
+            ready,
             key=lambda op: (
                 0 if op.target.direction == "send" else 1,
                 op.target.pko_address,
-                op.format_property,
-                op.configuration_attribute,
+                getattr(
+                    op, "event", getattr(op, "format_property", "ПередЗаписьюПолученныхДанных")
+                ),
+                getattr(op, "configuration_attribute", ""),
                 op.operation_id,
             ),
         )
-    )
+        result.append(first)
+        del pending[first.operation_id]
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)

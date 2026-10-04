@@ -1,0 +1,90 @@
+{
+  "bindings": [
+    {
+      "target": {
+        "project": "Пример",
+        "configuration": "Main",
+        "plan": "ПланФормата",
+        "variant": null,
+        "format_version": "1.20",
+        "direction": "send",
+        "pko_address": "ПКО/Товар"
+      },
+      "event": "ПриОтправкеДанных",
+      "handler_name": "доп_ПКО_a9575f03afa2dfa5",
+      "parameters": [
+        "ДанныеИБ",
+        "ДанныеXDTO",
+        "КомпонентыОбмена",
+        "СтекВыгрузки"
+      ],
+      "operation_ids": [
+        "0ec28c03eae3545387cb8627e833a19f69ca034b18279214c4557aea400d8c55"
+      ],
+      "previous_name": "Типовой",
+      "previous_arguments": [
+        "ДанныеИБ",
+        "ДанныеXDTO",
+        "КомпонентыОбмена",
+        "СтекВыгрузки"
+      ],
+      "previous_branch_hash": "48cbb53124eab5437161897f31e328f618d997abe8256a0a1a8465389f991db7",
+      "previous_routine_hash": "36b7920b2f794bdb2e089595607eb354af95588ef1a881bdba4167d4ab22c92a",
+      "runtime_verified": true,
+      "manager_interface": 2
+    }
+  ],
+  "canonical_utf8": "[\n  {\n    \"body\": \"ДанныеXDTO.Вставить(\\\"Комментарий\\\", ДанныеИБ.Заметка);\\n\",\n    \"chain\": \"after_existing\",\n    \"dependencies\": [],\n    \"event\": \"ПриОтправкеДанных\",\n    \"expected_previous\": \"Типовой\",\n    \"kind\": \"set_object_handler\",\n    \"operation_id\": \"0ec28c03eae3545387cb8627e833a19f69ca034b18279214c4557aea400d8c55\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"send\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  },\n  {\n    \"configuration_attribute\": \"Заметка\",\n    \"conversion_rule\": \"\",\n    \"dependencies\": [\n      \"0ec28c03eae3545387cb8627e833a19f69ca034b18279214c4557aea400d8c55\"\n    ],\n    \"format_property\": \"Комментарий\",\n    \"handler_operation_id\": \"0ec28c03eae3545387cb8627e833a19f69ca034b18279214c4557aea400d8c55\",\n    \"kind\": \"add_algorithmic_header_property\",\n    \"operation_id\": \"cde66e125498096839609225bf61d894f31343b04791b99a540c923d98b30f97\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"send\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  }\n]\n",
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_a9575f03afa2dfa5"
+  ],
+  "handler_names": {
+    "0ec28c03eae3545387cb8627e833a19f69ca034b18279214c4557aea400d8c55": "доп_ПКО_a9575f03afa2dfa5"
+  },
+  "input": [
+    {
+      "target": {
+        "project": "Пример",
+        "configuration": "Main",
+        "plan": "ПланФормата",
+        "variant": null,
+        "format_version": "1.20",
+        "direction": "send",
+        "pko_address": "ПКО/Товар"
+      },
+      "event": "ПриОтправкеДанных",
+      "body": "ДанныеXDTO.Вставить(\"Комментарий\", ДанныеИБ.Заметка);\n",
+      "expected_previous": "Типовой",
+      "chain": "after_existing",
+      "kind": "set_object_handler"
+    },
+    {
+      "target": {
+        "project": "Пример",
+        "configuration": "Main",
+        "plan": "ПланФормата",
+        "variant": null,
+        "format_version": "1.20",
+        "direction": "send",
+        "pko_address": "ПКО/Товар"
+      },
+      "configuration_attribute": "Заметка",
+      "format_property": "Комментарий",
+      "handler_operation_id": "0ec28c03eae3545387cb8627e833a19f69ca034b18279214c4557aea400d8c55",
+      "conversion_rule": "",
+      "kind": "add_algorithmic_header_property"
+    }
+  ],
+  "interfaces": [
+    1,
+    2,
+    3
+  ],
+  "manager_interface": 2,
+  "operation_ids": [
+    "0ec28c03eae3545387cb8627e833a19f69ca034b18279214c4557aea400d8c55",
+    "cde66e125498096839609225bf61d894f31343b04791b99a540c923d98b30f97"
+  ],
+  "plan_runtime_verified": true
+}

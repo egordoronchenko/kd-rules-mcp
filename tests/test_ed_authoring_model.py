@@ -1,6 +1,7 @@
 """Модель, все предусловия §2.3, кандидаты и неизменяемая структура автора."""
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import FrozenInstanceError, fields, replace
 from pathlib import Path
@@ -53,6 +54,32 @@ OPERATION = AddHeaderProperty(
     "Комментарий",
     AttributeDraft("доп_Заметка", "Заметка", "string", {"string_length": 150}),
 )
+
+
+def test_legacy_ids_and_canonical_bytes_without_kind_are_unchanged():
+    """Все сохранённые данные v1 закрепляют байты, а не заново вычисленный эталон."""
+    from kd2_rules_mcp.authoring.ed.handlers import canonical_operations_bytes, operation_from_input
+
+    paths = sorted((DATA / "expected").glob("*/manifest.json"))
+    assert len(paths) == 6
+    for path in paths:
+        rows = json.loads(path.read_text("utf-8"))["operations"]
+        old = tuple(
+            operation_from_input({k: v for k, v in row.items() if k != "operation_id"})
+            for row in rows
+        )
+        explicit = tuple(
+            operation_from_input(
+                {
+                    "kind": "add_header_property",
+                    **{k: v for k, v in row.items() if k != "operation_id"},
+                }
+            )
+            for row in rows
+        )
+        expected = (json.dumps(rows, sort_keys=True, ensure_ascii=False, indent=2) + "\n").encode()
+        assert canonical_operations_bytes(old) == canonical_operations_bytes(explicit) == expected
+        assert [op.operation_id for op in old] == [row["operation_id"] for row in rows]
 
 
 def inputs(version=2, *, text=None):

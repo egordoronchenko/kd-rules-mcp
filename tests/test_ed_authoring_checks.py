@@ -36,6 +36,24 @@ from tests.test_ed_authoring_model import (
     rule_changed,
 )
 
+
+def test_missing_value_notice_distinguishes_paths_and_explicit_empty():
+    """Пилот H3–H4: исходы разных путей нельзя сводить к общей очистке."""
+    from kd2_rules_mcp.authoring.ed.operations import validate_preconditions
+
+    op = replace(OPERATION, target=replace(TARGET, direction="receive"))
+    notice = next(
+        n
+        for n in validate_preconditions(inputs(), (op,), IDENTITY, version_scope="manager")
+        if n.id == "ed.author.missing_value_clears"
+    )
+    assert "обычном пути" in notice.message
+    assert "очищает" in notice.message
+    assert "Объектная конвертация узла реквизит не меняет" in notice.message
+    # Сводка просмотра ограничена по размеру: подробности остаются в справочнике скилла.
+    assert len(notice.message.encode("utf-8")) <= 520
+
+
 # Контракт MCP: остальные версии проверяются только для затронутых правил.
 prepare_authoring = partial(_prepare_authoring, other_rules_only=True)
 

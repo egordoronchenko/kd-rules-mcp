@@ -1,0 +1,50 @@
+{
+  "canonical_utf8": "[\n  {\n    \"body\": \"Возврат;\\n\",\n    \"chain\": \"none\",\n    \"dependencies\": [],\n    \"event\": \"ПриКонвертацииДанныхXDTO\",\n    \"expected_previous\": \"\",\n    \"kind\": \"set_object_handler\",\n    \"operation_id\": \"051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"receive\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  },\n  {\n    \"configuration_attribute\": \"Заметка\",\n    \"conversion_rule\": \"\",\n    \"dependencies\": [\n      \"051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d\"\n    ],\n    \"format_property\": \"Комментарий\",\n    \"handler_operation_id\": \"051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d\",\n    \"kind\": \"add_algorithmic_header_property\",\n    \"operation_id\": \"a21b645885949e37970e1c5483661963657dd11bd9bb788ea4639b4e13746df0\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"receive\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  }\n]\n",
+  "expected_failure": "ed.author.not_supported",
+  "handler_names": {
+    "051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d": "доп_ПКО_d8019c171759fb7f"
+  },
+  "input": [
+    {
+      "body": "Возврат;\n",
+      "chain": "none",
+      "event": "ПриКонвертацииДанныхXDTO",
+      "expected_previous": "",
+      "kind": "set_object_handler",
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    },
+    {
+      "configuration_attribute": "Заметка",
+      "conversion_rule": "",
+      "format_property": "Комментарий",
+      "handler_operation_id": "051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d",
+      "kind": "add_algorithmic_header_property",
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "interfaces": [
+    1,
+    2,
+    3
+  ],
+  "operation_ids": [
+    "051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d",
+    "a21b645885949e37970e1c5483661963657dd11bd9bb788ea4639b4e13746df0"
+  ]
+}

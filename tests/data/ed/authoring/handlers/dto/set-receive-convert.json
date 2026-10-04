@@ -1,0 +1,67 @@
+{
+  "bindings": [
+    {
+      "target": {
+        "project": "Пример",
+        "configuration": "Main",
+        "plan": "ПланФормата",
+        "variant": null,
+        "format_version": "1.20",
+        "direction": "receive",
+        "pko_address": "ПКО/Товар"
+      },
+      "event": "ПриКонвертацииДанныхXDTO",
+      "handler_name": "доп_ПКО_d8019c171759fb7f",
+      "parameters": [
+        "ДанныеXDTO",
+        "ПолученныеДанные",
+        "КомпонентыОбмена"
+      ],
+      "operation_ids": [
+        "051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d"
+      ],
+      "previous_name": "",
+      "previous_arguments": [],
+      "previous_branch_hash": "",
+      "previous_routine_hash": "",
+      "runtime_verified": false,
+      "manager_interface": 2
+    }
+  ],
+  "canonical_utf8": "[\n  {\n    \"body\": \"Возврат;\\n\",\n    \"chain\": \"none\",\n    \"dependencies\": [],\n    \"event\": \"ПриКонвертацииДанныхXDTO\",\n    \"expected_previous\": \"\",\n    \"kind\": \"set_object_handler\",\n    \"operation_id\": \"051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"receive\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  }\n]\n",
+  "handler_names": {
+    "051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d": "доп_ПКО_d8019c171759fb7f"
+  },
+  "input": [
+    {
+      "body": "Возврат;\n",
+      "chain": "none",
+      "event": "ПриКонвертацииДанныхXDTO",
+      "expected_previous": "",
+      "kind": "set_object_handler",
+      "target": {
+        "configuration": "Main",
+        "direction": "receive",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "interfaces": [
+    1,
+    2,
+    3
+  ],
+  "operation_ids": [
+    "051ff095f1f294968bced64a606f61e95f77fbe9924e37df3bc14c86eb48773d"
+  ],
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_d8019c171759fb7f"
+  ],
+  "manager_interface": 2,
+  "plan_runtime_verified": false
+}

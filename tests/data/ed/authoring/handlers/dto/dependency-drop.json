@@ -1,0 +1,106 @@
+{
+  "bindings": [
+    {
+      "target": {
+        "project": "Пример",
+        "configuration": "Main",
+        "plan": "ПланФормата",
+        "variant": null,
+        "format_version": "1.20",
+        "direction": "send",
+        "pko_address": "ПКО/Товар"
+      },
+      "event": "ПриОтправкеДанных",
+      "handler_name": "доп_ПКО_a9575f03afa2dfa5",
+      "parameters": [
+        "ДанныеИБ",
+        "ДанныеXDTO",
+        "КомпонентыОбмена",
+        "СтекВыгрузки"
+      ],
+      "operation_ids": [
+        "d6602a79297170046fdb11bfaa5c10213e701f1a0c2ec6e80b201099ea55f24c"
+      ],
+      "previous_name": "",
+      "previous_arguments": [],
+      "previous_branch_hash": "",
+      "previous_routine_hash": "",
+      "runtime_verified": false,
+      "manager_interface": 2
+    }
+  ],
+  "canonical_utf8": "[\n  {\n    \"body\": \"ДанныеXDTO.Вставить(\\\"Комментарий\\\", \\\"другое\\\");\\n\",\n    \"chain\": \"none\",\n    \"dependencies\": [],\n    \"event\": \"ПриОтправкеДанных\",\n    \"expected_previous\": \"\",\n    \"kind\": \"set_object_handler\",\n    \"operation_id\": \"d6602a79297170046fdb11bfaa5c10213e701f1a0c2ec6e80b201099ea55f24c\",\n    \"target\": {\n      \"configuration\": \"Main\",\n      \"direction\": \"send\",\n      \"format_version\": \"1.20\",\n      \"pko_address\": \"ПКО/Товар\",\n      \"plan\": \"ПланФормата\",\n      \"project\": \"Пример\",\n      \"variant\": null\n    }\n  }\n]\n",
+  "drop_operations": [
+    "d835cbdfc28f069783395fdffdff1be1df6b8202e3a43ffabf63f40e7157ca81",
+    "77d011f2f6b2adcb35d3c47c0cb03e5e1de6b014957b324ae388d505126315bb"
+  ],
+  "handler_names": {
+    "d6602a79297170046fdb11bfaa5c10213e701f1a0c2ec6e80b201099ea55f24c": "доп_ПКО_a9575f03afa2dfa5"
+  },
+  "input": [
+    {
+      "body": "ДанныеXDTO.Вставить(\"Комментарий\", \"другое\");\n",
+      "chain": "none",
+      "event": "ПриОтправкеДанных",
+      "expected_previous": "",
+      "kind": "set_object_handler",
+      "target": {
+        "configuration": "Main",
+        "direction": "send",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "interfaces": [
+    1,
+    2,
+    3
+  ],
+  "operation_ids": [
+    "d6602a79297170046fdb11bfaa5c10213e701f1a0c2ec6e80b201099ea55f24c"
+  ],
+  "previous_input": [
+    {
+      "body": "ДанныеXDTO.Вставить(\"Комментарий\", ДанныеИБ.Заметка);\n",
+      "chain": "none",
+      "event": "ПриОтправкеДанных",
+      "expected_previous": "",
+      "kind": "set_object_handler",
+      "target": {
+        "configuration": "Main",
+        "direction": "send",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    },
+    {
+      "configuration_attribute": "Заметка",
+      "conversion_rule": "",
+      "format_property": "Комментарий",
+      "handler_operation_id": "d835cbdfc28f069783395fdffdff1be1df6b8202e3a43ffabf63f40e7157ca81",
+      "kind": "add_algorithmic_header_property",
+      "target": {
+        "configuration": "Main",
+        "direction": "send",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "dispatcher_name": "доп_Диспетчер",
+  "dispatcher_order": [
+    "доп_ПКО_a9575f03afa2dfa5"
+  ],
+  "manager_interface": 2,
+  "plan_runtime_verified": false
+}
