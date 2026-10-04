@@ -323,6 +323,7 @@ class PreparedAuthoring:
     skipped: tuple[Skipped, ...]
     build_hash: str
     runtime_verified: bool
+    preparation_inputs: AuthoringInputs | None = field(default=None, repr=False, compare=False)
 
 
 def runtime_verified(manager_version: int | None) -> bool:

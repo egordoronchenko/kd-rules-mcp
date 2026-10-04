@@ -1,0 +1,192 @@
+{
+  "build_hash": "168a6a3b215ea6728bab062a7419a2a34663dc69142724967c18d65d123be41d",
+  "notices": [
+    {
+      "address": "ПКО/Товар",
+      "detail_key": "",
+      "id": "ed.author.other_version_incompatible",
+      "message": "В версиях 1.21 свойства «Число» или типа ПКО нет: значение не передаётся",
+      "methods": [],
+      "notice_id": "ed.author.other_version_incompatible:c9abef4480af37b051c83e6284bcf2759452d254bb8d35c734783f2e6e2e70a6",
+      "operation_id": "c9abef4480af37b051c83e6284bcf2759452d254bb8d35c734783f2e6e2e70a6",
+      "version_keys": [
+        "1.21"
+      ]
+    }
+  ],
+  "other_profiles": [
+    {
+      "after": [
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПередКонвертацией» не определён."
+        },
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПередОтложеннымЗаполнением» не определён."
+        },
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПослеКонвертации» не определён."
+        },
+        {
+          "address": "ПКО/Товар/ПКС/Число",
+          "check": "ed.schema.property_missing",
+          "level": "предупреждение",
+          "message": "Свойство формата «Число» отсутствует в выбранном профиле; проверьте версию и обработчик."
+        }
+      ],
+      "before": [
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПередКонвертацией» не определён."
+        },
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПередОтложеннымЗаполнением» не определён."
+        },
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПослеКонвертации» не определён."
+        }
+      ],
+      "direction": "send",
+      "disappeared": [],
+      "new": [
+        {
+          "address": "ПКО/Товар/ПКС/Число",
+          "check": "ed.schema.property_missing",
+          "level": "предупреждение",
+          "message": "Свойство формата «Число» отсутствует в выбранном профиле; проверьте версию и обработчик."
+        }
+      ],
+      "new_relevant_skipped": [
+        {
+          "check": "ed.schema.type_incompatible",
+          "reason": "owner_type_unavailable: ПКО/Товар/ПКС/Число"
+        }
+      ],
+      "skipped_after": [
+        {
+          "check": "ed.schema.type_incompatible",
+          "reason": "non_atomic_type: 2; ПКО/Товар/ПКС/Код, ПКО/Заказ/ПКС/Код"
+        },
+        {
+          "check": "ed.schema.type_incompatible",
+          "reason": "owner_type_unavailable: 1; ПКО/Товар/ПКС/Число"
+        }
+      ],
+      "skipped_before": [
+        {
+          "check": "ed.schema.type_incompatible",
+          "reason": "non_atomic_type: 2; ПКО/Товар/ПКС/Код, ПКО/Заказ/ПКС/Код"
+        }
+      ],
+      "version": "1.21"
+    }
+  ],
+  "runtime_verified": false,
+  "selected_profiles": [
+    {
+      "after": [
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПередКонвертацией» не определён."
+        },
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПередОтложеннымЗаполнением» не определён."
+        },
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПослеКонвертации» не определён."
+        }
+      ],
+      "before": [
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПередКонвертацией» не определён."
+        },
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПередОтложеннымЗаполнением» не определён."
+        },
+        {
+          "address": "Конвертация",
+          "check": "ed.conversion.required",
+          "level": "ошибка",
+          "message": "Обязательный метод конвертации «ПослеКонвертации» не определён."
+        }
+      ],
+      "direction": "send",
+      "disappeared": [],
+      "new": [],
+      "new_relevant_skipped": [],
+      "skipped_after": [
+        {
+          "check": "ed.schema.type_incompatible",
+          "reason": "non_atomic_type: 2; ПКО/Товар/ПКС/Код, ПКО/Заказ/ПКС/Код"
+        }
+      ],
+      "skipped_before": [
+        {
+          "check": "ed.schema.type_incompatible",
+          "reason": "non_atomic_type: 2; ПКО/Товар/ПКС/Код, ПКО/Заказ/ПКС/Код"
+        }
+      ],
+      "version": "1.20"
+    }
+  ],
+  "skipped": [
+    {
+      "check": "runtime.hook",
+      "reason": "Исполнение перехватчика в новом сеансе не проверено"
+    },
+    {
+      "check": "runtime.security",
+      "reason": "Безопасный режим и права не проверены"
+    },
+    {
+      "check": "runtime.registration",
+      "reason": "Регистрация изменений не проверена"
+    },
+    {
+      "check": "runtime.node_version",
+      "reason": "Фактическая версия узла неизвестна"
+    },
+    {
+      "check": "runtime.messages",
+      "reason": "Содержимое сообщений не проверено"
+    },
+    {
+      "check": "runtime.handlers",
+      "reason": "Бизнес-логика opaque обработчиков не исполнялась"
+    },
+    {
+      "check": "runtime.object_conversion",
+      "reason": "Путь объектной конвертации не проверен"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" version="2.20">
+	<Catalog uuid="00000000-0000-0000-0000-000000000003">
+		<InternalInfo>
+			<xr:GeneratedType name="CatalogObject.Товары" category="Object">
+				<xr:TypeId>00000000-0000-0000-0000-000000000090</xr:TypeId>
+				<xr:ValueId>00000000-0000-0000-0000-000000000090</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogRef.Товары" category="Ref">
+				<xr:TypeId>00000000-0000-0000-0000-000000000090</xr:TypeId>
+				<xr:ValueId>00000000-0000-0000-0000-000000000090</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogSelection.Товары" category="Selection">
+				<xr:TypeId>00000000-0000-0000-0000-000000000090</xr:TypeId>
+				<xr:ValueId>00000000-0000-0000-0000-000000000090</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogList.Товары" category="List">
+				<xr:TypeId>00000000-0000-0000-0000-000000000090</xr:TypeId>
+				<xr:ValueId>00000000-0000-0000-0000-000000000090</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogManager.Товары" category="Manager">
+				<xr:TypeId>00000000-0000-0000-0000-000000000090</xr:TypeId>
+				<xr:ValueId>00000000-0000-0000-0000-000000000090</xr:ValueId>
+			</xr:GeneratedType>
+		</InternalInfo>
+		<Properties>
+			<Name>Товары</Name>
+			<Comment>Не копировать настройки владельца</Comment>
+		</Properties>
+	</Catalog>
+</MetaDataObject>

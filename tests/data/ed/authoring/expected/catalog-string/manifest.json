@@ -1,0 +1,114 @@
+{
+  "base_configuration_uuid": "00000000-0000-0000-0000-000000000001",
+  "build_hash": "7f40e11b05ead61a46b93dc050024b60aeca2a37ce7d4855fe1968adbcc44d55",
+  "delivery": "extension",
+  "file_hashes": {
+    "extension/Catalogs/Товары.xml": "89299fbe3302aa35a89e9761b13c9b823f2dd186f9ca9d6c64334c3463a38fa7",
+    "extension/CommonModules/Менеджер2.xml": "ea9367b7c049b12fbb35231170cf49d18936149bffe033453595ebc0fdcd3999",
+    "extension/CommonModules/Менеджер2/Ext/Module.bsl": "a4a4af77233724cade8716b3c2908b573cfe647f4e13821109913f73ede2a148",
+    "extension/Configuration.xml": "c2943459f16e279dd60a5891aaab8a7f55823662acf679a4834f2ea8b45baaac",
+    "extension/Languages/Русский.xml": "be408e32764b3ef366b43e0d40a6d2c2376fcefc80614a447d4792a9d3ab14b5",
+    "instruction.md": "5596e43b7e00e4bc16d895cd27b1688812144bac259e3a568f2bd9e31b2c3deb",
+    "modules/CommonModules/Менеджер2/Ext/Module.bsl": "a4a4af77233724cade8716b3c2908b573cfe647f4e13821109913f73ede2a148",
+    "validation.json": "00e9a9551529723f51ce57b0b36ad0ef54e023e07c935de8a892ebb23737d376"
+  },
+  "generator_version": "ed-authoring/1",
+  "identity": {
+    "compatibility_mode": null,
+    "name": "ДоработкаОбмена",
+    "prefix": "доп_",
+    "synonym": "",
+    "version": "0.1"
+  },
+  "identity_map": {
+    "artifact_uuid": "a0e1c48a-a154-59a6-a136-d4371d2a1cc6",
+    "borrowed": {
+      "catalog/товары": "00000000-0000-0000-0000-000000000003",
+      "commonmodule/менеджер2": "00000000-0000-0000-0000-000000000012",
+      "language/русский": "00000000-0000-0000-0000-000000000002"
+    },
+    "objects": {
+      "catalog/товары": "36e953c7-f297-56db-bd70-3be1ef8b2b16",
+      "catalog/товары/attribute/доп_заметка": "e7f7215f-71f0-5277-b950-106a86d3c5b6",
+      "catalog/товары/generatedtype/list/typeid": "79ae8de6-0104-59e5-bb91-1859126ed097",
+      "catalog/товары/generatedtype/list/valueid": "65b0fe0e-619e-5dd1-a028-6df6999d9835",
+      "catalog/товары/generatedtype/manager/typeid": "c8ff9785-b9d6-592e-b858-13c8b6b21e19",
+      "catalog/товары/generatedtype/manager/valueid": "303cacf7-6471-55ed-9ad5-21cad084d9a0",
+      "catalog/товары/generatedtype/object/typeid": "4cb63a90-7b1d-537b-980c-329374fc3b22",
+      "catalog/товары/generatedtype/object/valueid": "d8ab6410-4c76-574b-bd04-5c16a7257418",
+      "catalog/товары/generatedtype/ref/typeid": "78a2a88a-30ac-5809-8e66-c90bfabd42c5",
+      "catalog/товары/generatedtype/ref/valueid": "0e5c1c71-e979-5e8f-936a-3dc418b3baf6",
+      "catalog/товары/generatedtype/selection/typeid": "cb0f7395-933f-59cf-b688-e3df3732c0e6",
+      "catalog/товары/generatedtype/selection/valueid": "51eea2ab-80f4-5c98-ac8e-c9e0cdd2938e",
+      "commonmodule/менеджер2": "6fdf9d2a-26da-5414-ab01-be7614e5e8f9",
+      "configuration": "80c3f371-778a-5067-a541-06bbec98aeff",
+      "contained/51f2d5d8-ea4d-4064-8892-82951750031e": "3978221b-359e-5eae-b821-d59f49f059fa",
+      "contained/9cd510cd-abfc-11d4-9434-004095e12fc7": "9bac4555-59cc-5fcc-a850-8ddfe4cb1149",
+      "contained/9de14907-ec23-4a07-96f0-85521cb6b53b": "cbcca1b4-eec8-58a9-879e-971cc279f7ba",
+      "contained/9fcd25a0-4822-11d4-9414-008048da11f9": "806182fd-597a-535d-92af-ee6eec13009f",
+      "contained/e3687481-0a87-462c-a166-9f34594f9bba": "668b7bee-a03f-5581-8156-05fc1bf8c9f0",
+      "contained/e68182ea-4237-4383-967f-90c1e3370bc7": "91a12c65-bb1e-5c5a-9beb-39d432cde440",
+      "contained/fb282519-d103-4dd3-bc12-cb271d631dfc": "0a3fefcd-fe6b-5bf8-a89d-5301f1646ef2",
+      "language/русский": "9413defb-ec8e-5e15-b3e5-167ef15cc2fa"
+    }
+  },
+  "notices": [
+    "ed.author.other_version_incompatible:30104e784d5318f31d6d30f7f6bf1610210bb73799b3ae5084bc9680622993e9"
+  ],
+  "operations": [
+    {
+      "configuration_attribute": "доп_Заметка",
+      "format_property": "Комментарий",
+      "new_attribute": {
+        "name": "доп_Заметка",
+        "primitive": "string",
+        "qualifiers": {
+          "string_length": 150
+        },
+        "synonym": "Заметка"
+      },
+      "operation_id": "30104e784d5318f31d6d30f7f6bf1610210bb73799b3ae5084bc9680622993e9",
+      "target": {
+        "configuration": "Main",
+        "direction": "send",
+        "format_version": "1.20",
+        "pko_address": "ПКО/Товар",
+        "plan": "ПланФормата",
+        "project": "Пример",
+        "variant": null
+      }
+    }
+  ],
+  "runtime_verified": false,
+  "schema_version": 1,
+  "source_hashes": {
+    "Catalogs/Товары.xml": "d3d6ff525a03d8d09b995012a4f0ef53713f48dae9eace3fbe356e7d8cb065e2",
+    "CommonModules/Менеджер2.xml": "eb047ab5fe14d540763d5e37ce10da2d5980c267a2832b579fc63ffafecc0342",
+    "CommonModules/Менеджер2/Ext/Module.bsl": "5ffba2a5aed67de08883e937eaf8001a1dbb826bcebf6536919fca8b3e59966d",
+    "Configuration.xml": "9054f22e0a65a40a03819e5543fdf2409d21247472c260db04dcc7169f64a48e",
+    "Languages/Русский.xml": "be24d9e55625bf2dec4aaf9fc18f8de989842fe5d5450918bb66278feb474b3f",
+    "schemas/1.20/0/0/format-1.20.bin": "99af95e3a4e5ff085cc3ee0f71f90de166df601fd96d249728f3358a6145f8f8",
+    "schemas/1.20/1/0/common.bin": "8d83e272ad23ce908d477ab0e52f158008ad29ff775f6ba9c503d4d37ea10d53",
+    "schemas/1.21/0/0/format-1.21.bin": "463b12621da349193fa6599e5eb9af55227215a557d8823d134ef31b963c8ec7",
+    "schemas/1.21/1/0/common.bin": "8d83e272ad23ce908d477ab0e52f158008ad29ff775f6ba9c503d4d37ea10d53"
+  },
+  "source_set": {
+    "configuration": "Main",
+    "document_hash": "9ccc0b762d479c84a00dae01ffaad8df83230cccb114a79794c01e4a777f7cd1",
+    "extensions": [],
+    "extensions_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "project": "Пример",
+    "routes_hash": "a406d9add0f40ab729201d9a585f8a7b5f6d68557ee082129f1d827ef4f3c3c3",
+    "schemas_hash": "7e55b9d4c46815ad1d2c70b8771b367e309fda2719ba6b63c732767e0386f656",
+    "structure_hash": "d6467022196ced6ac767680db68637a22ae0dbec6037c18e6c2ae393084726ff"
+  },
+  "unverified": [
+    "Исполнение перехватчика в новом сеансе не проверено",
+    "Безопасный режим и права не проверены",
+    "Регистрация изменений не проверена",
+    "Фактическая версия узла неизвестна",
+    "Содержимое сообщений не проверено",
+    "Бизнес-логика opaque обработчиков не исполнялась",
+    "Путь объектной конвертации не проверен"
+  ]
+}

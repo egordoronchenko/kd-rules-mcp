@@ -634,4 +634,5 @@ def prepare_authoring(
         skipped,
         build_hash,
         runtime_verified(inputs.document.manager_version),
+        preparation_inputs=inputs,
     )

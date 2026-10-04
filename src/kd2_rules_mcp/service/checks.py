@@ -7,6 +7,7 @@ from kd2_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
 from kd2_rules_mcp.service.base import ServiceBase
 from kd2_rules_mcp.service.views import page_limit, report_view
 from kd2_rules_mcp.validation.algorithms import check_algorithm_refs
+from kd2_rules_mcp.validation.exchange_plan import check_exchange_plan
 from kd2_rules_mcp.validation.format import check_format
 from kd2_rules_mcp.validation.handlers import export_handlers, locate
 from kd2_rules_mcp.validation.registration import check_registration
@@ -35,6 +36,7 @@ class ChecksMixin(ServiceBase):
                 report.extend(check_algorithm_refs(document))
                 report.extend(check_search_params(document))
                 report.extend(check_search_objects(document, target))
+                report.extend(check_exchange_plan(document, source, target))
             elif isinstance(document, RegistrationRules):
                 report.extend(check_registration(document, source))
         return report_view(report, level, check_prefix, offset, limit)
