@@ -5,6 +5,7 @@
 """
 
 import base64
+import http.client
 import json
 import re
 import urllib.request
@@ -219,14 +220,32 @@ def _take_field(text: str, pos: int, length: int) -> tuple[str, int]:
 
 
 def short_error(text: str) -> str:
-    """Ошибка 1С без эха нашего кода и стека HTTP-сервиса: до первой строки стека «{…}»."""
+    """Ошибка 1С без эха нашего кода и стека HTTP-сервиса.
+
+    Текст до первой строки стека «{…}». Если в подробном представлении есть
+    «по причине:», к краткому тексту добавляется первая содержательная строка
+    после последнего «по причине:» — сама причина платформы.
+    """
     text = re.sub(r"[A-Za-z0-9+/=]{200,}", "<base64>", text)
+    body = text.removeprefix("ОШИБКА ")
+    reason = ""
+    marker = "по причине:"
+    if marker in body:
+        tail = body[body.rfind(marker) + len(marker) :]
+        for line in tail.splitlines():
+            stripped = line.strip()
+            if stripped:
+                reason = stripped
+                break
     kept: list[str] = []
-    for line in text.removeprefix("ОШИБКА ").splitlines():
+    for line in body.splitlines():
         if kept and line.lstrip().startswith("{"):
             break
         kept.append(line.strip())
-    return " ".join(part for part in kept if part)
+    head = " ".join(part for part in kept if part)
+    if reason and reason not in head:
+        return f"{head} {reason}".strip()
+    return head
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,17 +276,35 @@ class DataServer:
         try:
             with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
                 raw = response.read().decode("utf-8")
+        except (UnicodeDecodeError, http.client.HTTPException) as error:
+            raise ExchangeCheckError(
+                f"{self.label}: не-JSON ответ или обрыв HTTP: {error}"
+            ) from error
         except OSError as error:
             raise ExchangeCheckError(f"{self.label}: сервер данных недоступен: {error}") from error
-        answer = json.loads(_sse_data(raw))
+        try:
+            answer = json.loads(_sse_data(raw))
+        except json.JSONDecodeError as error:
+            raise ExchangeCheckError(
+                f"{self.label}: не-JSON ответ или обрыв HTTP: {error}"
+            ) from error
         if "error" in answer:
             raise ExchangeCheckError(f"{self.label}: {answer['error']}")
         result = answer.get("result", {})
         return "".join(part.get("text", "") for part in result.get("content", []))
 
     def run(self, code: str) -> str:
-        """Код из `guarded`: текст после «OK»; «ОШИБКА …» или пустой ответ — ошибка шага."""
-        text = self.call(code)
+        """Код из `guarded`: текст после «OK»; «ОШИБКА …» или пустой ответ — ошибка шага.
+
+        Не-JSON ответ и обрыв HTTP (в том числе из переопределённого `call`) —
+        транспортная ошибка: вызывающий может перечитать состояние, не повторяя запись.
+        """
+        try:
+            text = self.call(code)
+        except (json.JSONDecodeError, UnicodeDecodeError, http.client.HTTPException) as error:
+            raise ExchangeCheckError(
+                f"{self.label}: не-JSON ответ или обрыв HTTP: {error}"
+            ) from error
         if text.startswith("OK"):
             return text[2:].removeprefix(" ").removeprefix("\n")
         if not text:

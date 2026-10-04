@@ -157,11 +157,13 @@ docker compose up -d --build
 | Штатная загрузка в базу КД | `uv run python kdbase\kd_check.py check <файл>` | `ИТОГ OK`, число ПКО/ПВД ожидаемое |
 | Штатная загрузка правил БСП (без записи в базу) | `uv run python kdbase\bsp_check.py <правила> <правила корреспондента> --plan <план> --project <проект> --base <песочница>`; готовый архив (`rules_pack`, 2 или 3 файла) — `--archive <ZIP>` вместо пары файлов | `ИТОГ OK` |
 | Живой обмен между песочницами (поиск в приёмнике, дубли) | `uv run python kdbase\exchange_check.py run --plan <план> --source <проект>.<база> --target <проект>.<база> --object <Документ.Имя> --ref <идентификатор> --source-rules <ZIP> --target-rules <ZIP> --query "<запрос>" --expect-rows N` | `ИТОГ OK`, запрос в приёмнике вернул ожидаемое |
+| Живой обмен через универсальный формат | `uv run python kdbase\ed_exchange_check.py run --source <проект>.<база> --target <проект>.<база> --case <случай.json>` | `ИТОГ OK`: значение есть в новом сообщении и в приёмнике |
 
 Что каждая проверка доказывает и чего не доказывает, где запускается и что ей нужно (база КД в `base\`, логины
 песочниц, серверы данных баз), как читать итог, типичные ложные замечания и все идентификаторы проверок
-`rules_validate` — **[docs/checks.md](docs/checks.md)**. `bsp_check` и `exchange_check` работают только с базами
-роли «песочница»; порядок живой проверки и грабли — скилл `kd2-exchange-pitfalls`.
+`rules_validate` — **[docs/checks.md](docs/checks.md)**. `bsp_check`, `exchange_check` и `ed_exchange_check` работают только с базами
+роли «песочница» (`run` и `cleanup`); порядок живой проверки и грабли — скилл `kd2-exchange-pitfalls` (КД 2) и `kd2-ed-rules` (универсальный формат).
+Случай `ed_exchange_check` может задать тип приёмника и имя типа формата отдельно от типа источника.
 
 ### Дополнительные живые проверки `kdbase`
 
@@ -213,6 +215,7 @@ uv run python kdbase/exchange_check.py delete --plan <план> --source <про
 | Ответ `match_objects` огромный | сузить `text` и `kind` |
 | «Неверно указан пользователь или пароль» в `bsp_check` | задать логин базы (`logins` или `.dev.env` проекта) |
 | `exchange_check`: «пустой ответ сервера данных» | в базе нет инструмента `vcexecutecode` у сервера данных — включить его в настройках сервера данных базы |
+| `ed_exchange_check`: «пустой ответ сервера данных» | код ушёл не одной строкой или не в UTF-8, либо у сервера данных нет инструмента выполнения кода |
 | Агент не видит инструменты | `docker compose ps`; в Claude Code — одобрить сервер (`claude mcp list`) |
 
 ## 6. Ограничения

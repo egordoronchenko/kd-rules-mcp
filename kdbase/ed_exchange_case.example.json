@@ -1,0 +1,42 @@
+{
+  "plan": "ОбменПример",
+  "format_version": "1.20",
+  "manager_interface": "2",
+  "format_property": "Комментарий",
+  "property_path": "ОбщиеСвойстваОбъектовФормата/Комментарий",
+  "source_attribute": "Пример_Заметка",
+  "target_attribute": "Пример_Заметка",
+  "absent": "unknown",
+  "absent_step": true,
+  "check_registration_on_write": false,
+  "object": {
+    "metadata": "Справочник.ПримерОбъекты",
+    "target_metadata": "Справочник.ПримерОбъекты",
+    "format_name": "Справочник.ПримерОбъекты",
+    "create": true,
+    "name": "Пример обмена: должность проверки"
+  },
+  "values": {
+    "v1": "Значение шага 1",
+    "v2": "Значение шага 2",
+    "empty": ""
+  },
+  "nodes": {
+    "mode": "create",
+    "source_code": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "target_code": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "variant": "ОбменПример"
+  },
+  "rules": {
+    "source": {
+      "manager": "МенеджерОбменаПример",
+      "pko": "Справочник_ПримерОбъекты_Отправка",
+      "direction": "Отправка"
+    },
+    "target": {
+      "manager": "МенеджерОбменаПример",
+      "pko": "Справочник_ПримерОбъекты",
+      "direction": "Получение"
+    }
+  }
+}
