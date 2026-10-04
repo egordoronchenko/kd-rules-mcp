@@ -37,7 +37,7 @@ def runtime_probes(prepared: PreparedAuthoring, meta: DumpMetadata) -> str:
     index = build_addresses(prepared.projection_before)
     after = build_addresses(prepared.projection_after.document)
     blocks = []
-    for direction in sorted({op.target.direction for op in prepared.operations}):
+    for direction in ("send", "receive"):
         lines = [
             "Правила = ОбменДаннымиXDTOСервер.КоллекцияПравилКонвертации("
             f"{bsl_string(str(version))});"
@@ -45,7 +45,7 @@ def runtime_probes(prepared: PreparedAuthoring, meta: DumpMetadata) -> str:
         if version == 3:
             lines += [
                 "// КомпонентыОбмена берутся из типового пути согласованного обмена.",
-                f"// НаправлениеОбмена компонентов: {direction_label(direction)}.",
+                f"// Сформируйте компоненты для направления {direction_label(direction)}.",
                 f"{meta.module.name}.{FILLER}(КомпонентыОбмена, Правила, Истина);",
                 "// Заголовочный проход: новых ПКС нет.",
                 f"{meta.module.name}.{FILLER}(КомпонентыОбмена, Правила, Ложь);",
@@ -54,23 +54,54 @@ def runtime_probes(prepared: PreparedAuthoring, meta: DumpMetadata) -> str:
             lines.append(
                 f"{meta.module.name}.{FILLER}({bsl_string(direction_label(direction))}, Правила);"
             )
-        for address in sorted(
-            {
-                op.target.pko_address
-                for op in prepared.operations
-                if op.target.direction == direction
-            }
-        ):
+        for address in sorted({op.target.pko_address for op in prepared.operations}):
             rule = index.find(address)
             projected = after.find(address)
             assert isinstance(rule, ObjectRule) and isinstance(projected, ObjectRule)
+            missing = direction_label(direction) + ": ПКО " + rule.name + " отсутствует"
+            changed = any(
+                op.target.pko_address == address and op.target.direction == direction
+                for op in prepared.operations
+            )
+            expected = len(projected.properties) if changed else len(rule.properties)
             lines += [
                 f"Правило = Правила.Найти({bsl_string(rule.declared_name or rule.name)}, "
                 '"ИмяПКО");',
-                "Если Правило <> Неопределено Тогда",
+                "Если Правило = Неопределено Тогда",
+                f"\tСообщить({bsl_string(missing)});",
+                "Иначе",
                 "\tСообщить(Правило.Свойства.Количество()); // В модели: "
-                f"{len(rule.properties)} → {len(projected.properties)}.",
-                "КонецЕсли;",
+                f"{len(rule.properties)} → {expected}.",
+            ]
+            for op in prepared.operations:
+                if op.target.pko_address != address:
+                    continue
+                lines += [
+                    "\tСовпаденийПары = 0;",
+                    "\tДля Каждого ПКС Из Правило.Свойства Цикл",
+                    f"\t\tЕсли ПКС.СвойствоФормата = {bsl_string(op.format_property)} Тогда",
+                    "\t\t\tСообщить(Строка(ПКС.СвойствоКонфигурации) + "
+                    '" ↔ " + Строка(ПКС.СвойствоФормата));',
+                    "\t\t\tЕсли ПКС.СвойствоКонфигурации = "
+                    f"{bsl_string(op.configuration_attribute)} Тогда",
+                    "\t\t\t\tСовпаденийПары = СовпаденийПары + 1;",
+                    "\t\t\tКонецЕсли;",
+                    "\t\tКонецЕсли;",
+                    "\tКонецЦикла;",
+                    '\tСообщить("Совпадений нужной пары: " + Строка(СовпаденийПары));',
+                ]
+            lines.append("КонецЕсли;")
+        for attribute in sorted({op.configuration_attribute for op in prepared.operations}):
+            lines += [
+                "// Проверяем реквизит по всей таблице, даже если целевого ПКО нет.",
+                "Для Каждого ПКО Из Правила Цикл",
+                "\tДля Каждого ПКС Из ПКО.Свойства Цикл",
+                f"\t\tЕсли ПКС.СвойствоКонфигурации = {bsl_string(attribute)} Тогда",
+                f"\t\t\tСообщить({bsl_string(direction_label(direction) + ': ')} + ПКО.ИмяПКО + "
+                '": " + Строка(ПКС.СвойствоКонфигурации) + " ↔ " + Строка(ПКС.СвойствоФормата));',
+                "\t\tКонецЕсли;",
+                "\tКонецЦикла;",
+                "КонецЦикла;",
             ]
         blocks.append("```bsl\n" + "\n".join(lines) + "\n```")
     return "\n\n".join(blocks)
@@ -110,9 +141,23 @@ def render_instruction(
         for plan in inputs.routes.plans:
             for entry in plan.entries:
                 if entry.manager_name == meta.module.name:
-                    scope_rows.append((plan.plan_name, entry.key, entry.state, plan.status))
+                    scope_rows.append(
+                        (
+                            plan.plan_name,
+                            entry.key,
+                            entry.state,
+                            _route_explanation(entry.state),
+                            plan.status,
+                        )
+                    )
         scope_rows.extend(
-            ("Без узла", e.key, e.state, inputs.routes.without_node_status)
+            (
+                "Без узла",
+                e.key,
+                e.state,
+                _route_explanation(e.state),
+                inputs.routes.without_node_status,
+            )
             for e in inputs.routes.without_node_entries
             if e.manager_name == meta.module.name
         )
@@ -163,7 +208,9 @@ def render_instruction(
                 for op in operations
             ),
         ),
-        "scope_table": table(("План", "Версия", "Маршрут", "Чтение карты"), scope_rows),
+        "scope_table": table(
+            ("План", "Версия", "Маршрут", "Пояснение", "Чтение карты"), scope_rows
+        ),
         "before_summary": f"Замечаний: {len(before)}",
         "issues_before_table": issues(before),
         "after_summary": f"Замечаний: {len(after)}",
@@ -214,6 +261,23 @@ def render_instruction(
         "manager_name": meta.module.name,
         "manual_insertions": insertion,
         "runtime_probes": runtime_probes(prepared, meta),
+        "direction_risks": _direction_risks(prepared),
+        "header_pass_note": (
+            "У интерфейса 3 проход ТолькоЗаголовки не добавляет ПКС, "
+            "полный проход добавляет указанные ПКС."
+        )
+        if prepared.projection_before.manager_version == 3
+        else "",
+        "empty_value_probe": (
+            "Проверьте очистку значения в источнике и сообщение от источника "
+            "без доработки: для приёмника отсутствие свойства "
+            "в обоих случаях неразличимо."
+        )
+        if any(op.target.direction == "receive" for op in operations)
+        else (
+            "Проверьте пустой реквизит источника: свойство и группа общих свойств "
+            "могут отсутствовать в XML."
+        ),
         "runtime_status": "Проверено живым обменом"
         if prepared.runtime_verified
         else "Не проверено живым обменом",
@@ -224,6 +288,56 @@ def render_instruction(
     # Имена проектов и исходные абсолютные адреса не являются подстановками инструкции.
     for project in sorted({t.project for t in targets}, key=len, reverse=True):
         if project:
-            result = result.replace(project, "[проект]")
-    result = re.sub(r"(?:[A-Za-z]:[\\/]|\\\\)[^\s|`<>]+", "[исходный файл]", result)
-    return result.rstrip() + "\n"
+            # URI не является именем проекта или путём файловой системы.
+            result = re.sub(
+                r"https?://[^\s|`<>]+|" + re.escape(project),
+                lambda m: m[0] if m[0].startswith(("http://", "https://")) else "[проект]",
+                result,
+            )
+    if inputs:
+        paths_to_redact = [f.path for f in inputs.document.files] + [inputs.routes.root]
+        paths_to_redact += [
+            s.path
+            for schema in inputs.schemas.values()
+            if isinstance(schema, EdSchema)
+            for package in schema.packages
+            for s in package.sources
+        ]
+        for path in sorted(paths_to_redact, key=len, reverse=True):
+            if path.startswith(("/", "\\\\")) or re.match(r"^[A-Za-z]:[\\/]", path):
+                result = result.replace(path, "[исходный файл]").replace(
+                    path.replace("\\", "/"), "[исходный файл]"
+                )
+    result = re.sub(r"(?<![\w:/])(?:[A-Za-z]:[\\/]|\\\\)[^\s|`<>]+", "[исходный файл]", result)
+    return re.sub(r"\n{3,}", "\n\n", result).rstrip() + "\n"
+
+
+def _route_explanation(state: str) -> str:
+    return {
+        "effective": "Действующая запись карты",
+        "unreachable": "Недостижимая ветвь; менеджер по ней не вызывается",
+        "overwritten": "Запись заменена последующей вставкой",
+        "unresolved": "Выбор менеджера не подтверждён",
+        "conditional": "Зависит от условия",
+    }.get(state, "Состояние чтения маршрута: " + state)
+
+
+def _direction_risks(prepared: PreparedAuthoring) -> str:
+    directions = {op.target.direction for op in prepared.operations}
+    paragraphs = []
+    if "send" in directions:
+        paragraphs.append(
+            "Отправка: пустой реквизит источника может не записываться в XML; при этом "
+            "отсутствуют и свойство, и группа общих свойств формата. "
+            "Проверьте фактическое сообщение."
+        )
+    if "receive" in directions:
+        paragraphs.append(
+            "Получение: очистка значения в источнике и источник без доработки для приёмника "
+            "неразличимы — в обоих случаях свойство может отсутствовать во входящем сообщении. "
+            "При разных именах реквизита и свойства это может очистить реквизит найденного "
+            "объекта. Комплект не содержит обработчика сохранения прежнего значения; если такое "
+            "поведение неприемлемо, не устанавливайте его. Влияние существующих обработчиков "
+            "и объектный путь получения проверяются отдельно."
+        )
+    return "\n\n".join(paragraphs)

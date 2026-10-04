@@ -35,6 +35,19 @@ def previous_artifact(files: Mapping[str, bytes]) -> ArtifactManifest | None:
     return manifest
 
 
+def with_source_hashes(bundle: RenderedAuthoring, sources: Mapping[str, str]) -> RenderedAuthoring:
+    """Закрепляет реальные относительные пути входов, не меняя порождённые файлы."""
+    if any(
+        not name or name.startswith("/") or "\\" in name or ":" in name or ".." in name.split("/")
+        for name in sources
+    ):
+        raise ValueError("Исходные файлы manifest требуют относительных путей выгрузки")
+    manifest = replace(bundle.manifest, source_hashes=sources)
+    return replace(
+        bundle, manifest=manifest, files={**bundle.files, "manifest.json": manifest.to_bytes()}
+    )
+
+
 def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring:
     """Объединяет уже проверенные менеджеры одной конфигурации без второго hook.
 

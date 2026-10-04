@@ -9,14 +9,12 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from types import FunctionType
-from typing import Any, cast
+from typing import Any
 
-from kd2_rules_mcp.ed import routes as route_reader
 from kd2_rules_mcp.ed.errors import EdFormatError, EdReadError, EdResourceLimitError
 from kd2_rules_mcp.ed.model import EdDocument
 from kd2_rules_mcp.ed.route_model import RouteProfile
-from kd2_rules_mcp.ed.routes import read_routes
+from kd2_rules_mcp.ed.routes import RouteFileObservation, read_routes
 from kd2_rules_mcp.ed.schema import EdSchema, load_schema
 from kd2_rules_mcp.errors import (
     EdRouteFormatError,
@@ -314,83 +312,15 @@ class EdRoutesMixin(ServiceBase):
         self, root: Path, *, documents: Mapping[Path, EdDocument] | None = None
     ) -> RouteProfile:
         try:
-            # Локальные зависимости reader: открытый менеджер не читается и не разбирается вновь.
-            # Функции маршрутов и их глобалы остаются неизменными для параллельных вызовов.
-            original_manager = cast(Any, route_reader._Reader._manager)
-            opened = documents or {}
             observed: dict[Path, tuple[int, int] | None] = {}
+            hashes: dict[Path, str] = {}
 
-            def read_manager(path: Path) -> EdDocument:
-                return opened[path] if path in opened else route_reader.read_manager(path)
+            def observe(file: RouteFileObservation) -> None:
+                observed.setdefault(file.path, file.stamp)
+                if file.sha256 is not None:
+                    hashes[file.path] = file.sha256
 
-            manager = FunctionType(
-                original_manager.__code__,
-                {**original_manager.__globals__, "read_manager": read_manager},
-            )
-            readers = []
-
-            def metadata(path: Path):
-                observed.setdefault(path, _file_stamp(path))
-                return route_reader.package_metadata(path)
-
-            original_packages = cast(Any, route_reader._Reader._read_packages)
-            packages = FunctionType(
-                original_packages.__code__,
-                {**original_packages.__globals__, "package_metadata": metadata},
-            )
-
-            class CachedReader(route_reader._Reader):
-                def __init__(self, path: Path):
-                    super().__init__(path)
-                    readers.append(self)
-
-                def _manager(self, name: str):
-                    canonical = self.inventory.module_names.get(name.casefold(), name)
-                    if name.casefold() in self.inventory.module_names:
-                        path = self.root / "CommonModules" / canonical / "Ext/Module.bsl"
-                        observed.setdefault(path, _file_stamp(path))
-                    return manager(self, name)
-
-                def _xml(self, path: Path):
-                    observed.setdefault(path, _file_stamp(path))
-                    return super()._xml(path)
-
-                def _load_bsl(self, path: Path):
-                    observed.setdefault(path, _file_stamp(path))
-                    return super()._load_bsl(path)
-
-                def _read_packages(self):
-                    # Отсутствие известного файла участвует в выборе маршрута/импорта.
-                    for name in self.inventory.packages:
-                        for relative in (
-                            f"XDTOPackages/{name}.xml",
-                            f"XDTOPackages/{name}/Ext/Package.bin",
-                        ):
-                            path = self.root / relative
-                            if _file_stamp(path) is None:
-                                observed[path] = None
-                    return packages(self)
-
-                def _read_plan(self, name: str):
-                    for relative in (
-                        f"ExchangePlans/{name}.xml",
-                        f"ExchangePlans/{name}/Ext/ManagerModule.bsl",
-                    ):
-                        path = self.root / relative
-                        if _file_stamp(path) is None:
-                            observed[path] = None
-                    return super()._read_plan(name)
-
-            original = cast(Any, read_routes)
-            read = FunctionType(
-                original.__code__, {**original.__globals__, "_Reader": CachedReader}
-            )
-            profile = read(root)
-            hashes = {
-                root / name: fingerprint
-                for reader in readers
-                for name, fingerprint in reader.files.items()
-            }
+            profile = read_routes(root, documents=documents, observe=observe)
             self._route_reads[str(root)] = (hashes, observed)
             return profile
         except EdResourceLimitError as error:

@@ -19,7 +19,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -28,6 +28,7 @@ from pathlib import Path
 from kd2_rules_mcp.ed.model import EdDocument
 from kd2_rules_mcp.ed.registration_model import RegistrationModuleDocument
 from kd2_rules_mcp.ed.route_model import RouteProfile
+from kd2_rules_mcp.ed.routes import RouteFileObservation
 from kd2_rules_mcp.ed.schema.model import EdSchema, SchemaPackage
 from kd2_rules_mcp.errors import Kd2Error
 from kd2_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
@@ -320,9 +321,16 @@ def _cached_read_manager(path: str | Path) -> EdDocument:
     return document
 
 
-def _cached_read_routes(root: Path) -> RouteProfile:
+def _cached_read_routes(
+    root: Path,
+    *,
+    documents: Mapping[Path, EdDocument] | None = None,
+    observe: Callable[[RouteFileObservation], None] | None = None,
+) -> RouteProfile:
     assert _orig_read_routes is not None
     root = Path(root)
+    if documents is not None or observe is not None:
+        return _orig_read_routes(root, documents=documents, observe=observe)
     if not _is_corpus_main(root):
         return _orig_read_routes(root)
     try:
@@ -495,9 +503,8 @@ def install() -> None:
     reader.read_manager = _cached_read_manager
     ed.read_manager = _cached_read_manager
 
-    # Чтение маршрутов не подменяется: сервис маршрутов строит читатель из исходной функции
-    # (учёт прочитанных файлов и уже открытых документов), обёртка это ломает.
     _orig_read_routes = routes.read_routes
+    routes.read_routes = _cached_read_routes
 
     _orig_load_rules = rules_io.load_rules
     rules_io.load_rules = _cached_load_rules

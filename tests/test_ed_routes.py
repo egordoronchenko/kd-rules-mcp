@@ -1,11 +1,16 @@
 """Синтетическое чтение маршрутов EnterpriseData: грамматика §2 и негативные границы."""
 
+import hashlib
+import json
+import os
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
 from kd2_rules_mcp.ed.errors import EdFormatError
+from kd2_rules_mcp.ed.reader import read_manager
 from kd2_rules_mcp.ed.routes import compare_versions, read_routes
 
 DATA = Path(__file__).parent / "data" / "ed" / "routes"
@@ -13,6 +18,138 @@ NODE = (
     "Версия конкретного узла неизвестна; при пустом значении "
     "исполнитель выбирает минимальную версию карты (XDTO:3618)."
 )
+
+
+def test_default_profile_bytes_unchanged():
+    # Эталон полного JSON до добавления необязательных параметров; поля пути зависят от машины.
+    data = asdict(read_routes(DATA / "grammar"))
+    data.pop("root")
+    data.pop("profile_id")
+    raw = json.dumps(data, ensure_ascii=False, sort_keys=True).encode()
+    assert hashlib.sha256(raw).hexdigest() == (
+        "9797ebe1c6c05cd2e235bdce18437b76663b362ab2b8445090fc688baf213fa4"
+    )
+
+
+def test_documents_and_observer_preserve_complete_profile(monkeypatch):
+    from kd2_rules_mcp.ed import routes
+
+    root = (DATA / "grammar").resolve()
+    baseline = read_routes(root)
+    documents = {root / m.path: read_manager(root / m.path) for m in baseline.managers if m.path}
+
+    def forbidden(path):
+        raise AssertionError(f"Повторный разбор открытого менеджера: {path}")
+
+    monkeypatch.setattr(routes, "read_manager", forbidden)
+    seen = []
+    assert read_routes(root, documents=documents, observe=seen.append) == baseline
+    observations = {item.path: item for item in seen}
+    for path, document in documents.items():
+        assert observations[path].sha256 == document.files[0].sha256
+        assert observations[path].stamp == (path.stat().st_size, path.stat().st_mtime_ns)
+    assert observations[root / "Configuration.xml"].sha256
+    assert observations[root / "XDTOPackages/ПакетФормата.xml"].sha256
+    binary = observations[root / "XDTOPackages/ПакетФормата/Ext/Package.bin"]
+    assert binary.stamp is not None and binary.sha256 is None  # Проверяется только наличие.
+    absent = observations[root / "ExchangePlans/ПланБезМодуля/Ext/ManagerModule.bsl"]
+    assert absent.stamp is None and absent.sha256 is None
+    assert all(p.is_absolute() for p in observations)
+    assert not any("СиротаНаДиске" in str(p) for p in observations)
+
+
+def test_changed_manager_is_read_instead_of_open_document(tmp_path, monkeypatch):
+    from kd2_rules_mcp.ed import routes
+
+    root = tmp_path / "dump"
+    shutil.copytree(DATA / "managers", root)
+    baseline = read_routes(root)
+    manager = next(m for m in baseline.managers if m.path and m.interface_version == 2)
+    path = root / manager.path
+    document = read_manager(path)
+    before = path.stat()
+    raw = path.read_bytes()
+    assert raw.endswith(b"\n")
+    path.write_bytes(raw[:-1] + b" ")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert (path.stat().st_size, path.stat().st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    expected = read_routes(root)
+    calls = []
+    original = routes.read_manager
+
+    def tracked(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(routes, "read_manager", tracked)
+    seen = []
+    assert read_routes(root, documents={path: document}, observe=seen.append) == expected
+    assert path in calls
+    current = next(item for item in reversed(seen) if item.path == path and item.sha256)
+    assert current.sha256 != document.files[0].sha256
+
+
+def test_observer_includes_malformed_sources_and_missing_dependencies(tmp_path):
+    root = tmp_path / "dump"
+    shutil.copytree(DATA / "grammar", root)
+    xml = root / "ExchangePlans/ПланФормата.xml"
+    xml.write_bytes(b"<broken")
+    module = root / "CommonModules/ОбменДаннымиПереопределяемый/Ext/Module.bsl"
+    module.write_bytes(b"\xff")
+    package = root / "XDTOPackages/ПакетФормата.xml"
+    package.unlink()
+    broken_package = root / "XDTOPackages/ПакетЛишний.xml"
+    broken_package.write_bytes(b"<broken-package")
+    seen = []
+    assert read_routes(root, observe=seen.append) == read_routes(root)
+    observed = {item.path: item for item in seen}
+    assert observed[xml].sha256 == hashlib.sha256(b"<broken").hexdigest()
+    assert observed[module].sha256 == hashlib.sha256(b"\xff").hexdigest()
+    assert observed[package].stamp is None
+    assert observed[broken_package].sha256 == hashlib.sha256(b"<broken-package").hexdigest()
+
+
+def test_session_route_cache_bypasses_optional_arguments(monkeypatch):
+    from tests import session_inputs
+
+    root = DATA / "empty"
+    monkeypatch.setattr(session_inputs, "_ROOTS", {root.resolve()})
+    monkeypatch.setattr(session_inputs, "_routes", {})
+    original = session_inputs._orig_read_routes
+    assert original is not None
+    calls = []
+
+    def tracked(path, **kwargs):
+        calls.append(kwargs)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(session_inputs, "_orig_read_routes", tracked)
+    first = session_inputs._cached_read_routes(root)
+    assert session_inputs._cached_read_routes(root) is first
+    assert len(calls) == 1
+    for _ in range(2):
+        assert session_inputs._cached_read_routes(root, documents={}) == first
+    seen = []
+    for _ in range(2):
+        assert session_inputs._cached_read_routes(root, observe=seen.append) == first
+    assert len(calls) == 5
+    assert calls[1]["documents"] == {}
+    assert calls[3]["observe"] is not None
+
+
+def test_session_route_cache_does_not_cache_temporary_corpus_root(tmp_path, monkeypatch):
+    from tests import session_inputs
+
+    root = tmp_path / "dump"
+    shutil.copytree(DATA / "empty", root)
+    monkeypatch.setattr(session_inputs, "_ROOTS", {root.resolve()})
+    monkeypatch.setattr(session_inputs, "_routes", {})
+    with pytest.raises(OSError, match="временный файл"):
+        session_inputs._file_key(root / "Configuration.xml")
+    first = session_inputs._cached_read_routes(root)
+    assert session_inputs._cached_read_routes(root) == first
+    assert session_inputs._cached_read_routes(root) is not first
+    assert session_inputs._routes == {}
 
 
 def load(name: str):

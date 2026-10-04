@@ -112,6 +112,38 @@ class ArtifactManifest:
     def to_bytes(self) -> bytes:
         return json_bytes(self.to_dict())
 
+    def changed_inputs(self, current: ArtifactManifest) -> dict[str, tuple[str, ...]]:
+        """Группы изменившихся входов и относительные имена; хеши наружу не выдаём."""
+        changed: dict[str, set[str]] = {}
+        for group, fields in {
+            "configuration": ("project", "configuration"),
+            "structure": ("structure_hash",),
+            "routes": ("routes_hash",),
+            "extensions": ("extensions", "extensions_hash"),
+            "schemas": ("schemas_hash",),
+            "files": ("document_hash",),
+        }.items():
+            if any(getattr(self.source_set, f) != getattr(current.source_set, f) for f in fields):
+                changed[group] = set()
+        for name in self.source_hashes.keys() | current.source_hashes.keys():
+            if self.source_hashes.get(name) == current.source_hashes.get(name):
+                continue
+            changed.setdefault("files", set()).add(name)
+            group = (
+                "extensions"
+                if name.startswith("extensions/")
+                else "schemas"
+                if name.startswith(("XDTOPackages/", "schemas/"))
+                else "configuration"
+                if name == "Configuration.xml"
+                else "routes"
+                if name.startswith(("ExchangePlans/", "Subsystems/"))
+                else None
+            )
+            if group:
+                changed.setdefault(group, set()).add(name)
+        return {group: tuple(sorted(names)) for group, names in sorted(changed.items())}
+
     @classmethod
     def from_bytes(cls, content: bytes) -> ArtifactManifest:
         try:

@@ -5,7 +5,12 @@ from dataclasses import replace
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.artifacts import artifact_name, combine_artifacts, previous_artifact
+from kd2_rules_mcp.authoring.ed.artifacts import (
+    artifact_name,
+    combine_artifacts,
+    previous_artifact,
+    with_source_hashes,
+)
 from kd2_rules_mcp.authoring.ed.model import AuthoringPreconditionError
 from kd2_rules_mcp.authoring.ed.render import render_authoring
 from kd2_rules_mcp.authoring.ed.xml_dump import M
@@ -26,6 +31,54 @@ def test_artifact_name_and_previous_ownership():
         with pytest.raises(AuthoringPreconditionError) as caught:
             previous_artifact(files)
         assert caught.value.failures[0].id == "ed.author.owned_content_changed"
+
+
+def test_relative_inputs_and_change_groups_preserve_payloads():
+    first = render_authoring(prepared(), descriptions())
+    bundle = with_source_hashes(
+        first, {"Configuration.xml": "one", "XDTOPackages/Формат/Ext/Package.bin": "two"}
+    )
+    assert all(
+        bundle.files[p] == content for p, content in first.files.items() if p != "manifest.json"
+    )
+    assert previous_artifact(bundle.files) == bundle.manifest
+    assert not bundle.manifest.changed_inputs(bundle.manifest)
+    source = replace(
+        bundle.manifest.source_set,
+        structure_hash="changed",
+        routes_hash="changed",
+        extensions_hash="changed",
+        document_hash="changed",
+        schemas_hash="changed",
+    )
+    current = replace(
+        bundle.manifest,
+        source_set=source,
+        source_hashes={
+            "Configuration.xml": "new",
+            "XDTOPackages/Формат/Ext/Package.bin": "new",
+            "extensions/0/Catalogs/Товары.xml": "new",
+            "ExchangePlans/План.xml": "new",
+        },
+    )
+    changes = bundle.manifest.changed_inputs(current)
+    assert set(changes) == {
+        "configuration",
+        "structure",
+        "routes",
+        "extensions",
+        "schemas",
+        "files",
+    }
+    assert changes["configuration"] == ("Configuration.xml",)
+    assert changes["schemas"] == ("XDTOPackages/Формат/Ext/Package.bin",)
+    assert changes["extensions"] == ("extensions/0/Catalogs/Товары.xml",)
+    assert changes["routes"] == ("ExchangePlans/План.xml",)
+    assert changes["structure"] == ()
+    assert "new" not in repr(changes)
+    for path in ("/root/file", "C:/dump/file", "../file", "folder\\file"):
+        with pytest.raises(ValueError):
+            with_source_hashes(first, {path: "hash"})
 
 
 def test_combine_managers_and_same_owner_attributes():

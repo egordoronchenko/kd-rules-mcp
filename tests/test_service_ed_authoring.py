@@ -175,6 +175,178 @@ def content(destination):
     }
 
 
+def reopen_authoring(setup, *, root=None):
+    """Новые снимки после обновления или переноса той же выгрузки."""
+    old, arguments, old_root = setup
+    root = root or old_root
+    service = Kd2Service(replace(old.settings, project_dirs={"Пример": root}))
+    arguments = copy.deepcopy(arguments)
+    target = arguments["operations"][0]["target"]
+    target["project_id"] = service.ed_open(str(root / "CommonModules/Менеджер2/Ext/Module.bsl"))[
+        "project_id"
+    ]
+    target["schema_id"] = service.ed_schema_open(
+        "1.20", project="Пример", configuration="Main", package="Формат120"
+    )["schema_id"]
+    target["structure_id"] = service.structure_load_project(
+        "Пример", "Main", structure_id="fiction-main", force=True
+    )["structure_id"]
+    return service, arguments, root
+
+
+def test_rebuild_changed_manager_and_stale_current_preview(setup):
+    first = write(setup)
+    destination = Path(first["output_dir"])
+    before = content(destination)
+    old = json.loads(before["manifest.json"])
+    path = setup[2] / "CommonModules/Менеджер2/Ext/Module.bsl"
+    path.write_text(path.read_text("utf-8") + "\n// Обновление типового модуля\n", encoding="utf-8")
+    current = reopen_authoring(setup)
+    viewed = preview(current)
+    assert viewed["rebuild"] and "files" in viewed["changed_input_groups"]
+    rows = all_items(current[0].ed_authoring_build, **current[1])
+    assert {r["name"] for r in rows if r["kind"] == "input_changed"} >= {
+        "CommonModules/Менеджер2/Ext/Module.bsl"
+    }
+    assert all("sha256" not in r for r in rows if r["kind"] == "input_changed")
+    assert content(destination) == before
+    stale = failure(lambda: write(current, first), "ed_authoring_stale")
+    assert "files" in stale["changed_inputs"]
+    assert content(destination) == before
+    written = write(current, viewed)
+    assert written["status"] == "written"
+    new = json.loads(content(destination)["manifest.json"])
+    assert old["identity_map"] == new["identity_map"]
+    assert old["operations"] == new["operations"]
+    assert not preview(current)["rebuild"]
+    assert write(current)["status"] == "unchanged"
+
+
+@pytest.mark.parametrize(
+    "change, expected",
+    [
+        ("occupied", "ed.author.format_property_occupied"),
+        ("rename", "ed.author.pko_missing"),
+        ("signature", "ed.author.manager_signature"),
+    ],
+)
+def test_rebuild_invalid_previous_operation_is_identified_and_can_be_dropped(
+    setup, change, expected
+):
+    first = write(setup)
+    destination = Path(first["output_dir"])
+    before = content(destination)
+    previous = json.loads(before["manifest.json"])
+    old_id = previous["operations"][0]["operation_id"]
+    path = setup[2] / "CommonModules/Менеджер2/Ext/Module.bsl"
+    text = path.read_text("utf-8")
+    text = {
+        "occupied": text.replace('"Код", "Код"', '"Код", "Комментарий"', 1),
+        "rename": text.replace('ИмяПКО = "Товар"', 'ИмяПКО = "ТоварНовый"'),
+        "signature": text.replace("НаправлениеОбмена, ПравилаКонвертации)", "ПравилаКонвертации)"),
+    }[change]
+    path.write_text(text, encoding="utf-8")
+    current = reopen_authoring(setup)
+    new = copy.deepcopy(current[1]["operations"][0])
+    new["target"]["pko_address"] = "ПКО/Заказ"
+    refused = failure(lambda: preview(current, operations=[new]), "ed_authoring_precondition")
+    failures = refused["failures"]
+    assert any(
+        f["id"] == expected and f["operation_id"] == old_id and f["from_previous"] for f in failures
+    )
+    assert content(destination) == before
+    if change == "signature":
+        # Сигнатура мешает и новым операциям этого менеджера: исключение не обходит проверку.
+        failure(
+            lambda: preview(current, operations=[new], drop_operations=[old_id]),
+            "ed_authoring_precondition",
+        )
+        assert content(destination) == before
+        return
+    viewed = preview(current, operations=[new], drop_operations=[old_id])
+    assert viewed["rebuild"] and viewed["change_counts"]["pks_added"] == 1
+    write(current, viewed, operations=[new], drop_operations=[old_id])
+    manifest = json.loads(content(destination)["manifest.json"])
+    assert all(op["operation_id"] != old_id for op in manifest["operations"])
+    for key in (
+        manifest["identity_map"]["objects"].keys() & previous["identity_map"]["objects"].keys()
+    ):
+        assert manifest["identity_map"]["objects"][key] == previous["identity_map"]["objects"][key]
+
+
+def test_rebuild_portable_source_paths_and_project_root(setup, tmp_path):
+    first = write(setup)
+    destination = Path(first["output_dir"])
+    old = json.loads((destination / "manifest.json").read_bytes())
+    moved = tmp_path / "mounted-dump"
+    shutil.copytree(setup[2], moved)
+    current = reopen_authoring(setup, root=moved)
+    viewed = preview(current)
+    write(current, viewed)
+    new = json.loads((destination / "manifest.json").read_bytes())
+    assert old["source_hashes"] == new["source_hashes"]
+    assert old["identity_map"] == new["identity_map"]
+    assert any(
+        p.startswith("XDTOPackages/") and p.endswith("Package.bin") for p in new["source_hashes"]
+    )
+    assert all(
+        not Path(p).is_absolute() and "\\" not in p and not p.startswith("schemas/")
+        for p in new["source_hashes"]
+    )
+
+
+def test_rebuild_preserves_previously_assigned_uuid(setup):
+    from kd2_rules_mcp.authoring.ed.artifacts import with_source_hashes
+    from kd2_rules_mcp.authoring.ed.identity import IdentityMap
+    from kd2_rules_mcp.authoring.ed.render import render_authoring
+
+    first = write(setup)
+    service = setup[0]
+    entry = next(iter(service._authoring_inputs.values()))
+    assert entry.prepared is not None
+    destination = Path(first["output_dir"])
+    old = module.ArtifactManifest.from_bytes((destination / "manifest.json").read_bytes())
+    ids = IdentityMap(
+        old.identity_map.artifact_uuid,
+        {**old.identity_map.objects, "configuration": "00000000-0000-0000-0000-000000000800"},
+        old.identity_map.borrowed,
+    )
+    # Прежний комплект B с внешней картой: его manifest соответствует всем XML-байтам.
+    previous = with_source_hashes(
+        render_authoring(entry.prepared, entry.descriptions, identity_map=ids), old.source_hashes
+    )
+    for name, payload in previous.files.items():
+        (destination / name).write_bytes(payload)
+    path = setup[2] / "CommonModules/Менеджер2/Ext/Module.bsl"
+    path.write_text(path.read_text("utf-8") + "\n// Новая редакция\n", encoding="utf-8")
+    current = reopen_authoring(setup)
+    write(current)
+    new = module.ArtifactManifest.from_bytes((destination / "manifest.json").read_bytes())
+    assert new.identity_map == ids
+
+
+def test_refreshed_snapshots_in_same_service_rebuild_then_enforce_preview_hash(setup):
+    first = write(setup)
+    service, arguments, root = setup
+    path = root / "CommonModules/Менеджер2/Ext/Module.bsl"
+    path.write_text(path.read_text("utf-8") + "\n// Новая редакция\n", encoding="utf-8")
+    target = arguments["operations"][0]["target"]
+    service.ed_close(target["project_id"])
+    target["project_id"] = service.ed_open(str(path))["project_id"]
+    service.ed_routes(project="Пример", configuration="Main", force=True)
+    viewed = preview(setup)
+    assert viewed["rebuild"]
+    stale = failure(lambda: write(setup, first), "ed_authoring_stale")
+    assert stale["changed_inputs"]["files"] == ("CommonModules/Менеджер2/Ext/Module.bsl",)
+    assert not stale["decisions_changed"]
+    write(setup, viewed)
+
+
+@pytest.mark.parametrize("drops", [["unknown"], ["duplicate", "duplicate"], "not-a-list", [None]])
+def test_drop_operations_arguments(setup, drops):
+    failure(lambda: preview(setup, drop_operations=drops), "invalid_argument")
+
+
 def test_preview_write_repeat_and_both_deliveries(setup):
     service, _, _ = setup
     before = content(service.workspace.root)

@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import hashlib
 from bisect import bisect_left
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
+from stat import S_ISREG
 
 from lxml import etree as ET
 
 from .errors import EdFormatError, EdReadError, EdResourceLimitError
 from .forms import MANAGER_VERSIONS, VERSION_ROUTINE
 from .lexer import Lexed, Statement, Token, lex, normalized, split_arguments, tokenize
-from .model import ParseStatus, SourceFile, SourceSpan
+from .model import EdDocument, ParseStatus, SourceFile, SourceSpan
 from .reader import read_manager
 from .route_model import (
     ConditionKind,
@@ -221,12 +222,38 @@ class _Inventory:
     module_names: dict[str, str]
 
 
-def read_routes(root: Path) -> RouteProfile:
-    """Читает профиль маршрутов основной выгрузки. Корень содержит Configuration.xml."""
+@dataclass(frozen=True, slots=True)
+class RouteFileObservation:
+    """Зависимость маршрутов: абсолютный путь, SHA-256 и (размер, mtime_ns).
+
+    stamp=None означает отсутствие файла. sha256=None при наличии stamp — проверку
+    наличия без чтения содержимого (например, макета регистрации или Package.bin).
+    Повторное сообщение о том же пути может дополнить проверку наличия хешем чтения.
+    """
+
+    path: Path
+    sha256: str | None
+    stamp: tuple[int, int] | None
+
+
+def read_routes(
+    root: Path,
+    *,
+    documents: Mapping[Path, EdDocument] | None = None,
+    observe: Callable[[RouteFileObservation], None] | None = None,
+) -> RouteProfile:
+    """Читает профиль маршрутов основной выгрузки с Configuration.xml.
+
+    documents заменяет повторный разбор менеджера, только если SHA-256 его файла
+    совпадает со снимком. observe получает зависимости, включая отсутствующие файлы;
+    содержимое файлов, у которых проверяется только наличие, не читается.
+    """
     root = Path(root)
     if not root.is_dir() or not (root / "Configuration.xml").is_file():
+        if observe is not None:
+            observe(RouteFileObservation((root / "Configuration.xml").resolve(), None, None))
         raise EdFormatError("Нет Configuration.xml: это не полная XML-выгрузка конфигурации")
-    return _Reader(root.resolve()).build()
+    return _Reader(root.resolve(), documents=documents, observe=observe).build()
 
 
 def compare_versions(left: str, right: str) -> int | None:
@@ -287,8 +314,17 @@ def _text_of(source: SourceFile, tokens: Sequence[Token]) -> str:
 
 
 class _Reader:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        documents: Mapping[Path, EdDocument] | None = None,
+        observe: Callable[[RouteFileObservation], None] | None = None,
+    ) -> None:
         self.root = root
+        self.documents = {Path(path).resolve(): doc for path, doc in (documents or {}).items()}
+        self.observe = observe
+        self.stamps: dict[Path, tuple[int, int] | None] = {}
         self.files: dict[str, str] = {}
         self.bsl_bytes = 0
         self.bsl_files = 0
@@ -309,6 +345,40 @@ class _Reader:
         self._callback: bool | None = None
         self._callback_noted = False
         self.inventory = self._inventory()
+
+    def _is_file(self, path: Path) -> bool:
+        if self.observe is None:
+            return path.is_file()
+        try:
+            stat = path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            stamp = None
+            present = False
+        else:
+            stamp = (stat.st_size, stat.st_mtime_ns)
+            present = S_ISREG(stat.st_mode)
+        if path not in self.stamps or self.stamps[path] != stamp:
+            self.observe(RouteFileObservation(path, None, stamp))
+        self.stamps[path] = stamp
+        return present
+
+    def _observed(self, path: Path, sha256: str) -> None:
+        if self.observe is not None:
+            if path not in self.stamps:
+                self._is_file(path)
+            self.observe(RouteFileObservation(path, sha256, self.stamps[path]))
+
+    def _observe_unparsed(self, path: Path) -> None:
+        """Неуспешный разбор внешним читателем тоже зависит от прочитанных байтов."""
+        if self.observe is None:
+            return
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(MAX_FILE_BYTES + 1)
+        except OSError:
+            return  # Состояние недоступного файла уже передано при проверке наличия.
+        if len(raw) <= MAX_FILE_BYTES:
+            self._observed(path, hashlib.sha256(raw).hexdigest())
 
     def build(self) -> RouteProfile:
         plans = tuple(self._read_plan(name) for name in self.inventory.plans)
@@ -408,12 +478,12 @@ class _Reader:
             xml_plans=sum(
                 1
                 for name in self.inventory.plans
-                if (self.root / "ExchangePlans" / f"{name}.xml").is_file()
+                if self._is_file(self.root / "ExchangePlans" / f"{name}.xml")
             ),
             manager_modules=sum(
                 1
                 for name in self.inventory.plans
-                if (self.root / "ExchangePlans" / name / "Ext" / "ManagerModule.bsl").is_file()
+                if self._is_file(self.root / "ExchangePlans" / name / "Ext" / "ManagerModule.bsl")
             ),
             ed_assignments=self.ed_assignments,
             literal_insertions=len(self.insert_sites),
@@ -476,7 +546,7 @@ class _Reader:
         relative = f"ExchangePlans/{name}.xml"
         path = self.root / "ExchangePlans" / f"{name}.xml"
         empty_registration = RegistrationProfile("none")
-        if not path.is_file():
+        if not self._is_file(path):
             self._skip(
                 "ed.route.reading", "Нет XML плана, объявленного в конфигурации", relative, 1
             )
@@ -489,7 +559,7 @@ class _Reader:
             self._skip("ed.route.reading", "Повреждённый XML плана обмена", relative, 1)
             return _empty_plan(name, relative, "partial", None, empty_registration)
         bsl = self.root / "ExchangePlans" / name / "Ext" / "ManagerModule.bsl"
-        if not bsl.is_file():
+        if not self._is_file(bsl):
             return _empty_plan(name, relative, "complete", False, empty_registration)
         module = self._load_bsl(bsl)
         bsl_relative = _relative(self.root, bsl)
@@ -560,7 +630,7 @@ class _Reader:
     ) -> tuple[tuple[RouteEntry, ...], tuple[FormatExtension, ...], RouteStatus]:
         declared = _OVERRIDE.casefold() in self.inventory.module_names
         path = self.root / "CommonModules" / _OVERRIDE / "Ext" / "Module.bsl"
-        if not declared or not path.is_file():
+        if not declared or not self._is_file(path):
             self._skip(
                 "ed.route.reading",
                 "Нет модуля ОбменДаннымиПереопределяемый: пустая карта без узла не доказана",
@@ -766,7 +836,7 @@ class _Reader:
                     / "Ext"
                     / "Module.bsl"
                 )
-                path = _relative(self.root, body) if body.is_file() else None
+                path = _relative(self.root, body) if self._is_file(body) else None
             return RegistrationProfile("manager", name, path, source=source)
         template_meta = metadata_path if "ПравилаРегистрации" in templates else None
         body = (
@@ -781,7 +851,7 @@ class _Reader:
         return RegistrationProfile(
             "xml",
             template_metadata_path=template_meta,
-            template_body_path=_relative(self.root, body) if body.is_file() else None,
+            template_body_path=_relative(self.root, body) if self._is_file(body) else None,
             source=source,
         )
 
@@ -790,16 +860,18 @@ class _Reader:
         for name in self.inventory.packages:
             relative = f"XDTOPackages/{name}.xml"
             path = self.root / "XDTOPackages" / f"{name}.xml"
-            if not path.is_file():
+            if not self._is_file(path):
                 self._skip("ed.route.reading", "Нет описания пакета XDTO", relative, 1)
                 continue
             try:
                 metadata_name, namespace, revision, _source_info = package_metadata(path)
             except (EdSchemaFormatError, EdSchemaReadError) as error:
+                self._observe_unparsed(path)
                 self._skip("ed.route.reading", str(error), relative, 1)
                 continue
             binary = self.root / "XDTOPackages" / name / "Ext" / "Package.bin"
-            binary_relative = _relative(self.root, binary) if binary.is_file() else None
+            self._observed(path, _source_info.sha256)
+            binary_relative = _relative(self.root, binary) if self._is_file(binary) else None
             sources = (relative,) if binary_relative is None else (relative, binary_relative)
             self.files[_relative(self.root, path)] = _source_info.sha256
             found.append(
@@ -850,21 +922,38 @@ class _Reader:
         declared = name.casefold() in self.inventory.module_names
         canonical = self.inventory.module_names.get(name.casefold(), name)
         body = self.root / "CommonModules" / canonical / "Ext" / "Module.bsl"
-        source_exists = declared and body.is_file()
+        source_exists = declared and self._is_file(body)
         relative = _relative(self.root, body) if source_exists else None
         if not source_exists:
             return ManagerInfo(canonical, declared, False, None, None, "unknown", ())
         try:
-            document = read_manager(body)
+            document = self.documents.get(body)
+            if document is not None:
+                try:
+                    with body.open("rb") as stream:
+                        raw = stream.read(MAX_FILE_BYTES + 1)
+                except OSError as error:
+                    raise EdReadError("Файл менеджера недоступен") from error
+                if len(raw) > MAX_FILE_BYTES:
+                    raise EdResourceLimitError("Размер менеджера превышает 32 MiB")
+                fingerprint = hashlib.sha256(raw).hexdigest()
+                self._observed(body, fingerprint)
+                if not document.files or document.files[0].sha256 != fingerprint:
+                    document = None
+            if document is None:
+                document = read_manager(body)
         except EdResourceLimitError:
             raise
         except EdFormatError:
+            self._observe_unparsed(body)
             return ManagerInfo(canonical, True, True, relative, None, "unknown", (), ("ed_format",))
         except EdReadError as error:
+            self._observe_unparsed(body)
             self._skip("ed.route.reading", str(error), relative or "", 1)
             return ManagerInfo(canonical, True, False, None, None, "unknown", ())
         if document.files:
             self.files.setdefault(_relative(self.root, body), document.files[0].sha256)
+            self._observed(body, document.files[0].sha256)
         present = any(
             item.name.casefold() == VERSION_ROUTINE.casefold() for item in document.routines
         )
@@ -1353,7 +1442,7 @@ class _Reader:
             if canonical is None
             else self.root / "CommonModules" / canonical / "Ext" / "Module.bsl"
         )
-        if canonical is None or path is None or not path.is_file():
+        if canonical is None or path is None or not self._is_file(path):
             self._map_skip(file, statement.span, f"Нет общего модуля {module_name}", run)
             return
         module_name = canonical
@@ -1609,7 +1698,7 @@ class _Reader:
                 / "Ext"
                 / "Module.bsl"
             )
-            target = self._load_bsl(path) if path.is_file() else None
+            target = self._load_bsl(path) if self._is_file(path) else None
             name = parts[1]
         elif (
             len(parts) == 3
@@ -1618,7 +1707,7 @@ class _Reader:
             and folded[1] == plan_name.casefold()
         ):
             path = self.root / "ExchangePlans" / plan_name / "Ext" / "ManagerModule.bsl"
-            target = self._load_bsl(path) if path.is_file() else None
+            target = self._load_bsl(path) if self._is_file(path) else None
             name = parts[2]
         else:
             return None, ""
@@ -1730,12 +1819,16 @@ class _Reader:
             return cached
         if self.bsl_files >= MAX_BSL_FILES:
             raise EdResourceLimitError("Число файлов BSL превышает 4096")
+        if self.observe is not None and path not in self.stamps:
+            self._is_file(path)
         try:
             raw = path.read_bytes()
         except OSError:
             self.unreadable.add(relative)
             self._skip("ed.route.reading", "Модуль недоступен", relative, 1)
             return None
+        fingerprint = hashlib.sha256(raw).hexdigest()
+        self._observed(path, fingerprint)
         if len(raw) > MAX_FILE_BYTES:
             raise EdResourceLimitError("Файл BSL превышает 32 MiB")
         if self.bsl_bytes + len(raw) > MAX_TOTAL_BSL:
@@ -1748,7 +1841,7 @@ class _Reader:
             return None
         self.bsl_bytes += len(raw)
         self.bsl_files += 1
-        self.files[relative] = hashlib.sha256(raw).hexdigest()
+        self.files[relative] = fingerprint
         source = _source_file(relative, str(path), text, raw)
         try:
             lexical = lex(source)
@@ -1759,10 +1852,14 @@ class _Reader:
         return module
 
     def _xml(self, path: Path) -> ET._Element:
+        if self.observe is not None and path not in self.stamps:
+            self._is_file(path)
         try:
             raw = path.read_bytes()
         except OSError as error:
             raise EdReadError("XML выгрузки недоступен") from error
+        fingerprint = hashlib.sha256(raw).hexdigest()
+        self._observed(path, fingerprint)
         if len(raw) > MAX_FILE_BYTES:
             raise EdResourceLimitError("XML выгрузки превышает 32 MiB")
         try:
@@ -1785,7 +1882,7 @@ class _Reader:
             if depth > MAX_XML_DEPTH:
                 raise EdResourceLimitError("Глубина XML превышает 128")
             stack.extend((child, depth + 1) for child in node if isinstance(child.tag, str))
-        self.files[_relative(self.root, path)] = hashlib.sha256(raw).hexdigest()
+        self.files[_relative(self.root, path)] = fingerprint
         return root
 
     def _map_skip(self, file: SourceFile, span: SourceSpan, reason: str, run: _Run) -> None:
@@ -1820,7 +1917,7 @@ class _Reader:
         path = self.root / "CommonModules" / name / "Ext" / "Module.bsl"
         module = (
             self._load_bsl(path)
-            if name.casefold() in self.inventory.module_names and path.is_file()
+            if name.casefold() in self.inventory.module_names and self._is_file(path)
             else None
         )
         routine = None if module is None else module.routines.get(_DISABLED.casefold())
@@ -1859,7 +1956,7 @@ class _Reader:
             if canonical is None:
                 return "false"
             xml = directory / f"{canonical}.xml"
-            if not xml.is_file():
+            if not self._is_file(xml):
                 self._skip(
                     "ed.route.reading",
                     "Нет XML подсистемы, на которую есть ссылка",

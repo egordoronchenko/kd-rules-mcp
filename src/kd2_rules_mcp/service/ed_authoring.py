@@ -16,10 +16,16 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from kd2_rules_mcp.authoring.ed.artifacts import artifact_name, combine_artifacts, previous_artifact
+from kd2_rules_mcp.authoring.ed.artifacts import (
+    artifact_name,
+    combine_artifacts,
+    previous_artifact,
+    with_source_hashes,
+)
 from kd2_rules_mcp.authoring.ed.candidates import candidates, target_objects
 from kd2_rules_mcp.authoring.ed.canonical import canonical_property
 from kd2_rules_mcp.authoring.ed.context import AuthoringContext
+from kd2_rules_mcp.authoring.ed.identity import IdentityMap
 from kd2_rules_mcp.authoring.ed.manifest import ArtifactManifest, sha256
 from kd2_rules_mcp.authoring.ed.model import (
     AddHeaderProperty,
@@ -33,6 +39,7 @@ from kd2_rules_mcp.authoring.ed.model import (
     SourceSet,
     digest,
 )
+from kd2_rules_mcp.authoring.ed.operations import validate_preconditions
 from kd2_rules_mcp.authoring.ed.render import render_authoring
 from kd2_rules_mcp.authoring.ed.xml_dump import M, parse_xml, read_description
 from kd2_rules_mcp.ed.address import AmbiguousAddressError, EntityNotFoundError
@@ -189,6 +196,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         self._authoring_input_bytes = 0
         self._authoring_schemas: OrderedDict[tuple[str, str], _CachedSchema] = OrderedDict()
         self._authoring_schema_bytes = 0
+        self._authoring_previews: OrderedDict[str, ArtifactManifest] = OrderedDict()
 
     def _catalog(self):
         """Один и тот же projects.yaml не открываем для каждой выдаваемой строки пути."""
@@ -318,6 +326,16 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         self._require_structure(refs[2])
         key = (project, configuration, *refs)
         cached = self._authoring_inputs.get(key)
+        if cached is not None and (
+            cached.value.document is not doc_project.document
+            or cached.value.schemas.get(schema_project.format_version) is not schema_project.schema
+            or cached.structure_fingerprint != self.store.meta(refs[2]).get("input_hash")
+            or self._route_roots.get(str(cached.route.root)) != cached.route.profile.profile_id
+        ):
+            # Вызывающий перечитал снимки: старый кэш не препятствует новой подготовке.
+            del self._authoring_inputs[key]
+            self._authoring_input_bytes -= cached.stored_bytes
+            cached = None
         if cached is not None:
             self._verify_inputs(cached)
             if _timing.get() is None:
@@ -352,11 +370,14 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         roots = (root, *(resolve(folder, p).resolve() for p in config.extensions))
         extension_names = []
         extension_stamps = {}
-        for extension_root in roots[1:]:
+        extension_sources: dict[str, str] = {}
+        for number, extension_root in enumerate(roots[1:]):
             path = extension_root / "Configuration.xml"
             before = _file_stamp(path)
             _read_count()
-            xml = parse_xml("Configuration.xml", path.read_text("utf-8-sig"))[0]
+            text = path.read_text("utf-8-sig")
+            xml = parse_xml("Configuration.xml", text)[0]
+            extension_sources[f"extensions/{number}/Configuration.xml"] = text
             if _file_stamp(path) != before:
                 raise EdAuthoringStaleError("Описание расширения изменилось во время чтения", {})
             extension_stamps[path] = before
@@ -505,7 +526,6 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     "Открытый снимок изменился; перечитайте входы", {"changed": [self._host(path)]}
                 )
             stamps[path] = before
-        extension_sources: dict[str, str] = {}
         structure, _ = self._ed_structure_snapshot(refs[2])
         source = SourceSet(
             project,
@@ -983,7 +1003,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             )
         opened = self.ed_open(self._host(entry.route.root / (managers[0].path or "")))
         if opened["source_changed"]:
-            raise EdAuthoringStaleError("Прежний менеджер изменился; перечитайте снимок", {})
+            self.ed_close(opened["project_id"])
+            opened = self.ed_open(self._host(entry.route.root / (managers[0].path or "")))
         schema = self.ed_schema_open(
             target.format_version,
             project=target.project,
@@ -991,8 +1012,38 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             package=packages[0].metadata_name,
         )
         if schema["source_changed"]:
-            raise EdAuthoringStaleError("Прежняя схема изменилась; перечитайте снимок", {})
+            self.ed_schema_close(schema["schema_id"])
+            schema = self.ed_schema_open(
+                target.format_version,
+                project=target.project,
+                configuration=target.configuration,
+                package=packages[0].metadata_name,
+            )
         return opened["project_id"], schema["schema_id"], entry.structure_id
+
+    def _previous_failure(self, error: AuthoringPreconditionError, operation: AddHeaderProperty):
+        mapped = _failure(error)
+        for failure in mapped.details["failures"]:
+            failure.update(operation_id=operation.operation_id, from_previous=True)
+            failure["source"]["file"] = self._host_text(failure["source"]["file"])
+        return mapped
+
+    @staticmethod
+    def _source_hashes(entry: _Inputs) -> dict[str, str]:
+        """Отпечатки прочитанных входов: пути относительно выгрузки, без обхода диска."""
+        sources = {p: sha256(t.encode("utf-8")) for p, t in entry.descriptions.items()}
+        known = dict(entry.route.file_hashes)
+        known.update({Path(f.path): f.sha256 for f in entry.value.document.files})
+        for schema in entry.value.schemas.values():
+            if isinstance(schema, EdSchema):
+                known.update({Path(s.path): s.sha256 for p in schema.packages for s in p.sources})
+        for path, fingerprint in known.items():
+            if path.is_relative_to(entry.roots[0]):
+                sources[path.relative_to(entry.roots[0]).as_posix()] = fingerprint
+        sources.update(
+            {p: sha256(t.encode("utf-8")) for p, t in entry.value.extension_sources.items()}
+        )
+        return sources
 
     @_timed_build
     def ed_authoring_build(
@@ -1013,6 +1064,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         level: str | None = None,
         check_prefix: str | None = None,
         address_prefix: str | None = None,
+        drop_operations: list[str] | None = None,
     ) -> dict[str, Any]:
         validate_page(offset, limit)
         views.validate_options(section, level, check_prefix, address_prefix)
@@ -1053,6 +1105,14 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             raise ValueError("acknowledged_notices: нужен список строк")
         if expected_preview_hash is not None:
             _text(expected_preview_hash, "expected_preview_hash")
+        if drop_operations is None:
+            drop_operations = []
+        if (
+            not isinstance(drop_operations, list)
+            or any(not isinstance(op, str) or not op for op in drop_operations)
+            or len(set(drop_operations)) != len(drop_operations)
+        ):
+            raise ValueError("drop_operations: нужен список уникальных идентификаторов операций")
         parsed = [self._authoring_operation(o, project, configuration) for o in operations]
         groups: dict[tuple[str, str, str], list[AddHeaderProperty]] = defaultdict(list)
         for operation, refs in parsed:
@@ -1094,6 +1154,12 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     artifact_name(identity.name, config_description.uuid), output_dir
                 )
                 previous, previous_files = self._previous(destination)
+                previous_ids = (
+                    {op.operation_id for op in previous.operations} if previous else set()
+                )
+                if set(drop_operations) - previous_ids:
+                    raise ValueError("drop_operations содержит операцию вне прежнего комплекта")
+                retained_ids = previous_ids - set(drop_operations)
                 if previous:
                     if previous.identity != identity:
                         raise _failure(
@@ -1108,6 +1174,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                             )
                         )
                     for op in previous.operations:
+                        if op.operation_id not in retained_ids:
+                            continue
                         matches = [
                             refs
                             for refs, entry in entries.items()
@@ -1125,11 +1193,14 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                             )
                         ]
                         if not matches:
-                            refs = self._previous_refs(op, entries)
-                            with _phase("inputs"):
-                                entries[refs] = self._inputs_for(
-                                    project, configuration, refs, (op,)
-                                )
+                            try:
+                                refs = self._previous_refs(op, entries)
+                                with _phase("inputs"):
+                                    entries[refs] = self._inputs_for(
+                                        project, configuration, refs, (op,)
+                                    )
+                            except AuthoringPreconditionError as error:
+                                raise self._previous_failure(error, op) from error
                             matches = [refs]
                         if len(matches) != 1:
                             raise ValueError("Несколько снимков прежнего менеджера в одном вызове")
@@ -1140,7 +1211,12 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 for refs, ops in groups.items():
                     entry = entries[refs]
                     for op in ops:
-                        self._require_selected_schema(op.target, refs, entry.value)
+                        try:
+                            self._require_selected_schema(op.target, refs, entry.value)
+                        except AuthoringPreconditionError as error:
+                            if op.operation_id in retained_ids:
+                                raise self._previous_failure(error, op) from error
+                            raise
                     with _phase("inputs"):
                         self._extension_sources(entry, tuple(ops), self._ed_project(refs[0]).index)
                     prepared_key = digest(
@@ -1152,6 +1228,18 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                             opened = self._ed_project(refs[0])
                             context.indices[id(opened.document)] = opened.index
                             context.references = opened.references
+                            for old in ops:
+                                if old.operation_id in retained_ids:
+                                    try:
+                                        validate_preconditions(
+                                            entry.value,
+                                            (old,),
+                                            identity,
+                                            version_scope=version_scope,
+                                            context=context,
+                                        )
+                                    except AuthoringPreconditionError as error:
+                                        raise self._previous_failure(error, old) from error
                             entry.prepared = prepare_authoring(
                                 entry.value,
                                 tuple(ops),
@@ -1169,7 +1257,25 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     with _phase("inputs"):
                         descriptions = self._descriptions(entry, prepared.operations)
                     with _phase("render"):
-                        bundles.append(render_authoring(prepared, descriptions, delivery=delivery))
+                        rendered = render_authoring(prepared, descriptions, delivery=delivery)
+                        if previous:
+                            current_ids = rendered.manifest.identity_map
+                            preserved = IdentityMap(
+                                current_ids.artifact_uuid,
+                                {
+                                    p: previous.identity_map.objects.get(p, v)
+                                    for p, v in current_ids.objects.items()
+                                },
+                                current_ids.borrowed,
+                            )
+                            if preserved != current_ids:
+                                rendered = render_authoring(
+                                    prepared,
+                                    descriptions,
+                                    delivery=delivery,
+                                    identity_map=preserved,
+                                )
+                        bundles.append(with_source_hashes(rendered, self._source_hashes(entry)))
                 self._limit(
                     sum(len(p.selected_profiles) + len(p.other_profiles) for p in preparations),
                     MAX_PROFILES,
@@ -1179,14 +1285,6 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 if previous and (
                     previous.identity_map.artifact_uuid
                     != bundle.manifest.identity_map.artifact_uuid
-                    or any(
-                        bundle.manifest.identity_map.objects.get(p) != v
-                        for p, v in previous.identity_map.objects.items()
-                    )
-                    or any(
-                        bundle.manifest.identity_map.borrowed.get(p) != v
-                        for p, v in previous.identity_map.borrowed.items()
-                    )
                 ):
                     raise AuthoringPreconditionError(
                         (
@@ -1198,25 +1296,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                             ),
                         )
                     )
-                if previous and (
-                    any(
-                        getattr(previous.source_set, field)
-                        != getattr(bundle.manifest.source_set, field)
-                        for field in (
-                            "project",
-                            "configuration",
-                            "structure_hash",
-                            "routes_hash",
-                            "extensions",
-                            "extensions_hash",
-                        )
-                    )
-                    or any(
-                        bundle.manifest.source_hashes.get(p) != h
-                        for p, h in previous.source_hashes.items()
-                    )
-                ):
-                    raise EdAuthoringStaleError("Входы прежнего комплекта изменились", {})
+                changed_inputs = previous.changed_inputs(bundle.manifest) if previous else {}
                 self._limit(len(bundle.files), MAX_FILES, "файлы комплекта")
                 self._limit(
                     sum(len(b) for b in bundle.files.values()), MAX_BYTES, "байты комплекта"
@@ -1230,9 +1310,22 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 status = "ready"
                 if mode == "write":
                     if expected_preview_hash != build_hash:
+                        viewed = self._authoring_previews.get(expected_preview_hash or "")
+                        comparison = viewed or previous
                         raise EdAuthoringStaleError(
                             "Нужен expected_preview_hash текущего preview",
-                            {"preview_hash": build_hash},
+                            {
+                                "preview_hash": build_hash,
+                                "changed_inputs": comparison.changed_inputs(bundle.manifest)
+                                if comparison
+                                else {},
+                                "decisions_changed": viewed is not None
+                                and (
+                                    viewed.operations != bundle.manifest.operations
+                                    or viewed.identity != bundle.manifest.identity
+                                    or viewed.delivery != bundle.manifest.delivery
+                                ),
+                            },
                         )
                     missing = sorted(set(bundle.manifest.notices) - set(acknowledged_notices))
                     if missing:
@@ -1257,7 +1350,14 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     level=level,
                     check_prefix=check_prefix,
                     address_prefix=address_prefix,
+                    rebuild=bool(previous and (changed_inputs or drop_operations)),
+                    changed_inputs=changed_inputs,
                 )
+                if mode == "preview":
+                    self._authoring_previews[build_hash] = bundle.manifest
+                    self._authoring_previews.move_to_end(build_hash)
+                    while len(self._authoring_previews) > MAX_INPUTS:
+                        self._authoring_previews.popitem(last=False)
                 return result
             except AuthoringPreconditionError as error:
                 mapped = _failure(error)

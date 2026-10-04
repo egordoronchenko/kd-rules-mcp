@@ -68,6 +68,50 @@ def test_opened_manager_cache_keeps_route_profiles_and_tool_responses(
         ) == expected.ed_routes(profile_id=snap.profile.profile_id, section=section)
     # Переход к обычному инструменту сохраняет его инвентарную проверку свежести.
     assert service.ed_routes(path=str(root)) == expected.ed_routes(path=str(root))
+    assert service.ed_route_compare(snap.profile.profile_id, snap.profile.profile_id) == (
+        expected.ed_route_compare(ordinary["profile_id"], ordinary["profile_id"])
+    )
+
+
+def test_wrapped_reader_keeps_dependencies_and_freshness(service, tmp_path, monkeypatch):
+    root = tmp_path / "dump"
+    make_dump(root)
+    original = routes_service.read_routes
+    received = []
+
+    def wrapped(path, *, documents=None, observe=None):
+        received.append((documents, observe))
+        return original(path, documents=documents, observe=observe)
+
+    monkeypatch.setattr(routes_service, "read_routes", wrapped)
+    path = root / "CommonModules/МенеджерОбменаПример/Ext/Module.bsl"
+    opened = service.ed_open(str(path))
+    document = service._ed_project(opened["project_id"]).document
+    snap, reused, stale = service._open_snapshot(
+        root, None, None, False, documents={path: document}, read_files_only=True
+    )
+    assert not reused and not stale
+    assert received[0][0] == {path: document} and callable(received[0][1])
+    config = root / "Configuration.xml"
+    assert config in snap.read_files and config in snap.file_hashes
+    absent = root / "ExchangePlans/План/Templates/ПравилаРегистрации/Ext/Template.txt"
+    assert absent in snap.read_files and snap.read_files[absent] is None
+    assert path in snap.file_hashes
+    changed = root / "ExchangePlans/План/Ext/ManagerModule.bsl"
+    changed.write_bytes(changed.read_bytes() + b"\n")
+    _, reused, stale = service._open_snapshot(root, None, None, False, read_files_only=True)
+    assert reused and stale
+
+
+def test_file_presence_dependencies_invalidate_route_snapshot(service, tmp_path):
+    root = tmp_path / "dump"
+    make_dump(root)
+    snap, _, _ = service._open_snapshot(root, None, None, False, read_files_only=True)
+    binary = root / "XDTOPackages/Пакет/Ext/Package.bin"
+    assert snap.read_files[binary] is not None
+    binary.unlink()
+    _, reused, stale = service._open_snapshot(root, None, None, False, read_files_only=True)
+    assert reused and stale
 
 
 def _xml(name: str, namespace: str) -> str:

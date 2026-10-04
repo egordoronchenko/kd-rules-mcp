@@ -575,6 +575,96 @@ def test_empty_tables_are_explicit():
     assert "Создаваемые реквизиты:\nНет\n" in bundle.instruction
 
 
+@pytest.mark.parametrize("delivery", ["extension", "manual"])
+@pytest.mark.parametrize("direction", ["send", "receive"])
+@pytest.mark.parametrize("version", [2, 3])
+def test_instruction_stand_risks_safe_mode_probes_and_spacing(delivery, direction, version):
+    op = replace(OPERATION, target=replace(TARGET, direction=direction))
+    value = prepared(version=version, operations=(op,))
+    bundle = render_authoring(value, descriptions(), delivery=delivery)
+    text = bundle.instruction
+    assert "безопасный режим" in text and "администратор" in text
+    assert "ЗащитаОтОпасныхДействий.ПредупреждатьОбОпасныхДействиях = Ложь" in text
+    assert "Другое расширение может добавить ПКС" in text
+    assert "имя реквизита фактически найденной ПКС" in text
+    assert "Если найдена ПКС чужого реквизита" in text
+    assert ("У интерфейса 3 проход ТолькоЗаголовки" in text) == (version == 3)
+    assert "\n\n\n" not in text
+    assert ("во входящем сообщении" in text) == (direction == "receive")
+    assert ("неразличимы" in text) == (direction == "receive")
+    if delivery == "extension":
+        commands = [line for line in text.splitlines() if line.startswith("1cv8 DESIGNER ")]
+        assert len(commands) == 4
+        for key, command in zip(
+            (
+                "/LoadConfigFromFiles",
+                "/CheckCanApplyConfigurationExtensions",
+                "/CheckModules",
+                "/UpdateDBCfg",
+            ),
+            commands,
+            strict=True,
+        ):
+            assert key in command
+            assert '/IBConnectionString "<строка соединения>"' in command
+            assert '-Extension "ДоработкаОбмена"' in command
+            assert "/N " not in command and "/P " not in command
+        assert "-Format Hierarchical" in commands[0]
+        assert "-Server -ExternalConnection" in commands[2]
+    probes = text.split("## Проверка в базе", 1)[1].split("Ожидаемый результат:", 1)[0]
+    # Обе стороны печатают фактическую пару и ищут реквизит даже при отсутствии ПКО.
+    assert probes.count("Правило.Свойства.Количество()") == 2
+    assert probes.count('Строка(ПКС.СвойствоКонфигурации) + " ↔ "') == 4
+    assert probes.count("Для Каждого ПКО Из Правила Цикл") == 2
+    assert probes.count("Если Правило = Неопределено Тогда") == 2
+    assert "Отправка: " in probes and "Получение: " in probes
+    from kd2_rules_mcp.ed.lexer import lex
+    from kd2_rules_mcp.ed.model import SourceFile
+
+    for code in re.findall(r"```bsl\n(.*?)\n```", probes, re.S):
+        offsets = (0, *(i + 1 for i, char in enumerate(code) if char == "\n"))
+        source = SourceFile("probe", "probe.bsl", code, digest(code), offsets)
+        assert not lex(source).warnings
+
+
+def test_instruction_real_uri_and_explained_route_states():
+    value = prepared()
+    source = value.preparation_inputs
+    assert source is not None
+    uri = "http://v8.1c.ru/edi/edi-format/1.20"
+    schema = source.schemas["1.20"]
+    assert not isinstance(schema, str)
+    schema = replace(
+        schema,
+        base_namespace=uri,
+        packages=tuple(
+            replace(p, namespace=uri) if p.namespace == schema.base_namespace else p
+            for p in schema.packages
+        ),
+    )
+    plan = source.routes.plans[0]
+    unreachable = replace(plan.entries[0], state="unreachable")
+    routes = replace(source.routes, plans=(replace(plan, entries=(*plan.entries, unreachable)),))
+    value = replace(
+        value,
+        preparation_inputs=replace(
+            source, schemas={**source.schemas, "1.20": schema}, routes=routes
+        ),
+    )
+    text = render_authoring(value, descriptions()).instruction
+    assert "URI: " + uri + "." in text
+    assert "htt[исходный файл]" not in text
+    assert "| effective | Действующая запись карты |" in text
+    assert "| unreachable | Недостижимая ветвь; менеджер по ней не вызывается |" in text
+    assert "Пояснение" in text
+
+
+def test_receive_instruction_golden():
+    op = replace(OPERATION, target=replace(TARGET, direction="receive"))
+    text = render_authoring(prepared(operations=(op,)), descriptions()).instruction
+    assert text.encode("utf-8") == (DATA / "expected/receive-instruction.md").read_bytes()
+
+
 @pytest.mark.parametrize("count", [1, 2, 100])
 def test_many_properties_one_hook_and_stable_xml(count):
     ops = tuple(

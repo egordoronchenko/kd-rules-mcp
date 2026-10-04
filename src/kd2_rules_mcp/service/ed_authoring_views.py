@@ -2,7 +2,7 @@
 
 import json
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from typing import Any
 
@@ -162,6 +162,8 @@ def build_view(
     level: str | None = None,
     check_prefix: str | None = None,
     address_prefix: str | None = None,
+    rebuild: bool = False,
+    changed_inputs: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict] = []
     scopes, scope_rows = [], []
@@ -272,6 +274,10 @@ def build_view(
             {"kind": "file", "name": path, "size": len(content), "sha256": sha256(content)}
             for path, content in bundle.files.items()
         )
+        rows.extend(
+            {"kind": "input_changed", "name": name}
+            for name in sorted({n for names in (changed_inputs or {}).values() for n in names})
+        )
     elif section == "scopes":
         rows = scope_rows
     other = Counter(other_states.values())
@@ -281,6 +287,8 @@ def build_view(
         "build_hash": build_hash,
         "output_dir": output_path,
         "written": written,
+        "rebuild": rebuild,
+        "changed_input_groups": sorted(changed_inputs or {}),
         "runtime_verified": bundle.manifest.runtime_verified,
         "runtime_unverified": sorted(unverified),
         "scopes": scopes,

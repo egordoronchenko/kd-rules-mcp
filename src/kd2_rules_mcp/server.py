@@ -1520,10 +1520,20 @@ def create_server(service: Kd2Service) -> MCPServer:
         address_prefix: Annotated[
             str | None, Field(description="Префикс адреса правила, без учёта регистра")
         ] = None,
+        drop_operations: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Идентификаторы операций прежнего комплекта, явно исключаемых из пересборки"
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Проверяет до/после и порождает комплект прямых ПКС.
 
         Write атомарно обновляет только собственный результат в workspace; база не вызывается.
+        При изменении входов прежние и новые операции проверяются заново. Summary показывает
+        rebuild и changed_input_groups; имена изменившихся входов — страницы items input_changed.
         """
         return await call(
             service.ed_authoring_build,
@@ -1543,6 +1553,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             level,
             check_prefix,
             address_prefix,
+            drop_operations,
         )
 
     return server
