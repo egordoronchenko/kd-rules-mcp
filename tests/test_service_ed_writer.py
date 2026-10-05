@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 from dataclasses import fields
 from pathlib import Path
+from time import perf_counter
 from types import SimpleNamespace
 from typing import get_args
 
@@ -44,6 +45,14 @@ PLAN = "ПланФормата"
 
 def size(value):
     return len(json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8"))
+
+
+def reopen_writer_schema(service, root):
+    return service.ed_schema_open(
+        "1.20",
+        path=str(root / "Schemas/format.bin"),
+        imports={"urn:test:writer-message": str(DATA / "message.bin")},
+    )
 
 
 def string_value(value):
@@ -223,6 +232,116 @@ def build(service, created, **kwargs):
 
 def files_at(path):
     return {p.relative_to(path).as_posix(): p.read_bytes() for p in path.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize(
+    "missing_schema,missing_structure", [(True, False), (True, True), (False, True)]
+)
+def test_migration_reopen_missing_inputs_refuses_before_loading(
+    writer_setup, monkeypatch, missing_schema, missing_structure
+):
+    service, args, root = writer_setup
+    service.ed_create(**args)
+    service = Kd2Service(service.settings)
+    if not missing_schema:
+        reopen_writer_schema(service, root)
+    if missing_structure:
+        monkeypatch.setattr(service.store, "exists", lambda _: False)
+
+    def forbidden(*a, **kw):
+        pytest.fail("Повторное создание не должно загружать маршруты, профиль или структуру")
+
+    for name in ("_manager_reference", "_manager_detection", "_manager_structure_provenance"):
+        monkeypatch.setattr(service, name, forbidden)
+    monkeypatch.setattr(service.store, "load_xml", forbidden)
+    start = perf_counter()
+    with pytest.raises(EdAuthoringPreconditionError) as error:
+        service.ed_create(**args)
+    assert perf_counter() - start < 1
+    assert error.value.details["failures"][0]["id"] == "manager_inputs_not_open"
+    calls = error.value.details["reopen_calls"]
+    if missing_schema:
+        assert calls[0]["tool"] == "ed_schema_open"
+        assert calls[0]["arguments"]["format_version"] == "1.20"
+    if missing_structure:
+        assert calls[-1] == {
+            "tool": "structure_load_xml",
+            "arguments": {
+                "structure_id": "host",
+                "path": args["configuration_path"],
+                "extensions": [],
+            },
+        }
+
+
+def test_migration_missing_project_inputs_return_catalog_reopen_calls(writer_setup, monkeypatch):
+    service, args, _ = writer_setup
+    service.ed_create(**args)
+    folder = service.manager_workspace.directory / args["project_id"]
+    metadata = json.loads((folder / "creation.json").read_bytes())
+    metadata["arguments"].update(project="УчебныйПроект", configuration="full")
+    (folder / "creation.json").write_text(json.dumps(metadata), encoding="utf-8")
+    restarted = Kd2Service(service.settings)
+    monkeypatch.setattr(restarted.store, "exists", lambda _: False)
+    with pytest.raises(EdAuthoringPreconditionError) as caught:
+        restarted.ed_create(**(args | {"project": "УчебныйПроект"}))
+    assert caught.value.details["reopen_calls"] == [
+        {
+            "tool": "ed_schema_open",
+            "arguments": {
+                "format_version": "1.20",
+                "project": "УчебныйПроект",
+                "configuration": "full",
+            },
+        },
+        {
+            "tool": "structure_load_project",
+            "arguments": {
+                "project_id": "УчебныйПроект",
+                "configuration_id": "full",
+                "structure_id": "host",
+            },
+        },
+    ]
+
+
+@pytest.mark.parametrize("reference", ["auto", "explicit"])
+def test_migration_property_reference_keeps_name_pair_and_rename(writer_setup, reference):
+    service, args, root = writer_setup
+    created = service.ed_create(**args)
+    module = root / "CommonModules/Менеджер2/Ext/Module.bsl"
+    module.write_text(
+        (DATA / "pilot.bsl")
+        .read_text(encoding="utf-8")
+        .replace('"Наименование",        "Наименование"', '"Код", "Наименование"'),
+        encoding="utf-8",
+    )
+    document_id = "auto" if reference == "auto" else service.ed_open(str(module))["project_id"]
+    result = service.ed_authoring_candidates(
+        scope="manager",
+        kind="properties",
+        reference_document_id=document_id,
+        target={
+            "project_id": created["project_id"],
+            "schema_id": args["schema_id"],
+            "structure_id": "host",
+            "direction": "send",
+            "configuration_object": "Справочник.Должности",
+            "format_type": "Справочник.Должности",
+        },
+    )
+    rows = [r for r in result["properties"]["items"] if r["configuration"] == "Код"]
+    assert {r["format_name"] for r in rows} == {"Код", "Наименование"}
+    typical = next(r for r in rows if r["class"] == "reference_module")
+    assert typical["property_kind"] == "direct" and typical["rule_name"] is None
+    assert typical["reason"] == "так в типовом модуле" and not typical["auto"]
+    assert typical["origin"]["document_id"] != "auto"
+    assert set(result) >= {
+        "properties",
+        "table_parts",
+        "unmatched_format",
+        "unmatched_configuration",
+    }
 
 
 def test_long_packet_pages_explain_size_limit_and_keep_every_operation(writer_setup):
@@ -685,6 +804,7 @@ def test_end_to_end_restart_navigation_delivery_and_close(writer_setup):
     }
     assert service.ed_overview(created["document_id"])["counts"]["pko"] == 0
     service = Kd2Service(service.settings)
+    reopen_writer_schema(service, root)
     reopened = service.ed_create(**args)
     assert reopened["existing"] and reopened["revision"] == created["revision"]
     applied = service.ed_apply(
@@ -740,7 +860,7 @@ def test_end_to_end_restart_navigation_delivery_and_close(writer_setup):
 
 
 def test_stale_revisions_hashes_and_durable_exact_replay(writer_setup):
-    service, args, _ = writer_setup
+    service, args, root = writer_setup
     created = service.ed_create(**args)
     packet_args, preview, applied = apply_packet(service, created, manager_operations())
     assert service.ed_apply(
@@ -766,6 +886,7 @@ def test_stale_revisions_hashes_and_durable_exact_replay(writer_setup):
             "positions", applied["revision"], update, mode="apply", expected_preview_hash="other"
         )
     assert error.value.details["preview_hash"]
+    reopen_writer_schema(service, root)
     assert service.ed_create(**args)["revision"] == applied["revision"]
     with pytest.raises(EdAuthoringPreconditionError) as error:
         service.ed_create(**{**args, "format_version": "1.21"})
@@ -1078,9 +1199,10 @@ def test_hundred_operations_have_compact_summary_and_full_pages(writer_setup):
 
 
 def test_creation_from_another_service_is_recovered_without_overwriting_inputs(writer_setup):
-    service, args, _ = writer_setup
+    service, args, root = writer_setup
     another = Kd2Service(service.settings)
     created = service.ed_create(**args)
+    reopen_writer_schema(another, root)
     assert another.ed_create(**args)["existing"]
     assert another.ed_create(**args)["revision"] == created["revision"]
     with pytest.raises(EdAuthoringPreconditionError) as error:
@@ -1414,9 +1536,10 @@ def test_preview_omits_non_durable_document_after_restart(writer_setup):
 
 @pytest.mark.parametrize("tool", ["ed_overview", "ed_list", "ed_get", "ed_locate", "ed_validate"])
 def test_navigation_rejects_snapshot_changed_by_other_process(writer_setup, tool):
-    service, args, _ = writer_setup
+    service, args, root = writer_setup
     created = service.ed_create(**args)
     other = Kd2Service(service.settings)
+    reopen_writer_schema(other, root)
     other.ed_create(**args)
     _, _, updated = apply_packet(other, created, manager_operations())
     extra = {
@@ -1599,6 +1722,7 @@ def test_existing_creation_reports_changes_and_rebind_preserves_rules_and_receip
     assert files_at(service.manager_workspace.directory / "positions/applied") == receipt_files
     assert "validation" in rebound and rebound["executor_profile"]["verified"]
     restarted = Kd2Service(service.settings)
+    reopen_writer_schema(restarted, root)
     assert (
         restarted.ed_create(**{**args, "schema_id": opened["schema_id"]})["revision"]
         == current.revision
@@ -1821,6 +1945,8 @@ def test_rebind_recovers_each_write_r2(
         if fault == "after_journal"
         else {**args, "configuration_path": str(other), "structure_id": "other"}
     )
+    if restart:
+        reopen_writer_schema(restarted, root)
     reopened = restarted.ed_create(**target_args)
     metadata = restarted._manager_metadata("positions")
     assert "pending_rebind" not in json.loads((folder / "creation.json").read_bytes())
@@ -2083,9 +2209,10 @@ def test_default_extension_suffix_uses_platform_letters_and_preserves_saved_name
 
 
 def test_stale_reader_can_close_without_removing_current_manager(writer_setup):
-    service, args, _ = writer_setup
+    service, args, root = writer_setup
     created = service.ed_create(**args)
     other = Kd2Service(service.settings)
+    reopen_writer_schema(other, root)
     other.ed_create(**args)
     _, _, applied = apply_packet(other, created, manager_operations())
     assert service.ed_close(created["document_id"])["closed"]

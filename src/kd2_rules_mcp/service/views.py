@@ -606,6 +606,18 @@ def _pks_row(path: str, item: Node) -> dict[str, Any]:
     code = _reference_text("КодПравилаКонвертации", item.values.get("КодПравилаКонвертации"))
     if code:
         row["conversion"] = code
+    handlers = [
+        name
+        for name in ("ПередВыгрузкой", "ПриВыгрузке", "ПослеВыгрузки")
+        if _handler_text(item, name)
+    ]
+    if handlers:
+        row["handlers"] = handlers
+    parameter = item.values.get("ИмяПараметраДляПередачи")
+    if isinstance(parameter, str) and parameter.strip():
+        row["ИмяПараметраДляПередачи"] = parameter
+    if item.values.get("ПолучитьИзВходящихДанных") is True:
+        row["ПолучитьИзВходящихДанных"] = True
     return row
 
 

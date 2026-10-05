@@ -10,6 +10,27 @@ from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
 DATA = Path(__file__).parent / "data"
 
 
+def test_migration_rules_get_property_rows_show_code_parameter_and_incoming(tmp_path):
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    opened = service.rules_open(str(DATA / "exchange_rules.xml"))
+    document = service._exchange(opened["project_id"])
+    pko = document.pko()[0]
+    properties = pko.child("Свойства")
+    assert properties is not None
+    prop = properties.items[0]
+    prop.values["ПередВыгрузкой"] = 'Значение = "Расчетный";'
+    prop.values["ПриВыгрузке"] = "ИсходящиеДанные = Параметры.Банк;"
+    prop.values["ПослеВыгрузки"] = "   "
+    prop.values["ИмяПараметраДляПередачи"] = "Банк"
+    prop.values["ПолучитьИзВходящихДанных"] = True
+    result = service.rules_get(opened["project_id"], "pko", pko.code, "", 100)
+    row = result["properties"]["items"][0]
+    assert row["handlers"] == ["ПередВыгрузкой", "ПриВыгрузке"]
+    assert row["ИмяПараметраДляПередачи"] == "Банк"
+    assert row["ПолучитьИзВходящихДанных"] is True
+    assert "Расчетный" not in str(row) and "ИсходящиеДанные" not in str(row)
+
+
 def test_rules_open_private_copy_save_does_not_touch_shared(tmp_path: Path) -> None:
     """Копия: private и reused false; save копии не меняет saved_path общего проекта."""
     service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))

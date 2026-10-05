@@ -575,8 +575,9 @@ def create_server(service: Kd2Service) -> MCPServer:
         owner: Owner = "",
         limit: Annotated[int, Field(description="Maximum ПКС/ПКЗ items", ge=1)] = 100,
     ) -> dict[str, Any]:
-        """Read rule fields, sides and children or conversion events/header. Code and children
-        are truncated; addresses support edits."""
+        """Read fields/children or conversion header/events. ПКС flags: handlers,
+        transfer parameter, incoming-data use. Code: handlers_export. Text/children truncate;
+        addresses support edits."""
         return await call(service.rules_get, project_id, kind, key, owner, limit)
 
     @server.tool()
@@ -1329,7 +1330,7 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def ed_create(
-        project_id: Annotated[str, Field(description="Explicit durable manager project ID")],
+        project_id: Annotated[str, Field(description="Durable manager ID")],
         mode: Annotated[str, Field(description="new, import, or rebind to fresh inputs")] = "new",
         project: Annotated[str | None, Field(description="Host from project_list")] = None,
         configuration: Annotated[str, Field(description="Host configuration")] = "full",
@@ -1344,7 +1345,7 @@ def create_server(service: Kd2Service) -> MCPServer:
         format_version: Annotated[
             str | None, Field(description="One exact route version key")
         ] = None,
-        interface_version: Annotated[int, Field(description="W1 supports 2 only")] = 2,
+        interface_version: Annotated[int, Field(description="2 only")] = 2,
         identity: Annotated[
             dict[str, Any] | None,
             Field(
@@ -1363,10 +1364,11 @@ def create_server(service: Kd2Service) -> MCPServer:
             str, Field(description="import_report, notices, differences, plan_candidates")
         ] = "import_report",
     ) -> dict[str, Any]:
-        """Create/reopen a durable interface-2 manager; import preserves text. Returns revision,
-        counts, executor/import report, document_id and reference_manager or reason. Changed
-        arguments refuse; fingerprints warn. Atomic rebind keeps rules/receipts, validates inputs
-        and recovers interrupted writes. Missing plan returns plan_candidates."""
+        """Create/reopen durable interface-2 manager; import preserves text. Revision/counts,
+        profile/report, document_id, reference_manager/reason. Different arguments refuse;
+        changed fingerprints warn. Missing inputs refuse quickly with reopen_calls.
+        Atomic rebind keeps rules/receipts, validates and recovers writes.
+        Missing plan: plan_candidates."""
         return await call(
             service.ed_create,
             project_id,
@@ -1435,8 +1437,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             dict[str, Any],
             Field(
                 description=(
-                    "Overlay target: docs/tools.md. Manager: schema_id, structure_id, direction; "
-                    "properties: configuration_object, format_type; reference: optional project_id"
+                    "Manager: schema_id, structure_id, direction; properties add "
+                    "configuration_object, format_type; reference accepts project_id. "
+                    "Overlay: docs/tools.md"
                 )
             ),
         ],
@@ -1457,11 +1460,11 @@ def create_server(service: Kd2Service) -> MCPServer:
         scope: Annotated[str | None, Field(description="overlay (default) or manager")] = None,
         reference_document_id: Annotated[
             str | None,
-            Field(description="Typical snapshot or auto from the version map; objects only"),
+            Field(description="Typical manager snapshot or auto (both kinds)"),
         ] = None,
     ) -> dict[str, Any]:
-        """List overlay properties or manager object/property pairs. All candidates have
-        auto=false; the agent chooses mappings. A typical manager adds reference pairs."""
+        """List overlay properties or manager pairs; auto=false. Enums: needs_pkpd/value_pairs.
+        Typical ПКС: reference_module, property_kind/rule_name, no code."""
         return await call(
             service.ed_authoring_candidates,
             target,

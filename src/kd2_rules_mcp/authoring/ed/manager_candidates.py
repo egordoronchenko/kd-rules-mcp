@@ -19,8 +19,10 @@ from typing import Any
 
 from kd2_rules_mcp.authoring.candidates import KD_NAME_ANALOGS, Confidence
 from kd2_rules_mcp.authoring.ed.candidates import compatibility, primitive_limits
+from kd2_rules_mcp.ed.address import AddressIndex, build_addresses
+from kd2_rules_mcp.ed.model import EdDocument
 from kd2_rules_mcp.ed.schema.model import EdSchema, QName, SchemaProperty, SchemaType
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
+from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
 from kd2_rules_mcp.ed.schema.resolver import (
     effective_properties,
     is_reference,
@@ -31,7 +33,7 @@ from kd2_rules_mcp.ed.schema.xdto import XS
 from kd2_rules_mcp.errors import Kd2Error
 from kd2_rules_mcp.structures.queries import MAX_LIMIT, NotFound, find_object
 from kd2_rules_mcp.structures.xmldump import KINDS
-from kd2_rules_mcp.validation.ed_structure_snapshot import StructureProperty
+from kd2_rules_mcp.validation.ed_structure_snapshot import StructureProperty, metadata_key
 
 _HEADER_KINDS = frozenset({"Реквизит", "Свойство", "Измерение", "Ресурс"})
 _REFERENCE_PREFIXES = tuple(item[4] for item in KINDS.values() if "Ссылка." in item[4])
@@ -149,6 +151,9 @@ def property_candidates(
     direction: str,
     offset: int = 0,
     limit: int = 200,
+    reference_document: EdDocument | None = None,
+    reference_document_id: str = "",
+    reference_index: AddressIndex | None = None,
 ) -> dict[str, Any]:
     """Реквизиты шапки выбранной пары и отдельно имена табличных частей.
 
@@ -176,6 +181,25 @@ def property_candidates(
         attributes,
         visible_header,
     )
+    for row in properties:
+        if row["class"] == "needs_pkpd":
+            _add_value_pairs(structure, schema, visible_header, row)
+    if reference_document is not None:
+        reference_rows, reference_attrs, reference_props = _reference_properties(
+            binding,
+            full_name,
+            typ,
+            direction,
+            schema,
+            attributes,
+            visible_header,
+            reference_document,
+            reference_document_id,
+            reference_index or build_addresses(reference_document),
+        )
+        properties.extend(reference_rows)
+        used_attr.update(reference_attrs)
+        used_fmt.update(reference_props)
     table_rows, used_tables, used_tabular = _match_tables(
         binding,
         full_name,
@@ -199,7 +223,7 @@ def property_candidates(
     )
     properties.sort(
         key=lambda item: (
-            _RANK[item["confidence"]],
+            _RANK.get(item["confidence"], 4),
             _fold(item["configuration"]),
             _fold(item["format_path"]),
         )
@@ -593,6 +617,13 @@ def _is_nested_reference(prop: SchemaProperty, target: SchemaType | None) -> boo
 
 
 def _is_nested_path(schema: EdSchema, owner: SchemaType, physical: tuple[QName, ...]) -> bool:
+    """В раскрытых схемой путях сохраняет свои группы под корневым `КлючевыеСвойства`.
+
+    Имя группы общих свойств не ограничено. Группа должна быть объектным типом,
+    не ссылкой Ref и не чужим типом ключей.
+    Вложенная ссылка/ключи другого объекта обрывают весь путь, включая более глубокие
+    группы. Вне своих ключей эвристика классификатора по-прежнему отсекает чужие поля.
+    """
     current = owner
     for position, part in enumerate(physical[:-1]):
         prop = _property_named(schema, current, part.local)
@@ -601,15 +632,16 @@ def _is_nested_path(schema: EdSchema, owner: SchemaType, physical: tuple[QName, 
         target = property_type(schema, prop)
         if target is None:
             return False
-        # ДанныеКлассификатора внутри собственных ключей — группа этого объекта.
-        # Та же группа в ссылочном свойстве шапки остаётся чужим объектом.
-        own_classifier = (
-            position == 1
+        own_group = (
+            position > 0
             and physical[0].local == "КлючевыеСвойства"
-            and part.local == "ДанныеКлассификатора"
+            and target.kind == "object"
             and not _is_key_properties_type(target)
+            and not is_reference(schema, target)
         )
-        if not own_classifier and _is_nested_reference(prop, target):
+        if position > 0 and _is_key_properties_type(target):
+            return True
+        if not own_group and _is_nested_reference(prop, target):
             return True
         current = target
     return False
@@ -847,6 +879,20 @@ def _classify(
     key_type = bool(target and _is_key_properties_type(target))
     fmt_ref = bool(target and is_reference(schema, target))
     cfg_ref = _all_references(attr)
+    if (
+        not attr.unresolved
+        and len(attr.types) == 1
+        and attr.types[0].startswith("ПеречислениеСсылка.")
+        and _enumeration_values(schema, target) is not None
+    ):
+        return _Classified(
+            "needs_pkpd",
+            "Перечисление: нужно правило предопределённых данных",
+            None,
+            True,
+            type_name,
+            None,
+        )
     if cfg_ref and (key_type or fmt_ref):
         return _Classified(
             "reference",
@@ -870,6 +916,142 @@ def _classify(
         type_name,
         None,
     )
+
+
+def _enumeration_values(schema: EdSchema, typ: SchemaType | None) -> tuple[str, ...] | None:
+    """Конечные значения полного одиночного типа; ограничения предков пересекаются."""
+    seen = set()
+    values: set[str] | None = None
+    while typ is not None:
+        if (
+            typ.id in seen
+            or typ.status != "complete"
+            or typ.kind != "value"
+            or typ.members
+            or typ.variety.casefold() in ("list", "union")
+        ):
+            return None
+        seen.add(typ.id)
+        declared = {f.lexical for f in typ.facets if f.kind == "enumeration"}
+        if declared:
+            values = declared if values is None else values & declared
+        if typ.base is None or typ.base.namespace == XS:
+            break
+        typ = schema.types.get(typ.base)
+        if typ is None:
+            return None
+    return tuple(sorted(values)) if values is not None else None
+
+
+def _add_value_pairs(structure, schema, header, row) -> None:
+    """Только равные имена; несовпадения оставляем агенту явно."""
+    prop = next(
+        p for p in header if p.path == row["format_path"] and p.namespace == row["namespace"]
+    )
+    format_values = _enumeration_values(schema, property_type(schema, prop.prop)) or ()
+    cfg = [
+        str(v[0])
+        for v in structure.execute(
+            "SELECT v.name FROM object_values v JOIN objects o ON o.id=v.object_id "
+            "WHERE o.kind='Перечисление' AND o.type_name=? ORDER BY v.name",
+            (row["configuration_types"][0],),
+        )
+    ]
+    pairs = [{"configuration": c, "format": f} for c in cfg for f in format_values if c == f]
+    row.update(
+        {
+            "value_pairs": pairs,
+            "unmatched_configuration_values": [c for c in cfg if c not in format_values],
+            "unmatched_format_values": [f for f in format_values if f not in cfg],
+        }
+    )
+
+
+def _reference_properties(
+    binding, configuration, typ, direction, schema, attributes, header, document, document_id, index
+):
+    """Декларации ПКС шапки выбранной пары; обработчики никогда не включаются в ответ."""
+    profile = ValidationProfile.build(schema, None, direction)
+    applicability = Applicability.build(document, profile)
+    pkpd = {r.declared_name or r.name for r in document.pkpd}
+    pko = {r.declared_name or r.name for r in document.pko}
+    rows, used_attr, used_fmt = [], set(), set()
+    source_hash = tuple(f.sha256 for f in document.files)
+    for rule in document.pko:
+        key, _ = metadata_key(rule.configuration_object.value)
+        fmt = rule.format_object.value if rule.format_object else None
+        if key != tuple(part.casefold() for part in configuration.split(".", 1)):
+            continue
+        if not typ.qname or fmt != typ.qname.local:
+            continue
+        active = applicability.evaluate(rule, direction)
+        if active is False:
+            continue
+        for prop in rule.properties:
+            if prop.group_id or not prop.format_property:
+                continue
+            formats = [
+                p
+                for p in header
+                if (p.leaf == prop.format_property or p.path == prop.format_property)
+                and (not prop.namespace or p.namespace == prop.namespace)
+            ]
+            attrs = [
+                a
+                for a in attributes
+                if a.prop.path.casefold() == prop.configuration_property.casefold()
+            ]
+            # Неразрешённые декларации не выдаём как доказанную пару текущих входов.
+            if not formats or (prop.configuration_property and not attrs):
+                continue
+            kind = (
+                "algorithm"
+                if prop.algorithm_flag
+                else "pkpd"
+                if prop.conversion_rule in pkpd
+                else "reference"
+                if prop.conversion_rule in pko
+                else "unresolved"
+                if prop.conversion_rule
+                else "direct"
+            )
+            for field in formats:
+                used_attr.update(id(a) for a in attrs)
+                used_fmt.add(id(field))
+                rows.append(
+                    {
+                        "candidate_id": _candidate_id(
+                            binding,
+                            "reference_property",
+                            str(source_hash),
+                            direction,
+                            configuration,
+                            str(typ.qname),
+                            prop.entity_id,
+                            field.path,
+                        ),
+                        "configuration": attrs[0].prop.path if attrs else "",
+                        "configuration_types": list(attrs[0].prop.types) if attrs else [],
+                        "format_path": field.path,
+                        "format_name": field.leaf,
+                        "namespace": field.namespace,
+                        "format_type": _type_name(field.prop, property_type(schema, field.prop)),
+                        "class": "reference_module",
+                        "confidence": "reference",
+                        "auto": False,
+                        "reason": "так в типовом модуле",
+                        "direction": direction,
+                        "property_kind": kind,
+                        "rule_name": prop.conversion_rule or None,
+                        "needs_rule": kind in ("reference", "pkpd", "unresolved"),
+                        "applicability": "active" if active is True else "unknown",
+                        "origin": {
+                            "document_id": document_id,
+                            "address": index.by_id.get(prop.entity_id, ("",))[0],
+                        },
+                    }
+                )
+    return rows, used_attr, used_fmt
 
 
 def _is_key_properties_type(typ: SchemaType) -> bool:

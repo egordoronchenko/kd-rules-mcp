@@ -246,8 +246,9 @@ Registration projects expose registration.
 
 ### `rules_get`
 
-Read rule fields, sides and children or conversion events/header. Code and children
-are truncated; addresses support edits.
+Read fields/children or conversion header/events. ПКС flags: handlers,
+transfer parameter, incoming-data use. Code: handlers_export. Text/children truncate;
+addresses support edits.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -675,14 +676,15 @@ arguments or null with reason. Live compatibility is unverified.
 
 ### `ed_create`
 
-Create/reopen a durable interface-2 manager; import preserves text. Returns revision,
-counts, executor/import report, document_id and reference_manager or reason. Changed
-arguments refuse; fingerprints warn. Atomic rebind keeps rules/receipts, validates inputs
-and recovers interrupted writes. Missing plan returns plan_candidates.
+Create/reopen durable interface-2 manager; import preserves text. Revision/counts,
+profile/report, document_id, reference_manager/reason. Different arguments refuse;
+changed fingerprints warn. Missing inputs refuse quickly with reopen_calls.
+Atomic rebind keeps rules/receipts, validates and recovers writes.
+Missing plan: plan_candidates.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `project_id` | string | required | Explicit durable manager project ID |
+| `project_id` | string | required | Durable manager ID |
 | `mode` | string | `"new"` | new, import, or rebind to fresh inputs |
 | `project` | string \| null | `null` | Host from project_list |
 | `configuration` | string | `"full"` | Host configuration |
@@ -690,7 +692,7 @@ and recovers interrupted writes. Missing plan returns plan_candidates.
 | `extensions` | array of string \| null | `null` | Ordered host extensions; null uses project settings |
 | `plan` | string \| null | `null` | Exchange plan name |
 | `format_version` | string \| null | `null` | One exact route version key |
-| `interface_version` | integer | `2` | W1 supports 2 only |
+| `interface_version` | integer | `2` | 2 only |
 | `identity` | object \| null | `null` | name, prefix, module_name, synonym, version, compatibility_mode; default name includes project_id |
 | `document_id` | string \| null | `null` | ed_open snapshot to import |
 | `schema_id` | string \| null | `null` | Optional open XDTO schema |
@@ -719,12 +721,12 @@ current revision and live document_id.
 
 ### `ed_authoring_candidates`
 
-List overlay properties or manager object/property pairs. All candidates have
-auto=false; the agent chooses mappings. A typical manager adds reference pairs.
+List overlay properties or manager pairs; auto=false. Enums: needs_pkpd/value_pairs.
+Typical ПКС: reference_module, property_kind/rule_name, no code.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `target` | object | required | Overlay target: docs/tools.md. Manager: schema_id, structure_id, direction; properties: configuration_object, format_type; reference: optional project_id |
+| `target` | object | required | Manager: schema_id, structure_id, direction; properties add configuration_object, format_type; reference accepts project_id. Overlay: docs/tools.md |
 | `kind` | string | required | Overlay: format/configuration; manager: objects/properties |
 | `text` | string | `""` | Name/path substring, case-insensitive |
 | `offset` | integer ≥ 0 | `0` | Page offset |
@@ -732,7 +734,7 @@ auto=false; the agent chooses mappings. A typical manager adds reference pairs.
 | `configuration_attribute` | string \| null | `null` | Selected attribute |
 | `format_property` | string \| null | `null` | Selected format property |
 | `scope` | string \| null | `null` | overlay (default) or manager |
-| `reference_document_id` | string \| null | `null` | Typical snapshot or auto from the version map; objects only |
+| `reference_document_id` | string \| null | `null` | Typical manager snapshot or auto (both kinds) |
 
 ### `ed_authoring_build`
 
@@ -922,6 +924,10 @@ qualifiers.
 `rules_overview.counts.conversion` counts filled conversion events; `rules_list` section
 `conversion` contains one row, while `pks` lists ПКС across all ПКО.
 `rules_get` truncates handler text at 2000 characters; its `limit` caps child ПКС/ПКЗ lists at 200.
+Compact child ПКС rows expose nonempty `handlers` (names of `ПередВыгрузкой`, `ПриВыгрузке`,
+`ПослеВыгрузки`), nonempty `ИмяПараметраДляПередачи` and true `ПолучитьИзВходящихДанных`.
+Absent flags mean empty/false. Standalone ПКС still exposes its stored `fields`/`attrs`;
+use `handlers_export` for complete handler code.
 
 ### Saving, packing and validation
 
@@ -1573,9 +1579,9 @@ No BSL executes during authoring; installation and live exchange are separate st
    `reference_manager={name,path}` identifies the typical manager for this exact route key.
    If null, adjacent `reference_manager_reason={id,message}` explains the unavailable route/source.
    A missing plan refuses with a paged `plan_candidates` list of ED plans.
-3. Query `ed_authoring_candidates(scope="manager",kind="objects")`, then
-   `reference_document_id="auto",target.project_id` loads that route's typical manager;
-   then query `kind="properties"` for a selected pair. Choose each mapping explicitly.
+3. Query `ed_authoring_candidates(scope="manager",kind="objects")`, then `kind="properties"`
+   for a selected pair. Both accept `reference_document_id="auto",target.project_id` to load
+   that route's typical manager and reveal semantic renamings. Choose each mapping explicitly.
 4. Preview `ed_apply` with the current revision. Read canonical operations, changes and
    notices through pages; apply with its `preview_hash` and confirmations, omitting `operations`.
 5. Navigate the returned `document_id` with `ed_overview`, `ed_list`, `ed_get`, `ed_locate`.
@@ -1641,7 +1647,14 @@ The next request recovers the transaction journal. With the same arguments, chan
 `existing=true` and a `creation_inputs_changed` notice with differences and a rebind hint;
 the model keeps its original bindings. Apply/build refuse changed fingerprints until rebind.
 Difference pages use `section="differences",offset,limit` and expose `difference_count,next_offset,has_more`.
-After restart, `ed_create` restores navigation; reopen the schema before candidate/schema queries.
+After restart, reopen bound inputs before repeating `ed_create`. Missing schema/structure
+snapshots refuse quickly with `ed_authoring_precondition`, failure `manager_inputs_not_open`,
+`missing_inputs[{kind,id}]` and executable `reopen_calls[{tool,arguments}]`.
+For catalog projects these are `ed_schema_open(project,configuration,format_version)` and
+`structure_load_project(project_id,configuration_id,structure_id)`; dump projects receive
+stored package/import paths and `structure_load_xml(path,extensions,structure_id)`.
+No inputs are loaded implicitly. If restored IDs differ, use `ed_create(mode="rebind")`.
+Once inputs are open, `ed_create` restores navigation.
 The project retains schema source hashes, the host structure fingerprint and the configuration
 dump fingerprint (the same export markers used by structure loading) for stale checks.
 There is no additional manager-list tool.
@@ -1912,13 +1925,24 @@ Add `target.project_id` to check that the structure comes from the manager's con
 dump and exactly its selected extensions; this applies to both candidate kinds, even when
 the manager has no bound structure ID. An unknown project ID refuses.
 
+Property class `needs_pkpd` means a configuration enumeration meets a format enumeration:
+create a predefined-data rule explicitly. These rows have `needs_rule=true`, `auto=false`,
+`value_pairs[{configuration,format}]` for equal value names and
+`unmatched_configuration_values,unmatched_format_values` for values still needing a decision.
+No value mapping is chosen automatically.
+
 For object candidates, optional `reference_document_id` adds semantic pairs from a typical
 manager's ПКО with `confidence="reference",reason="так в типовом модуле",auto=false`
 and `origin={document_id,address}`. The XML structure source establishes the host configuration;
 Manager projects require XML structures; a foreign structure refuses with `ed.author.snapshot_mismatch`.
 The reference snapshot must be inside that host's `CommonModules`. Pairs already suggested by names stay single rows;
-rules definitely inapplicable to the selected version/direction are excluded. Properties
-do not accept a reference snapshot.
+rules definitely inapplicable to the selected version/direction are excluded.
+For property candidates, the same parameter adds separate `class="reference_module"` rows
+for this object/type pair with `confidence="reference"`, the same reason/origin and `auto=false`.
+`property_kind` is `direct`, `reference`, `pkpd`, `algorithm` (or `unresolved` for a missing target);
+`rule_name` is the conversion target's name or null. Handler bodies are excluded.
+Name-based pairs remain visible beside different pairs declared by the typical manager.
+The four property pages retain their ordinary pagination fields.
 Use `reference_document_id="auto"` with `target.project_id` to resolve the exact plan/version
 map and open its typical manager automatically; the returned `origin.document_id` is an
 ordinary reader snapshot. Without a project, auto requires XML provenance and a unique ED
@@ -1929,8 +1953,10 @@ includes a hint to use auto.
 If a previously opened typical snapshot changed, auto refuses with `ed_authoring_stale` and
 its `reference_document_id`: close that snapshot with `ed_close`, then repeat auto.
 An unavailable or ambiguous route refuses with `reference_manager_unavailable`; inspect
-`ed_routes` and pass an explicit snapshot. Own `КлючевыеСвойства.ДанныеКлассификатора` fields
-are candidates for this object's attributes; key fields of referenced objects remain excluded.
+`ed_routes` and pass an explicit snapshot. Any own common-property group beneath root `КлючевыеСвойства`
+is expanded, including `ДанныеКлассификатораБанков`; group names are unrestricted.
+Groups that are references or another object's key-properties type stop expansion of their
+whole subtree. Fields outside the own-key subtree retain the reference/classifier filter.
 Manager-project primitive ПКС validation uses candidate compatibility, including string facets.
 Ordinary snapshots and overlay reports retain their previous type-check boundary and bytes.
 For manager-project snapshots, `ed.schema.value_range` warns when a sending string attribute

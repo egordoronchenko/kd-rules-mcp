@@ -1,6 +1,7 @@
 """Кандидаты нового менеджера: имя, синоним, вид, примитив, ссылка, страницы, устаревание."""
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,8 @@ from kd2_rules_mcp.authoring.ed.manager_candidates import (
     object_candidates,
     property_candidates,
 )
+from kd2_rules_mcp.ed import read_manager
+from kd2_rules_mcp.ed.model import PredefinedRule
 from kd2_rules_mcp.ed.schema import load_schema
 from kd2_rules_mcp.structures import db
 
@@ -23,12 +26,15 @@ def schema():
     return load_schema(DATA / "format.bin", locate_import=lambda _: DATA / "message.bin")
 
 
-def test_own_classifier_group_is_paired_but_foreign_reference_is_not(tmp_path):
+@pytest.mark.parametrize(
+    "group", ["ДанныеКлассификатора", "ДанныеКлассификатораБанков", "ДанныеГруппы"]
+)
+def test_own_classifier_group_is_paired_but_foreign_reference_is_not(tmp_path, group):
     text = (DATA / "format.bin").read_text(encoding="utf-8")
     # Та же структура ключей оказывается и своей группой, и чужой ссылкой в шапке.
     text = text.replace(
         '<property name="Код" type="xs:string"/>',
-        '<property name="ДанныеКлассификатора" type="t:ОбщиеСвойстваВымышленногоКлассификатора"/>',
+        f'<property name="{group}" type="t:ОбщиеСвойстваВымышленногоКлассификатора"/>',
         1,
     )
     text = text.replace('<property name="Наименование" type="t:Наименование10"/>', "")
@@ -47,7 +53,7 @@ def test_own_classifier_group_is_paired_but_foreign_reference_is_not(tmp_path):
         r for r in result["properties"]["items"] if r["configuration"] in ("Код", "Наименование")
     ]
     assert {(r["configuration"], r["format_path"]) for r in own} == {
-        (name, "КлючевыеСвойства.ДанныеКлассификатора." + name) for name in ("Код", "Наименование")
+        (name, f"КлючевыеСвойства.{group}." + name) for name in ("Код", "Наименование")
     }
     assert all(r["class"] == "direct" for r in own)
     assert not any(
@@ -56,6 +62,109 @@ def test_own_classifier_group_is_paired_but_foreign_reference_is_not(tmp_path):
         )
         for r in result["properties"]["items"]
     )
+
+
+def test_migration_enum_candidate_needs_pkpd_and_pairs_values(tmp_path):
+    connection = structure()
+    connection.execute(
+        "INSERT INTO objects(kind,name,type_name) VALUES ('Перечисление',?,?)",
+        ("ЮридическоеФизическоеЛицо", "ПеречислениеСсылка.ЮридическоеФизическоеЛицо"),
+    )
+    enum_id = object_id(connection, "Перечисление", "ЮридическоеФизическоеЛицо")
+    connection.executemany(
+        "INSERT INTO object_values(object_id,name) VALUES (?,?)",
+        [(enum_id, name) for name in ("ЮридическоеЛицо", "ФизическоеЛицо", "ТолькоКонфигурация")],
+    )
+    add_prop(
+        connection,
+        "Справочник",
+        "Должности",
+        "Реквизит",
+        "ЮридическоеФизическоеЛицо",
+        ("ПеречислениеСсылка.ЮридическоеФизическоеЛицо",),
+    )
+    path = tmp_path / "format.bin"
+    path.write_text(
+        (DATA / "format.bin")
+        .read_text(encoding="utf-8")
+        .replace(
+            '<objectType name="Справочник.Должности">',
+            '<objectType name="Справочник.Должности">'
+            '<property name="ЮридическоеФизическоеЛицо" type="t:ВидЛица"/>',
+        )
+        .replace(
+            "</package>",
+            '<valueType name="ВидЛица" base="xs:string">'
+            "<enumeration>ЮридическоеЛицо</enumeration><enumeration>ФизическоеЛицо</enumeration>"
+            "<enumeration>ТолькоФормат</enumeration></valueType></package>",
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_schema(path, locate_import=lambda _: DATA / "message.bin")
+    result = property_candidates(
+        connection, loaded, "Справочник.Должности", "Справочник.Должности", direction="send"
+    )
+    row = next(
+        r
+        for r in result["properties"]["items"]
+        if r["configuration"] == "ЮридическоеФизическоеЛицо"
+    )
+    assert row["class"] == "needs_pkpd" and row["needs_rule"] and not row["auto"]
+    assert "предопределённых данных" in row["reason"]
+    assert row["value_pairs"] == [
+        {"configuration": name, "format": name} for name in ("ФизическоеЛицо", "ЮридическоеЛицо")
+    ]
+    assert row["unmatched_configuration_values"] == ["ТолькоКонфигурация"]
+    assert row["unmatched_format_values"] == ["ТолькоФормат"]
+
+
+def test_migration_reference_properties_report_all_kinds_without_code():
+    document = read_manager(DATA / "pilot.bsl")
+    rule = document.pko[0]
+    prop = rule.properties[0]
+    pkpd = PredefinedRule(
+        entity_id="pkpd-values",
+        kind="pkpd",
+        name="ВидыЛиц",
+        declared_name="ВидыЛиц",
+        span=prop.span,
+        raw_text="ТЕЛО НЕ ПОКАЗЫВАТЬ",
+    )
+    props = tuple(
+        replace(
+            prop,
+            entity_id=f"property-{kind}",
+            name=kind,
+            conversion_rule=target,
+            algorithm_flag=algorithm,
+            raw_text="ТЕЛО НЕ ПОКАЗЫВАТЬ",
+        )
+        for kind, target, algorithm in (
+            ("direct", "", 0),
+            ("reference", rule.declared_name, 0),
+            ("pkpd", "ВидыЛиц", 0),
+            ("algorithm", "", 1),
+        )
+    )
+    document = replace(document, pko=(replace(rule, properties=props),), pkpd=(pkpd,))
+    result = property_candidates(
+        structure(),
+        schema(),
+        "Справочник.Должности",
+        "Справочник.Должности",
+        direction="send",
+        reference_document=document,
+        reference_document_id="typical",
+    )
+    rows = [r for r in result["properties"]["items"] if r["class"] == "reference_module"]
+    assert {r["property_kind"]: r["rule_name"] for r in rows} == {
+        "direct": None,
+        "reference": rule.declared_name,
+        "pkpd": "ВидыЛиц",
+        "algorithm": None,
+    }
+    assert all(not r["auto"] and r["origin"]["address"] for r in rows)
+    assert "ТЕЛО НЕ ПОКАЗЫВАТЬ" not in str(result)
 
 
 def structure() -> sqlite3.Connection:

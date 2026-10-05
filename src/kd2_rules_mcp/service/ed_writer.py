@@ -548,6 +548,50 @@ class EdWriterMixin(EdAuthoringMixin):
             self._manager_documents[model.project_id] = document_id
         return document_id, snapshot
 
+    def _manager_require_open_inputs(self, args: dict, metadata: dict) -> None:
+        """Отказ до чтения маршрутов/слоёв: повторное создание не восстанавливает входы."""
+        calls, missing = [], []
+        if args.get("schema_id") and args["schema_id"] not in self._ed_schemas:
+            missing.append({"kind": "schema", "id": args["schema_id"]})
+            arguments = {"format_version": args["format_version"]}
+            if args.get("project"):
+                arguments.update(project=args["project"], configuration=args["configuration"])
+            else:
+                packages = metadata.get("schema_packages", [])
+                sources = metadata.get("schema_sources", [])
+                if packages:
+                    arguments.update(
+                        path=packages[0]["path"],
+                        imports={
+                            p["namespace"]: p["path"]
+                            for p in packages[1:]
+                            if p["role"] == "dependency"
+                        },
+                        extensions=[p["path"] for p in packages if p["role"] == "extension"],
+                    )
+                elif sources:
+                    arguments["path"] = sources[0][0]
+            calls.append({"tool": "ed_schema_open", "arguments": arguments})
+        if args.get("structure_id") and not self.store.exists(args["structure_id"]):
+            missing.append({"kind": "structure", "id": args["structure_id"]})
+            arguments = {"structure_id": args["structure_id"]}
+            if args.get("project"):
+                arguments.update(project_id=args["project"], configuration_id=args["configuration"])
+                tool = "structure_load_project"
+            else:
+                arguments.update(path=args["configuration_path"], extensions=args["extensions"])
+                tool = "structure_load_xml"
+            calls.append({"tool": tool, "arguments": arguments})
+        if missing:
+            _refuse(
+                "manager_inputs_not_open",
+                "Входы проекта не открыты: выполните reopen_calls "
+                "(ed_schema_open, structure_load_project/structure_load_xml). "
+                "При новых идентификаторах используйте ed_create mode=rebind",
+                missing_inputs=missing,
+                reopen_calls=calls,
+            )
+
     def ed_create(
         self,
         project_id: str,
@@ -622,6 +666,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 )
             if identity is None:
                 identity = old_args["identity"]
+            self._manager_require_open_inputs(old_args, self._manager_metadata(project_id))
         if rebinding:
             with self._lock:
                 old_args = self._manager_metadata(project_id)["arguments"]
@@ -1359,8 +1404,8 @@ class EdWriterMixin(EdAuthoringMixin):
         direction = _text(value.get("direction"), "direction")
         if kind == "objects" and any(k in value for k in ("configuration_object", "format_type")):
             raise ValueError("Выбранная пара относится только к kind=properties")
-        if kind == "properties" and (reference_document_id is not None or text):
-            raise ValueError("properties не принимает text или reference_document_id")
+        if kind == "properties" and text:
+            raise ValueError("properties не принимает text")
         with self._lock:
             schema = self._ed_schemas.get(schema_id)
             if schema is None:
@@ -1380,7 +1425,7 @@ class EdWriterMixin(EdAuthoringMixin):
                         if provenance.get("source_path")
                         else None
                     )
-                if kind == "properties":
+                if kind == "properties" and reference_document_id is None:
                     return property_candidates(
                         connection,
                         schema.schema,
@@ -1510,6 +1555,19 @@ class EdWriterMixin(EdAuthoringMixin):
                     if reference.layered
                     else reference_document.files[0].sha256
                 )
+                if kind == "properties":
+                    return property_candidates(
+                        connection,
+                        schema.schema,
+                        _text(value.get("configuration_object"), "configuration_object"),
+                        _text(value.get("format_type"), "format_type"),
+                        direction=direction,
+                        offset=offset,
+                        limit=limit,
+                        reference_document=reference_document,
+                        reference_document_id=reference_document_id,
+                        reference_index=reference_index,
+                    )
                 # Собираем все страницы перед объединением: offset применяется к общему списку.
                 result = object_candidates(
                     connection, schema.schema, direction=direction, text=text, limit=200
