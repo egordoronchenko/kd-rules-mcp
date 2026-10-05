@@ -741,6 +741,11 @@ def report_summary(report: ValidationReport) -> dict[str, Any]:
     return {
         "errors": len(report.errors),
         "warnings": len(report.warnings),
+        **(
+            {"info": sum(i.level is Level.INFO for i in report.issues)}
+            if any(i.level is Level.INFO for i in report.issues)
+            else {}
+        ),
         "skipped": len(report.skipped),
         "by_check": by_check,
         "text": report.summary(),

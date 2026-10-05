@@ -343,6 +343,8 @@ def validation_view(
     section: str,
     offset: int,
     limit: int,
+    *,
+    explain_skipped: bool = False,
 ) -> dict[str, Any]:
     """Отчёт ed_validate. Итог — по всему отчёту; отборы меняют только запрошенный раздел.
 
@@ -356,6 +358,22 @@ def validation_view(
             for item in report.skipped
             if _skipped_matches(item, check_prefix, address_prefix)
         ]
+        if explain_skipped:
+            for row in rows:
+                hint = {
+                    "non_atomic_type": "Тип не подтверждён как одиночный примитив; "
+                    "задайте ПКО ссылки или алгоритм преобразования",
+                    "qualifiers_unavailable": "Квалификаторы типа неизвестны; проверьте структуру "
+                    "и ограничения схемы или задайте алгоритм",
+                    "handler_may_supply": "Обработчик может менять значение; "
+                    "проверьте его код и тип результата",
+                    "owner_type_unavailable": "Откройте схему нужной версии "
+                    "и проверьте тип формата ПКО",
+                    "unresolved_configuration_type": "Тип реквизита не разрешён; "
+                    "обновите структуру с нужными расширениями",
+                }.get(row["reason"].partition(":")[0])
+                if hint:
+                    row["hint"] = hint
         view["skipped"] = slice_rows(rows, offset, limit)
         return view
     issues = [issue.to_dict() for issue in report.issues]

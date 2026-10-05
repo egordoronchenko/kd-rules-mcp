@@ -13,11 +13,67 @@ from tests.test_ed_profile import BASE, DATA, document
 from tests.test_validation_ed_structure import snapshot, table_text
 
 
-def check(text=BASE, direction="both", schema=None):
+def check(text=BASE, direction="both", schema=None, *, include_value_ranges=False):
     doc = document(text)
     schema = schema or load_schema(DATA / "validation.bin")
     profile = ValidationProfile.build(schema, "1.2", direction)
-    return validate_schema(doc, schema, build_addresses(doc), profile, snapshot())
+    return validate_schema(
+        doc,
+        schema,
+        build_addresses(doc),
+        profile,
+        snapshot(),
+        include_value_ranges=include_value_ranges,
+        legacy_atomic_only=False,
+    )
+
+
+@pytest.mark.parametrize("direction", ["send", "receive"])
+def test_direct_faceted_strings_use_candidate_compatibility(tmp_path, direction):
+    from kd2_rules_mcp.authoring.ed.candidates import compatibility
+
+    path = tmp_path / "facets.bin"
+    text = (DATA / "validation.bin").read_text(encoding="utf-8")
+    path.write_text(
+        text.replace('name="Код" type="xs:string"', 'name="Код" type="t:Короткая"').replace(
+            "</package>",
+            '<valueType name="Короткая" base="xs:string">'
+            "<maxLength>2</maxLength></valueType></package>",
+        ),
+        encoding="utf-8",
+    )
+    schema = load_schema(path)
+    profile = ValidationProfile.build(schema, "1.2", direction)
+    owner, _ = profile.find_type("Справочник.Тест")
+    assert owner is not None
+    prop = profile.properties[profile.resolve(owner, "Код").property_ids[0]]
+    attribute = snapshot().objects[("справочник", "тест")].property("Код")[0]
+    expected = compatibility(profile, prop, attribute, direction)
+    report = check(direction=direction, schema=schema, include_value_ranges=True)
+    assert not any(
+        s.check == "ed.schema.type_incompatible" and "non_atomic_type" in s.reason
+        for s in report.skipped
+    )
+    ranges = [i for i in report.issues if i.check == "ed.schema.value_range"]
+    assert bool(ranges) == bool(expected.value_range)
+    if ranges:
+        assert expected.value_range is not None
+        assert ranges[0].level.value == ("предупреждение" if direction == "send" else "info")
+        assert direction in ranges[0].message
+        assert ranges[0].address in ranges[0].message
+        assert expected.value_range_consequence in ranges[0].message
+        assert expected.value_range in ranges[0].message
+        assert ranges[0].address == "ПКО/Тест/ПКС/Код"
+
+
+def test_string_family_mismatch_is_checked():
+    report = check(
+        BASE.replace("// <properties>", 'ДобавитьПКС(СвойстваШапки, "Флаг", "Номер", 0);')
+    )
+    assert any(
+        i.check == "ed.schema.type_incompatible" and i.address == "ПКО/Тест/ПКС/Номер"
+        for i in report.issues
+    )
 
 
 @pytest.mark.parametrize(
@@ -92,7 +148,7 @@ def test_types_incompatible_and_atomic_boundary():
     assert not check(text.replace('"Флаг", "Дата"', '"Дата", "Дата"')).issues
 
 
-@pytest.mark.parametrize("name", ["Перечисление", "Объединение", "Произвольный", "Номер"])
+@pytest.mark.parametrize("name", ["Перечисление", "Объединение", "Произвольный"])
 def test_unproven_atomic_families_are_skipped(name):
     report = check(
         BASE.replace("// <properties>", f'ДобавитьПКС(СвойстваШапки, "Флаг", "{name}", 0);')

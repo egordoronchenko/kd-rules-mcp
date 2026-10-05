@@ -16,12 +16,18 @@ from kd2_rules_mcp.ed.executor_profile import (
     ProfileDetection,
     ReceivePath,
 )
-from kd2_rules_mcp.ed.forms import ENTRYPOINTS
+from kd2_rules_mcp.ed.forms import ENTRYPOINTS, EVENT_SIGNATURES
 from kd2_rules_mcp.ed.lexer import lex, tokenize
 from kd2_rules_mcp.ed.model import EdDocument
 from kd2_rules_mcp.ed.reader import read_manager_text
 from kd2_rules_mcp.ed.refs import ReferenceIndex, build_references, norm_name
-from kd2_rules_mcp.ed.writer_import import import_signature
+from kd2_rules_mcp.ed.writer_import import (
+    code_occurrences,
+    code_rule_references,
+    declarative_diagnostics,
+    import_signature,
+    property_directions,
+)
 from kd2_rules_mcp.ed.writer_model import ManagerModel
 from kd2_rules_mcp.validation.ed_links import validate_links
 from kd2_rules_mcp.validation.report import Issue, ValidationReport
@@ -29,6 +35,138 @@ from kd2_rules_mcp.validation.report import Issue, ValidationReport
 
 def _direction(rule, direction: str) -> bool:
     return direction in rule.directions or "both" in rule.directions
+
+
+def _declarative_checks(model: ManagerModel, report: ValidationReport, addresses) -> None:
+    """Проверяет декларации, направления ссылок и заполнение ПКС."""
+    guards = {g.logical_id: g for g in model.guards}
+    messages = {
+        "reference_case_mismatch": "Исполнитель сравнивает имена точно — проверьте. "
+        "Описание платформы; живым обменом не подтверждено",
+        "rule_namespace_collision": "Имена ПКО и ПКПД совпадают; ПКПД перехватывает поиск "
+        "имени правила (XDTO:1543,6818)",
+        "parameter_duplicate": "Имена параметров совпадают без учёта регистра: "
+        "ключ Структуры будет перезаписан",
+        "parameter_name": "Имя параметра должно быть идентификатором поля Структуры",
+    }
+    for code, address in declarative_diagnostics(model):
+        emit = report.warning if code == "reference_case_mismatch" else report.error
+        emit("ed.writer." + code, address, messages[code])
+    names = defaultdict(list)
+    for target in (*model.pko, *model.pkpd):
+        names[target.name].append(target)
+    for key, name, line, directions in code_rule_references(model):
+        if not name:
+            continue
+        if name not in names and any(n.casefold() == name.casefold() for n in names):
+            report.warning(
+                "ed.writer.reference_case_mismatch",
+                addresses[key],
+                f"Строка {line}: " + messages["reference_case_mismatch"],
+            )
+            continue
+        missing = [
+            d for d in sorted(directions) if not any(_direction(t, d) for t in names.get(name, ()))
+        ]
+        if missing:
+            report.error(
+                "ed.writer.reference_direction",
+                addresses[key],
+                f"Строка {line}: правило инструкции «{name}» отсутствует "
+                f"в направлении {', '.join(missing)}; исполнитель не найдёт цель "
+                "(XDTO:1294–1300,1530–1554,502–508)",
+            )
+    for rule in model.pko:
+        for group_guards, props in [
+            ((), rule.properties),
+            *((g.guards, g.properties) for g in rule.groups),
+        ]:
+            for prop in props:
+                name = prop.conversion.name
+                if not name or prop.conversion.resolution == "computed" or name not in names:
+                    continue
+                missing = [
+                    d
+                    for d in sorted(property_directions(rule, prop, guards, group_guards))
+                    if not any(_direction(t, d) for t in names.get(name, ()))
+                ]
+                if missing:
+                    report.error(
+                        "ed.writer.reference_direction",
+                        addresses[prop.logical_id],
+                        f"Правило «{name}» отсутствует в направлении {', '.join(missing)}; "
+                        "исполнитель не найдёт цель ПКС (XDTO:502–508,1543,6818)",
+                    )
+    predefined = {r.logical_id: r for r in model.pkpd}
+    unverified = {
+        e.logical_id
+        for e in model.import_report.entries
+        if e.reason == "helper_semantics_unverified"
+    }
+    events = {
+        "send": (
+            "ПриОтправкеДанных",
+            "ДанныеXDTOИзДанныхИБ, XDTO:1203–1205,1250–1270",
+        ),
+        "receive": (
+            "ПриКонвертацииДанныхXDTO",
+            "СтруктураОбъектаXDTOВДанныеИБ, XDTO:1855–1885; "
+            "КонвертацияСвойстваСтруктурыОбъектаXDTO, XDTO:6772–6799",
+        ),
+    }
+
+    def applies(member, direction):
+        return all(
+            g.direction in (None, "both", direction)
+            for key in member.guards
+            if (g := guards.get(key)) is not None
+        )
+
+    for rule in model.pko:
+        for prop in rule.properties:
+            # Старый помощник не удостоверяет смысл флага/ссылки; его уже
+            # отмечает ed.writer.incomplete, заполнение ПКС здесь не угадываем.
+            if prop.logical_id in unverified:
+                continue
+            for direction, (event, evidence) in events.items():
+                if not _direction(rule, direction) or not applies(prop, direction):
+                    continue
+                needs_handler = (
+                    not prop.configuration_property and bool(prop.format_property)
+                    if direction == "send"
+                    else not prop.format_property and bool(prop.configuration_property)
+                )
+                if (
+                    prop.algorithm_flag
+                    and needs_handler
+                    and not any(
+                        e.event == event
+                        and applies(e, direction)
+                        and (e.target.name.strip() or e.target.resolution == "computed")
+                        for e in rule.events
+                    )
+                ):
+                    report.warning(
+                        "ed.writer.algorithm_handler",
+                        addresses[prop.logical_id],
+                        f"Алгоритмическая ПКС {direction}: нет обработчика «{event}» у ПКО "
+                        f"«{rule.name}»; свойство не будет заполнено ({evidence})",
+                    )
+                target = predefined.get(prop.conversion.target_id or "")
+                if target is not None and not any(
+                    v.direction == direction for v in target.mappings
+                ):
+                    evidence = (
+                        "ВыгрузитьСвойство, XDTO:1543–1550"
+                        if direction == "send"
+                        else "КонвертацияСвойстваСтруктурыОбъектаXDTO, XDTO:6818–6824"
+                    )
+                    report.warning(
+                        "ed.writer.pkpd_direction",
+                        addresses[prop.logical_id],
+                        f"ПКПД «{target.name}» не содержит пар направления {direction}; "
+                        f"значение свойства останется пустым ({evidence})",
+                    )
 
 
 def _signature_matches(actual, expected) -> bool:
@@ -40,6 +178,153 @@ def _signature_matches(actual, expected) -> bool:
         and tuple(p.by_value for p in actual.parameters)
         == tuple(p.by_value for p in expected.parameters)
     )
+
+
+def _code_checks(
+    model: ManagerModel, document: EdDocument, report: ValidationReport, addresses
+) -> None:
+    """Рамки и связи W2; тела только лексически индексируются, не исполняются."""
+    routines = {r.name.casefold(): r for r in document.routines}
+    units = {u.logical_id: u for u in model.code_units}
+    bindings = [(rule, event) for rule in (*model.pko, *model.pod) for event in rule.events]
+    bound = {e.target.target_id for _, e in bindings}
+    by_name = {u.name.casefold(): u for u in model.code_units}
+    cases = {c.literal_name: c for c in document.dispatcher_cases}
+    sources = {s.file_id: s for s in document.files}
+    for dispatcher in document.routines:
+        if "dispatcher" not in dispatcher.roles:
+            continue
+        literals = {}
+        for statement in lex(sources[dispatcher.span.file_id]).statements:
+            if not (
+                dispatcher.body_span.char_start
+                <= statement.span.char_start
+                < dispatcher.body_span.char_end
+            ):
+                continue
+            tokens = statement.tokens
+            if not (
+                statement.head in ("если", "иначеесли")
+                and len(tokens) >= 5
+                and tokens[1].folded in ("имяпроцедуры", "имяфункции")
+                and tokens[2].value == "="
+                and tokens[3].kind == "string"
+            ):
+                continue
+            literal = tokens[3].value
+            if previous := literals.get(literal):
+                unit = by_name.get(dispatcher.name.casefold())
+                report.error(
+                    "ed.writer.dispatcher_literal_duplicate",
+                    addresses[unit.logical_id] if unit else "Код/" + dispatcher.name,
+                    f"Литерал «{literal}» повторяется в одном диспетчере: "
+                    f"строки {previous.span.line_start} и {statement.span.line_start}; "
+                    "следующая ветка недостижима",
+                )
+            else:
+                literals[literal] = statement
+    for _rule, event in bindings:
+        unit = units.get(event.target.target_id or "")
+        method = routines.get((unit.name if unit else event.target.name).casefold())
+        address = addresses[event.logical_id]
+        if method is None:
+            report.error(
+                "ed.writer.binding_method",
+                address,
+                "Привязка указывает на отсутствующий метод; значение сохранено как есть",
+            )
+            continue
+        case = cases.get(event.target.name)
+        if case is None or case.target.raw.casefold() != method.name.casefold():
+            report.error(
+                "ed.writer.handler_dispatcher",
+                address,
+                "У метода привязки нет соответствующей ветки диспетчера; "
+                "литерал сравнивается точно, обработчик не будет вызван",
+            )
+        if event.event == "ПослеЗагрузкиВсехДанных":
+            continue
+        expected = EVENT_SIGNATURES.get(event.event, ())
+        signature = import_signature(method)
+        parameters = len(signature.parameters)
+        minimum = max(
+            (n + 1 for n, p in enumerate(signature.parameters) if p.default.state == "unset"),
+            default=0,
+        )
+        if not any(minimum <= len(p) <= parameters for p in expected) or signature.routine_kind != (
+            "function" if event.event == "ВыборкаДанных" else "procedure"
+        ):
+            report.error(
+                "ed.writer.handler_signature",
+                address,
+                "Сигнатура обработчика не соответствует событию; "
+                "Template.txt:75–91, ObjectModule.bsl:3250–3287",
+            )
+    for unit in model.code_units:
+        if "handler" in unit.roles and unit.logical_id not in bound:
+            report.error(
+                "ed.writer.handler_binding",
+                addresses[unit.logical_id],
+                "Метод обработчика не связан с правилом",
+            )
+        if "handler" in unit.roles and unit.name.casefold() not in {
+            c.target.raw.casefold() for c in document.dispatcher_cases
+        }:
+            report.error(
+                "ed.writer.handler_dispatcher",
+                addresses[unit.logical_id],
+                "У обработчика нет ветки диспетчера",
+            )
+    for case in document.dispatcher_cases:
+        method = routines.get(case.target.raw.casefold())
+        if method is not None:
+            signature = import_signature(method)
+            minimum = max(
+                (n + 1 for n, p in enumerate(signature.parameters) if p.default.state == "unset"),
+                default=0,
+            )
+            maximum = len(signature.parameters)
+            if not minimum <= len(case.arguments) <= maximum:
+                member = next(
+                    (c for c in model.dispatcher_cases if c.name == case.literal_name), None
+                )
+                report.error(
+                    "ed.writer.dispatcher_arguments",
+                    addresses[member.logical_id] if member else "Ветка/" + case.literal_name,
+                    f"Ветка передаёт {len(case.arguments)} аргументов, метод принимает "
+                    f"{minimum}–{maximum} с учётом значений по умолчанию",
+                )
+        if case.target.raw.casefold() not in routines:
+            if any(
+                i.check == "ed.dispatcher.target_missing" and f"«{case.literal_name}»" in i.message
+                for i in report.issues
+            ):
+                # validate_links уже выдал адресную ошибку этой ветки, не дублируем её.
+                continue
+            unit = by_name.get(case.literal_name.casefold())
+            address = addresses[unit.logical_id] if unit else "Ветка/" + case.literal_name
+            report.error(
+                "ed.writer.dispatcher_method",
+                address,
+                "Ветка диспетчера вызывает отсутствующий метод",
+            )
+    used = (
+        bound
+        | {
+            o.target_id
+            for o in code_occurrences(model)
+            if o.kind == "algorithm_call" and o.owner_id != o.target_id
+        }
+        | {c.target.target_id for c in model.dispatcher_cases}
+    )
+    for unit in model.code_units:
+        if "algorithm" in unit.roles and unit.logical_id not in used:
+            report.warning(
+                "ed.writer.algorithm_unused",
+                addresses[unit.logical_id],
+                "Нет прямых вызовов, привязок и веток алгоритма; "
+                "вычисляемые вызовы не устанавливаются",
+            )
 
 
 def _server_routines(document: EdDocument):
@@ -404,13 +689,17 @@ def validate_writer(
                 "Конвертация",
                 f"Функция версии не возвращает интерфейс модели {interface}; XDTO:4763–4771",
             )
-    for name, rows in routines.items():
+    all_routines = defaultdict(list)
+    for routine in document.routines:
+        all_routines[routine.name.casefold()].append(routine)
+    for rows in all_routines.values():
         if len(rows) > 1:
             report.error(
                 "ed.writer.name_collision",
                 "Код/" + rows[0].name,
                 "Повтор имени метода без учёта регистра; вызовы неоднозначны (XDTO:4716–4742)",
             )
+    for name, rows in routines.items():
         if name in ("выполнитьпроцедурумодуляменеджера", "выполнитьфункциюмодуляменеджера"):
             for routine in rows:
                 body = document.files[0].text[
@@ -473,6 +762,8 @@ def validate_writer(
     report.skipped.extend(
         s for s in linked.skipped if s.check in selected or s.check == "ed.handler.extended_events"
     )
+    _declarative_checks(model, report, addresses)
+    _code_checks(model, document, report, addresses)
     # XDTO:781–795,1199–1243,1527–1565,8402–8469: ПОД — не единственный вход.
     used, uncertain_send = _reachable_rules(model, document, references, "send", addresses, calls)
     for rule in model.pko:

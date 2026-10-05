@@ -10,6 +10,7 @@ class Level(StrEnum):
 
     ERROR = "ошибка"
     WARNING = "предупреждение"
+    INFO = "info"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,10 @@ class ValidationReport:
         """Добавляет предупреждение."""
         self.issues.append(Issue(Level.WARNING, check, address, message))
 
+    def info(self, check: str, address: str, message: str) -> None:
+        """Добавляет сведения, не требующие подтверждения предупреждения."""
+        self.issues.append(Issue(Level.INFO, check, address, message))
+
     def skip(self, check: str, reason: str) -> None:
         """Отмечает проверку как невыполненную."""
         self.skipped.append(Skipped(check, reason))
@@ -95,6 +100,9 @@ class ValidationReport:
             text = f"Ошибок нет, предупреждений: {warnings}"
         else:
             text = "Ошибок и предупреждений нет"
+        information = sum(issue.level is Level.INFO for issue in self.issues)
+        if information:
+            text += f"; сведений: {information}"
         if self.skipped:
             checks = ", ".join(sorted({item.check for item in self.skipped}))
             text += f"; не выполнены проверки: {checks} — результат неполный"

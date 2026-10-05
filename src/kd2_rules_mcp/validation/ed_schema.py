@@ -13,6 +13,7 @@ from kd2_rules_mcp.ed.schema.model import EdSchema, SchemaProperty, SchemaType
 from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
 from kd2_rules_mcp.ed.schema.resolver import is_reference, property_type, table_row
 from kd2_rules_mcp.ed.schema.xdto import XS
+from kd2_rules_mcp.validation.ed_compatibility import compatibility, primitive_limits
 from kd2_rules_mcp.validation.ed_structure_snapshot import (
     CheckContext,
     StructureSnapshot,
@@ -80,7 +81,7 @@ def enum_values(schema: EdSchema, typ: SchemaType) -> tuple[frozenset[str], bool
 
 
 def atomic_family(schema: EdSchema, prop: SchemaProperty) -> str | None:
-    """Только доказанное атомарное семейство; enum/union/ref/any исключены."""
+    """Прежняя граница overlay: сохраняет отчёты опубликованных комплектов."""
     if prop.status != "complete":
         return None
     target = property_type(schema, prop)
@@ -156,6 +157,8 @@ def validate_schema(
     coverage: Counter[str] | None = None,
     *,
     context: EffectiveContext | None = None,
+    include_value_ranges: bool = False,
+    legacy_atomic_only: bool = True,
 ) -> ValidationReport:
     """Проверяет выбранную схему и прямые типы при наличии структуры."""
     if isinstance(document, LayeredManager):
@@ -360,7 +363,8 @@ def validate_schema(
                             checking.skip(check, "unresolved_configuration_type", prop)
                         elif has_handler(rule, direction, checking.applicability):
                             checking.skip(check, "handler_may_supply", prop)
-                        else:
+                        elif legacy_atomic_only:
+                            # Overlay хранит эти отчёты в комплекте: прежний протокол побайтно.
                             expected = atomic_family(schema, resolved_prop)
                             types = set(actual[0].types)
                             if (
@@ -379,6 +383,47 @@ def validate_schema(
                                         "требуют преобразования, "
                                         "не описанного прямым ПКС.",
                                     )
+                        else:
+                            target = property_type(schema, resolved_prop)
+                            family, _, _ = primitive_limits(profile, resolved_prop)
+                            if (
+                                family is None
+                                or (target and is_reference(schema, target))
+                                or len(actual[0].types) != 1
+                                or actual[0].types[0] not in {"Строка", "Число", "Дата", "Булево"}
+                            ):
+                                checking.skip(check, "non_atomic_type", prop)
+                            else:
+                                compatible = compatibility(
+                                    profile, resolved_prop, actual[0], direction
+                                )
+                                if compatible.refusal == "conversion_required":
+                                    checking.skip(check, "qualifiers_unavailable", prop)
+                                else:
+                                    checking.checked()
+                                    if not compatible.compatible:
+                                        checking.report.warning(
+                                            check,
+                                            checking.address(prop),
+                                            f"Типы свойства «{prop.format_property}» "
+                                            "требуют преобразования, "
+                                            "не описанного прямым ПКС.",
+                                        )
+                                    if include_value_ranges and compatible.value_range:
+                                        emit = (
+                                            checking.report.warning
+                                            if compatible.value_range_warning
+                                            else checking.report.info
+                                        )
+                                        emit(
+                                            "ed.schema.value_range",
+                                            checking.address(prop),
+                                            f"Прямая ПКС ({direction}), {checking.address(prop)}: "
+                                            f"{compatible.value_range}; "
+                                            f"{compatible.value_range_consequence}; "
+                                            "проверьте допустимые значения или задайте "
+                                            "алгоритм преобразования.",
+                                        )
 
                 if direction != "send":
                     continue

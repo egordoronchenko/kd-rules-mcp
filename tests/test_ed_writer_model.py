@@ -142,7 +142,7 @@ def test_import_counts_states_and_exact_blocks():
     document = read_manager_text(SYNTHETIC)
     model, report = imported()
     assert model.counts == {key: document.counts[key] for key in model.counts}
-    assert report.counts["pks"] == {"editable": 2, "retained": 4, "blocked": 0}
+    assert report.counts["pks"] == {"editable": 4, "retained": 2, "blocked": 0}
     assert report.counts["pko"]["editable"] == 2
     assert model.pko[0].directions == ("send",)
     assert model.pko[1].directions == ("receive",)
@@ -299,7 +299,7 @@ def test_bom_crlf_and_multiline_code_are_exact():
     assert loaded.source_files[0].bytes() == text.encode("utf-8")
     assert loaded.header.text_style.bom and loaded.header.text_style.newline == "\r\n"
     assert loaded.code_units[0].body == model.code_units[0].body
-    assert loaded.conversion_events[0].state == "retained"
+    assert loaded.conversion_events[0].state == "editable"
 
 
 def test_changed_helper_and_missing_dispatch_case_are_visible():
@@ -568,7 +568,7 @@ def test_namespace_update_and_invalid_argument_positions():
     assert preview(updated, (bad,), expected_revision=updated.revision).failures
 
 
-def test_known_code_reference_blocks_and_computed_reference_requires_confirmation():
+def test_known_and_computed_code_references_require_confirmation():
     code = """\n#Область Алгоритмы
 Процедура Business(КомпонентыОбмена)
     ОбменДаннымиXDTOСервер.ПКОПоИмени(КомпонентыОбмена, "Item");
@@ -585,26 +585,23 @@ def test_known_code_reference_blocks_and_computed_reference_requires_confirmatio
             patch=PkoPatch(name="Renamed"),
         )
         plan = preview(model, (op,), expected_revision=model.revision)
-        if text == code:
-            assert plan.failures and plan.failures[0].references
-            assert plan.model == model
-        else:
-            assert not plan.failures and plan.notices[0].references
-            with pytest.raises(ManagerOperationError, match="вычисляемым"):
-                apply(
-                    model,
-                    (op,),
-                    expected_revision=model.revision,
-                    expected_preview_hash=plan.preview_hash,
-                )
-            confirmed = apply(
+        assert not plan.failures and plan.notices[0].references
+        with pytest.raises(ManagerOperationError):
+            apply(
                 model,
                 (op,),
                 expected_revision=model.revision,
                 expected_preview_hash=plan.preview_hash,
-                confirmations=tuple((n.code, n.notice_hash) for n in plan.notices),
             )
-            assert confirmed.pko[0].name == "Renamed"
+        confirmed = apply(
+            model,
+            (op,),
+            expected_revision=model.revision,
+            expected_preview_hash=plan.preview_hash,
+            confirmations=tuple((n.code, n.notice_hash) for n in plan.notices),
+        )
+        assert confirmed.pko[0].name == "Renamed"
+        assert confirmed.code_units == model.code_units
     model, _ = imported(
         SYNTHETIC
         + code.replace(
@@ -906,9 +903,10 @@ def test_review_missing_reference_address_retry_and_event_text():
     )
     model, _ = imported(text)
     event = model.pko[0].events[0]
-    assert event.state == "retained" and any(
-        'ПриОтправкеДанных = "Handler"' in b.text for b in model.retained_blocks
-    )
+    assert event.state == "editable" and event.target.resolution == "missing"
+    from kd2_rules_mcp.ed.writer import render
+
+    assert 'ПриОтправкеДанных = "Handler"' in render(model).text
 
 
 @pytest.mark.parametrize(
@@ -1157,10 +1155,8 @@ def test_layout_partition_and_views_are_exact(crlf, bom):
     assert layout_labels(model, group.logical_id) == ["G1", "// GC между G1 и G2", "G2"]
     other, _ = imported()
     parameter = other.parameters[0]
-    assert parameter.inside_leaf_id is not None
-    assert parameter.logical_id not in {e.entity_id for c in other.layouts for e in c.elements}
-    retained = next(b for b in other.retained_blocks if b.logical_id == parameter.inside_leaf_id)
-    assert "ЗаполнитьПараметрыКонвертации" in retained.text
+    assert parameter.inside_leaf_id is None and parameter.state == "editable"
+    assert parameter.logical_id in {e.entity_id for c in other.layouts for e in c.elements}
     assert other.pko[0].groups[0].properties[0].inside_leaf_id is not None
     assert all(
         not hasattr(b, "before_id") and not hasattr(b, "after_id") for b in model.retained_blocks
@@ -1327,7 +1323,7 @@ def test_layout_operations_have_explicit_sequences_and_preserve_text():
 def test_layout_refusals_and_computed_dependency_scope():
     from kd2_rules_mcp.ed.writer_model import CodeUnit, Signature
 
-    model, _ = imported(layout_input())
+    model, _ = imported(layout_input().replace('0, "Other");', '0, "Other", "urn:w4");'))
     rule = model.pko[0]
     op = ManagerOperation(
         "directions",
@@ -1346,10 +1342,7 @@ def test_layout_refusals_and_computed_dependency_scope():
         owner_id=rule.logical_id,
         patch=PropertyPatch(configuration_property="N", format_property="N"),
     )
-    assert (
-        preview(model, (missing,), expected_revision=model.revision).failures[0].reason
-        == "model_invalid"
-    )
+    assert not preview(model, (missing,), expected_revision=model.revision).failures
     retained_leaf = next(
         e.block_id
         for c in model.layouts
@@ -1506,8 +1499,9 @@ def test_third_review_single_rule_regions_and_retained_event_refusals():
     assert rule.events and all(e.reason for e in report.entries if e.state == "retained")
     op = ManagerOperation("delete-event-owner", "pko", "delete", target_id=rule.logical_id)
     plan = preview(model, (op,), expected_revision=model.revision)
-    assert plan.failures[0].reason == "opaque_context_changed"
-    assert plan.failures[0].references
+    assert not plan.failures
+    assert all(r.logical_id != rule.logical_id for r in plan.model.pko)
+    assert all(e.logical_id != rule.events[0].logical_id for r in plan.model.pko for e in r.events)
     event_leaf = next(
         e for c in model.layouts for e in c.elements if e.entity_id == rule.events[0].logical_id
     )
@@ -1613,7 +1607,7 @@ def test_layout_corrupt_leaf_and_read_only_view_are_rejected():
     )
     with pytest.raises(ValueError, match="перекрываются"):
         validate_model(bad)
-    parameter = model.parameters[0]
+    parameter = model.pko[0].groups[0].properties[0]
     root = next(c for c in model.layouts if c.logical_id == model.root_layouts[0])
     bad = replace(
         model,
@@ -1781,7 +1775,9 @@ def test_layout_field_operators_own_comments_and_new_fields_have_slots():
         ),
     )
     assert layout_labels(cleared, rule.logical_id) == layout_labels(model, rule.logical_id)
-    opaque, _ = imported(probe_module('ДобавитьПКС(СвойстваШапки, "R", "R", 0, "Other");'))
+    opaque, _ = imported(
+        probe_module('ДобавитьПКС(СвойстваШапки, "R", "R", 0, "Other", "urn:w4");')
+    )
     refusal = ManagerOperation(
         "clear-format",
         "pko",

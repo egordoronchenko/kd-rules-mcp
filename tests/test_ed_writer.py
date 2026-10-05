@@ -210,6 +210,7 @@ def test_third_review_boundaries_fingerprints_and_shared_line():
             "create",
             owner_id=rule.logical_id,
             container_id=rule.logical_id,
+            after_id=None,
             patch=PropertyPatch(configuration_property="First", format_property="First"),
         ),
     )
@@ -304,7 +305,8 @@ def test_invalid_mode_refused():
 
 
 def test_retained_inline_comment_is_stored_once_and_positional_address_refused():
-    model, _ = imported(layout_input().replace('0, "Other");', '0, "Other"); // хвост R'))
+    # Пространство имён ссылочной ПКС остаётся сохранённой формой W4.
+    model, _ = imported(layout_input().replace('0, "Other");', '0, "Other", "urn:w4"); // хвост R'))
     retained = next(p for p in model.pko[0].properties if p.state == "retained")
     element = next(
         e for c in model.layouts for e in c.elements if e.entity_id == retained.logical_id
@@ -372,7 +374,7 @@ def test_dispatcher_chain_is_generator_form_without_else_or_exception():
 
 
 def test_insert_after_retained_and_delete_reinsert_series_render_roundtrip():
-    model, _ = imported(layout_input())
+    model, _ = imported(layout_input().replace('0, "Other");', '0, "Other", "urn:w4");'))
     rule = model.pko[0]
     retained = next(p for p in rule.properties if p.state == "retained")
     initial_texts = {b.logical_id: b.text for b in model.retained_blocks}

@@ -1,17 +1,23 @@
 """Сервис полного менеджера: сквозной путь, долговечность и изоляция прежних контрактов."""
 
+import ast
+import inspect
 import json
 import os
 import re
 import shutil
 import sqlite3
+from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
+from typing import get_args
 
 import anyio
 import pytest
 from lxml import etree
 from mcp import Client
 
+from kd2_rules_mcp.authoring.ed import manager_operations as writer_operations
 from kd2_rules_mcp.authoring.ed.manager_render import ManagerRoute, render_manager_kit
 from kd2_rules_mcp.ed import executor_profile
 from kd2_rules_mcp.ed.writer import render
@@ -152,6 +158,7 @@ def writer_setup(tmp_path, monkeypatch):
         path.write_text(text, encoding="utf-8")
     service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
     conn = structure()
+    conn.execute("UPDATE properties SET string_length=10 WHERE name='Наименование'")
     conn.executemany(
         "INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)",
         [
@@ -218,6 +225,435 @@ def files_at(path):
     return {p.relative_to(path).as_posix(): p.read_bytes() for p in path.rglob("*") if p.is_file()}
 
 
+def test_long_packet_pages_explain_size_limit_and_keep_every_operation(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    packet = [
+        {
+            "client_id": f"long-{n}",
+            "kind": "manager",
+            "action": "update",
+            "patch": {"title": string_value(str(n) + "x" * 1600)},
+        }
+        for n in range(5)
+    ]
+    rows, offset = [], 0
+    while True:
+        page = service.ed_apply(
+            created["project_id"],
+            created["revision"],
+            packet,
+            section="operations",
+            offset=offset,
+            limit=50,
+        )
+        rows.extend(page["items"])
+        assert page["next_offset"] == offset + len(page["items"])
+        if not page["has_more"]:
+            break
+        assert page["truncated_by"] == "size"
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    assert len(rows) == page["total"] == 5
+
+
+@pytest.mark.parametrize("length", [5000, 0])
+def test_send_string_overflow_r4_needs_build_ack_after_restart(writer_setup, length):
+    service, args, _ = writer_setup
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute(
+            "UPDATE properties SET string_length=? WHERE name='Наименование'", (length,)
+        )
+        connection.execute("UPDATE meta SET value='u8-r4' WHERE key='input_hash'")
+    created = service.ed_create(**args)
+    _, _, applied = apply_packet(service, created, manager_operations(split=True))
+    report = service.ed_validate(
+        applied["document_id"], schema_id=args["schema_id"], structure_id="host"
+    )
+    issue = next(i for i in report["issues"]["items"] if "(send)" in i["message"])
+    assert issue["level"] == "предупреждение"
+    assert issue["address"] in issue["message"]
+    assert "не выгрузится" in issue["message"] and "XDTO:6103–6109" in issue["message"]
+    service = Kd2Service(service.settings)
+    preview = build(service, applied)
+    assert preview["validation"]["warnings"] == 1
+    assert any(n.startswith("ed.schema.value_range:") for n in preview["required_acknowledgements"])
+    with pytest.raises(EdAuthoringAckRequiredError):
+        build(service, applied, mode="write", expected_preview_hash=preview["build_hash"])
+    written = build(
+        service,
+        applied,
+        mode="write",
+        expected_preview_hash=preview["build_hash"],
+        acknowledged_notices=preview["required_acknowledgements"],
+    )
+    assert written["written"]
+
+
+def test_auto_r4_extension_names_request_project_instead_of_read_error(writer_setup):
+    service, args, _ = writer_setup
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute("UPDATE meta SET value='[\"ExampleExtension\"]' WHERE key='extensions'")
+    with pytest.raises(EdAuthoringPreconditionError) as error:
+        service.ed_authoring_candidates(
+            scope="manager",
+            kind="objects",
+            reference_document_id="auto",
+            target={"schema_id": args["schema_id"], "structure_id": "host", "direction": "send"},
+        )
+    assert error.value.details["failures"][0]["id"] == "structure_extension_paths_unavailable"
+    assert "project_id" in str(error.value) and "явный документ" in str(error.value)
+
+
+def test_auto_r4_recovers_extension_paths_from_source(writer_setup, tmp_path):
+    service, args, _ = writer_setup
+    extension = tmp_path / "extension"
+    extension.mkdir()
+    (extension / "Configuration.xml").write_text(
+        '<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">'
+        '<Configuration uuid="c7c3b722-aedf-4ebc-aed5-6a905455f6fe">'
+        "<Properties><Name>ExampleExtension</Name>"
+        "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+        "</Properties></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute("UPDATE meta SET value='[\"ExampleExtension\"]' WHERE key='extensions'")
+        connection.execute(
+            "INSERT INTO meta(key,value) VALUES ('extension_paths',?)",
+            (json.dumps([str(extension)]),),
+        )
+    page = service.ed_authoring_candidates(
+        scope="manager",
+        kind="objects",
+        reference_document_id="auto",
+        target={"schema_id": args["schema_id"], "structure_id": "host", "direction": "send"},
+    )
+    assert "items" in page
+
+
+def test_offset_r4_does_not_hide_sibling_failures(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    good = [
+        {
+            "client_id": f"t{n}",
+            "kind": "manager",
+            "action": "update",
+            "patch": {"title": string_value("T" * 300)},
+        }
+        for n in range(8)
+    ]
+    bad = [
+        {"client_id": f"bad{n}", "kind": "table_part", "action": "create", "patch": {}}
+        for n in range(3)
+    ]
+    page = service.ed_apply(
+        "positions", created["revision"], good + bad, section="operations", offset=5, limit=3
+    )
+    assert page["offset"] == 5
+    assert page["failures"]["offset"] == 0
+    assert len(page["failures"]["items"]) == page["failures"]["total"] == 3
+
+
+def test_create_offset_r4_keeps_profile_notice_visible(writer_setup):
+    service, args, root = writer_setup
+    for path in root.glob("CommonModules/ОбменДанными*/Ext/Module.bsl"):
+        path.write_bytes(path.read_bytes() + b"// changed\n")
+    page = service.ed_create(**args, offset=1, limit=1)
+    assert page["import_report"]["offset"] == 1
+    assert page["notices_offset"] == 0
+    assert page["notices"][0]["id"] == "executor_profile_unverified"
+
+
+def test_create_offset_r4_only_pages_selected_input_differences(writer_setup, monkeypatch):
+    service, args, _ = writer_setup
+    service.ed_create(**args)
+    differences = [{"field": f"input-{n}", "existing": "old", "current": "new"} for n in range(3)]
+    monkeypatch.setattr(service, "_manager_input_differences", lambda *a: ({}, differences))
+    page = service.ed_create(**args, offset=2, limit=2)
+    notice = page["notices"][0]
+    assert notice["differences"] == differences[:2] and notice["has_more"]
+    following = service.ed_create(
+        **args, section="differences", offset=notice["next_offset"], limit=2
+    )
+    assert following["notices"][0]["differences"] == differences[2:]
+    assert not following["notices"][0]["has_more"]
+    assert following["import_report"]["offset"] == following["notices_offset"] == 0
+
+
+def test_preview_lock_r4_reports_busy_not_stale(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    lock = service.manager_workspace.directory / "positions" / ".lock"
+    lock.write_text(json.dumps({"pid": os.getpid(), "created": 9e12}), encoding="utf-8")
+    try:
+        with pytest.raises(EdAuthoringPreconditionError) as error:
+            service.ed_apply("positions", created["revision"], manager_operations())
+        assert error.value.details["failures"][0]["id"] == "project_busy"
+        assert "повторите" in str(error.value)
+    finally:
+        lock.unlink()
+    assert service.ed_apply("positions", created["revision"], manager_operations())["preview_hash"]
+
+
+def test_reference_manager_null_r4_has_version_reason(writer_setup):
+    service, args, _ = writer_setup
+    page = service.ed_create(**{**args, "schema_id": None, "format_version": "9.99"})
+    assert page["reference_manager"] is None
+    assert page["reference_manager_reason"]["id"] == "format_version_not_mapped"
+    assert "9.99" in page["reference_manager_reason"]["message"]
+
+
+def test_apply_replay_and_build_pages_advance_through_all_rows(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    packet = [
+        {
+            "client_id": str(n) + "x" * 180,
+            "kind": "manager",
+            "action": "update",
+            "patch": {"title": string_value(str(n))},
+        }
+        for n in range(50)
+    ]
+    preview = service.ed_apply(args["project_id"], created["revision"], packet)
+    call = {
+        "project_id": args["project_id"],
+        "expected_revision": created["revision"],
+        "mode": "apply",
+        "expected_preview_hash": preview["preview_hash"],
+    }
+    applied = service.ed_apply(**call)
+    assert applied["has_more"]
+    rows = list(applied["items"])
+    offset = applied["next_offset"]
+    while True:
+        page = service.ed_apply(**call, offset=offset)
+        assert page["offset"] == offset and page["next_offset"] == offset + len(page["items"])
+        rows.extend(page["items"])
+        if not page["has_more"]:
+            break
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    assert len(rows) == page["total"]
+    for section in ("summary", "operations", "notices", "files", "issues_after", "skipped"):
+        offset, rows = 0, []
+        while True:
+            page = build(service, applied, section=section, offset=offset)
+            rows.extend(page["items"])
+            assert page["next_offset"] == offset + len(page["items"])
+            if not page["has_more"]:
+                break
+            assert page["next_offset"] > offset
+            offset = page["next_offset"]
+        assert len(rows) == page["total"]
+
+
+def test_rebind_notice_pages_keep_all_long_diagnostics(writer_setup, monkeypatch):
+    from kd2_rules_mcp.validation.report import ValidationReport
+
+    service, args, _ = writer_setup
+    service.ed_create(**args)
+    report = ValidationReport()
+    for n in range(45):
+        report.warning("ed.writer.test", f"ПКО/{n}", "diagnostic " * 40)
+    monkeypatch.setattr(service, "_manager_rebind_report", lambda *a: report)
+    rows, offset = [], 0
+    while True:
+        page = service.ed_create(
+            **{**args, "mode": "rebind"}, section="notices", offset=offset, limit=50
+        )
+        rows.extend(page["notices"])
+        assert page["notices_next_offset"] == offset + len(page["notices"])
+        if not page["notices_has_more"]:
+            break
+        assert page["notices_next_offset"] > offset
+        offset = page["notices_next_offset"]
+    assert len(rows) == page["notice_count"] == 45
+
+
+def test_apply_failure_subpages_can_be_continued(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    packet = [
+        {"client_id": f"missing-{n}", "kind": "pko", "action": "delete", "address": f"ПКО/Нет{n}"}
+        for n in range(10)
+    ]
+    first = service.ed_apply(args["project_id"], created["revision"], packet)
+    assert first["failures"]["total"] == 10 and first["failures"]["has_more"]
+    offset = first["failures"]["next_offset"]
+    following = service.ed_apply(
+        args["project_id"], created["revision"], packet, section="failures", offset=offset
+    )
+    assert following["failures"]["offset"] == offset
+    assert first["failures"]["items"] != following["failures"]["items"]
+    assert not following["failures"]["has_more"]
+
+
+def test_apply_saved_preview_after_restart_and_replay(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    preview = service.ed_apply(created["project_id"], created["revision"], manager_operations())
+    service = Kd2Service(service.settings)
+    result = service.ed_apply(
+        created["project_id"],
+        created["revision"],
+        mode="apply",
+        expected_preview_hash=preview["preview_hash"],
+    )
+    assert result["applied"] and result["revision"] == preview["future_revision"]
+    assert service.ed_overview(result["document_id"])["counts"]["pko"] == 1
+    replay = service.ed_apply(
+        created["project_id"],
+        created["revision"],
+        mode="apply",
+        expected_preview_hash=preview["preview_hash"],
+    )
+    assert replay["replayed"] and replay["revision"] == result["revision"]
+
+
+def test_manager_primitive_validation_and_ranges_preserve_reader_contract(writer_setup):
+    service, args, root = writer_setup
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute("UPDATE properties SET string_length=20 WHERE name='Наименование'")
+    created = service.ed_create(**args)
+    _, _, applied = apply_packet(service, created, manager_operations())
+    inputs = {"schema_id": args["schema_id"], "structure_id": "host"}
+    report = service.ed_validate(applied["document_id"], **inputs)
+    ranges = [i for i in report["issues"]["items"] if i["check"] == "ed.schema.value_range"]
+    assert len(ranges) == 1 and "20" in ranges[0]["message"] and "10" in ranges[0]["message"]
+    assert ranges[0]["level"] == "предупреждение"
+    assert report["summary"].get("info", 0) == 0 and report["summary"]["warnings"] == 1
+    assert (
+        service.ed_validate(applied["document_id"], **inputs, level="предупреждение")["issues"][
+            "items"
+        ]
+        == ranges
+    )
+    assert not any(
+        s["check"] == "ed.schema.type_incompatible" and "non_atomic_type" in s["reason"]
+        for s in service.ed_validate(applied["document_id"], **inputs, section="skipped")[
+            "skipped"
+        ]["items"]
+    )
+    source = root / "generated.bsl"
+    source.write_text(
+        render(service.manager_workspace.get(args["project_id"]).model).text, encoding="utf-8"
+    )
+    regular = service.ed_open(str(source))
+    ordinary_report = service.ed_validate(regular["project_id"], **inputs)
+    assert not ordinary_report["issues"]["items"]
+
+
+def test_manager_skipped_type_explains_conversion_action(writer_setup):
+    service, args, root = writer_setup
+    created = service.ed_create(**args)
+    operations = manager_operations()
+    operations[1]["patch"]["format_property"] = "Ссылка"
+    _, _, applied = apply_packet(service, created, operations)
+    inputs = {"schema_id": args["schema_id"], "structure_id": "host", "section": "skipped"}
+    rows = service.ed_validate(applied["document_id"], **inputs)["skipped"]["items"]
+    row = next(r for r in rows if r["reason"].startswith("non_atomic_type:"))
+    assert "ПКО" in row["hint"] and "алгоритм" in row["hint"]
+    assert ";" in row["reason"] and "алгоритм" not in row["reason"]
+    source = root / "generated.bsl"
+    source.write_text(
+        render(service.manager_workspace.get(args["project_id"]).model).text, encoding="utf-8"
+    )
+    regular = service.ed_open(str(source))
+    ordinary = service.ed_validate(regular["project_id"], **inputs)["skipped"]["items"]
+    assert all("hint" not in r for r in ordinary)
+
+
+def test_missing_or_evicted_saved_preview_requests_packet(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    previews = []
+    for n in range(10):
+        previews.append(
+            service.ed_apply(
+                created["project_id"],
+                created["revision"],
+                [
+                    {
+                        "client_id": str(n),
+                        "kind": "manager",
+                        "action": "update",
+                        "patch": {"title": string_value(str(n))},
+                    }
+                ],
+            )
+        )
+    for missing in ("0" * 64, previews[0]["preview_hash"]):
+        with pytest.raises(EdAuthoringPreconditionError) as error:
+            service.ed_apply(
+                created["project_id"],
+                created["revision"],
+                mode="apply",
+                expected_preview_hash=missing,
+            )
+        assert error.value.details["failures"][0]["id"] == "preview_packet_missing"
+        assert "operations" in str(error.value)
+
+
+def test_create_exposes_typical_manager_and_missing_plan_candidates(writer_setup):
+    service, args, root = writer_setup
+    created = service.ed_create(**args)
+    assert created["reference_manager"] == {
+        "name": "Менеджер2",
+        "path": str(root / "CommonModules/Менеджер2/Ext/Module.bsl"),
+    }
+    with pytest.raises(EdAuthoringPreconditionError) as error:
+        service.ed_create(**{**args, "project_id": "wrong-plan", "plan": "НетПлана"})
+    assert error.value.details["plan_candidates"]["items"] == [{"plan": PLAN}]
+
+
+def test_object_candidates_auto_and_empty_page_hint(writer_setup):
+    service, args, root = writer_setup
+    service.ed_create(**args)
+    module = root / "CommonModules/Менеджер2/Ext/Module.bsl"
+    module.write_text((DATA / "pilot.bsl").read_text(encoding="utf-8"), encoding="utf-8")
+    # Пара из типового модуля имеет смысловое переименование, по имени её нет.
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute(
+            "UPDATE objects SET name='ШтатныеПозиции', synonym='' WHERE name='Должности'"
+        )
+        connection.commit()
+    module.write_text(
+        module.read_text(encoding="utf-8").replace(
+            "Метаданные.Справочники.Должности", "Метаданные.Справочники.ШтатныеПозиции"
+        ),
+        encoding="utf-8",
+    )
+    target = {
+        "project_id": args["project_id"],
+        "schema_id": args["schema_id"],
+        "structure_id": "host",
+        "direction": "send",
+    }
+    empty = service.ed_authoring_candidates(
+        scope="manager", target=target, kind="objects", text="Штатные"
+    )
+    assert empty["notices"][0]["hint"] == 'reference_document_id="auto"'
+    auto = service.ed_authoring_candidates(
+        scope="manager", target=target, kind="objects", text="Штатные", reference_document_id="auto"
+    )
+    assert len(auto["items"]) == 1
+    assert auto["items"][0]["confidence"] == "reference"
+    assert auto["items"][0]["origin"]["document_id"] != "auto"
+    module.write_text(module.read_text(encoding="utf-8") + "\n// changed\n", encoding="utf-8")
+    with pytest.raises(EdAuthoringStaleError) as error:
+        service.ed_authoring_candidates(
+            scope="manager",
+            target=target,
+            kind="objects",
+            text="Штатные",
+            reference_document_id="auto",
+        )
+    assert error.value.details["reference_document_id"] == auto["items"][0]["origin"]["document_id"]
+
+
 def test_end_to_end_restart_navigation_delivery_and_close(writer_setup):
     service, args, root = writer_setup
     created = service.ed_create(**args)
@@ -242,7 +678,11 @@ def test_end_to_end_restart_navigation_delivery_and_close(writer_setup):
     snapshot_before = files_at(service.manager_workspace.directory)
     packet = manager_operations(split=True)
     preview = service.ed_apply(created["project_id"], created["revision"], packet)
-    assert snapshot_before == files_at(service.manager_workspace.directory)
+    assert snapshot_before == {
+        p: b
+        for p, b in files_at(service.manager_workspace.directory).items()
+        if "/previews/" not in p
+    }
     assert service.ed_overview(created["document_id"])["counts"]["pko"] == 0
     service = Kd2Service(service.settings)
     reopened = service.ed_create(**args)
@@ -525,6 +965,18 @@ def test_two_new_tools_over_transport(writer_setup):
             )
             assert not result.is_error and result.structured_content is not None
             assert result.structured_content["preview_hash"]
+            preview_hash = result.structured_content["preview_hash"]
+            result = await client.call_tool(
+                "ed_apply",
+                {
+                    "project_id": "positions",
+                    "expected_revision": created["revision"],
+                    "mode": "apply",
+                    "expected_preview_hash": preview_hash,
+                },
+            )
+            assert not result.is_error and result.structured_content is not None
+            assert result.structured_content["applied"]
 
     anyio.run(scenario)
 
@@ -662,28 +1114,130 @@ def test_creation_resolves_project_list_configuration(setup):
     )["existing"]
 
 
-def test_documented_two_property_example_uses_service_ids(writer_setup):
-    service, args, _ = writer_setup
+def documented_writer_packets():
+    """Метки связывают исполняемые примеры со справочником, без копий JSON в тесте."""
     doc = (Path(__file__).parents[1] / "docs/tools.md").read_text("utf-8")
-    blocks = re.findall(
-        r"```json\n(.*?)\n```", doc.split("## Writing a manager module", 1)[1], re.S
-    )
+    section = doc.split("## Writing a manager module", 1)[1]
+    blocks = re.findall(r"<!-- ed-writer-example: ([\w-]+) -->\n```json\n(.*?)\n```", section, re.S)
+    assert blocks and len(blocks) == section.count("<!-- ed-writer-example:")
+    assert len({name for name, _ in blocks}) == len(blocks)
+    return [(name, json.loads(text)) for name, text in blocks]
+
+
+@pytest.mark.parametrize("name,packet", documented_writer_packets())
+def test_documented_two_property_example_uses_service_ids(writer_setup, name, packet):
+    """Каждый опубликованный пакет проходит сервисный preview и apply на тестовом проекте."""
+    service, args, _ = writer_setup
     created = service.ed_create(**args)
-    first = json.loads(blocks[1])["operations"]
-    preview = service.ed_apply("positions", created["revision"], first, section="operations")
-    pko_id = preview["items"][0]["result_id"]
-    _, _, applied = apply_packet(service, created, first)
-    packet = json.loads(blocks[2].replace("<pko-id>", pko_id))
-    preview = service.ed_apply("positions", applied["revision"], [packet[0]], section="operations")
-    property_id = preview["items"][0]["result_id"]
-    packet = json.loads(
-        blocks[2].replace("<pko-id>", pko_id).replace("<name-property-id>", property_id)
+    assert isinstance(packet, list) and packet
+    preview = service.ed_apply("positions", created["revision"], packet, section="operations")
+    assert preview["failures"]["total"] == 0, preview
+    assert preview["operation_count"] == len(packet)
+    assert preview["skipped"]["total"] == 0
+    applied = service.ed_apply(
+        "positions",
+        created["revision"],
+        mode="apply",
+        expected_preview_hash=preview["preview_hash"],
+        confirmations=preview["required_confirmations"],
     )
-    _, _, applied = apply_packet(service, applied, packet)
-    checked = service.ed_validate(
-        applied["document_id"], schema_id=args["schema_id"], structure_id="host"
-    )
-    assert checked["summary"]["errors"] == checked["summary"]["warnings"] == 0, checked
+    assert applied["applied"] and applied["revision"] == preview["future_revision"]
+    if name == "catalog":
+        checked = service.ed_validate(
+            applied["document_id"], schema_id=args["schema_id"], structure_id="host"
+        )
+        assert checked["summary"]["errors"] == checked["summary"]["warnings"] == 0, checked
+
+
+def writer_doc_table(marker):
+    text = (Path(__file__).parents[1] / "docs/tools.md").read_text("utf-8")
+    table = text.split(f"<!-- ed-writer-{marker} -->", 1)[1].split(
+        f"<!-- /ed-writer-{marker} -->", 1
+    )[0]
+    rows = [line.split("|")[1:-1] for line in table.splitlines() if line.startswith("|")]
+    result = {}
+    for row in rows[2:]:
+        kind = row[0].strip().strip("`")
+        assert kind not in result, kind
+        result[kind] = row[1:]
+    return result
+
+
+def writer_action_is_rejected(kind, action):
+    """Читает ограничения действий из диспетчера операций, а не из списка в тесте."""
+    source = ast.parse(inspect.getsource(writer_operations))
+    functions = {n.name: n for n in source.body if isinstance(n, ast.FunctionDef)}
+    context = {
+        "op": SimpleNamespace(kind=kind, action=action, target_id=None, owner_id=None, clear=()),
+        "target_id": None,
+        "_PATCHES": writer_operations._PATCHES,
+    }
+
+    def guard(node):
+        # Только закрытые условия kind/action; условия по модели не определяют поддержку действия.
+        if any(isinstance(n, (ast.Call, ast.Subscript)) for n in ast.walk(node)):
+            return None
+        if any(isinstance(n, ast.Name) and n.id not in context for n in ast.walk(node)):
+            return None
+        try:
+            return bool(
+                eval(
+                    compile(ast.Expression(node), "<action-guard>", "eval"),
+                    {"__builtins__": {}},
+                    context,
+                )
+            )
+        except AttributeError:
+            return None
+
+    def rejected(statements):
+        for statement in statements:
+            if isinstance(statement, ast.If):
+                truth = guard(statement.test)
+                if truth is not None and rejected(statement.body if truth else statement.orelse):
+                    return True
+            elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                call = statement.value
+                if (
+                    isinstance(call.func, ast.Name)
+                    and call.func.id == "_fail"
+                    and call.args
+                    and isinstance(call.args[0], ast.Constant)
+                    and call.args[0].value == "unsupported_form"
+                ):
+                    return True
+            elif isinstance(statement, ast.Return) and isinstance(statement.value, ast.Call):
+                call = statement.value
+                if (
+                    isinstance(call.func, ast.Name)
+                    and call.func.id in functions
+                    and rejected(functions[call.func.id].body)
+                ):
+                    return True
+        return False
+
+    return rejected(functions["_apply_one"].body)
+
+
+def test_documented_writer_kinds_and_actions_match_code():
+    rows = writer_doc_table("kinds")
+    kinds = set(get_args(writer_operations.OperationKind))
+    actions = set(get_args(writer_operations.Action))
+    assert set(rows) == kinds
+    for kind, row in rows.items():
+        documented = set(re.findall(r"`([^`]+)`", row[0]))
+        assert documented <= actions, (kind, documented - actions)
+        supported = {action for action in actions if not writer_action_is_rejected(kind, action)}
+        assert documented == supported, (kind, documented, supported)
+
+
+def test_documented_writer_patch_fields_match_dtos():
+    rows = writer_doc_table("patches")
+    assert set(rows) == set(writer_operations._PATCHES)
+    for kind, dto in writer_operations._PATCHES.items():
+        documented = set(re.findall(r"`([^`]+)`", rows[kind][0]))
+        expected = {f.name for f in fields(dto)}
+        assert expected <= documented, (kind, expected - documented)
 
 
 def title_op(client, value):
@@ -829,7 +1383,11 @@ def test_empty_packet_does_not_claim_a_revision(writer_setup):
         expected_preview_hash=preview["preview_hash"],
     )
     assert not result["applied"] and result["revision"] == created["revision"]
-    assert files_at(service.manager_workspace.directory) == before
+    assert {
+        p: b
+        for p, b in files_at(service.manager_workspace.directory).items()
+        if "/previews/" not in p
+    } == before
 
 
 def test_old_receipt_returns_current_revision_and_live_document(writer_setup):

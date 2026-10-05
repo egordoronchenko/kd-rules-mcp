@@ -40,6 +40,23 @@ def test_skipped_checks_make_result_incomplete() -> None:
     )
 
 
+def test_information_does_not_count_as_warning_or_error() -> None:
+    from kd2_rules_mcp.service.views import report_summary
+
+    report = ValidationReport()
+    report.info("ed.schema.value_range", "ПКО/Тест/ПКС/Код", "Проверьте длину значений")
+    assert not report.has_errors and not report.warnings
+    assert report.issues[0].to_dict()["level"] == "info"
+    assert report_summary(report) == {
+        "errors": 0,
+        "warnings": 0,
+        "info": 1,
+        "skipped": 0,
+        "by_check": {"ed.schema.value_range": 1},
+        "text": "Ошибок и предупреждений нет; сведений: 1",
+    }
+
+
 def test_rule_addresses() -> None:
     rules = load_exchange_rules(DATA / "exchange_rules.xml")
     pko = rules.pko()

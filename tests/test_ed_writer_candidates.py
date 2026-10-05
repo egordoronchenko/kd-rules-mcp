@@ -23,6 +23,41 @@ def schema():
     return load_schema(DATA / "format.bin", locate_import=lambda _: DATA / "message.bin")
 
 
+def test_own_classifier_group_is_paired_but_foreign_reference_is_not(tmp_path):
+    text = (DATA / "format.bin").read_text(encoding="utf-8")
+    # Та же структура ключей оказывается и своей группой, и чужой ссылкой в шапке.
+    text = text.replace(
+        '<property name="Код" type="xs:string"/>',
+        '<property name="ДанныеКлассификатора" type="t:ОбщиеСвойстваВымышленногоКлассификатора"/>',
+        1,
+    )
+    text = text.replace('<property name="Наименование" type="t:Наименование10"/>', "")
+    text = text.replace(
+        '<objectType name="КлючевыеСвойстваДолжности">',
+        '<objectType name="КлючевыеСвойстваДолжности">'
+        '<property name="Чужой" type="t:КлючевыеСвойстваКлассификатор"/>',
+    )
+    path = tmp_path / "format.bin"
+    path.write_text(text, encoding="utf-8")
+    loaded = load_schema(path, locate_import=lambda _: DATA / "message.bin")
+    result = property_candidates(
+        structure(), loaded, "Справочник.Должности", "Справочник.Должности", direction="send"
+    )
+    own = [
+        r for r in result["properties"]["items"] if r["configuration"] in ("Код", "Наименование")
+    ]
+    assert {(r["configuration"], r["format_path"]) for r in own} == {
+        (name, "КлючевыеСвойства.ДанныеКлассификатора." + name) for name in ("Код", "Наименование")
+    }
+    assert all(r["class"] == "direct" for r in own)
+    assert not any(
+        r["format_path"].startswith(
+            ("Классификатор.", "КодКлассификатора.", "КлючевыеСвойства.Чужой.")
+        )
+        for r in result["properties"]["items"]
+    )
+
+
 def structure() -> sqlite3.Connection:
     connection = sqlite3.connect(":memory:")
     connection.executescript(db.SCHEMA)
@@ -180,6 +215,20 @@ def test_object_name_synonym_kind_and_pages():
         object_candidates(structure(), schema(), direction="send", kinds="Справочник")
     with pytest.raises(ValueError):
         object_candidates(structure(), schema(), direction="send", offset=-1)
+
+
+def test_deferred_candidate_explains_next_step():
+    connection = structure()
+    connection.execute("INSERT INTO type_sets(types) VALUES ('Булево')")
+    connection.execute(
+        "UPDATE properties SET type_set_id=(SELECT id FROM type_sets WHERE types='Булево') "
+        "WHERE name='Код'"
+    )
+    result = property_candidates(
+        connection, schema(), "Справочник.Должности", "Справочник.Должности", direction="send"
+    )
+    mismatch = next(r for r in result["properties"]["items"] if r["configuration"] == "Код")
+    assert mismatch["class"] == "mismatch" and "алгоритм" in mismatch["reason"]
 
 
 def test_properties_direct_reference_mismatch_tables_and_direction():

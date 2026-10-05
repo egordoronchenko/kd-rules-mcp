@@ -224,7 +224,8 @@ def test_commands_copy_base_and_encode_scenario(
         assert fake.uploads == [snapshot]
         assert not Path(fake.calls[0][8]).exists()
         assert "СОСТАВ ПКО | 1 | 1 | 1" in out
-        assert "999" not in out
+        # Только строки отчёта: в пути папки запуска цифры случайные.
+        assert not any("999" in line for line in out.splitlines() if "|" in line)
 
 
 def test_keep_base_leaves_the_copy(isolated: tuple[Path, FakeCscript]) -> None:

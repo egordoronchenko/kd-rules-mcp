@@ -810,6 +810,8 @@ class EdMixin(ServiceBase):
                     profile,
                     snapshot,
                     coverage,
+                    include_value_ranges=project.manager_project_id is not None,
+                    legacy_atomic_only=project.manager_project_id is None,
                 )
             )
             if snapshot is None:
@@ -855,7 +857,14 @@ class EdMixin(ServiceBase):
             "project_id": project_id,
             **writer_metadata,
             **views.validation_view(
-                report, level, check_prefix, address_prefix, section, offset, limit
+                report,
+                level,
+                check_prefix,
+                address_prefix,
+                section,
+                offset,
+                limit,
+                explain_skipped=project.manager_project_id is not None,
             ),
             "references": views.references_summary(references),
             "profile": {

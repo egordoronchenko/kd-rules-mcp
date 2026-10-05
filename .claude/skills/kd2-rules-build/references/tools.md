@@ -556,12 +556,13 @@ selects extension files; line numbers belong to that file.
 ### `ed_validate`
 
 Validate ED links; schema_id/structure_id add format/type checks. Manager documents
-also run ed.writer.*. Inspect skipped; runtime remains unverified.
+also run ed.writer.* and include value-range info. Inspect skipped;
+runtime remains unverified.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | ED document/snapshot ID |
-| `level` | string \| null | `null` | Severity: ошибка or предупреждение |
+| `level` | string \| null | `null` | Severity: ошибка, предупреждение or info |
 | `check_prefix` | string \| null | `null` | Check ID prefix |
 | `address_prefix` | string \| null | `null` | Address prefix at `/` boundary, case-insensitive |
 | `section` | string | `"issues"` | Section: issues or skipped |
@@ -678,15 +679,15 @@ arguments or null with reason. Live compatibility is unverified.
 
 ### `ed_create`
 
-Create/reopen a durable interface-2 manager; import preserves source text. Returns
-revision, counts, executor/import report and document_id. Different arguments refuse;
-changed fingerprints warn. Atomic rebind keeps rules/receipts and validates fresh inputs;
-interrupted rebind recovers with a notice.
+Create/reopen a durable interface-2 manager; import preserves text. Returns revision,
+counts, executor/import report, document_id and reference_manager or reason. Changed
+arguments refuse; fingerprints warn. Atomic rebind keeps rules/receipts, validates inputs
+and recovers interrupted writes. Missing plan returns plan_candidates.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | Explicit durable manager project ID |
-| `mode` | string | `"new"` | new, import, or rebind existing model to fresh inputs |
+| `mode` | string | `"new"` | new, import, or rebind to fresh inputs |
 | `project` | string \| null | `null` | Host from project_list |
 | `configuration` | string | `"full"` | Host configuration |
 | `configuration_path` | string \| null | `null` | Host dump instead of project |
@@ -694,30 +695,31 @@ interrupted rebind recovers with a notice.
 | `plan` | string \| null | `null` | Exchange plan name |
 | `format_version` | string \| null | `null` | One exact route version key |
 | `interface_version` | integer | `2` | W1 supports 2 only |
-| `identity` | object \| null | `null` | name, prefix, module_name; optional synonym, version, compatibility_mode. Default name includes project_id |
+| `identity` | object \| null | `null` | name, prefix, module_name, synonym, version, compatibility_mode; default name includes project_id |
 | `document_id` | string \| null | `null` | ed_open snapshot to import |
 | `schema_id` | string \| null | `null` | Optional open XDTO schema |
 | `structure_id` | string \| null | `null` | Optional loaded host structure |
 | `offset` | integer ≥ 0 | `0` | Page offset |
 | `limit` | integer 1…200 | `20` | Page size |
+| `section` | string | `"import_report"` | import_report, notices, differences, plan_candidates |
 
 ### `ed_apply`
 
-Preview/apply an atomic manager packet: canonical operations, changes, notices,
-preview_hash; apply adds document_id. Empty/already applied packets keep revision.
-Replays return replayed=true, current revision and live document_id.
+Preview/apply atomically; last 8 previews survive restart. Pages use next_offset;
+truncated_by=size marks size limits. Apply adds document_id. Replays return replayed=true,
+current revision and live document_id.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | Manager project from ed_create |
 | `expected_revision` | string | required | Current project revision |
-| `operations` | array of object | required | Up to 100: client_id, kind, action, target_id/address, owner_id, container_id, after_id, patch, clear. Manager patch: manager_name, title, generated_at, text_style only; bindings require ed_create mode=rebind |
+| `operations` | array of object \| null | `null` | Up to 100 W2 operations; forms: docs/tools.md. client_id refs; on create after_id omitted=append, null=first. Omit on apply to use saved preview_hash. Manager patch: manager_name, title, generated_at, text_style only; bindings via ed_create mode=rebind |
 | `mode` | string | `"preview"` | preview or apply |
 | `expected_preview_hash` | string \| null | `null` | Current preview_hash for apply |
 | `confirmations` | array of object \| null | `null` | Preview notices: code, notice_hash |
 | `offset` | integer ≥ 0 | `0` | Page offset |
 | `limit` | integer 1…200 | `50` | Page size |
-| `section` | string | `"summary"` | summary, operations, changes, notices |
+| `section` | string | `"summary"` | summary, operations, changes, notices, failures, skipped |
 
 ### `ed_authoring_candidates`
 
@@ -734,7 +736,7 @@ auto=false; the agent chooses mappings. A typical manager adds reference pairs.
 | `configuration_attribute` | string \| null | `null` | Selected attribute |
 | `format_property` | string \| null | `null` | Selected format property |
 | `scope` | string \| null | `null` | overlay (default) or manager |
-| `reference_document_id` | string \| null | `null` | Typical manager snapshot from the same host; objects only |
+| `reference_document_id` | string \| null | `null` | Typical snapshot or auto from the version map; objects only |
 
 ### `ed_authoring_build`
 
@@ -1562,8 +1564,9 @@ cannot authorize changed decisions/inputs. Manual edits to owned bodies block re
 ## Writing a manager module
 
 `scope="manager"` writes a complete interface-2 manager. Calls without `scope` retain
-the overlay contracts above. W1 supports ПКО, direct header ПКС, identification/search,
-ПОД and manager-header edits. Future operation kinds refuse with `unsupported_form`.
+the overlay contracts above. Operations cover ПКО, ПОД, direct/reference/algorithmic header ПКС,
+identification/search, ПКПД/value pairs, parameters, handlers, conversion events and algorithms.
+Reserved kinds refuse with `unsupported_form`.
 No BSL executes during authoring; installation and live exchange are separate steps.
 
 1. Load the host structure and open its XDTO schema with `ed_schema_open`.
@@ -1571,10 +1574,14 @@ No BSL executes during authoring; installation and live exchange are separate st
    `project_list` or `configuration_path`), `plan`, one `format_version` route key,
    and optional `schema_id,structure_id`. `extensions` is the ordered list of host extensions.
    Catalog extensions apply by default; an explicit empty list excludes them.
+   `reference_manager={name,path}` identifies the typical manager for this exact route key.
+   If null, adjacent `reference_manager_reason={id,message}` explains the unavailable route/source.
+   A missing plan refuses with a paged `plan_candidates` list of ED plans.
 3. Query `ed_authoring_candidates(scope="manager",kind="objects")`, then
-   `kind="properties"` for a selected pair. Make each mapping decision explicitly.
+   `reference_document_id="auto",target.project_id` loads that route's typical manager;
+   then query `kind="properties"` for a selected pair. Choose each mapping explicitly.
 4. Preview `ed_apply` with the current revision. Read canonical operations, changes and
-   notices through pages; apply the same packet with its `preview_hash` and confirmations.
+   notices through pages; apply with its `preview_hash` and confirmations, omitting `operations`.
 5. Navigate the returned `document_id` with `ed_overview`, `ed_list`, `ed_get`, `ed_locate`.
    `ed_validate` adds `ed.writer.*` issues and `writer` metadata to the ordinary report.
    Pass open schema/structure IDs for the existing schema and metadata checks.
@@ -1618,6 +1625,8 @@ import_report`. `counts` covers rule kinds; `import_report` includes kind/state 
 diagnostic count and a page of diagnostics (`kind="diagnostic",code,address`) followed by
 entries (`kind,address,logical_id,state,reason`). Repeat creation with `offset,limit` to
 read further pages (`limit=20` by default); these controls do not enter project identity.
+`section="import_report"` is the default; `notices`, `differences` and error `plan_candidates`
+select their continuation pages. Offset applies only to the selected section; sibling pages start at 0.
 `executor_profile={profile_id,verified,mismatches}` comes from a fresh comparison of host
 executor modules and explicitly selected extensions. A mismatch permits creation but returns
 `executor_profile_unverified`; the same live comparison runs on validation and build.
@@ -1635,7 +1644,7 @@ refuse with `ed_authoring_path` before writing. Rebind file-write failures use `
 The next request recovers the transaction journal. With the same arguments, changed input contents return
 `existing=true` and a `creation_inputs_changed` notice with differences and a rebind hint;
 the model keeps its original bindings. Apply/build refuse changed fingerprints until rebind.
-Difference pages use the creation `offset,limit` and expose `difference_count,next_offset,has_more`.
+Difference pages use `section="differences",offset,limit` and expose `difference_count,next_offset,has_more`.
 After restart, `ed_create` restores navigation; reopen the schema before candidate/schema queries.
 The project retains schema source hashes, the host structure fingerprint and the configuration
 dump fingerprint (the same export markers used by structure loading) for stale checks.
@@ -1666,108 +1675,233 @@ can be closed with `ed_close`.
 `ed_close` also removes damaged projects and unfinished `creation.json` snapshots;
 an unfinished creation with other arguments refuses with `differences`.
 
-### Operation forms and two-property catalog example
+### Operation forms
 
-Each operation has `client_id,kind,action`; optional fields are
+Operation keys: required `client_id` (1–200 characters), `kind,action`; optional
 `target_id` **or** `address`, `owner_id,container_id,after_id,patch,clear`.
-Kinds in W1 are `manager,pko,pod,property,identification`; actions are
-`create,update,delete,move` as supported by the selected kind.
-`clear` explicitly removes optional fields; omission leaves them unchanged.
-For `kind="manager"`, public `patch`/`clear` may contain only `manager_name,title,generated_at,
-text_style` (subject to the operation DTO's clearability rules). Interface 2 is fixed in W1.
-Any other field, including `host,format_bindings,executor_profile`, refuses the whole packet
-with `manager_binding_requires_rebind` and an `ed_create(mode="rebind")` hint. The service's
-binding operation is internal; public apply cannot bypass provenance or schema checks.
-Values are typed DTOs: `{"state":"string","value":"..."}`,
-`{"state":"boolean","value":false}`, or metadata references with
-`state="reference",reference_parts=["Метаданные","Справочники","Должности"]`.
+Omitted/null fields keep values; `clear` removes them. No patch/clear overlap;
+delete/move accept neither. Client IDs cannot change content.
 
-Create the ПКО first (preview, then apply):
+<!-- ed-writer-kinds -->
+| `kind` | Supported `action` | Owner and placement |
+|---|---|---|
+| `manager` | `update` | Header; no target/owner/position |
+| `pko` | `create`, `update`, `delete`, `move` | Module; no owner |
+| `pod` | `create`, `update`, `delete`, `move` | Module; no owner |
+| `property` | `create`, `update`, `delete`, `move` | ПКО owner on create; header/conditional container |
+| `identification` | `update` | Identification target; inferred/explicit ПКО owner |
+| `pkpd` | `create`, `update`, `delete` | Type/direction container; no owner |
+| `value_mapping` | `create`, `update`, `delete`, `move` | ПКПД owner on create; direction container |
+| `parameter` | `create`, `update`, `delete` | Parameter entrypoint; no owner |
+| `handler` | `create`, `update`, `delete` | ПКО/ПОД owner on create; module container for method |
+| `conversion_event` | `update` | Event/code-unit target; no owner/position |
+| `algorithm` | `create`, `update`, `delete` | Module container on create; no owner |
+| `table_part` | — | Reserved (`unsupported_form`) |
+| `routine` | — | Reserved (`unsupported_form`) |
+| `write_policy` | — | Reserved (`unsupported_form`) |
+<!-- /ed-writer-kinds -->
 
-```json
-{
-  "project_id": "positions",
-  "expected_revision": "<create-revision>",
-  "mode": "preview",
-  "operations": [{
-    "client_id": "positions-pko", "kind": "pko", "action": "create",
-    "patch": {
-      "name": "Должности", "directions": ["send", "receive"],
-      "configuration_object": {"state": "reference", "reference_parts": ["Метаданные", "Справочники", "Должности"]},
-      "format_object": {"state": "string", "value": "Справочник.Должности"}
-    }
-  }]
-}
-```
+| Target/position | Contract |
+|---|---|
+| IDs / addresses | Writer IDs (`result_id`/navigation). Resolve after preceding operations; direction qualifiers work; positional `~N`/`#N` refuse. |
+| Create result | No target/address; client-derived ID. Handler result = binding. |
+| `after_id` on create | Omitted: append (import: generator key); null: first. Explicit placement also needs container. |
+| `move` | Container + anchor; null/omission: first. Direction changes recheck references. |
+| Position IDs | Layout container; anchor element/entity/container inside. No crossing retained context or owner/direction boundaries. |
+| Packet references | `{"client_id":"earlier"}` in `owner_id,container_id,after_id,target_id`, `conversion`, `used_pko[]` or their `target_id`. Unknown/forward/deleted refuses; strings = IDs. |
 
-Use its canonical `result_id` as `<pko-id>`. Preview the first property to obtain
-`<name-property-id>` with its unchanged `client_id`; then preview/apply this five-operation
-packet against the revision after creating the ПКО:
+ПКО ID = header container, not module. Handler `target` requires a code-unit ID, not client reference.
 
+### Patch fields and typed values
+
+`!` = create requirement; defaults = creation only. Identifier = nonempty BSL name.
+Directions: `["send"]`, `["receive"]`, `["send","receive"]`, `["both"]`; no duplicates/mixed `both`.
+
+| Value DTO | JSON / constraints |
+|---|---|
+| Absent (`V?`) | `{"state":"unset"}`; optional Value default |
+| String (`S`) | `{"state":"string","value":"text"}`; no CR; LF allowed |
+| Boolean (`B`) | `{"state":"boolean","value":false}` |
+| Number | `{"state":"number","value":"0.1234567890123456789"}`; finite JSON numbers also work; string preserves precision |
+| Date | `{"state":"date","value":"20261005000000"}`; digits only |
+| Undefined | `{"state":"undefined"}`; no `value` |
+| Reference (`R`) | `{"state":"reference","reference_parts":[...]}`: metadata `["Метаданные",collection,type]`, value `[collection,type,value]` |
+
+<!-- ed-writer-patches -->
+| `kind` | `patch` fields: type, defaults and restrictions | `clear` |
+|---|---|---|
+| `manager` | `manager_name`: Identifier; `title`, `generated_at`: S/V?, single line, date needs title; `text_style`: `{encoding:"utf-8",newline:"\n"/"\r\n"/"mixed",bom:boolean,indent:string}` (defaults UTF-8/CRLF/BOM/tab). Retained text blocks EOL/indent changes. Public `interface_version`, `host`, `format_bindings`, `executor_profile` rejected; rebind for bindings. Interface 2. | None; title/date accept V? |
+| `pko` | `name`!: Identifier; `directions`!; `configuration_object`: R/V?; `format_object`: S/V?; `group_flag`: B/V?; `identification`: IdentificationPatch, create only; `events`: Event DTO array, default `[]`, unchanged-only (edit via `handler`). Values default unset. | `configuration_object`, `format_object`, `group_flag` |
+| `pod` | `name`!: Identifier; `directions`!; `configuration_selection`: R/V?; `format_selection`: S/V?; `clear_data`: B/V?; `used_pko`: references, default `[]`; `events`: unchanged-only as ПКО. Values default unset. | `configuration_selection`, `format_selection`, `clear_data` |
+| `property` | `configuration_property`!, `format_property`!: strings, one may be empty; `property_kind`: `direct` (default)/`reference`/`pkpd`/`algorithm`; `algorithm_flag`: integer 0 (default)/1; `conversion`: reference, default empty; `namespace`: string `""`, direct only; `argument_presence`: 3–7 booleans, first three true (default), helper-limited, empty tail trimmed. | None |
+| `identification` | `mode`: S/V?, one of `ПоУникальномуИдентификатору`, `ПоПолямПоиска`, `СначалаПоУникальномуИдентификаторуПотомПоПолямПоиска`; `search_sets`: nonempty string arrays, default `[]`; `not_found_policy`: V? only. Receive required; field-search modes need search sets. No "no search" enum. | `mode`, `search_sets`, `not_found_policy` |
+| `pkpd` | `name`!: Identifier; `directions`!; `configuration_type`!: R; `format_type`!: S; `data_kind`: `enumeration` (default)/`predefined`. R path: `["Метаданные","Перечисления",name]` / `["Метаданные","Справочники",name]` respectively. | None |
+| `value_mapping` | `direction`!: `send`/`receive`, allowed by owner; `configuration_value`!: R `["Перечисления" or "Справочники",ownerType,value]`; `format_value`!: S. Unique send key = configuration value; receive key = format string. | None |
+| `parameter` | `name`!: Identifier; `default`: Value above, default unset/implicit; `unknown` rejected. | `default` |
+| `handler` | `event`!: name below, create only; new `body`!: string, or `target`: existing editable code-unit reference with exact event signature (without body). `restore_dispatcher`: boolean false, update only. Update accepts body/target/restore; deferred event requires a procedure algorithm target. | `body`; deferred body via `algorithm` |
+| `conversion_event` | `body`: exact string, required on update unless cleared. | `body` |
+| `algorithm` | `name`!: Identifier; `body`!: string; `routine_kind`: `procedure` (default)/`function`; `parameters`: formal-parameter text `""` (supports `Знач`, defaults, commas); `exported`: boolean false. Entrypoints, dispatchers/events, `ДобавитьПКО_…`/`ДобавитьПОД_…` and handler-template names reserved. | `body` |
+<!-- /ed-writer-patches -->
+
+| ПКС form | Required combination |
+|---|---|
+| `direct` | Flag 0, no conversion |
+| `reference` | Flag 0, ПКО conversion |
+| `pkpd` | Flag 0, ПКПД conversion |
+| `algorithm` | Flag 1; optional conversion rule; logic in handler/algorithm |
+
+Kind changes require explicit flag **and** conversion (`{"kind":"conversion"}` clears).
+Targets must exist per owner/guard direction, including retained references. ПКО/ПКПД names
+share a space; same-name send/receive targets used in both directions require joint rename.
+Case mismatches stay diagnosed (`ed.writer.reference_case_mismatch`).
+
+| Reference field | Accepted shape |
+|---|---|
+| `conversion` | `{"kind":"pko","target_id":"<id>","resolution":"resolved"}` (or kind `pkpd`); alternatively `{ "kind":"pko", "name":"ExactName" }`, resolved by direction. Name defaults empty/inferred. Also `{"client_id":"earlier-rule"}` or nested target-ID reference. Empty: `{"kind":"conversion"}`. |
+| `used_pko` | Array of `{"kind":"pko","target_id":"<id>","resolution":"resolved"}` or client references; kind defaults `pko`, name empty/inferred. Name alone insufficient; `[]` removes all. |
+| Handler `target` | `{"kind":"code_unit","target_id":"<method-id>","resolution":"resolved"}`; optional name, no client reference. |
+
+### Code frames, bodies and dependencies
+
+| New handler event | Owner / parameters in generated frame |
+|---|---|
+| `ПриОбработке` | ПОД: ДанныеИБ (receive-only: ДанныеXDTO), ИспользованиеПКО, КомпонентыОбмена |
+| `ВыборкаДанных` | ПОД send function: КомпонентыОбмена |
+| `ПриОтправкеДанных` | ПКО send: ДанныеИБ, ДанныеXDTO, КомпонентыОбмена, СтекВыгрузки |
+| `ПриКонвертацииДанныхXDTO` | ПКО receive: ДанныеXDTO, ПолученныеДанные, КомпонентыОбмена |
+| `ПередЗаписьюПолученныхДанных` | ПКО receive: ПолученныеДанные, ДанныеИБ, КонвертацияСвойств, КомпонентыОбмена |
+| `ПослеЗагрузкиВсехДанных` | ПКО: existing procedure algorithm target, no new frame/body |
+
+| Code operation | Text and frame contract |
+|---|---|
+| Create | Generates binding/frame/branch. No frame in body; CRLF → module EOL, LF-delimited lines gain a tab. Region/adjacent-rule placement. |
+| Update/clear body | Exact heading-to-closing text including first LF/CRLF and final newline/indent, e.g. `"\n\tX=1;\n"`. Clear keeps frame; semantics not parsed/executed. |
+| Body restrictions | Lone CR/VT/FF/U+0085/U+2028/U+2029/U+001C–U+001E rejected with position; balanced regions, intact method boundaries. |
+| Dispatcher | Only changed bindings affect branches; imported defects/aliases remain. Identifiers: case-insensitive; literals: exact. |
+| Restore | `handler update` + `restore_dispatcher:true`, confirm execution change. Occupied literal calling another method refuses with callee/line; retained branch cannot change. |
+| Conversion events | Update/clear existing `ПередКонвертацией`, `ПослеКонвертации`, `ПередОтложеннымЗаполнением`, `ПередОбработкойУдаляемогоОбъекта`; event/code ID or `Событие/<name>`. No create. |
+| Algorithm update | Rename updates local direct calls/bindings/branches, not strings. Signature change with calls needs review of locations/visible mismatches; deferred algorithms remain procedures. |
+| Rule rename | Updates declaration/bindings/frames/branches/ПКС/used-ПКО; lists unchanged body mentions. |
+| Delete | Non-cascading; references refuse. Own bindings/branches/handlers removed; ambiguous retained copies require confirmation. Edit dependencies explicitly. |
+| Parameter uses | Indexed `ПараметрыКонвертации.Name` (also via components) blocks rename/delete; computed string/index/variable/iteration access needs confirmation. |
+
+### Error codes and confirmations
+
+Outer codes: `invalid_argument`, `ed_authoring_precondition`, `ed_authoring_stale`,
+`ed_authoring_ack_required`. Below: preview `failures.reason` (apply errors: `failures.id`) and notices.
+
+| ID | Where / effect |
+|---|---|
+| `unsupported_form` | Unsupported kind/action/form/policy |
+| `model_invalid` | Invalid target/client/fields/body/signature; occupied literal |
+| `dangling_reference` | Broken references; locations in `references` |
+| `opaque_context_changed` | Retained context would change |
+| `unstable_address`, `unreachable_group` | Positional address / unreachable direction guard |
+| `manager_binding_requires_rebind` | Precondition `failures.id`: public binding/interface edit |
+| `confirmation_required` | Layer apply only; service uses `ed_authoring_ack_required` |
+| `code_name_literals`, `code_handler_references` | Notice: unchanged body name mentions |
+| `computed_dependencies`, `computed_algorithm_calls` | Notice: computed targets; algorithm rename/delete conservatively warns if bodies exist |
+| `algorithm_signature_calls` | Notice: signature changes with calls/branches |
+| `handler_execution_changed` | Notice: restored branch changes execution |
+| `orphan_handler` | Notice: rebinding/rule deletion leaves unbound methods/branches |
+
+Confirm every notice with `confirmations:[{"code":"…","notice_hash":"<exact-hash>"}]`.
+Read `section="notices"` for locations. Validation `ed.writer.*` IDs: [checks.md](checks.md).
+
+### Executable packet examples
+
+Each array is `operations` for a fresh interface-2 manager; preview then apply with hash/confirmations.
+
+Two-property catalog, inline identification and send/receive ПОД:
+
+<!-- ed-writer-example: catalog -->
 ```json
 [
-  {
-    "client_id": "positions-name", "kind": "property", "action": "create",
-    "owner_id": "<pko-id>", "container_id": "<pko-id>", "after_id": null,
-    "patch": {"configuration_property": "Наименование", "format_property": "Наименование"}
-  },
-  {
-    "client_id": "positions-short", "kind": "property", "action": "create",
-    "owner_id": "<pko-id>", "container_id": "<pko-id>", "after_id": "<name-property-id>",
-    "patch": {"configuration_property": "НаименованиеКраткое", "format_property": "НаименованиеКраткое"}
-  },
-  {
-    "client_id": "positions-search", "kind": "identification", "action": "update",
-    "address": "ПКО/Должности/Идентификация",
-    "patch": {
-      "mode": {"state": "string", "value": "СначалаПоУникальномуИдентификаторуПотомПоПолямПоиска"},
-      "search_sets": [["Наименование"]]
-    }
-  },
-  {
-    "client_id": "positions-send", "kind": "pod", "action": "create",
-    "patch": {
-      "name": "Должности_Отправка", "directions": ["send"],
-      "configuration_selection": {"state": "reference", "reference_parts": ["Метаданные", "Справочники", "Должности"]},
-      "clear_data": {"state": "boolean", "value": false},
-      "used_pko": [{"kind": "pko", "target_id": "<pko-id>", "name": "Должности", "resolution": "resolved"}]
-    }
-  },
-  {
-    "client_id": "positions-receive", "kind": "pod", "action": "create",
-    "patch": {
-      "name": "Должности_Получение", "directions": ["receive"],
-      "format_selection": {"state": "string", "value": "Справочник.Должности"},
-      "used_pko": [{"kind": "pko", "target_id": "<pko-id>", "name": "Должности", "resolution": "resolved"}]
-    }
-  }
+  {"client_id":"positions-pko","kind":"pko","action":"create","patch":{"name":"Должности","directions":["send","receive"],"configuration_object":{"state":"reference","reference_parts":["Метаданные","Справочники","Должности"]},"format_object":{"state":"string","value":"Справочник.Должности"},"identification":{"mode":{"state":"string","value":"СначалаПоУникальномуИдентификаторуПотомПоПолямПоиска"},"search_sets":[["Наименование"]]}}},
+  {"client_id":"positions-name","kind":"property","action":"create","owner_id":{"client_id":"positions-pko"},"after_id":null,"patch":{"configuration_property":"Наименование","format_property":"Наименование"}},
+  {"client_id":"positions-short","kind":"property","action":"create","owner_id":{"client_id":"positions-pko"},"container_id":{"client_id":"positions-pko"},"after_id":{"client_id":"positions-name"},"patch":{"configuration_property":"НаименованиеКраткое","format_property":"НаименованиеКраткое"}},
+  {"client_id":"positions-send","kind":"pod","action":"create","patch":{"name":"Должности_Отправка","directions":["send"],"configuration_selection":{"state":"reference","reference_parts":["Метаданные","Справочники","Должности"]},"clear_data":{"state":"boolean","value":false},"used_pko":[{"client_id":"positions-pko"}]}},
+  {"client_id":"positions-receive","kind":"pod","action":"create","patch":{"name":"Должности_Получение","directions":["receive"],"format_selection":{"state":"string","value":"Справочник.Должности"},"used_pko":[{"client_id":"positions-pko"}]}}
 ]
 ```
 
-Model IDs from canonical operation pages differ from read-only reader entity IDs.
-Existing model addresses support updates/deletes; duplicate model rule names qualify by direction.
-Packet references to newly created rules use IDs returned by previews, rather than reader IDs.
+Reference ПКС through another ПКО:
+
+<!-- ed-writer-example: reference -->
+```json
+[
+  {"client_id":"ref-owner","kind":"pko","action":"create","patch":{"name":"ReferenceOwner","directions":["send","receive"]}},
+  {"client_id":"ref-target","kind":"pko","action":"create","patch":{"name":"ReferenceTarget","directions":["send","receive"]}},
+  {"client_id":"ref-property","kind":"property","action":"create","owner_id":{"client_id":"ref-owner"},"patch":{"configuration_property":"Родитель","format_property":"Parent","property_kind":"reference","conversion":{"client_id":"ref-target"}}}
+]
+```
+
+ПКПД pair and ПКС (catalog data: `data_kind="predefined"`, `Справочники` replaces `Перечисления`):
+
+<!-- ed-writer-example: predefined -->
+```json
+[
+  {"client_id":"status-owner","kind":"pko","action":"create","patch":{"name":"StatusOwner","directions":["send"]}},
+  {"client_id":"status-rule","kind":"pkpd","action":"create","patch":{"name":"StatusValues","directions":["send"],"configuration_type":{"state":"reference","reference_parts":["Метаданные","Перечисления","Статусы"]},"format_type":{"state":"string","value":"Status"}}},
+  {"client_id":"status-pair","kind":"value_mapping","action":"create","owner_id":{"client_id":"status-rule"},"patch":{"direction":"send","configuration_value":{"state":"reference","reference_parts":["Перечисления","Статусы","Активен"]},"format_value":{"state":"string","value":"Active"}}},
+  {"client_id":"status-property","kind":"property","action":"create","owner_id":{"client_id":"status-owner"},"patch":{"configuration_property":"Статус","format_property":"Status","property_kind":"pkpd","conversion":{"client_id":"status-rule"}}}
+]
+```
+
+Conversion parameter:
+
+<!-- ed-writer-example: parameter -->
+```json
+[{"client_id":"timeout","kind":"parameter","action":"create","patch":{"name":"Timeout","default":{"state":"number","value":"30.125"}}}]
+```
+
+Event binding/frame and conversion-event body update:
+
+<!-- ed-writer-example: handler -->
+```json
+[
+  {"client_id":"handler-owner","kind":"pko","action":"create","patch":{"name":"HandledOwner","directions":["send"]}},
+  {"client_id":"send-handler","kind":"handler","action":"create","owner_id":{"client_id":"handler-owner"},"patch":{"event":"ПриОтправкеДанных","body":"ДанныеXDTO.Вставить(\"Комментарий\", \"Example\");"}},
+  {"client_id":"before-conversion","kind":"conversion_event","action":"update","address":"Событие/ПередКонвертацией","patch":{"body":"\n\t// Agent-owned conversion body.\n"}}
+]
+```
+
+Function algorithm with a defaulted parameter:
+
+<!-- ed-writer-example: algorithm -->
+```json
+[{"client_id":"normalize","kind":"algorithm","action":"create","patch":{"name":"Normalize","routine_kind":"function","parameters":"Знач Text, Suffix = \"\"","exported":false,"body":"Возврат Text + Suffix;"}}]
+```
+
+### Preview and apply responses
 
 `ed_apply` preview returns `project_id,revision,future_revision,preview_hash,applied=false,
 counts,operation_count,change_count,failures,skipped,required_confirmations,confirmation_count` and a page.
-`section="summary"` has compact operation IDs/hashes and change addresses/fields;
-`operations` returns full canonical `operation,operation_hash,result_id`;
-`changes` adds complete before/after values; `notices` contains exact `code,notice_hash`.
-Pages use `offset,limit,total,has_more,next_offset`; continue by `next_offset`.
-The fixed header exposes up to ten confirmations; query notice pages for the rest.
-Failures and skipped operation IDs have their own compact first pages.
+W2 changes operations/changes/notices; top-level keys stay.
 
-Apply the unchanged packet with `mode="apply",expected_preview_hash="<preview_hash>",
-confirmations=[{"code":"<notice-code>","notice_hash":"<notice-hash>"}]`.
-Apply permits `section="summary"` only, is atomic, and returns the saved revision and live
-`document_id`; a changed model has `applied=true` and the former project document closes.
-Empty packets return `applied=false,reason="no_operations"`; packets containing only existing
-decisions return `applied=false,reason="already_applied"`. Both keep the current revision in
-preview and apply. Preview changes neither model nor reader snapshots and omits `document_id`.
-An exact applied packet/hash replay returns its recorded operation summary with
-`replayed=true,applied=false,reason="already_applied"`,
-the **current** revision/counts and a live `document_id`, including after restart or later packets.
-Navigation through a snapshot superseded by another process refuses with `ed_authoring_stale`.
+| Response | Contract |
+|---|---|
+| `operation_count` | Includes failures; failed resolution/application has empty `result_id`. |
+| `failures`, `skipped` | Page objects; rows respectively `reason,address,message,references` and repeated `client_id`. |
+| `section` | `summary`: notices, changes, compact operations; `operations`: `operation,operation_hash,result_id`; `changes`: before/after; `notices`: code, locations, `notice_hash`. |
+| Confirmations | Header holds ten; `confirmation_count,confirmations_has_more,confirmations_next_offset` cover the rest. Read notice pages. |
+| Paging | `offset,limit,total,has_more,next_offset`; continue by `next_offset`, even below limit. `truncated_by="size"`: whole rows shortened to budget. Offset applies only to the requested `section` (also `failures`, `skipped`); sibling pages start at 0. Applies to build/import pages. |
+| Creation notices | `notice_count,notices_offset,notices_has_more,notices_next_offset`, optional `notices_truncated_by`; repeat creation with `section="notices"` and the next offset. |
+| Preview | Saves packet; model/reader unchanged; no `document_id`. |
+| Apply | Atomic, `section="summary"` only; saved revision + live `document_id`. Changed model: `applied=true`, former document closes. |
+| No change | `applied=false,reason="no_operations"` (empty) / `"already_applied"` (all decisions repeated); current revision in both modes. |
+| Receipt replay | `replayed=true,applied=false,reason="already_applied"`; paged summary/skipped, current revision/counts/document; survives restarts/later packets. |
+
+Apply: omit `operations`; pass `expected_revision,expected_preview_hash,confirmations`.
+Last eight previews persist across restarts; input/revision/hash/confirmation checks apply.
+Explicit unchanged packets also work.
+
+| Recovery code | Action |
+|---|---|
+| `preview_packet_missing`, `preview_packet_corrupt` | Resend operations; preview again if inputs changed. |
+| `receipt_page_unavailable` | One-page receipt; navigate current document. |
+| `ed_authoring_stale` | Snapshot superseded; reopen current project/document. |
+| `ed_authoring_precondition` + `project_busy` | Preview while another process holds the project lock; retry. |
 
 ### Manager candidates and delivery
 
@@ -1789,6 +1923,31 @@ Manager projects require XML structures; a foreign structure refuses with `ed.au
 The reference snapshot must be inside that host's `CommonModules`. Pairs already suggested by names stay single rows;
 rules definitely inapplicable to the selected version/direction are excluded. Properties
 do not accept a reference snapshot.
+Use `reference_document_id="auto"` with `target.project_id` to resolve the exact plan/version
+map and open its typical manager automatically; the returned `origin.document_id` is an
+ordinary reader snapshot. Without a project, auto requires XML provenance and a unique ED
+plan serving the schema version and extension paths stored in its source metadata. Extension
+names alone cannot recover paths: `structure_extension_paths_unavailable` asks for
+`target.project_id` or an explicit `reference_document_id`. An empty page without a reference
+includes a hint to use auto.
+If a previously opened typical snapshot changed, auto refuses with `ed_authoring_stale` and
+its `reference_document_id`: close that snapshot with `ed_close`, then repeat auto.
+An unavailable or ambiguous route refuses with `reference_manager_unavailable`; inspect
+`ed_routes` and pass an explicit snapshot. Own `КлючевыеСвойства.ДанныеКлассификатора` fields
+are candidates for this object's attributes; key fields of referenced objects remain excluded.
+Manager-project primitive ПКС validation uses candidate compatibility, including string facets.
+Ordinary snapshots and overlay reports retain their previous type-check boundary and bytes.
+For manager-project snapshots, `ed.schema.value_range` warns when a sending string attribute
+can exceed the format's `maxLength` (including unlimited strings) or cannot guarantee `minLength`:
+the value will not export (XDTO:6103–6109). Build requires acknowledging these warnings.
+Sending numeric limits remain `level="info"`, specifying which values will not export.
+Receiving wider format values gives `info` about truncation, precision loss or failed writes;
+fixed-length/date-part risks remain `info`. Messages name direction, both limits and the ПКС address.
+`summary.info` counts information; filter by `level="info"`. Incompatible primitive types remain
+warnings. Build checks bound limits again, including after restart. Review values or supply an algorithm.
+Manager skipped pages retain machine-readable reasons and add a `hint` with the next action:
+`non_atomic_type` requires a reference ПКО or algorithm, `qualifiers_unavailable` requires
+updated structure/schema qualifiers, and `handler_may_supply` requires reviewing handler code.
 
 ```json
 {
@@ -1798,7 +1957,7 @@ do not accept a reference snapshot.
 ```
 
 Call this as `ed_authoring_build`; omit `route` to use the project's plan/version.
-W1 delivery is `extension` only. Passing overlay `operations`, host/extension fields,
+Manager delivery is `extension` only. Passing overlay `operations`, host/extension fields,
 `version_scope` or `drop_operations` with manager scope refuses.
 The response contains `scope,project_id,revision,document_id,build_hash,status,written,output_dir,
 counts,runtime_verified=false,validation,required_acknowledgements,acknowledgement_count` and a page.

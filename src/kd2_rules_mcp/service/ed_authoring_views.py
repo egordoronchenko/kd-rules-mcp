@@ -71,6 +71,7 @@ def compact_page(base: dict, rows: Sequence[dict], offset: int, limit: int) -> d
         result["items"].pop()
         result["next_offset"] = offset + len(result["items"])
         result["has_more"] = result["next_offset"] < result["total"]
+        result["truncated_by"] = "size"
     return base | result
 
 

@@ -1,16 +1,20 @@
-"""Формы генератора КД 3: только интерфейс и редактируемые операторы W1."""
+"""Формы генератора КД 3: интерфейс и редактируемые декларации W1/W2 D1."""
 
-from .writer_model import Formal, Signature, Value
+from decimal import Decimal
+
+from .writer_model import CodeUnit, Formal, PredefinedRule, Signature, Value, ValueMapping
 
 
 def literal(value: Value) -> str:
     """BSL-литерал; неизвестный текст не считается порождаемой формой."""
     if value.state == "string":
+        if "\r" in str(value.value):
+            raise ValueError("Строковый литерал с CR не поддержан; используйте LF")
         return '"' + str(value.value).replace('"', '""').replace("\n", "\n|") + '"'
     if value.state == "boolean":
         return "Истина" if value.value else "Ложь"
     if value.state == "number":
-        return str(value.value)
+        return format(Decimal(str(value.value)), "f")
     if value.state == "undefined":
         return "Неопределено"
     if value.state == "date":
@@ -46,6 +50,36 @@ def routine_close(signature: Signature) -> str:
     return "КонецФункции" if signature.routine_kind == "function" else "КонецПроцедуры"
 
 
+def code_open(unit: CodeUnit) -> str:
+    # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:3188–3191,3263–3287.
+    if unit.parameters_text is None:
+        return unit.frame_comment + routine_open(unit.name, unit.signature)
+    kind = "Функция" if unit.signature.routine_kind == "function" else "Процедура"
+    return (
+        unit.frame_comment
+        + f"{kind} {unit.name}({unit.parameters_text})"
+        + (" Экспорт" if unit.signature.exported else "")
+    )
+
+
+def dispatcher_case(
+    name: str, target: str, arguments: tuple[Value, ...], returns: bool, first: bool
+) -> str:
+    # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:3219–3230.
+    keyword = "Если" if first else "ИначеЕсли"
+    variable = "ИмяФункции" if returns else "ИмяПроцедуры"
+    return (
+        f"{keyword} {variable} = {literal(Value('string', name))} Тогда \n"
+        + "\t"
+        + ("Возврат " if returns else "")
+        + target
+        + "(\n"
+        + "\t\t"
+        + ", ".join(literal(a) if a.state != "unknown" else a.raw for a in arguments)
+        + ");"
+    )
+
+
 def version(interface: int) -> str:
     # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/
     # ШаблоныТекстовМодулей/Ext/Template.txt:9–11.
@@ -57,6 +91,60 @@ def version(interface: int) -> str:
 def property_call(arguments: tuple[str, ...]) -> str:
     # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:2320–2380.
     return "ДобавитьПКС(" + ", ".join(arguments) + ");"
+
+
+def predefined_open(rule: PredefinedRule) -> str:
+    # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/
+    # ШаблоныТекстовМодулей/Ext/Template.txt:102–106.
+    text = (
+        f"// {rule.name}.\n"
+        + "ПравилоКонвертации".ljust(28)
+        + " = ПравилаКонвертации.Добавить();\n"
+        + "ПравилоКонвертации.ИмяПКПД".ljust(28)
+        + " = "
+        + literal(Value("string", rule.name))
+        + ";\n"
+        + "ПравилоКонвертации.ТипДанных = "
+        + literal(rule.configuration_type)
+        + ";\n"
+        + "ПравилоКонвертации.ТипXDTO".ljust(28)
+        + " = "
+        + literal(rule.format_type)
+        + ";"
+    )
+    comments = dict(rule.field_comments)
+    return "\n".join(
+        line
+        + (" " + comments[key] if key in comments else "")
+        + "".join(
+            "\n" + comment for field, comment in rule.field_comments if field == "after_" + key
+        )
+        for key, line in zip(
+            ("comment", "create", "name", "configuration_type", "format_type"),
+            text.split("\n"),
+            strict=True,
+        )
+    )
+
+
+def mapping_frame(direction: str, close: bool = False) -> str:
+    # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:1119–1120,1196–1199.
+    side = "Отправки" if direction == "send" else "Получения"
+    event = "Отправке" if direction == "send" else "Получении"
+    return (
+        f"ПравилоКонвертации.КонвертацииЗначенийПри{event} = ЗначенияДля{side};"
+        if close
+        else f"ЗначенияДля{side} = Новый Соответствие;"
+    )
+
+
+def value_mapping(item: ValueMapping) -> str:
+    # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:1157–1178.
+    side = "Отправки" if item.direction == "send" else "Получения"
+    values = (item.configuration_value, item.format_value)
+    if item.direction == "receive":
+        values = values[::-1]
+    return f"ЗначенияДля{side}.Вставить(" + ", ".join(literal(v) for v in values) + ");"
 
 
 def search(fields: tuple[str, ...]) -> str:

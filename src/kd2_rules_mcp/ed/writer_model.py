@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import math
+import re
 import types
 import zlib
 from collections import OrderedDict
@@ -42,6 +43,8 @@ def json_value(value: Any) -> Any:
             item.name: json_value(getattr(value, item.name))
             for item in fields(value)
             if not item.name.startswith("_")
+            and not (item.name == "restore_dispatcher" and getattr(value, item.name) is None)
+            and not (item.name == "identification" and getattr(value, item.name) is None)
         }
     if isinstance(value, tuple | list):
         return [json_value(item) for item in value]
@@ -67,7 +70,13 @@ def json_bytes(value: Any) -> bytes:
 def _json_default(value: Any) -> dict[str, Any]:
     """JSON-кодировщик сам обходит готовые словари; DTO раскрываются по одному узлу."""
     if is_dataclass(value) and not isinstance(value, type):
-        return {f.name: getattr(value, f.name) for f in fields(value) if not f.name.startswith("_")}
+        return {
+            f.name: getattr(value, f.name)
+            for f in fields(value)
+            if not f.name.startswith("_")
+            and not (f.name == "restore_dispatcher" and getattr(value, f.name) is None)
+            and not (f.name == "identification" and getattr(value, f.name) is None)
+        }
     raise TypeError("Значение не поддержано форматом JSON ED")
 
 
@@ -119,6 +128,11 @@ def content_hash(value: Any) -> str:
                     and getattr(value, name) is None
                 )
                 or (kind is ManagerModel and name == "module_styles" and not getattr(value, name))
+                or (kind is CodeUnit and name == "parameters_text" and getattr(value, name) is None)
+                or (kind is CodeUnit and name == "frame_comment" and not getattr(value, name))
+                or (
+                    kind is PredefinedRule and name == "field_comments" and not getattr(value, name)
+                )
             ):
                 continue
             hasher.update(label + bytes.fromhex(content_hash(getattr(value, name))))
@@ -176,7 +190,12 @@ class Value:
             "string": type(self.value) is str,
             "date": type(self.value) is str,
             "boolean": type(self.value) is bool,
-            "number": type(self.value) in (int, float),
+            # Десятичный литерал хранится точной строкой, без округления через float.
+            "number": type(self.value) in (int, float)
+            or (
+                isinstance(self.value, str)
+                and bool(re.fullmatch(r"[+-]?\d+(?:\.\d+)?", self.value))
+            ),
             "reference": self.value is None and bool(self.reference_parts),
             "unknown": self.value is None,
         }
@@ -202,8 +221,8 @@ class TextStyle:
 class EntityStyle:
     """Мода оформления по виду и направлению; при равенстве частот — первый образец."""
 
-    kind: Literal["pko", "pod", "identification"]
-    direction: Literal["send", "receive"]
+    kind: Literal["pko", "pod", "identification", "pkpd", "parameter"]
+    direction: Literal["send", "receive", "both"]
     assignment_width: int = 0
     field_widths: tuple[tuple[str, int], ...] = ()
     opening_blank_lines: int = 0
@@ -320,7 +339,7 @@ class Identification(Member):
 class Property(Member):
     configuration_property: str
     format_property: str
-    property_kind: Literal["direct", "reference", "algorithm"] = "direct"
+    property_kind: Literal["direct", "reference", "pkpd", "algorithm"] = "direct"
     algorithm_flag: int = 0
     conversion: Reference = Reference("conversion")
     namespace: str = ""
@@ -382,9 +401,12 @@ class ValueMapping(Member):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PredefinedRule(Member):
+    directions: tuple[Direction, ...] = ()
+    data_kind: Literal["enumeration", "predefined"] = "enumeration"
     configuration_type: Value = Value()
     format_type: Value = Value()
     mappings: tuple[ValueMapping, ...] = ()
+    field_comments: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -405,6 +427,8 @@ class CodeUnit(Member):
     body_start: int = 0
     body_end: int = 0
     helper_verified: bool | None = None
+    parameters_text: str | None = None
+    frame_comment: str = ""
 
     def __post_init__(self) -> None:
         if text_hash(self.body) != self.sha256:
@@ -432,6 +456,19 @@ class DispatcherCase(Member):
     target: Reference
     arguments: tuple[Value, ...]
     returns: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CodeOccurrence:
+    """Лексическое вхождение; строка считается от начала точного тела, с единицы."""
+
+    owner_id: str
+    target_id: str
+    kind: Literal["algorithm_call", "algorithm_literal", "rule_literal"]
+    name: str
+    start: int
+    end: int
+    line: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -537,7 +574,9 @@ class LayoutContainer:
     """
 
     logical_id: str
-    kind: Literal["module", "rule", "entrypoint", "conditional"]
+    kind: Literal[
+        "module", "rule", "entrypoint", "conditional", "predefined", "values", "code", "dispatcher"
+    ]
     name: str
     owner_id: str | None = None
     state: ImportState = "editable"
@@ -580,6 +619,24 @@ def leaf_fingerprint(
 ) -> str:
     """Отпечаток только своего оператора, без дочерних сущностей и координат."""
     if isinstance(item, LayoutContainer):
+        if item.kind in ("code", "dispatcher"):
+            unit = next(u for u in model.code_units if u.logical_id == item.logical_id)
+            return digest(
+                (item.kind, unit.name, unit.signature, unit.parameters_text, unit.frame_comment)
+            )
+        if item.kind == "predefined":
+            member = next(r for r in model.pkpd if r.logical_id == item.logical_id)
+            return digest(
+                (
+                    item.kind,
+                    member.name,
+                    member.configuration_type,
+                    member.format_type,
+                    member.directions,
+                    member.data_kind,
+                )
+                + ((member.field_comments,) if member.field_comments else ())
+            )
         return digest((item.kind, item.name, item.signature, item.direction, item.branch))
     if item.field.startswith("header."):
         name = item.field.removeprefix("header.")
@@ -589,6 +646,14 @@ def leaf_fingerprint(
     if members is None:
         members = {m.logical_id: m for m in model.members()}
     member = members.get(item.entity_id or "")
+    if isinstance(member, DispatcherCase):
+        owner = next(c for c in model.layouts if c.logical_id == member.dispatcher.target_id)
+        first = next(
+            e.entity_id
+            for e in owner.elements
+            if isinstance(members.get(e.entity_id or ""), DispatcherCase)
+        )
+        return digest((member, first == member.logical_id))
     if member is None:
         return digest((item.field, item.trailing_comment))
     if item.field:
@@ -1087,8 +1152,8 @@ def validate_model(model: ManagerModel) -> None:
         raise ValueError("Повтор стиля вида и направления")
     for style in model.module_styles:
         if (
-            style.kind not in ("pko", "pod", "identification")
-            or style.direction not in ("send", "receive")
+            style.kind not in ("pko", "pod", "identification", "pkpd", "parameter")
+            or style.direction not in ("send", "receive", "both")
             or style.assignment_width < 0
             or style.opening_blank_lines < 0
             or not style.indent
@@ -1101,7 +1166,7 @@ def validate_model(model: ManagerModel) -> None:
             raise ValueError("Неверный стиль модуля")
     if len({item.client_id for item in model.decisions}) != len(model.decisions):
         raise ValueError("Повтор идентификатора решения")
-    for rule in (*model.pko, *model.pod):
+    for rule in (*model.pko, *model.pod, *model.pkpd):
         if (
             any(direction not in ("send", "receive", "both") for direction in rule.directions)
             or len(set(rule.directions)) != len(rule.directions)
@@ -1138,6 +1203,10 @@ def validate_model(model: ManagerModel) -> None:
             "rule",
             "entrypoint",
             "conditional",
+            "predefined",
+            "values",
+            "code",
+            "dispatcher",
         ) or container.state not in ("editable", "retained", "blocked"):
             raise ValueError("Неверный вид или состояние контейнера")
         check_slice(container.opening)

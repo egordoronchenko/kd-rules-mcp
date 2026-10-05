@@ -10,12 +10,16 @@ from .canonical import model_addresses
 from .writer_import import infer_module_styles
 from .writer_model import (
     CodeUnit,
+    DispatcherCase,
+    Event,
     Identification,
     ImportReport,
     LayoutContainer,
     LayoutElement,
     ManagerModel,
     ObjectRule,
+    Parameter,
+    PredefinedRule,
     ProcessingRule,
     Property,
     RuleUse,
@@ -23,6 +27,7 @@ from .writer_model import (
     SourceSlice,
     TextStyle,
     Value,
+    ValueMapping,
     leaf_fingerprint,
     validate_model,
 )
@@ -162,10 +167,15 @@ def render(
     styles = {(s.kind, s.direction): s for s in module_styles}
 
     def entity_style(owner: LayoutContainer, kind: str | None = None):
+        if kind == "parameter":
+            return styles.get(("parameter", "both"))
         current = owner
-        while current.owner_id and current.kind != "rule":
+        while current.owner_id and current.kind not in ("rule", "predefined"):
             current = containers[current.owner_id]
         rule = members.get(current.logical_id)
+        if isinstance(rule, PredefinedRule):
+            direction = rule.directions[0] if len(rule.directions) == 1 else "both"
+            return styles.get(("pkpd", direction))
         if not isinstance(rule, ObjectRule | ProcessingRule):
             return None
         direction = "receive" if any(d in ("receive", "both") for d in rule.directions) else "send"
@@ -179,7 +189,11 @@ def render(
         if style:
             if element.field == "group_flag" and element.field not in dict(style.field_widths):
                 return default
-            return dict(style.field_widths).get(element.field, style.assignment_width or default)
+            member = members.get(element.entity_id or "")
+            return dict(style.field_widths).get(
+                member.event if isinstance(member, Event) else element.field,
+                style.assignment_width or default,
+            )
         return default
 
     parts: list[str] = []
@@ -206,6 +220,11 @@ def render(
             and not parts[-1].endswith(("\n", "\r"))
             and not text.startswith(("\n", "\r"))
             and not adjacent
+            and not (
+                form == "closing"
+                and kind in ("handler", "algorithm", "conversion_event", "code")
+                and not parts[-1].rsplit("\n", 1)[-1].strip()
+            )
         ):
             parts[-1] += newline
             position += len(newline.encode("utf-8"))
@@ -243,6 +262,8 @@ def render(
         # ШаблоныТекстовМодулей/Ext/Template.txt:23–29,44–56,64–69.
         member = members.get(element.entity_id or "")
         name = element.field
+        if name == "dispatch_end":
+            return "КонецЕсли;"
         if name == "header.title":
             date = model.header.generated_at.value
             if any(c in str(model.header.title.value) + str(date) for c in "\r\n"):
@@ -340,6 +361,31 @@ def render(
         if element.field:
             return field_text(element, owner)
         member = members[element.entity_id or ""]
+        if isinstance(member, Event):
+            rule = members[owner.logical_id]
+            prefix = "ПравилоКонвертации." if isinstance(rule, ObjectRule) else "ПравилоОбработки."
+            default = (
+                forms.assignment_width(rule.directions, "") if isinstance(rule, ObjectRule) else 40
+            )
+            return (
+                (prefix + member.event).ljust(width_for(element, owner, default))
+                + " = "
+                + forms.literal(Value("string", member.target.name))
+                + ";"
+            )
+        if isinstance(member, DispatcherCase):
+            cases = [
+                e.entity_id
+                for e in owner.elements
+                if isinstance(members.get(e.entity_id or ""), DispatcherCase)
+            ]
+            return forms.dispatcher_case(
+                member.name,
+                member.target.name,
+                member.arguments,
+                member.returns,
+                cases[0] == member.logical_id,
+            )
         if isinstance(member, Property):
             arguments = ["СвойстваШапки"]
             for flag, value in zip(
@@ -358,6 +404,19 @@ def render(
             return forms.property_call(tuple(arguments))
         if isinstance(member, SearchSet):
             return forms.search(member.fields)
+        if isinstance(member, ValueMapping):
+            return forms.value_mapping(member)
+        if isinstance(member, Parameter):
+            return (
+                "ПараметрыКонвертации.Вставить("
+                + forms.literal(Value("string", member.name))
+                + (
+                    ", " + forms.literal(member.default)
+                    if member.default_source == "explicit"
+                    else ""
+                )
+                + ");"
+            )
         if isinstance(member, RuleUse):
             rule = members[member.rule.target_id or ""]
             assert isinstance(rule, ObjectRule | ProcessingRule)
@@ -379,12 +438,29 @@ def render(
     def frame(container: LayoutContainer, close: bool, span: SourceSlice | None) -> str:
         # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/
         # ШаблоныТекстовМодулей/Ext/Template.txt:21–22,41–43,62–63.
+        if container.kind in ("code", "dispatcher"):
+            unit = members[container.logical_id]
+            assert isinstance(unit, CodeUnit)
+            return forms.routine_close(unit.signature) if close else forms.code_open(unit)
         if container.kind == "conditional":
             return (
                 "КонецЕсли;"
                 if close
                 else forms.condition(container.direction or "receive", container.branch)
             )
+        if container.kind == "predefined":
+            rule = members[container.logical_id]
+            assert isinstance(rule, PredefinedRule)
+            return forms.predefined_open(rule)
+        if container.kind == "values":
+            result = forms.mapping_frame(container.direction or "send", close)
+            rule = members.get(container.owner_id or "")
+            if isinstance(rule, PredefinedRule):
+                key = f"values_{container.direction or 'send'}_{'close' if close else 'open'}"
+                comment = dict(rule.field_comments).get(key, "")
+                if comment:
+                    result += " " + comment
+            return result
         if close:
             return forms.routine_close(container.signature)
         result = forms.routine_open(container.name, container.signature)
@@ -424,12 +500,18 @@ def render(
     def walk(key: str, depth: int = 0, close_branch: bool = True):
         container = containers[key]
         framed = (
-            container.kind in ("rule", "entrypoint", "conditional") and container.branch != "chain"
+            container.kind
+            in ("rule", "entrypoint", "conditional", "predefined", "values", "code", "dispatcher")
+            and container.branch != "chain"
         )
         for close in (False, True):
             span = container.closing if close else container.opening
             # Промежуточная ветка цепочки не имеет своего КонецЕсли.
-            has_frame = framed and (not close or close_branch)
+            has_frame = (
+                framed
+                and (not close or close_branch)
+                and not (container.kind == "predefined" and close)
+            )
             if has_frame:
                 source = original(span)
                 valid = span is not None and span.fingerprint == leaf_fingerprint(
@@ -445,12 +527,25 @@ def render(
                         unit=container_style.indent if container_style else None,
                     )
                 )
+                if container.kind in ("code", "dispatcher") and not close and text is not source:
+                    text = frame(container, close, span)
+                if container.kind == "predefined" and text is not source:
+                    text += indent * max(depth - 1, 0) + newline
+                frame_member = members.get(key)
                 emit(
                     key + ("/closing" if close else "/opening"),
                     "pko"
                     if isinstance(members.get(key), ObjectRule)
                     else "pod"
                     if isinstance(members.get(key), ProcessingRule)
+                    else "pkpd"
+                    if isinstance(members.get(key), PredefinedRule)
+                    else "handler"
+                    if isinstance(frame_member, CodeUnit) and "handler" in frame_member.roles
+                    else "algorithm"
+                    if isinstance(frame_member, CodeUnit) and "algorithm" in frame_member.roles
+                    else "conversion_event"
+                    if isinstance(frame_member, CodeUnit) and "event" in frame_member.roles
                     else container.kind,
                     addresses[key],
                     text,
@@ -461,7 +556,9 @@ def render(
                 )
             if close:
                 break
-            child_depth = depth + (1 if framed else 0)
+            child_depth = depth + (
+                1 if framed and container.kind not in ("predefined", "values", "code") else 0
+            )
             for n, element in enumerate(container.elements):
                 if element.container_id:
                     walk(
@@ -488,12 +585,26 @@ def render(
                     and element.source.fingerprint == leaf_fingerprint(model, element, members)
                     and element.source.container_id in ("", container.logical_id)
                 )
-                if mode == "preserve" and source is not None and valid:
+                if element.field == "body":
+                    unit = members[element.entity_id or ""]
+                    assert isinstance(unit, CodeUnit)
+                    text, state = (
+                        unit.body,
+                        "verbatim"
+                        if mode == "preserve" and valid and source is not None
+                        else "regenerated",
+                    )
+                elif mode == "preserve" and source is not None and valid:
                     text, state = source, "verbatim"
                 else:
                     local_depth = child_depth
                     style = entity_style(
-                        container, "identification" if element.field == "mode" else None
+                        container,
+                        "identification"
+                        if element.field == "mode"
+                        else "parameter"
+                        if isinstance(members.get(element.entity_id or ""), Parameter)
+                        else None,
                     )
                     unit = style.indent if style else indent
                     if source is not None and use_source_style:
@@ -534,6 +645,16 @@ def render(
                     if isinstance(member, SearchSet)
                     else "rule_use"
                     if isinstance(member, RuleUse)
+                    else "value_mapping"
+                    if isinstance(member, ValueMapping)
+                    else "parameter"
+                    if isinstance(member, Parameter)
+                    else "binding"
+                    if isinstance(member, Event)
+                    else "dispatcher_case"
+                    if isinstance(member, DispatcherCase)
+                    else "code_body"
+                    if element.field == "body"
                     else "routine"
                 )
                 emit(

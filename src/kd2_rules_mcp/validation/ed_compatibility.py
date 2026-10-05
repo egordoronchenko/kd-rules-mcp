@@ -1,0 +1,339 @@
+"""Общая совместимость прямой ПКС: примитивы, квалификаторы и риск потери значения."""
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, localcontext
+from types import MappingProxyType
+
+from kd2_rules_mcp.ed.schema.model import SchemaProperty
+from kd2_rules_mcp.ed.schema.profile import ValidationProfile
+from kd2_rules_mcp.ed.schema.resolver import property_type
+from kd2_rules_mcp.ed.schema.xdto import XS
+from kd2_rules_mcp.validation.ed_structure_snapshot import StructureProperty
+
+FAMILIES = {
+    "string": "Строка",
+    "boolean": "Булево",
+    "decimal": "Число",
+    "integer": "Число",
+    "date": "Дата",
+    "dateTime": "Дата",
+    "time": "Дата",
+}
+INTEGER_BOUNDS = {
+    "byte": (-128, 127),
+    "short": (-32768, 32767),
+    "int": (-2147483648, 2147483647),
+    "long": (-9223372036854775808, 9223372036854775807),
+    "unsignedByte": (0, 255),
+    "unsignedShort": (0, 65535),
+    "unsignedInt": (0, 4294967295),
+    "unsignedLong": (0, 18446744073709551615),
+    "nonNegativeInteger": (0, None),
+    "positiveInteger": (1, None),
+    "nonPositiveInteger": (None, 0),
+    "negativeInteger": (None, -1),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Compatibility:
+    compatible: bool
+    reason: str
+    refusal: str = ""
+    value_range: str | None = None
+    value_range_warning: bool = False
+    value_range_consequence: str = ""
+
+
+def primitive_limits(
+    profile: ValidationProfile,
+    prop: SchemaProperty,
+) -> tuple[str | None, str | None, Mapping[str, Decimal]]:
+    """Все предки/facets должны быть известны; enum/pattern/list/union запрещены (§2.4)."""
+    schema = profile.schema
+    assert schema is not None
+    if prop.status != "complete" or prop.upper != 1:
+        return None, None, {}
+    target = property_type(schema, prop)
+    limits: dict[str, Decimal] = {}
+    seen = set()
+    ref = prop.type_ref
+    allowed = {
+        "maxLength",
+        "minLength",
+        "length",
+        "totalDigits",
+        "fractionDigits",
+        "minInclusive",
+        "maxInclusive",
+        "minExclusive",
+        "maxExclusive",
+    }
+    while target is not None:
+        if (
+            target.id in seen
+            or target.status != "complete"
+            or target.kind != "value"
+            or target.members
+            or target.variety.casefold() in ("list", "union")
+        ):
+            return None, None, {}
+        seen.add(target.id)
+        for facet in target.facets:
+            if facet.kind not in allowed:
+                return None, None, {}
+            try:
+                value = Decimal(facet.lexical)
+                if not value.is_finite():
+                    return None, None, {}
+            except InvalidOperation:
+                return None, None, {}
+            existing = limits.get(facet.kind)
+            limits[facet.kind] = (
+                value
+                if existing is None
+                else (
+                    max(existing, value) if facet.kind.startswith("min") else min(existing, value)
+                )
+            )
+        ref = target.base
+        if ref is None:
+            return None, None, {}
+        if ref.namespace == XS:
+            break
+        target = schema.types.get(ref)
+        if target is None:
+            return None, None, {}
+    if ref is None or ref.namespace != XS:
+        return None, None, {}
+    local = ref.local
+    family = FAMILIES.get(local)
+    if local in INTEGER_BOUNDS:
+        family = "Число"
+        low, high = INTEGER_BOUNDS[local]
+        if low is not None:
+            limits["minInclusive"] = max(limits.get("minInclusive", Decimal(low)), Decimal(low))
+        if high is not None:
+            limits["maxInclusive"] = min(limits.get("maxInclusive", Decimal(high)), Decimal(high))
+    if family == "Число" and local != "decimal":
+        limits["fractionDigits"] = Decimal(0)
+    applicable_facets = {
+        "Строка": {"length", "minLength", "maxLength"},
+        "Число": {
+            "totalDigits",
+            "fractionDigits",
+            "minInclusive",
+            "maxInclusive",
+            "minExclusive",
+            "maxExclusive",
+        },
+        "Булево": set(),
+        "Дата": set(),
+    }.get(family or "", set())
+    if set(limits) - applicable_facets:
+        return None, None, {}
+    for key in ("length", "minLength", "maxLength", "totalDigits", "fractionDigits"):
+        value = limits.get(key)
+        if value is not None and (value < 0 or value != value.to_integral_value()):
+            return None, None, {}
+    if limits.get("totalDigits") == 0 or (
+        "totalDigits" in limits and limits.get("fractionDigits", Decimal(0)) > limits["totalDigits"]
+    ):
+        return None, None, {}
+    if "length" in limits and not (
+        limits.get("minLength", limits["length"])
+        <= limits["length"]
+        <= limits.get("maxLength", limits["length"])
+    ):
+        return None, None, {}
+    if limits.get("minLength", Decimal(0)) > limits.get("maxLength", Decimal("Infinity")):
+        return None, None, {}
+    lower = limits.get("minInclusive", limits.get("minExclusive"))
+    upper = limits.get("maxInclusive", limits.get("maxExclusive"))
+    if (
+        lower is not None
+        and upper is not None
+        and (lower > upper or (lower == upper and any(k.endswith("Exclusive") for k in limits)))
+    ):
+        return None, None, {}
+    return family, local, MappingProxyType(limits)
+
+
+def compatibility(
+    profile: ValidationProfile,
+    prop: SchemaProperty,
+    attribute: StructureProperty,
+    direction: str,
+) -> Compatibility:
+    family, local, limits = primitive_limits(profile, prop)
+    if family is None or attribute.unresolved or len(attribute.types) != 1:
+        return Compatibility(
+            False,
+            "Требуется конвертация: не одиночный подтверждённый примитив",
+            "conversion_required",
+        )
+    if attribute.types[0] not in ("Строка", "Булево", "Число", "Дата"):
+        return Compatibility(
+            False, "Тип реквизита и примитив свойства различаются", "type_incompatible"
+        )
+    if attribute.types[0] != family:
+        return Compatibility(
+            False, "Примитивные семьи реквизита и свойства различаются", "type_incompatible"
+        )
+    q = attribute.qualifiers
+    risks = []
+    range_warning = False
+    consequence = ""
+    if family == "Строка":
+        config = q.get("string_length", 0)
+        if not isinstance(config, int) or isinstance(config, bool) or config < 0:
+            return Compatibility(False, "Неизвестны квалификаторы строки", "conversion_required")
+        length = limits.get("length", limits.get("maxLength"))
+        source, destination = (
+            (config or None, length) if direction == "send" else (length, config or None)
+        )
+        if destination is not None and (source is None or Decimal(source) > Decimal(destination)):
+            risks.append(
+                f"длина источника={source if source is not None else 'unbounded'}, "
+                f"приёмника={destination}"
+            )
+            range_warning = direction == "send"
+        minimum = limits.get("length", limits.get("minLength", Decimal(0)))
+        if direction == "send" and minimum > 0:
+            risks.append(
+                f"минимальная длина формата={minimum}; пустое значение реквизита допустимо"
+            )
+            range_warning = True
+        if q.get("string_fixed"):
+            risks.append("реквизит имеет фиксированную длину")
+        consequence = (
+            f"длина реквизита=0…{config or 'неограничена'}, "
+            f"длина формата={minimum}…{length if length is not None else 'неограничена'}; "
+        )
+        if range_warning:
+            if length is not None and (config == 0 or config > length):
+                consequence += f"значение длиннее {length} символов не выгрузится; "
+            if minimum > 0:
+                consequence += f"значение короче {minimum} символов не выгрузится; "
+            consequence += "проверка ограничений перед отправкой (XDTO:6103–6109)"
+        elif direction == "receive":
+            consequence += "при загрузке возможны усечение строки или отказ записи"
+        else:
+            consequence += "фиксированная длина реквизита требует проверки перед отправкой"
+    elif family == "Дата":
+        # Структура хранит состав словами («Дата и время»), операции авторинга — именем
+        # перечисления (`DateTime`): сравнение без пробелов и регистра. «Дата» входит в
+        # `dateTime` без потери; приём `dateTime` в «Дата» и отправка «Дата и время» в
+        # `date` отбрасывают время. «Время» и «Дата» друг в друга не входят.
+        parts = str(q.get("date_parts", "ДатаВремя")).casefold().replace(" ", "")
+        config_parts = {
+            "дата": frozenset({"date"}),
+            "date": frozenset({"date"}),
+            "время": frozenset({"time"}),
+            "time": frozenset({"time"}),
+            "датавремя": frozenset({"date", "time"}),
+            "датаивремя": frozenset({"date", "time"}),
+            "datetime": frozenset({"date", "time"}),
+        }.get(parts)
+        format_parts = {
+            "date": frozenset({"date"}),
+            "time": frozenset({"time"}),
+            "datetime": frozenset({"date", "time"}),
+        }.get((local or "dateTime").casefold())
+        if config_parts is None:
+            return Compatibility(
+                False, "Неизвестен состав даты реквизита; обновите структуру", "conversion_required"
+            )
+        if format_parts is None:
+            return Compatibility(
+                False, "Компоненты даты реквизита и свойства различаются", "type_incompatible"
+            )
+        source, destination = (
+            (config_parts, format_parts) if direction == "send" else (format_parts, config_parts)
+        )
+        if source != destination:
+            extra = source - destination
+            if extra == frozenset({"time"}) and not destination - source:
+                risks.append(
+                    "время из сообщения отбрасывается"
+                    if direction == "receive"
+                    else "время реквизита отбрасывается"
+                )
+            elif destination - source == frozenset({"time"}) and not extra:
+                pass
+            else:
+                return Compatibility(
+                    False,
+                    "Компоненты даты реквизита и свойства различаются",
+                    "type_incompatible",
+                )
+        if limits:
+            return Compatibility(
+                False, "Ограничения даты не поддержаны прямой ПКС", "conversion_required"
+            )
+        consequence = f"состав реквизита={parts}, состав формата={local}; " + (
+            "при загрузке будет отброшено время сообщения"
+            if direction == "receive"
+            else "при отправке будет отброшено время реквизита"
+        )
+    elif family == "Число":
+        digits, fraction = q.get("number_length"), q.get("number_precision")
+        if (
+            not isinstance(digits, int)
+            or not isinstance(fraction, int)
+            or not 0 <= fraction < digits <= 38
+        ):
+            return Compatibility(False, "Неизвестны квалификаторы числа", "conversion_required")
+        with localcontext() as context:
+            context.prec = 80
+            maximum = Decimal(10) ** (digits - fraction) - Decimal(10) ** (-fraction)
+        config_low = Decimal(0) if q.get("number_nonnegative") else -maximum
+        format_low = limits.get("minInclusive", limits.get("minExclusive"))
+        format_high = limits.get("maxInclusive", limits.get("maxExclusive"))
+        total = limits.get("totalDigits")
+        decimals = limits.get("fractionDigits")
+        if total is not None:
+            bound = Decimal(10) ** total - 1
+            format_low = max(format_low, -bound) if format_low is not None else -bound
+            format_high = min(format_high, bound) if format_high is not None else bound
+        cfg = (config_low, maximum, Decimal(fraction))
+        fmt = (format_low, format_high, decimals)
+        source, destination = (cfg, fmt) if direction == "send" else (fmt, cfg)
+        for label, src, dst, lower in zip(
+            ("min", "max", "fraction"), source, destination, (True, False, False), strict=True
+        ):
+            if dst is not None and (src is None or (src < dst if lower else src > dst)):
+                risks.append(
+                    f"{label}: источник={src if src is not None else 'unbounded'}, приёмник={dst}"
+                )
+        if direction == "send" and any(k.endswith("Exclusive") for k in limits):
+            risks.append("граница формата исключительная")
+        consequence = (
+            f"диапазон реквизита=[{config_low}; {maximum}], дробных знаков={fraction}; "
+            f"диапазон формата=[{format_low if format_low is not None else 'неограничен'}; "
+            f"{format_high if format_high is not None else 'неограничен'}], "
+            f"дробных знаков={decimals if decimals is not None else 'неограничено'}; "
+        )
+        if direction == "send":
+            limits_text = []
+            if format_high is not None and maximum > format_high:
+                limits_text.append(f"значение больше {format_high} не выгрузится")
+            if format_low is not None and config_low < format_low:
+                limits_text.append(f"значение меньше {format_low} не выгрузится")
+            if decimals is not None and fraction > decimals:
+                limits_text.append(
+                    f"значение с дробной частью более {decimals} знаков не выгрузится"
+                )
+            if any(k.endswith("Exclusive") for k in limits):
+                limits_text.append("значение на исключительной границе не выгрузится")
+            consequence += "; ".join(limits_text) + " (XDTO:6103–6109)"
+        else:
+            consequence += "при загрузке возможны потеря точности числа или отказ записи"
+    return Compatibility(
+        True,
+        "Одиночный совместимый примитив",
+        value_range="; ".join(risks) or None,
+        value_range_warning=range_warning,
+        value_range_consequence=consequence if risks else "",
+    )

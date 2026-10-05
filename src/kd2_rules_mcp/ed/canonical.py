@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, fields, is_dataclass
+from decimal import Decimal
 from functools import lru_cache
 from typing import Any
 
@@ -15,6 +16,7 @@ from .writer_model import (
     ManagerModel,
     Member,
     RetainedBlock,
+    Value,
     digest,
 )
 
@@ -102,7 +104,9 @@ def model_addresses(model: ManagerModel) -> dict[str, str]:
     for container in model.layouts:
         result.setdefault(
             container.logical_id,
-            "Раскладка/Модуль"
+            result[container.owner_id] + "/Значения/" + _escaped(container.name)
+            if container.kind == "values" and container.owner_id in result
+            else "Раскладка/Модуль"
             if container.kind == "module"
             else "Раскладка/" + _escaped(container.name),
         )
@@ -233,11 +237,15 @@ def canonical_value(
             excluded |= {"opening", "closing"}
             if value.kind == "module":
                 excluded |= {"name"}
-        return {
+        result = {
             f.name: canonical_value(getattr(value, f.name), ids, f.name, (*path, f.name))
             for f in fields(value)
             if f.name not in excluded and not f.name.startswith("_")
         }
+        if isinstance(value, Value) and value.state == "number":
+            number = format(Decimal(str(value.value)), "f")
+            result["value"] = number.rstrip("0").rstrip(".") if "." in number else number
+        return result
     if isinstance(value, dict):
         return {
             key: canonical_value(item, ids, key, (*path, key))
@@ -275,7 +283,7 @@ def canonical_model(model: ManagerModel) -> CanonicalModel:
 
     # Направления правила — множество: порядок использований в точках входа задаёт раскладка,
     # а не порядок кортежа (после повторного чтения он всегда «отправка, получение»).
-    for catalog in ("pko", "pod"):
+    for catalog in ("pko", "pod", "pkpd"):
         for rule in value.get(catalog, ()):
             if isinstance(rule, dict) and isinstance(rule.get("directions"), list):
                 rule["directions"] = sorted(

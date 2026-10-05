@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import tempfile
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, NoReturn
@@ -30,6 +30,7 @@ from kd2_rules_mcp.ed import build_references
 from kd2_rules_mcp.ed.address import build_addresses
 from kd2_rules_mcp.ed.executor_profile import ProfileDetection, detect_profile
 from kd2_rules_mcp.ed.reader import read_manager_text
+from kd2_rules_mcp.ed.schema import load_schema
 from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
 from kd2_rules_mcp.ed.writer import new_manager, render
 from kd2_rules_mcp.ed.writer_import import import_manager
@@ -55,7 +56,7 @@ from kd2_rules_mcp.projects import resolve
 from kd2_rules_mcp.service.ed import EdProject
 from kd2_rules_mcp.service.ed_authoring import EdAuthoringMixin, _failure, _mapping, _text
 from kd2_rules_mcp.service.ed_authoring_views import compact_page, validate_options
-from kd2_rules_mcp.service.ed_layers import checked_extensions, extension_paths
+from kd2_rules_mcp.service.ed_layers import checked_extensions, extension_paths, select_views
 from kd2_rules_mcp.service.ed_views import address_of, validate_page
 from kd2_rules_mcp.service.paths import Settings
 from kd2_rules_mcp.structures.store import dump_fingerprint
@@ -64,7 +65,9 @@ from kd2_rules_mcp.validation.ed_schema import validate_schema
 from kd2_rules_mcp.validation.ed_structure import validate_structure
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
 from kd2_rules_mcp.validation.ed_writer import validate_writer
-from kd2_rules_mcp.validation.report import Level
+from kd2_rules_mcp.validation.report import Level, ValidationReport
+
+MAX_PREVIEW_PACKETS = 8
 
 
 def _refuse(reason: str, message: str, **details) -> NoReturn:
@@ -194,6 +197,118 @@ class EdWriterMixin(EdAuthoringMixin):
         self._safe_path(path)
         return path
 
+    def _manager_preview_packet(self, project_id: str, preview_hash: str | None) -> list[dict]:
+        if not isinstance(preview_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", preview_hash):
+            _refuse("preview_packet_missing", "Хеш preview неизвестен; пришлите operations")
+        path = self._manager_file(project_id, "previews/" + preview_hash + ".json")
+        if not path.is_file():
+            _refuse(
+                "preview_packet_missing",
+                "Пакет preview неизвестен или вытеснен; пришлите operations",
+            )
+        try:
+            packet = json.loads(path.read_bytes())
+            operations = packet["operations"]
+            if (
+                packet["preview_hash"] != preview_hash
+                or not isinstance(operations, list)
+                or packet["packet_hash"] != digest(operations)
+            ):
+                raise ValueError("Повреждён пакет")
+        except (ValueError, KeyError, TypeError):
+            _refuse("preview_packet_corrupt", "Повреждён пакет preview; пришлите operations")
+        return operations
+
+    def _manager_save_preview(
+        self, project_id: str, revision: str, preview_hash: str, operations: list[dict]
+    ) -> None:
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(self.manager_workspace._disk_lock(project_id))
+            except EdAuthoringStaleError:
+                _refuse("project_busy", "Проект занят другим процессом; повторите preview позже")
+            current = self._manager_project(project_id)
+            self.manager_workspace._check_current(current)
+            if current.model.revision != revision:
+                raise EdAuthoringStaleError(
+                    "Проект изменён во время preview", {"revision": current.model.revision}
+                )
+            path = self._manager_file(project_id, "previews/" + preview_hash + ".json")
+            _atomic_json(
+                path,
+                {
+                    "preview_hash": preview_hash,
+                    "packet_hash": digest(operations),
+                    "revision": revision,
+                    "operations": operations,
+                },
+            )
+            packets = sorted(
+                path.parent.glob("*.json"),
+                key=lambda p: (p.stat().st_mtime_ns, p.name),
+                reverse=True,
+            )
+            for old in packets[MAX_PREVIEW_PACKETS:]:
+                self._safe_path(old)
+                old.unlink(missing_ok=True)
+
+    def _manager_reference(
+        self,
+        root: Path,
+        roots: tuple[Path, ...],
+        plan: str | None,
+        key: str,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> tuple[dict | None, dict | None]:
+        """Точное соответствие ключа версии доказанной записи карты плана."""
+        snapshot, _, _ = self._open_snapshot(
+            root, None, None, False, extensions=roots, read_files_only=True
+        )
+        plans = snapshot.profile.plans
+        selected = next(
+            (p for p in plans if p.plan_name.casefold() == (plan or "").casefold()), None
+        )
+        if plan is None:
+            candidates = [p for p in plans if p.is_ed is True and key in p.effective_map()]
+            selected = candidates[0] if len(candidates) == 1 else None
+        elif selected is None:
+            _refuse(
+                "exchange_plan_missing",
+                "План не найден; выберите plan из plan_candidates",
+                plan_candidates=compact_page(
+                    {}, [{"plan": p.plan_name} for p in plans if p.is_ed is True], offset, limit
+                ),
+            )
+        if selected is None:
+            return None, {
+                "id": "reference_route_ambiguous",
+                "message": f"Нет единственного плана с доказанным маршрутом версии {key}",
+            }
+        if selected.is_ed is not True:
+            return None, {
+                "id": "plan_not_ed",
+                "message": f"План {selected.plan_name} не подтверждён как обмен через формат",
+            }
+        name = selected.effective_map().get(key)
+        if not name:
+            return None, {
+                "id": "format_version_not_mapped",
+                "message": f"В карте плана {selected.plan_name} "
+                f"нет доказанного модуля версии {key}",
+            }
+        manager = next(
+            (m for m in snapshot.profile.managers if m.name.casefold() == (name or "").casefold()),
+            None,
+        )
+        if manager is None or not manager.path:
+            return None, {
+                "id": "manager_source_unavailable",
+                "message": f"Исходник типового модуля {name} для версии {key} не определён",
+            }
+        return {"name": manager.name, "path": self._host((root / manager.path).resolve())}, None
+
     def _manager_metadata(self, project_id: str) -> dict:
         try:
             path = self._manager_file(project_id, "creation.json")
@@ -304,6 +419,14 @@ class EdWriterMixin(EdAuthoringMixin):
                 for s in p.sources
             ]
             metadata["schema_sources"] = sources
+            metadata["schema_packages"] = [
+                {
+                    "path": self._host_text(p.sources[0].path),
+                    "namespace": p.namespace,
+                    "role": p.origin_role,
+                }
+                for p in schema.schema.packages
+            ]
             bindings = (
                 FormatBinding(
                     key, schema.schema.packages[0].namespace, digest(sources), args["schema_id"]
@@ -324,6 +447,44 @@ class EdWriterMixin(EdAuthoringMixin):
             )
         )
         return metadata, host, bindings
+
+    def _manager_value_ranges(self, model, metadata: dict) -> ValidationReport:
+        """Проверяет ограничения привязанных типов и после перезапуска сервиса."""
+        args = metadata["arguments"]
+        if not args["schema_id"] or not args["structure_id"]:
+            return ValidationReport()
+        opened = self._ed_schemas.get(args["schema_id"])
+        if opened is not None:
+            schema = opened.schema
+        else:
+            packages = metadata.get("schema_packages")
+            if not packages:
+                _refuse(
+                    "schema_snapshot_unavailable",
+                    "Откройте привязанную schema_id заново для проверки ограничений сборки",
+                    schema_id=args["schema_id"],
+                )
+            paths = [(p, self._read_path(p["path"])) for p in packages]
+            imports = {p["namespace"]: path for p, path in paths}
+            schema = load_schema(
+                paths[0][1],
+                extensions=tuple(path for p, path in paths if p["role"] == "extension"),
+                locate_import=imports.get,
+            )
+        _, snapshot = self._manager_snapshot(model, publish=False)
+        structure = self._ed_structure_snapshot(args["structure_id"])[0]
+        report = validate_schema(
+            snapshot.document,
+            schema,
+            snapshot.index,
+            ValidationProfile.build(schema, args["format_version"], "both"),
+            structure,
+            include_value_ranges=True,
+            legacy_atomic_only=False,
+        )
+        return ValidationReport(
+            issues=[i for i in report.issues if i.check == "ed.schema.value_range"]
+        )
 
     def _manager_rebind_report(self, model, metadata: dict, detection: ProfileDetection):
         """Новые привязки проверяются и по форме писателя, и по схеме/структуре."""
@@ -404,8 +565,11 @@ class EdWriterMixin(EdAuthoringMixin):
         structure_id: str | None = None,
         offset: int = 0,
         limit: int = 20,
+        section: str = "import_report",
     ) -> dict[str, Any]:
         validate_page(offset, limit)
+        if section not in ("import_report", "notices", "differences", "plan_candidates"):
+            raise ValueError("section: import_report, notices, differences или plan_candidates")
         _text(project_id, "project_id")
         if mode not in ("new", "import", "rebind"):
             raise ValueError("mode: new, import или rebind")
@@ -508,6 +672,14 @@ class EdWriterMixin(EdAuthoringMixin):
             _refuse("model_invalid", "Нужна XML-выгрузка конфигурации с Configuration.xml")
         plan = _text(plan, "plan")
         key = _text(format_version, "format_version")
+        reference_manager, reference_reason = self._manager_reference(
+            root,
+            roots,
+            plan,
+            key,
+            offset=offset if section == "plan_candidates" else 0,
+            limit=limit,
+        )
         identity_data = _mapping(
             identity or {},
             "identity",
@@ -622,11 +794,7 @@ class EdWriterMixin(EdAuthoringMixin):
                         "warnings": sum(i.level == Level.WARNING for i in report.issues),
                         "issue_count": len(report.issues),
                     }
-                    notices.extend(
-                        compact_page(
-                            {}, [{"id": i.check, **i.to_dict()} for i in report.issues], 0, 10
-                        )["items"]
-                    )
+                    notices.extend({"id": i.check, **i.to_dict()} for i in report.issues)
                     # Журнал публикуется первым; решение в сохранённой модели
                     # фиксирует новую сторону транзакции независимо от дальнейших правок.
                     with _rebind_io(), self.manager_workspace._disk_lock(project_id):
@@ -659,7 +827,9 @@ class EdWriterMixin(EdAuthoringMixin):
                 else:
                     detection = self._manager_detection(metadata, model.executor_profile.profile_id)
                 if differences and not rebinding:
-                    differences_page = compact_page({}, differences, offset, limit)
+                    differences_page = compact_page(
+                        {}, differences, offset if section == "differences" else 0, limit
+                    )
                     notices.append(
                         {
                             "id": "creation_inputs_changed",
@@ -742,6 +912,8 @@ class EdWriterMixin(EdAuthoringMixin):
                         "передайте extensions=[] или явный список",
                     }
                 )
+            notices_offset = offset if section == "notices" else 0
+            notices_page = compact_page({}, notices, notices_offset, limit)
             return {
                 "project_id": project_id,
                 "revision": model.revision,
@@ -749,7 +921,14 @@ class EdWriterMixin(EdAuthoringMixin):
                 "document_id": generated_id,
                 "counts": model.counts,
                 "executor_profile": self._manager_profile(detection),
-                "notices": notices,
+                "notices": notices_page["items"],
+                "notice_count": notices_page["total"],
+                "notices_offset": notices_offset,
+                "notices_has_more": notices_page["has_more"],
+                "notices_next_offset": notices_page["next_offset"],
+                **({"notices_truncated_by": "size"} if notices_page.get("truncated_by") else {}),
+                "reference_manager": reference_manager,
+                **({"reference_manager_reason": reference_reason} if reference_reason else {}),
                 **({"rebound": True, "validation": validation} if rebinding else {}),
                 "import_report": compact_page(
                     {
@@ -761,7 +940,7 @@ class EdWriterMixin(EdAuthoringMixin):
                         for code, address in model.import_report.diagnostics
                     ]
                     + [asdict(e) for e in model.import_report.entries],
-                    offset,
+                    offset if section == "import_report" else 0,
                     limit,
                 ),
             }
@@ -817,7 +996,7 @@ class EdWriterMixin(EdAuthoringMixin):
         self,
         project_id: str,
         expected_revision: str,
-        operations: list[dict],
+        operations: list[dict] | None = None,
         mode: str = "preview",
         expected_preview_hash: str | None = None,
         confirmations: list[dict] | None = None,
@@ -831,10 +1010,17 @@ class EdWriterMixin(EdAuthoringMixin):
             "operations",
             "changes",
             "notices",
+            "failures",
+            "skipped",
         ):
-            raise ValueError("mode: preview/apply; section: summary/operations/changes/notices")
+            raise ValueError(
+                "mode: preview/apply; section: summary/operations/changes/notices/failures/skipped"
+            )
         if mode == "apply" and section != "summary":
             raise ValueError("apply допускает только section=summary")
+        if operations is None and mode == "apply":
+            with self._lock:
+                operations = self._manager_preview_packet(project_id, expected_preview_hash)
         if not isinstance(operations, list):
             raise ValueError("operations: нужен список")
         self._limit(len(operations), 100, "операции")
@@ -877,6 +1063,8 @@ class EdWriterMixin(EdAuthoringMixin):
                     receipt = json.loads(receipt_path.read_bytes())
                     result = receipt["result"]
                     decisions = receipt["decisions"]
+                    receipt_rows = receipt.get("rows")
+                    skipped_rows = receipt.get("skipped_rows")
                     if (
                         not isinstance(result, dict)
                         or not isinstance(result.get("revision"), str)
@@ -884,6 +1072,20 @@ class EdWriterMixin(EdAuthoringMixin):
                         or result.get("project_id") != project_id
                         or not isinstance(decisions, dict)
                         or not decisions
+                        or (
+                            receipt_rows is not None
+                            and (
+                                not isinstance(receipt_rows, list)
+                                or not all(isinstance(row, dict) for row in receipt_rows)
+                            )
+                        )
+                        or (
+                            skipped_rows is not None
+                            and (
+                                not isinstance(skipped_rows, list)
+                                or not all(isinstance(row, dict) for row in skipped_rows)
+                            )
+                        )
                         or not all(
                             isinstance(k, str)
                             and isinstance(v, str)
@@ -901,7 +1103,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 known = {d.client_id: d.operation_hash for d in project.model.decisions}
                 if decisions and all(known.get(k) == v for k, v in decisions.items()):
                     current_id, _ = self._manager_snapshot(project.model)
-                    return {
+                    replay = {
                         **result,
                         "replayed": True,
                         "applied": False,
@@ -911,6 +1113,33 @@ class EdWriterMixin(EdAuthoringMixin):
                         "counts": project.model.counts,
                         "document_id": current_id,
                     }
+                    if receipt_rows is not None:
+                        if skipped_rows is not None:
+                            replay["skipped"] = compact_page({}, skipped_rows, 0, min(limit, 5))
+                        header = {
+                            k: v
+                            for k, v in replay.items()
+                            if k
+                            not in {
+                                "items",
+                                "offset",
+                                "limit",
+                                "total",
+                                "has_more",
+                                "next_offset",
+                                "truncated_by",
+                            }
+                        }
+                        return compact_page(header, receipt_rows, offset, limit)
+                    if offset != result.get("offset", 0):
+                        _refuse(
+                            "receipt_page_unavailable",
+                            "Старая квитанция хранит только одну страницу; "
+                            "используйте текущий document_id для навигации",
+                            revision=project.model.revision,
+                            document_id=current_id,
+                        )
+                    return replay
             if expected_revision != project.model.revision:
                 raise EdAuthoringStaleError(
                     "Ревизия менеджера устарела", {"revision": project.model.revision}
@@ -928,6 +1157,8 @@ class EdWriterMixin(EdAuthoringMixin):
                 "operations": [json_value(o) for o in planned.operations],
                 "changes": [json_value(c) for c in planned.changes],
                 "notices": [json_value(n) for n in planned.notices],
+                "failures": [json_value(f) for f in planned.failures],
+                "skipped": [{"client_id": s} for s in planned.skipped],
             }
             summary_rows = (
                 [{"kind": "notice", **n} for n in rows["notices"]]
@@ -960,12 +1191,18 @@ class EdWriterMixin(EdAuthoringMixin):
                 "applied": False,
                 "section": section,
                 "counts": planned.model.counts,
-                "failures": compact_page({}, [json_value(f) for f in planned.failures], 0, 5),
-                "skipped": compact_page({}, [{"client_id": s} for s in planned.skipped], 0, 5),
+                "failures": compact_page(
+                    {}, rows["failures"], offset if section == "failures" else 0, min(limit, 5)
+                ),
+                "skipped": compact_page(
+                    {}, rows["skipped"], offset if section == "skipped" else 0, min(limit, 5)
+                ),
                 "required_confirmations": [
                     {"code": n.code, "notice_hash": n.notice_hash} for n in planned.notices[:10]
                 ],
                 "confirmation_count": len(planned.notices),
+                "confirmations_has_more": len(planned.notices) > 10,
+                "confirmations_next_offset": min(10, len(planned.notices)),
                 "change_count": len(planned.changes),
                 "operation_count": len(planned.operations),
             }
@@ -994,6 +1231,8 @@ class EdWriterMixin(EdAuthoringMixin):
                                 for f in planned.failures[:5]
                             ],
                             "failure_count": len(planned.failures),
+                            "failures_has_more": len(planned.failures) > 5,
+                            "failures_next_offset": min(5, len(planned.failures)),
                         },
                     )
                 updated = self.manager_workspace.apply(
@@ -1023,6 +1262,8 @@ class EdWriterMixin(EdAuthoringMixin):
                         receipt_path,
                         {
                             "result": result,
+                            "rows": summary_rows,
+                            "skipped_rows": [{"client_id": s} for s in planned.skipped],
                             "decisions": {
                                 d.client_id: d.operation_hash
                                 for d in updated.model.decisions
@@ -1031,6 +1272,7 @@ class EdWriterMixin(EdAuthoringMixin):
                         },
                     )
                 return result
+            self._manager_save_preview(project_id, project.model.revision, preview_hash, operations)
             return compact_page(
                 base,
                 rows[section] if section != "summary" else summary_rows,
@@ -1126,6 +1368,7 @@ class EdWriterMixin(EdAuthoringMixin):
             with self._structure(structure_id) as connection:
                 provenance = dict(connection.execute("SELECT key,value FROM meta"))
                 manager_id = value.get("project_id")
+                metadata = None
                 if manager_id is not None:
                     model = self._manager_project(_text(manager_id, "project_id")).model
                     metadata = self._manager_metadata(manager_id)
@@ -1156,17 +1399,117 @@ class EdWriterMixin(EdAuthoringMixin):
                         offset=offset,
                         limit=limit,
                     )
-                    return {**page, "next_offset": page["offset"] + len(page["items"])}
+                    hint = (
+                        [
+                            {
+                                "id": "reference_manager_hint",
+                                "message": "По именам пары не найдены; подключите типовой "
+                                "менеджер для смысловых переименований",
+                                "hint": 'reference_document_id="auto"',
+                            }
+                        ]
+                        if page["total"] == 0
+                        else []
+                    )
+                    return {
+                        **page,
+                        "next_offset": page["offset"] + len(page["items"]),
+                        "notices": hint,
+                    }
                 if manager_id is None and (provenance.get("source") != "xml" or root is None):
                     _refuse("model_invalid", "Для структуры без XML-источника нужен project_id")
                 assert root is not None
+                roots = ()
+                automatic_reference = reference_document_id == "auto"
+                if automatic_reference:
+                    if metadata is not None:
+                        roots = extension_paths(
+                            metadata["arguments"]["extensions"], self._read_path
+                        )
+                    else:
+                        try:
+                            names = json.loads(provenance.get("extensions", "[]"))
+                            paths = json.loads(provenance.get("extension_paths", "[]"))
+                            if (
+                                not isinstance(names, list)
+                                or not isinstance(paths, list)
+                                or len(names) != len(paths)
+                                or not all(isinstance(n, str) for n in names)
+                                or not all(
+                                    isinstance(p, str) and Path(p).is_absolute() for p in paths
+                                )
+                            ):
+                                raise ValueError("Нет путей расширений")
+                            roots = extension_paths(paths, self._read_path)
+                            checked_extensions(root, roots)
+                        except (ValueError, Kd2Error, OSError):
+                            _refuse(
+                                "structure_extension_paths_unavailable",
+                                "Пути расширений не сохранены или недоступны: "
+                                "нужен target.project_id или явный документ reference_document_id",
+                            )
+                        self._manager_structure_provenance(
+                            structure_id,
+                            {
+                                "arguments": {
+                                    "configuration_path": self._host(root),
+                                    "extensions": [self._host(p) for p in roots],
+                                }
+                            },
+                        )
+                    plan = metadata["arguments"]["plan"] if metadata is not None else None
+                    key = (
+                        metadata["arguments"]["format_version"]
+                        if metadata is not None
+                        else schema.format_version
+                    )
+                    reference_info, reference_reason = self._manager_reference(
+                        root, roots, plan, key
+                    )
+                    if reference_info is None:
+                        _refuse(
+                            "reference_manager_unavailable",
+                            "Типовой менеджер этой версии не определён; используйте ed_routes "
+                            "и передайте reference_document_id явно",
+                            reference_manager_reason=reference_reason,
+                        )
+                    opened = self.ed_open(
+                        path=reference_info["path"],
+                        **(
+                            {
+                                "configuration_path": self._host(root),
+                                "extensions": [self._host(p) for p in roots],
+                            }
+                            if roots
+                            else {}
+                        ),
+                    )
+                    if opened.get("source_changed"):
+                        raise EdAuthoringStaleError(
+                            "Типовой менеджер изменился; закройте reference_document_id "
+                            "через ed_close и повторите reference_document_id=auto",
+                            {"reference_document_id": opened["project_id"]},
+                        )
+                    reference_document_id = opened["project_id"]
                 reference = self._ed_project(reference_document_id)
                 if (
                     not (root / "Configuration.xml").is_file()
-                    or reference.layered
-                    or not reference.path.resolve().is_relative_to(root / "CommonModules")
+                    or (reference.layered and not automatic_reference)
+                    or not any(
+                        reference.path.resolve().is_relative_to(folder / "CommonModules")
+                        for folder in (root, *(roots if automatic_reference else ()))
+                    )
                 ):
                     _refuse("model_invalid", "Типовой менеджер должен быть из той же конфигурации")
+                reference_document, reference_index = reference.document, reference.index
+                if reference.layered:
+                    view = select_views(reference.layered, direction, False)[0]
+                    reference_document, reference_index = view.document, view.index
+                source_fingerprint = (
+                    digest(tuple(f.sha256 for f in reference_document.files))
+                    if reference.layered
+                    else reference_document.files[0].sha256
+                )
                 # Собираем все страницы перед объединением: offset применяется к общему списку.
                 result = object_candidates(
                     connection, schema.schema, direction=direction, text=text, limit=200
@@ -1198,14 +1541,14 @@ class EdWriterMixin(EdAuthoringMixin):
                     (
                         sha256(connection.serialize()),
                         schema.schema.schema_id,
-                        reference.document.files[0].sha256,
+                        source_fingerprint,
                     )
                 )
                 applicability = Applicability.build(
-                    reference.document,
+                    reference_document,
                     ValidationProfile.build(schema.schema, schema.format_version, direction),
                 )
-                for rule in reference.document.pko:
+                for rule in reference_document.pko:
                     if applicability.evaluate(rule, direction) is False:
                         continue
                     cfg, _ = metadata_key(rule.configuration_object.value)
@@ -1223,7 +1566,7 @@ class EdWriterMixin(EdAuthoringMixin):
                         {
                             "candidate_id": digest(
                                 (
-                                    reference.document.files[0].sha256,
+                                    source_fingerprint,
                                     binding,
                                     full_name,
                                     fmt,
@@ -1239,11 +1582,11 @@ class EdWriterMixin(EdAuthoringMixin):
                             "auto": False,
                             "origin": {
                                 "document_id": reference_document_id,
-                                "address": address_of(rule, reference.index),
+                                "address": address_of(rule, reference_index),
                             },
                         }
                     )
-                return compact_page({}, rows, offset, min(limit, 200))
+                return compact_page({"notices": []}, rows, offset, min(limit, 200))
 
     def _manager_previous(
         self, destination: Path
@@ -1355,6 +1698,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 detection = self._manager_detection(metadata, model.executor_profile.profile_id)
                 rendered = render(model, "preserve" if model.source_files else "canonical")
                 report = validate_writer(model, rendered.data, detection=detection)
+                report.extend(self._manager_value_ranges(model, metadata))
                 errors = [
                     {"id": i.check, **i.to_dict()}
                     for i in report.issues
@@ -1436,6 +1780,8 @@ class EdWriterMixin(EdAuthoringMixin):
                     "runtime_verified": False,
                     "required_acknowledgements": required[:20],
                     "acknowledgement_count": len(required),
+                    "acknowledgements_has_more": len(required) > 20,
+                    "acknowledgements_next_offset": min(20, len(required)),
                     "validation": {
                         "errors": 0,
                         "warnings": sum(i.level == Level.WARNING for i in report.issues),

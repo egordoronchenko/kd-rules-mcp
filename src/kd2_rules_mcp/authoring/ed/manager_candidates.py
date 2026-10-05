@@ -594,14 +594,22 @@ def _is_nested_reference(prop: SchemaProperty, target: SchemaType | None) -> boo
 
 def _is_nested_path(schema: EdSchema, owner: SchemaType, physical: tuple[QName, ...]) -> bool:
     current = owner
-    for part in physical[:-1]:
+    for position, part in enumerate(physical[:-1]):
         prop = _property_named(schema, current, part.local)
         if prop is None:
             return False
         target = property_type(schema, prop)
         if target is None:
             return False
-        if _is_nested_reference(prop, target):
+        # ДанныеКлассификатора внутри собственных ключей — группа этого объекта.
+        # Та же группа в ссылочном свойстве шапки остаётся чужим объектом.
+        own_classifier = (
+            position == 1
+            and physical[0].local == "КлючевыеСвойства"
+            and part.local == "ДанныеКлассификатора"
+            and not _is_key_properties_type(target)
+        )
+        if not own_classifier and _is_nested_reference(prop, target):
             return True
         current = target
     return False
@@ -808,6 +816,8 @@ def _property_row(
         row["value_range"] = classified.value_range
     if classified.match == "reference":
         row["format_object"] = classified.format_object
+    if classified.match == "mismatch":
+        row["reason"] += "; выберите другую пару или задайте ПКО/алгоритм преобразования"
     return row
 
 

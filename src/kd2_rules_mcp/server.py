@@ -1074,7 +1074,7 @@ def create_server(service: Kd2Service) -> MCPServer:
     async def ed_validate(
         project_id: Annotated[str, Field(description="ED document/snapshot ID")],
         level: Annotated[
-            str | None, Field(description="Severity: ошибка or предупреждение")
+            str | None, Field(description="Severity: ошибка, предупреждение or info")
         ] = None,
         check_prefix: Annotated[
             str | None,
@@ -1112,7 +1112,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
     ) -> dict[str, Any]:
         """Validate ED links; schema_id/structure_id add format/type checks. Manager documents
-        also run ed.writer.*. Inspect skipped; runtime remains unverified."""
+        also run ed.writer.* and include value-range info. Inspect skipped;
+        runtime remains unverified."""
         return await call(
             service.ed_validate,
             project_id,
@@ -1329,9 +1330,7 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def ed_create(
         project_id: Annotated[str, Field(description="Explicit durable manager project ID")],
-        mode: Annotated[
-            str, Field(description="new, import, or rebind existing model to fresh inputs")
-        ] = "new",
+        mode: Annotated[str, Field(description="new, import, or rebind to fresh inputs")] = "new",
         project: Annotated[str | None, Field(description="Host from project_list")] = None,
         configuration: Annotated[str, Field(description="Host configuration")] = "full",
         configuration_path: Annotated[
@@ -1349,8 +1348,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         identity: Annotated[
             dict[str, Any] | None,
             Field(
-                description="name, prefix, module_name; optional synonym, version, "
-                "compatibility_mode. Default name includes project_id"
+                description="name, prefix, module_name, synonym, version, compatibility_mode; "
+                "default name includes project_id"
             ),
         ] = None,
         document_id: Annotated[str | None, Field(description="ed_open snapshot to import")] = None,
@@ -1360,11 +1359,14 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         offset: Offset = 0,
         limit: Limit = 20,
+        section: Annotated[
+            str, Field(description="import_report, notices, differences, plan_candidates")
+        ] = "import_report",
     ) -> dict[str, Any]:
-        """Create/reopen a durable interface-2 manager; import preserves source text. Returns
-        revision, counts, executor/import report and document_id. Different arguments refuse;
-        changed fingerprints warn. Atomic rebind keeps rules/receipts and validates fresh inputs;
-        interrupted rebind recovers with a notice."""
+        """Create/reopen a durable interface-2 manager; import preserves text. Returns revision,
+        counts, executor/import report, document_id and reference_manager or reason. Changed
+        arguments refuse; fingerprints warn. Atomic rebind keeps rules/receipts, validates inputs
+        and recovers interrupted writes. Missing plan returns plan_candidates."""
         return await call(
             service.ed_create,
             project_id,
@@ -1382,6 +1384,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             structure_id,
             offset,
             limit,
+            section,
         )
 
     @server.tool()
@@ -1389,13 +1392,14 @@ def create_server(service: Kd2Service) -> MCPServer:
         project_id: Annotated[str, Field(description="Manager project from ed_create")],
         expected_revision: Annotated[str, Field(description="Current project revision")],
         operations: Annotated[
-            list[dict[str, Any]],
+            list[dict[str, Any]] | None,
             Field(
-                description="Up to 100: client_id, kind, action, target_id/address, owner_id, "
-                "container_id, after_id, patch, clear. Manager patch: manager_name, title, "
-                "generated_at, text_style only; bindings require ed_create mode=rebind"
+                description="Up to 100 W2 operations; forms: docs/tools.md. "
+                "client_id refs; on create after_id omitted=append, null=first. "
+                "Omit on apply to use saved preview_hash. Manager patch: manager_name, "
+                "title, generated_at, text_style only; bindings via ed_create mode=rebind"
             ),
-        ],
+        ] = None,
         mode: Annotated[str, Field(description="preview or apply")] = "preview",
         expected_preview_hash: Annotated[
             str | None, Field(description="Current preview_hash for apply")
@@ -1406,12 +1410,12 @@ def create_server(service: Kd2Service) -> MCPServer:
         offset: Offset = 0,
         limit: Limit = 50,
         section: Annotated[
-            str, Field(description="summary, operations, changes, notices")
+            str, Field(description="summary, operations, changes, notices, failures, skipped")
         ] = "summary",
     ) -> dict[str, Any]:
-        """Preview/apply an atomic manager packet: canonical operations, changes, notices,
-        preview_hash; apply adds document_id. Empty/already applied packets keep revision.
-        Replays return replayed=true, current revision and live document_id."""
+        """Preview/apply atomically; last 8 previews survive restart. Pages use next_offset;
+        truncated_by=size marks size limits. Apply adds document_id. Replays return replayed=true,
+        current revision and live document_id."""
         return await call(
             service.ed_apply,
             project_id,
@@ -1453,7 +1457,7 @@ def create_server(service: Kd2Service) -> MCPServer:
         scope: Annotated[str | None, Field(description="overlay (default) or manager")] = None,
         reference_document_id: Annotated[
             str | None,
-            Field(description="Typical manager snapshot from the same host; objects only"),
+            Field(description="Typical snapshot or auto from the version map; objects only"),
         ] = None,
     ) -> dict[str, Any]:
         """List overlay properties or manager object/property pairs. All candidates have
