@@ -51,6 +51,7 @@ from kd2_rules_mcp.ed.writer_model import (
     PredefinedRule,
     ProcessingRule,
     Property,
+    PropertyGroup,
     Reference,
     RetainedBlock,
     RuleUse,
@@ -157,6 +158,13 @@ class PropertyPatch:
 
 
 @dataclass(frozen=True, slots=True)
+class TablePartPatch:
+    configuration_property: str | None = None
+    format_property: str | None = None
+    argument_presence: tuple[bool, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class IdentificationPatch:
     mode: Value | None = None
     search_sets: tuple[tuple[str, ...], ...] | None = None
@@ -212,6 +220,7 @@ Patch = (
     | PodPatch
     | PkoPatch
     | PropertyPatch
+    | TablePartPatch
     | IdentificationPatch
     | PkpdPatch
     | ValueMappingPatch
@@ -225,6 +234,7 @@ _PATCHES = {
     "pod": PodPatch,
     "pko": PkoPatch,
     "property": PropertyPatch,
+    "table_part": TablePartPatch,
     "identification": IdentificationPatch,
     "pkpd": PkpdPatch,
     "value_mapping": ValueMappingPatch,
@@ -252,7 +262,9 @@ class ManagerOperation:
     _packet_refs: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
-        if self.after_id == "" and self.action != "create":
+        if self.action == "move" and self.after_id == "" and self.container_id is None:
+            raise ValueError("Перемещение требует container_id или явный after_id (null — первым)")
+        if self.after_id == "" and self.action not in ("create", "move"):
             object.__setattr__(self, "after_id", None)
         if not isinstance(self.client_id, str) or not self.client_id or len(self.client_id) > 200:
             raise ValueError("Требуется client_id длиной 1–200")
@@ -266,6 +278,7 @@ class ManagerOperation:
                     "pko",
                     "pod",
                     "property",
+                    "table_part",
                     "pkpd",
                     "value_mapping",
                     "parameter",
@@ -307,14 +320,14 @@ def parse_operation(data: dict[str, Any]) -> ManagerOperation:
         ):
             raise ValueError(f"{payload.get('client_id', '')}: некорректная ссылка {path}")
         packet_refs.append((path, value["client_id"]))
-        return None
+        return "client_id:" + value["client_id"] if path == "container_id" else None
 
     for name in ("owner_id", "container_id", "after_id", "target_id"):
         if name in payload:
             payload[name] = client_reference(payload[name], name)
     if isinstance(patch, dict):
         patch = dict(patch)
-        for name in ("conversion", "used_pko"):
+        for name in ("conversion", "used_pko", "target"):
             if name not in patch:
                 continue
             values = patch[name] if name == "used_pko" else [patch[name]]
@@ -327,12 +340,23 @@ def parse_operation(data: dict[str, Any]) -> ManagerOperation:
                     value = dict(value)
                     if set(value) == {"client_id"}:
                         value = {
-                            "kind": "pko" if name == "used_pko" else "conversion",
+                            "kind": "code_unit"
+                            if name == "target"
+                            else "pko"
+                            if name == "used_pko"
+                            else "conversion",
                             "target_id": client_reference(value, path),
                         }
                     elif "target_id" in value:
                         value["target_id"] = client_reference(value["target_id"], path)
-                    value.setdefault("kind", "pko" if name == "used_pko" else "conversion")
+                    value.setdefault(
+                        "kind",
+                        "code_unit"
+                        if name == "target"
+                        else "pko"
+                        if name == "used_pko"
+                        else "conversion",
+                    )
                 converted.append(value)
             patch[name] = converted if name == "used_pko" else converted[0]
     dto = decode_dto(ManagerOperation, payload)
@@ -378,6 +402,7 @@ class ManagerNotice:
     message: str
     references: tuple[str, ...]
     notice_hash: str
+    requires_confirmation: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -538,19 +563,39 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                 if len(parts) == 2
                 else getattr(patch, parts[1])[int(parts[2])]
             )
-            if not isinstance(member, ObjectRule | PredefinedRule):
+            if parts[1] == "target" and isinstance(patch, HandlerPatch):
+                if isinstance(member, Event):
+                    member = next(
+                        (u for u in model.code_units if u.logical_id == member.target.target_id),
+                        None,
+                    )
+                if not isinstance(member, CodeUnit):
+                    _fail(
+                        "model_invalid",
+                        f"Операция/{op.client_id}",
+                        f"client_id «{client}» не является методом",
+                    )
+                reference = replace(
+                    reference,
+                    kind="code_unit",
+                    target_id=member.logical_id,
+                    name=member.name,
+                    resolution="resolved",
+                )
+            elif not isinstance(member, ObjectRule | PredefinedRule):
                 _fail(
                     "model_invalid",
                     f"Операция/{op.client_id}",
                     f"Операция {op.client_id}: client_id «{client}» не является ПКО или ПКПД",
                 )
-            reference = replace(
-                reference,
-                target_id=key,
-                name=reference.name,
-                kind="pko" if isinstance(member, ObjectRule) else "pkpd",
-                resolution="resolved",
-            )
+            else:
+                reference = replace(
+                    reference,
+                    target_id=key,
+                    name=reference.name,
+                    kind="pko" if isinstance(member, ObjectRule) else "pkpd",
+                    resolution="resolved",
+                )
             if len(parts) == 2:
                 patch = replace(patch, **{parts[1]: reference})
             else:
@@ -558,6 +603,29 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                 values[int(parts[2])] = reference
                 patch = replace(patch, **{parts[1]: tuple(values)})
         op = replace(op, patch=patch, _packet_refs=(), **updates)
+    if op.address:
+        if re.search(r"(?:~|#)\d+(?:/|$)", op.address):
+            _fail(
+                "unstable_address",
+                op.address,
+                "Позиционный адрес нельзя изменять; возьмите logical_id из списка",
+            )
+        matches = [
+            d.result_ids[0]
+            for d in model.decisions
+            if d.client_id == op.client_id
+            and op.address.casefold() in {a.casefold() for a in d.address_aliases}
+        ]
+        if not matches:
+            addresses = model_addresses(model)
+            matches = [
+                key
+                for key, address in addresses.items()
+                if address.casefold() == op.address.casefold()
+            ]
+        if len(matches) != 1:
+            _fail("model_invalid", op.address, "Адрес отсутствует или неоднозначен")
+        op = replace(op, target_id=matches[0], address=None)
     previous = next((d for d in model.decisions if d.client_id == op.client_id), None)
     if op.action == "create" and op.after_id == "" and previous is not None:
         op = replace(
@@ -576,7 +644,14 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                 position_mode="default",
             )
         else:
-            owner = next((r for r in model.pko if r.logical_id == op.owner_id), None)
+            owner = next(
+                (
+                    r
+                    for r in (*model.pko, *(g for r in model.pko for g in r.groups))
+                    if r.logical_id == op.owner_id
+                ),
+                None,
+            )
             if owner is not None:
                 fields = _updates(op.patch)
                 sort_key = _property_key(
@@ -584,6 +659,11 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                     fields.get("format_property", ""),
                     fields.get("algorithm_flag", 0),
                 )
+                if isinstance(owner, PropertyGroup):
+                    sort_key = (
+                        fields.get("configuration_property", "").casefold(),
+                        fields.get("format_property", "").casefold(),
+                    )
                 preceding = None
                 by_id = {p.logical_id: p for p in owner.properties}
                 # Без явного контейнера новая ПКС общая: сортируем только общие
@@ -602,8 +682,17 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                     if prop is None:
                         continue
                     if model.source_files and (
-                        _property_key(
-                            prop.configuration_property, prop.format_property, prop.algorithm_flag
+                        (
+                            (
+                                prop.configuration_property.casefold(),
+                                prop.format_property.casefold(),
+                            )
+                            if isinstance(owner, PropertyGroup)
+                            else _property_key(
+                                prop.configuration_property,
+                                prop.format_property,
+                                prop.algorithm_flag,
+                            )
                         )
                         > sort_key
                     ):
@@ -615,6 +704,32 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                     after_id=preceding if op.after_id == "" else op.after_id,
                     position_mode="default" if op.after_id == "" else "explicit",
                 )
+    if op.action == "create" and op.kind == "table_part" and op.container_id is None:
+        owner = next((r for r in model.pko if r.logical_id == op.owner_id), None)
+        if owner:
+            preceding = None
+            fields = _updates(op.patch)
+            new_group = PropertyGroup(
+                logical_id="new",
+                name="",
+                configuration_property=fields.get("configuration_property", ""),
+                format_property=fields.get("format_property", ""),
+            )
+            by_id = {g.logical_id: g for g in owner.groups}
+            for key in model.ordered_entity_ids(owner.logical_id):
+                group = by_id.get(key)
+                if group:
+                    if model.source_files and _table_key(owner, group) > _table_key(
+                        owner, new_group
+                    ):
+                        break
+                    preceding = key
+            op = replace(
+                op,
+                container_id=owner.logical_id,
+                after_id=preceding if op.after_id == "" else op.after_id,
+                position_mode="default" if op.after_id == "" else "explicit",
+            )
     if op.action == "create" and op.kind in ("pko", "pod") and op.container_id is None:
         previous = next((d for d in model.decisions if d.client_id == op.client_id), None)
         if previous is not None and op.after_id == "":
@@ -658,6 +773,7 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                 "pko",
                 "pod",
                 "property",
+                "table_part",
                 "pkpd",
                 "value_mapping",
                 "parameter",
@@ -669,9 +785,15 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
         if op.action in ("create", "move") and op.container_id:
             container = next((c for c in model.layouts if c.logical_id == op.container_id), None)
             if container:
+                candidates = [
+                    e
+                    for e in container.elements
+                    if op.action != "move"
+                    or op.target_id not in (e.logical_id, e.entity_id, e.container_id)
+                ]
                 op = replace(
                     op,
-                    after_id=container.elements[-1].logical_id if container.elements else None,
+                    after_id=candidates[-1].logical_id if candidates else None,
                     position_mode="default" if default_position else "explicit",
                 )
         else:
@@ -688,28 +810,7 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
             ]
             if len(matches) == 1:
                 op = replace(op, after_id=matches[0])
-    if not op.address:
-        return op
-    if re.search(r"(?:~|#)\d+(?:/|$)", op.address):
-        _fail(
-            "unstable_address",
-            op.address,
-            "Позиционный адрес нельзя изменять; возьмите logical_id из списка",
-        )
-    matches = [
-        d.result_ids[0]
-        for d in model.decisions
-        if d.client_id == op.client_id
-        and op.address.casefold() in {a.casefold() for a in d.address_aliases}
-    ]
-    if not matches:
-        addresses = model_addresses(model)
-        matches = [
-            key for key, address in addresses.items() if address.casefold() == op.address.casefold()
-        ]
-    if len(matches) != 1:
-        _fail("model_invalid", op.address, "Адрес отсутствует или неоднозначен")
-    return replace(op, target_id=matches[0], address=None)
+    return op
 
 
 def _property_key(configuration: str, format_name: str, algorithm: int) -> tuple[str, int]:
@@ -782,8 +883,8 @@ def _property_patch(
 def _layout_context(containers, container):
     """Владелец и вычисляемый стек условий, без каркаса цепочки веток."""
     guards = []
-    while container.kind == "conditional":
-        if container.branch != "chain":
+    while container.kind in ("conditional", "table_part"):
+        if container.kind == "conditional" and container.branch != "chain":
             guards.append(container.logical_id)
         container = containers[container.owner_id]
     return container, tuple(reversed(guards))
@@ -987,17 +1088,36 @@ def _edit_layout(before, after, op, key, owner_id, address):
         _fail("model_invalid", address, "Выберите тело ветки, а не каркас цепочки условий")
     if owner_id is not None:
         ancestor, guards = _layout_context(containers, destination)
-        if ancestor.logical_id != owner_id or ancestor.kind != "rule":
+        owner = next((m for m in after.members() if m.logical_id == owner_id), None)
+        if isinstance(owner, PropertyGroup):
+            actual = destination
+            while actual.owner_id and actual.kind not in ("rule", "table_part"):
+                actual = containers[actual.owner_id]
+            valid_owner = actual.logical_id == owner_id
+        else:
+            valid_owner = ancestor.logical_id == owner_id and ancestor.kind == "rule"
+        if not valid_owner:
             _fail("model_invalid", address, "Контейнер принадлежит другому правилу")
-        rule = next(r for r in after.pko if r.logical_id == owner_id)
+        rule = next(r for r in after.pko if r.logical_id == ancestor.logical_id)
         props = tuple(
             replace(p, guards=guards) if p.logical_id == key and p.guards != guards else p
-            for p in rule.properties
+            for p in (owner.properties if isinstance(owner, PropertyGroup) else rule.properties)
         )
         after = replace(
             after,
             pko=tuple(
-                replace(r, properties=props) if r.logical_id == owner_id else r for r in after.pko
+                replace(
+                    r,
+                    groups=tuple(
+                        replace(g, properties=props) if g.logical_id == owner_id else g
+                        for g in r.groups
+                    ),
+                )
+                if isinstance(owner, PropertyGroup) and r.logical_id == rule.logical_id
+                else replace(r, properties=props)
+                if r.logical_id == owner_id
+                else r
+                for r in after.pko
             ),
         )
     elif destination.kind != "module":
@@ -1268,35 +1388,20 @@ def _sync_use_layout(before, after, kind, key):
             containers[group_id] = destination
             if kind == "pod" and direction == "send":
                 # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:2684–2688.
-                newline = after.header.text_style.newline
-                newline = "\r\n" if newline == "mixed" else newline
-                tab = after.header.text_style.indent
-                text = newline.join(
-                    (
-                        tab * 2 + 'Если ПравилаОбработкиДанных.Колонки.Найти("ОчисткаДанных") '
-                        "= Неопределено Тогда",
-                        tab * 3 + 'ПравилаОбработкиДанных.Колонки.Добавить("ОчисткаДанных");',
-                        tab * 2 + "КонецЕсли;",
-                        "",
-                    )
-                )
                 block_id = logical_id(after.project_id, group_id + "/clear-column")
-                block = RetainedBlock(
-                    logical_id=block_id,
-                    name="Текст",
-                    state="retained",
-                    kind="scaffold",
-                    text=text,
-                    sha256=text_hash(text),
-                    file_id="",
-                    source_hash="",
-                    owner_id=group_id,
-                )
                 destination = replace(
-                    destination, elements=(LayoutElement(block_id, "text", block_id=block_id),)
+                    destination,
+                    elements=(
+                        LayoutElement(
+                            block_id,
+                            "entity",
+                            entity_id="conversion",
+                            field="header.clear_data_column",
+                        ),
+                    ),
                 )
                 containers[group_id] = destination
-                after = replace(after, retained_blocks=(*after.retained_blocks, block))
+                after = replace(after, header=replace(after.header, clear_data_column=True))
             after = replace(
                 after,
                 guards=(
@@ -1399,7 +1504,18 @@ def _sync_use_layout(before, after, kind, key):
                     for g in after.guards
                 ),
             )
-    return replace(after, layouts=tuple(containers.values()))
+    return replace(
+        after,
+        layouts=tuple(containers.values()),
+        header=replace(
+            after.header,
+            clear_data_column=any(
+                e.field == "header.clear_data_column"
+                for c in containers.values()
+                for e in c.elements
+            ),
+        ),
+    )
 
 
 def references_to(
@@ -1515,7 +1631,250 @@ def _validate_patch(kind: str, updates: dict[str, Any], address: str) -> None:
                 _fail("model_invalid", address, "Некорректное имя свойства")
 
 
+def _table_key(rule: ObjectRule, group: PropertyGroup):
+    """Наблюдаемый порядок корпуса: опись W3, разд. 4; W:2392–2402."""
+    direct = bool(group.configuration_property and group.format_property)
+    if rule.directions == ("send",):
+        return (
+            group.format_property.casefold(),
+            not direct,
+            group.configuration_property.casefold(),
+        )
+    return (not direct, group.configuration_property.casefold(), group.format_property.casefold())
+
+
+def _apply_table_part(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel, str]:
+    addresses = model_addresses(model)
+    current = next((g for r in model.pko for g in r.groups if g.logical_id == op.target_id), None)
+    owner = next(
+        (
+            r
+            for r in model.pko
+            if r.logical_id == op.owner_id or any(g.logical_id == op.target_id for g in r.groups)
+        ),
+        None,
+    )
+    address = addresses.get(op.target_id or "", "Конвертация")
+    if owner is None or owner.state != "editable":
+        _fail("model_invalid", address, "Табличная часть требует редактируемого владельца ПКО")
+    if model.header.interface_version == 1:
+        _fail("unsupported_form", address, "Табличные части интерфейса 1 не поддержаны")
+    helper = next((u for u in model.code_units if u.name.casefold() == "добавитьпктч"), None)
+    if helper is None or helper.helper_verified is not True:
+        _fail("unsupported_form", address, "Определение ДобавитьПКТЧ не подтверждено")
+    if (
+        op.clear
+        or (op.action != "create" and current is None)
+        or (current and current.state != "editable")
+    ):
+        _fail(
+            "opaque_context_changed", address, "Нет редактируемой группы либо недопустима очистка"
+        )
+    updates = _updates(op.patch)
+    for name in ("configuration_property", "format_property"):
+        if name in updates and (
+            not isinstance(updates[name], str) or (updates[name] and not _identifier(updates[name]))
+        ):
+            _fail("model_invalid", address, "Имя стороны ТЧ — идентификатор либо пустая строка")
+    if "argument_presence" in updates and updates["argument_presence"] != (True, True, True):
+        _fail("unsupported_form", address, "Пространство имён и условие группы — следующий срез")
+    if (
+        op.action == "create"
+        and not {"configuration_property", "format_property"} <= updates.keys()
+    ):
+        _fail(
+            "model_invalid", address, "Новая группа требует обе стороны (пустая строка допустима)"
+        )
+    key = current.logical_id if current else logical_id(model.project_id, op.client_id)
+    if op.action == "create":
+        group = PropertyGroup(
+            logical_id=key,
+            name=updates["format_property"] or updates["configuration_property"],
+            **updates,
+        )
+    elif op.action == "update":
+        assert current is not None
+        group = replace(current, **updates)
+        group = replace(group, name=group.format_property or group.configuration_property)
+    else:
+        group = current
+    containers = {c.logical_id: c for c in model.layouts}
+    destination = containers.get(op.container_id or owner.logical_id)
+    new_owner = owner
+    if op.action in ("create", "move"):
+        if destination is None:
+            _fail("model_invalid", address, "Контейнер группы отсутствует")
+        ancestor, guards = _layout_context(containers, destination)
+        new_owner = next((r for r in model.pko if r.logical_id == ancestor.logical_id), None)
+        if new_owner is None or destination.kind not in ("rule", "conditional"):
+            _fail("model_invalid", address, "Группа вставляется в ПКО либо его ветку направления")
+        assert group is not None
+        previous_guards = set(current.guards) if current else set()
+        group = replace(
+            group,
+            guards=guards,
+            properties=tuple(
+                replace(p, guards=(*guards, *(g for g in p.guards if g not in previous_guards)))
+                for p in group.properties
+            ),
+        )
+    if group is not None and op.action != "delete":
+        guard_index = {g.logical_id: g for g in model.guards}
+        names = [g for g in new_owner.groups if g.logical_id != key]
+        if (
+            group.format_property
+            and "send" in property_directions(new_owner, group, guard_index)
+            and any(
+                g.format_property.casefold() == group.format_property.casefold()
+                and "send" in property_directions(new_owner, g, guard_index)
+                for g in names
+            )
+            and not (
+                current is not None
+                and owner.logical_id == new_owner.logical_id
+                and current.format_property.casefold() == group.format_property.casefold()
+                and current.guards == group.guards
+            )
+        ):
+            _fail(
+                "model_invalid",
+                address,
+                "Две группы отправки в одну ТЧ формата затирают строки (XDTO:1246)",
+            )
+    rules = []
+    for rule in model.pko:
+        groups = tuple(g for g in rule.groups if g.logical_id != key)
+        if rule.logical_id == new_owner.logical_id and op.action != "delete":
+            groups += (group,)
+        rules.append(replace(rule, groups=groups))
+    changed = replace(model, pko=tuple(rules))
+    assert group is not None or op.action == "delete"
+    if op.action == "update":
+        assert group is not None
+        return replace(
+            changed,
+            layouts=tuple(
+                replace(c, name=group.name) if c.logical_id == key else c for c in model.layouts
+            ),
+        ), key
+    if op.action == "create":
+        assert group is not None
+        containers[key] = LayoutContainer(
+            key, "table_part", group.name, owner_id=new_owner.logical_id
+        )
+    original = next(
+        ((c, e) for c in model.layouts for e in c.elements if e.container_id == key), None
+    )
+    element = original[1] if original else LayoutElement(key, "container", container_id=key)
+    if original:
+        source = containers[original[0].logical_id]
+        containers[source.logical_id] = replace(
+            source, elements=tuple(e for e in source.elements if e.container_id != key)
+        )
+    if op.action == "delete":
+        removed_blocks = {e.block_id for e in containers[key].elements if e.block_id}
+        del containers[key]
+        changed = replace(
+            changed,
+            retained_blocks=tuple(
+                b for b in changed.retained_blocks if b.logical_id not in removed_blocks
+            ),
+        )
+    else:
+        assert destination is not None
+        destination = containers[destination.logical_id]
+        rows = list(destination.elements)
+        if op.after_id:
+            positions = [
+                i
+                for i, e in enumerate(rows)
+                if op.after_id in (e.logical_id, e.entity_id, e.container_id)
+            ]
+            if len(positions) != 1:
+                _fail("model_invalid", address, "Сосед группы отсутствует в контейнере")
+            position = positions[0] + 1
+        else:
+            members = {m.logical_id: m for m in changed.members()}
+            position = next(
+                (
+                    i
+                    for i, e in enumerate(rows)
+                    if isinstance(members.get(e.container_id or ""), PropertyGroup)
+                    or e.field in ("table_end", "properties_end")
+                    or isinstance(members.get(e.entity_id or ""), SearchSet)
+                    or e.field == "mode"
+                ),
+                len(rows),
+            )
+        rows.insert(position, element)
+        containers[destination.logical_id] = replace(destination, elements=tuple(rows))
+        containers[key] = replace(containers[key], owner_id=destination.logical_id)
+        if original and original[0].logical_id != destination.logical_id:
+            table = containers[key]
+            containers[key] = replace(
+                table,
+                opening=replace(table.opening, fingerprint="") if table.opening else None,
+                elements=tuple(
+                    replace(e, source=replace(e.source, fingerprint=""))
+                    if e.source and not e.block_id
+                    else e
+                    for e in table.elements
+                ),
+            )
+    for rule in changed.pko:
+        if rule.logical_id not in (owner.logical_id, new_owner.logical_id):
+            continue
+        parent = containers[rule.logical_id]
+        old_end = next(
+            (e for e in parent.elements if e.field in ("table_end", "properties_end")), None
+        )
+        rows = [e for e in parent.elements if e.field not in ("table_end", "properties_end")]
+        if rule.groups:
+            last = max(
+                (
+                    i
+                    for i, e in enumerate(rows)
+                    if e.container_id in {g.logical_id for g in rule.groups}
+                ),
+                default=-1,
+            )
+            if last >= 0:
+                rows.insert(
+                    last + 1,
+                    replace(old_end, field="table_end")
+                    if old_end
+                    else LayoutElement(
+                        logical_id(model.project_id, rule.logical_id + "/table-end"),
+                        "entity",
+                        entity_id=rule.logical_id,
+                        field="table_end",
+                    ),
+                )
+        elif old_end and old_end.source:
+            original_footer = replace(old_end, field="properties_end")
+            members = {m.logical_id: m for m in changed.members()}
+            if (
+                model.header.helper_variant == "legacy-v2"
+                or old_end.source.fingerprint == leaf_fingerprint(changed, original_footer, members)
+            ):
+                last = max(
+                    (
+                        i
+                        for i, e in enumerate(rows)
+                        if e.entity_id in {p.logical_id for p in rule.properties}
+                        or e.field == "properties_start"
+                        or any(e.container_id in p.guards for p in rule.properties)
+                    ),
+                    default=-1,
+                )
+                rows.insert(last + 1, original_footer)
+        containers[rule.logical_id] = replace(parent, elements=tuple(rows))
+    return replace(changed, layouts=tuple(containers.values())), key
+
+
 def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel, str]:
+    if op.kind == "table_part":
+        return _apply_table_part(model, op)
     if op.kind in ("handler", "conversion_event", "algorithm"):
         return _apply_code(model, op)
     if op.kind in ("pkpd", "value_mapping", "parameter"):
@@ -1642,25 +2001,40 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
     items: tuple = ()
     owner = None
     if op.kind in ("property", "identification"):
+        possible_owners = (
+            tuple(r for r in model.pko) + tuple(g for r in model.pko for g in r.groups)
+            if op.kind == "property"
+            else model.pko
+        )
         owner = next(
             (
                 r
-                for r in model.pko
+                for r in possible_owners
                 if r.logical_id == op.owner_id
                 or any(p.logical_id == target_id for p in r.properties)
-                or r.identification.logical_id == target_id
+                or (isinstance(r, ObjectRule) and r.identification.logical_id == target_id)
             ),
             None,
         )
         if owner is None:
             _fail("model_invalid", address, "Требуется владелец ПКО")
         assert owner is not None
+        if isinstance(owner, PropertyGroup) and (
+            updates.get("namespace") or updates.get("condition_name")
+        ):
+            _fail(
+                "unsupported_form", address, "Пространство имён и условие ПКС ТЧ — следующий срез"
+            )
         if owner.state != "editable" or any(
             b.locks_context and b.owner_id in (owner.logical_id, target_id)
             for b in model.retained_blocks
         ):
             _fail("opaque_context_changed", address, "Окружение содержит непрозрачную декларацию")
-        items = owner.properties if op.kind == "property" else (owner.identification,)
+        if op.kind == "property":
+            items = owner.properties
+        else:
+            assert isinstance(owner, ObjectRule)
+            items = (owner.identification,)
     else:
         items = getattr(model, op.kind)
     current = next((item for item in items if item.logical_id == target_id), None)
@@ -1741,7 +2115,7 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
         _fail("model_invalid", address, "ID новой сущности определяется client_id")
     key = current.logical_id if current else logical_id(model.project_id, op.client_id)
     if op.kind == "identification":
-        assert owner is not None and current is not None
+        assert isinstance(owner, ObjectRule) and current is not None
         assert isinstance(current, Identification)
         if op.action != "update":
             _fail("unsupported_form", address, "Идентификация изменяется атомарным update")
@@ -1900,8 +2274,47 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
         assert owner is not None
         owner = replace(owner, properties=items)
         changed = replace(
-            model, pko=tuple(owner if r.logical_id == owner.logical_id else r for r in model.pko)
+            model,
+            pko=tuple(
+                owner
+                if r.logical_id == owner.logical_id
+                else replace(
+                    r,
+                    groups=tuple(
+                        owner if g.logical_id == owner.logical_id else g for g in r.groups
+                    ),
+                )
+                for r in model.pko
+            ),
         )
+        if op.action == "move" and op.container_id:
+            destination = next((c for c in model.layouts if c.logical_id == op.container_id), None)
+            while destination is not None and destination.kind not in ("rule", "table_part"):
+                destination = next(
+                    (c for c in model.layouts if c.logical_id == destination.owner_id), None
+                )
+            if destination and destination.logical_id != owner.logical_id:
+                prop = next(p for p in items if p.logical_id == key)
+                changed = replace(
+                    changed,
+                    pko=tuple(
+                        replace(
+                            r,
+                            properties=tuple(p for p in r.properties if p.logical_id != key)
+                            + ((prop,) if r.logical_id == destination.logical_id else ()),
+                            groups=tuple(
+                                replace(
+                                    g,
+                                    properties=tuple(p for p in g.properties if p.logical_id != key)
+                                    + ((prop,) if g.logical_id == destination.logical_id else ()),
+                                )
+                                for g in r.groups
+                            ),
+                        )
+                        for r in changed.pko
+                    ),
+                )
+                owner = next(m for m in changed.members() if m.logical_id == destination.logical_id)
         return _edit_layout(model, changed, op, key, owner.logical_id, address), key
     result = replace(model, **{op.kind: items})
     if "name" in updates and op.action == "update":
@@ -1990,6 +2403,9 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
     if op.kind in ("pko", "pod") and op.action == "delete":
         used_guards = {g for m in result.members() if not isinstance(m, Guard) for g in m.guards}
         used_guards.update(g.logical_id for g in result.guards if g.inside_leaf_id)
+        used_guards.update(
+            c.logical_id for c in result.layouts if c.kind == "conditional" and c.branch != "chain"
+        )
         pending = list(used_guards)
         guards = {g.logical_id: g for g in result.guards}
         while pending:
@@ -2487,7 +2903,7 @@ def _insert_code(
 
 
 def _sync_dispatchers(
-    before: ManagerModel, model: ManagerModel, restore: set[str] | None = None
+    before: ManagerModel, model: ManagerModel, restore: dict[str, str] | None = None
 ) -> ManagerModel:
     units = {u.logical_id: u for u in model.code_units}
     model = replace(
@@ -2504,14 +2920,17 @@ def _sync_dispatchers(
     renamed = {
         key for key, unit in units.items() if key in old_units and unit.name != old_units[key].name
     }
-    restore = restore or set()
+    restore_literals = restore or {}
+    restoring = set(restore_literals)
     removed = (old_active.keys() - active.keys()) | (
         {u.logical_id for u in before.code_units} - {u.logical_id for u in model.code_units}
     )
-    changed_targets = removed | restore | renamed | {key for key in active if key not in old_active}
+    changed_targets = (
+        removed | restoring | renamed | {key for key in active if key not in old_active}
+    )
     if not changed_targets:
         return model
-    added = (active.keys() - old_active.keys()) | restore
+    added = (active.keys() - old_active.keys()) | restoring
     units = {u.logical_id: u for u in model.code_units}
     dispatchers = {u.signature.routine_kind: u for u in model.code_units if "dispatcher" in u.roles}
     required = {active[key][0].signature.routine_kind for key in added if key in active}
@@ -2567,12 +2986,13 @@ def _sync_dispatchers(
     sources = {s.logical_id: s for s in model.source_map}
     for key in (added | renamed) & active.keys():
         unit = units[key]
+        literal = restore_literals.get(key, unit.name)
         if unit.signature.routine_kind not in dispatchers:
             # Переименование не восстанавливает отсутствующий диспетчер импорта.
             continue
         dispatcher = dispatchers[unit.signature.routine_kind].logical_id
         for case in model.dispatcher_cases:
-            if case.dispatcher.target_id != dispatcher or case.name != unit.name:
+            if case.dispatcher.target_id != dispatcher or case.name != literal:
                 continue
             if case.target.target_id == key or case.target.name.casefold() == unit.name.casefold():
                 continue
@@ -2581,7 +3001,7 @@ def _sync_dispatchers(
             _fail(
                 "model_invalid",
                 place,
-                f"Литерал «{unit.name}» занят: ветка вызывает «{case.target.name}», "
+                f"Литерал «{literal}» занят: ветка вызывает «{case.target.name}», "
                 f"строка {source.line_start if source else 'неизвестна'}; "
                 "добавление другой ветки скроет существующий вызов",
                 (place,),
@@ -2593,12 +3013,8 @@ def _sync_dispatchers(
         if case.target.target_id in removed:
             continue
         pair = active.get(case.target.target_id or "")
-        if (
-            case.target.target_id in restore
-            and case.target.target_id not in renamed
-            and case.name != units[case.target.target_id or ""].name
-        ):
-            # Восстанавливается литерал привязки, а соседний псевдоним остаётся как есть.
+        if case.target.target_id in restoring and case.target.target_id not in renamed:
+            # Восстановление добавляет отсутствующую ветку, но не чинит чужой вызов.
             cases.append(case)
             continue
         if (pair or case.target.target_id in renamed) and case.target.target_id in changed_targets:
@@ -2609,12 +3025,12 @@ def _sync_dispatchers(
                     "Ветка с псевдонимом или комментарием сохранена; измените её явно",
                 )
             unit = units[case.target.target_id or ""]
-            restored = unit.logical_id in restore
+            restored = unit.logical_id in restoring
             cases.append(
                 replace(
                     case,
                     name=unit.name
-                    if unit.logical_id in restore or unit.logical_id in renamed
+                    if unit.logical_id in restoring or unit.logical_id in renamed
                     else case.name,
                     target=Reference("code_unit", unit.logical_id, unit.name, "resolved"),
                     arguments=_code_arguments(unit, active[unit.logical_id][1])
@@ -2637,12 +3053,15 @@ def _sync_dispatchers(
     for key in sorted(added & active.keys(), key=sort_keys.__getitem__):
         unit, event = active[key]
         dispatcher = dispatchers[unit.signature.routine_kind].logical_id
-        if (dispatcher, unit.name) in existing:
+        literal = restore_literals.get(key, unit.name)
+        assert literal is not None
+        if (dispatcher, literal) in existing:
             continue
         cases.append(
             DispatcherCase(
                 logical_id=logical_id(model.project_id, key + "/case"),
-                name=unit.name,
+                name=literal,
+                state="retained" if literal != unit.name else "editable",
                 dispatcher=Reference(
                     "code_unit", dispatchers[unit.signature.routine_kind].logical_id, "", "resolved"
                 ),
@@ -2725,7 +3144,9 @@ def _sync_dispatchers(
         )
         new_first = next((e.entity_id for e in rows if e.entity_id in selected), None)
         if any(
-            c.state != "editable" and ((c.logical_id == old_first) != (c.logical_id == new_first))
+            c.logical_id in old_cases
+            and c.state != "editable"
+            and ((c.logical_id == old_first) != (c.logical_id == new_first))
             for c in selected.values()
         ):
             _fail(
@@ -2734,6 +3155,46 @@ def _sync_dispatchers(
                 "Изменение первой ветки требует регенерации сохранённого текста; "
                 "его комментарии или псевдоним не изменяются автоматически",
             )
+        from kd2_rules_mcp.ed.writer_forms import dispatcher_case
+
+        blocks = list(model.retained_blocks)
+        for n, row in enumerate(rows):
+            case = selected.get(row.entity_id or "")
+            if case is None or case.state == "editable" or case.logical_id in old_cases:
+                continue
+            newline = (
+                "\r\n"
+                if model.header.text_style.newline == "mixed"
+                else model.header.text_style.newline
+            )
+            text = (
+                "\t"
+                + dispatcher_case(
+                    case.name,
+                    case.target.name,
+                    case.arguments,
+                    case.returns,
+                    case.logical_id == new_first,
+                ).replace("\n", newline + "\t")
+                + newline
+            )
+            block_id = logical_id(model.project_id, case.logical_id + "/retained")
+            blocks.append(
+                RetainedBlock(
+                    logical_id=block_id,
+                    name=case.name,
+                    kind="dispatcher_case",
+                    state="retained",
+                    text=text,
+                    sha256=text_hash(text),
+                    file_id="",
+                    source_hash="",
+                    owner_id=container.logical_id,
+                    dependencies=(case.target,),
+                )
+            )
+            rows[n] = replace(row, logical_id=block_id, block_id=block_id)
+        model = replace(model, retained_blocks=tuple(blocks))
         layouts.append(replace(container, elements=tuple(rows)))
     # Callback — производная роль, которую читатель восстанавливает по привязкам/веткам.
     bound = (
@@ -2791,7 +3252,7 @@ def _code_signature(name: str, kind: str, parameters: str, exported: bool) -> Si
             or any(p.name is None for p in signature.parameters)
         ):
             raise ValueError("Неподдержанная сигнатура")
-        if len(document.routines) != 12:
+        if len(document.routines) != 13:
             raise ValueError("Подмена рамки метода")
         return signature
     except Exception as error:
@@ -3177,7 +3638,18 @@ def _apply_code(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel
     ):
         _fail("model_invalid", address, "Восстановление ветки требует существующую привязку")
     changed = _sync_dispatchers(
-        before, changed, {unit.logical_id} if updates.get("restore_dispatcher") and unit else None
+        before,
+        changed,
+        {
+            unit.logical_id: next(
+                e.target.name
+                for r in (*changed.pko, *changed.pod)
+                for e in r.events
+                if e.logical_id == key
+            )
+        }
+        if updates.get("restore_dispatcher") and unit
+        else None,
     )
     return _refresh_code_dependencies(before, changed), key
 
@@ -3270,7 +3742,7 @@ def _refresh_code_dependencies(before: ManagerModel, model: ManagerModel) -> Man
     deps = {}
     for unit in selected:
         routine = methods.get(unit.name.casefold())
-        if routine is None or len(document.routines) != 11 + len(selected):
+        if routine is None or len(document.routines) != 12 + len(selected):
             _fail("model_invalid", "Код/" + unit.name, "Тело изменило границы метода")
         rows = []
         for ref in index.entries:
@@ -3943,6 +4415,52 @@ def _rename_property_references(
     return changed
 
 
+def _table_duplicates(model: ManagerModel) -> set[tuple[str, str, str, str, str]]:
+    """Пары действующих групп; старое расхождение не блокирует постороннюю правку."""
+    guards = {g.logical_id: g for g in model.guards}
+    pairs = set()
+    for rule in model.pko:
+        groups: dict[tuple[str, str], list[str]] = {}
+        for group in rule.groups:
+            for direction in property_directions(rule, group, guards):
+                side = (
+                    group.format_property if direction == "send" else group.configuration_property
+                )
+                if side:
+                    groups.setdefault((direction, side.casefold()), []).append(group.logical_id)
+        for (direction, side), keys in groups.items():
+            keys.sort()
+            for n, first in enumerate(keys):
+                for second in keys[n + 1 :]:
+                    pairs.add((rule.logical_id, direction, side, first, second))
+    return pairs
+
+
+def _table_duplicate_notices(before: ManagerModel, model: ManagerModel) -> list[ManagerNotice]:
+    addresses = model_addresses(model)
+    notices = []
+    for pair in sorted(_table_duplicates(model) - _table_duplicates(before)):
+        _, direction, side, first, second = pair
+        refs = (addresses[first], addresses[second])
+        if direction == "send":
+            _fail(
+                "model_invalid",
+                refs[0],
+                f"Две группы отправки в ТЧ формата «{side}» затирают строки (XDTO:1246)",
+                refs,
+            )
+        notices.append(
+            ManagerNotice(
+                "table_part_duplicate",
+                refs[0],
+                f"Две группы получения складывают строки в ТЧ «{side}» (XDTO:6644)",
+                refs,
+                digest(pair),
+            )
+        )
+    return notices
+
+
 def _resolve_properties(before: ManagerModel, model: ManagerModel) -> ManagerModel:
     """Ссылки по имени разрешаются отдельно в каждом направлении итогового пакета."""
 
@@ -3953,6 +4471,10 @@ def _resolve_properties(before: ManagerModel, model: ManagerModel) -> ManagerMod
     known = {r.logical_id: r for r in (*model.pko, *model.pkpd)}
     old_known = {r.logical_id: r for r in (*before.pko, *before.pkpd)}
     guards = {g.logical_id: g for g in model.guards}
+    old_guards = {g.logical_id: g for g in before.guards}
+    old_group_guards = {
+        p.logical_id: g.guards for r in before.pko for g in r.groups for p in g.properties
+    }
     names = {}
     for rule in known.values():
         names.setdefault(rule.name, []).append(rule)
@@ -4006,7 +4528,7 @@ def _resolve_properties(before: ManagerModel, model: ManagerModel) -> ManagerMod
     for (key, name, old_name), ids in edits.items():
         model = _rename_property_references(model, key, name, old_name, ids)
 
-    old_owners = {r.logical_id: r for r in before.pko}
+    old_owners = {p.logical_id: r for r in before.pko for p in properties(r)}
     reference_failures = []
 
     def resolve(rule, prop, group_guards=()):
@@ -4033,12 +4555,20 @@ def _resolve_properties(before: ManagerModel, model: ManagerModel) -> ManagerMod
                 "Удалённая цель ПКС не заменяется автоматически одноимённым правилом",
                 (addresses[prop.logical_id],),
             )
-        old_rule = old_owners.get(rule.logical_id)
+        old_rule = old_owners.get(prop.logical_id)
         changed = (
             previous is None
             or previous != prop
             or old_rule is None
             or old_rule.directions != rule.directions
+            or (
+                previous is not None
+                and old_rule is not None
+                and required
+                != property_directions(
+                    old_rule, previous, old_guards, old_group_guards.get(previous.logical_id, ())
+                )
+            )
             or any(
                 t.logical_id not in old_known or t.directions != old_known[t.logical_id].directions
                 for t in matches
@@ -4055,10 +4585,16 @@ def _resolve_properties(before: ManagerModel, model: ManagerModel) -> ManagerMod
         selected = [t for d in required for t in matches if available(t, d)]
         if any(sum(available(t, d) for t in matches) != 1 for d in required) or not matches:
             if changed:
+                target_kind = {"pko": "ПКО", "pkpd": "ПКПД"}.get(ref.kind, "ПКО/ПКПД")
+                missing = sorted(d for d in required if sum(available(t, d) for t in matches) != 1)
+                directions = ", ".join(missing or sorted(required)) or "владельца"
                 _fail(
                     "dangling_reference",
                     addresses[prop.logical_id],
-                    "Правило ПКС отсутствует или неоднозначно в нужном направлении",
+                    f"Цель ПКС {target_kind} "
+                    f"«{name}» отсутствует или неоднозначна в направлении "
+                    f"{directions}; "
+                    "создайте правило-цель раньше или в том же пакете",
                     (addresses[prop.logical_id],),
                 )
             return prop
@@ -4115,7 +4651,7 @@ def _resolve_properties(before: ManagerModel, model: ManagerModel) -> ManagerMod
         _fail(
             "dangling_reference",
             reference_failures[0].address,
-            "Правила ПКС отсутствуют или неоднозначны в нужном направлении",
+            "; ".join(dict.fromkeys(f.message for f in reference_failures)),
             refs,
         )
     resolved = (
@@ -4257,7 +4793,7 @@ def _handler_usage_references(
                     token.kind == "identifier"
                     and n + 1 < len(tokens)
                     and tokens[n + 1].value == "("
-                    and (not n or tokens[n - 1].value != ".")
+                    and (not n or tokens[n - 1].folded not in (".", "процедура", "функция"))
                 )
             ):
                 refs.append(addresses[owner_id] + f":{body.count(chr(10), 0, token.start) + 1}")
@@ -4807,6 +5343,17 @@ def preview(
             code_notices = _code_notices(result, op)
             changed, key = _apply_one(result, op)
             notices.extend(_code_change_notices(result, changed, op))
+            if op.kind == "table_part" and op.action == "create":
+                notices.append(
+                    ManagerNotice(
+                        "table_part_replace",
+                        "ПКТЧ",
+                        "Исполнитель заменяет табличную часть целиком (XDTO:7051–7062)",
+                        (),
+                        digest((op, "table_part_replace")),
+                        False,
+                    )
+                )
             if op.kind == "parameter" and op.action in ("delete", "update"):
                 old_parameter = next((p for p in result.parameters if p.logical_id == key), None)
                 if old_parameter and (
@@ -4852,6 +5399,7 @@ def preview(
             )
     try:
         result = _resolve_properties(model, result)
+        notices.extend(_table_duplicate_notices(model, result))
         result = _validate_parameter_changes(model, result, parameter_history)
         _validate_predefined_changes(model, result)
         notices.extend(_validate_code_directions(model, result))
@@ -4964,7 +5512,10 @@ def preview(
         model
         if failures or result is model
         else replace(
-            result, confirmations=tuple((n.code, n.notice_hash) for n in notices)
+            result,
+            confirmations=tuple(
+                (n.code, n.notice_hash) for n in notices if n.requires_confirmation
+            ),
         ).with_revision()
     )
     changes = compare_models(model, result).changes
@@ -5005,7 +5556,11 @@ def apply(
         raise EdAuthoringStaleError("Хеш просмотра менеджера не совпадает")
     if planned.failures:
         raise ManagerOperationError(planned.failures)
-    missing = tuple(n for n in planned.notices if (n.code, n.notice_hash) not in confirmations)
+    missing = tuple(
+        n
+        for n in planned.notices
+        if n.requires_confirmation and (n.code, n.notice_hash) not in confirmations
+    )
     if missing:
         raise ManagerOperationError(
             tuple(

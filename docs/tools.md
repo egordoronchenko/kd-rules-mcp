@@ -1697,7 +1697,7 @@ delete/move accept neither. Client IDs cannot change content.
 | `manager` | `update` | Header; no target/owner/position |
 | `pko` | `create`, `update`, `delete`, `move` | Module; no owner |
 | `pod` | `create`, `update`, `delete`, `move` | Module; no owner |
-| `property` | `create`, `update`, `delete`, `move` | ПКО owner on create; header/conditional container |
+| `property` | `create`, `update`, `delete`, `move` | ПКО or table-part owner on create; header/group/conditional container |
 | `identification` | `update` | Identification target; inferred/explicit ПКО owner |
 | `pkpd` | `create`, `update`, `delete` | Type/direction container; no owner |
 | `value_mapping` | `create`, `update`, `delete`, `move` | ПКПД owner on create; direction container |
@@ -1705,7 +1705,7 @@ delete/move accept neither. Client IDs cannot change content.
 | `handler` | `create`, `update`, `delete` | ПКО/ПОД owner on create; module container for method |
 | `conversion_event` | `update` | Event/code-unit target; no owner/position |
 | `algorithm` | `create`, `update`, `delete` | Module container on create; no owner |
-| `table_part` | — | Reserved (`unsupported_form`) |
+| `table_part` | `create`, `update`, `delete`, `move` | ПКО owner; header/conditional container. Owns its row properties. |
 | `routine` | — | Reserved (`unsupported_form`) |
 | `write_policy` | — | Reserved (`unsupported_form`) |
 <!-- /ed-writer-kinds -->
@@ -1715,11 +1715,11 @@ delete/move accept neither. Client IDs cannot change content.
 | IDs / addresses | Writer IDs (`result_id`/navigation). Resolve after preceding operations; direction qualifiers work; positional `~N`/`#N` refuse. |
 | Create result | No target/address; client-derived ID. Handler result = binding. |
 | `after_id` on create | Omitted: append (import: generator key); null: first. Explicit placement also needs container. |
-| `move` | Container + anchor; null/omission: first. Direction changes recheck references. |
+| `move` | Destination required: `container_id` or explicit `after_id`; omitting both refuses. Container alone: append; null: first. Direction changes recheck references. |
 | Position IDs | Layout container; anchor element/entity/container inside. No crossing retained context or owner/direction boundaries. |
-| Packet references | `{"client_id":"earlier"}` in `owner_id,container_id,after_id,target_id`, `conversion`, `used_pko[]` or their `target_id`. Unknown/forward/deleted refuses; strings = IDs. |
+| Packet references | `{"client_id":"earlier"}` in `owner_id,container_id,after_id,target_id`, `conversion`, `used_pko[]`, handler `target` or their `target_id`. Unknown/forward/deleted refuses; strings = IDs. |
 
-ПКО ID = header container, not module. Handler `target` requires a code-unit ID, not client reference.
+ПКО ID = header container, not module. Handler target references an earlier algorithm or handler's method.
 
 ### Patch fields and typed values
 
@@ -1743,6 +1743,7 @@ Directions: `["send"]`, `["receive"]`, `["send","receive"]`, `["both"]`; no dupl
 | `pko` | `name`!: Identifier; `directions`!; `configuration_object`: R/V?; `format_object`: S/V?; `group_flag`: B/V?; `identification`: IdentificationPatch, create only; `events`: Event DTO array, default `[]`, unchanged-only (edit via `handler`). Values default unset. | `configuration_object`, `format_object`, `group_flag` |
 | `pod` | `name`!: Identifier; `directions`!; `configuration_selection`: R/V?; `format_selection`: S/V?; `clear_data`: B/V?; `used_pko`: references, default `[]`; `events`: unchanged-only as ПКО. Values default unset. | `configuration_selection`, `format_selection`, `clear_data` |
 | `property` | `configuration_property`!, `format_property`!: strings, one may be empty; `property_kind`: `direct` (default)/`reference`/`pkpd`/`algorithm`; `algorithm_flag`: integer 0 (default)/1; `conversion`: reference, default empty; `namespace`: string `""`, direct only; `argument_presence`: 3–7 booleans, first three true (default), helper-limited, empty tail trimmed. | None |
+| `table_part` | `configuration_property`!, `format_property`!: identifiers (one may be empty); `argument_presence`: `[true,true,true]` only, default. Namespace/condition and interface 1 unsupported. Create reports full replacement without requiring confirmation. Duplicate names ignore case: send format refuses, receive configuration requires confirmation, including rename/move and owner direction changes. Existing imported duplicates stay diagnosed. Invalid imported names stay retained with a reason. Imported groups keep order; new groups use generator keys; preserve never realigns neighbours. | None |
 | `identification` | `mode`: S/V?, one of `ПоУникальномуИдентификатору`, `ПоПолямПоиска`, `СначалаПоУникальномуИдентификаторуПотомПоПолямПоиска`; `search_sets`: nonempty string arrays, default `[]`; `not_found_policy`: V? only. Receive required; field-search modes need search sets. No "no search" enum. | `mode`, `search_sets`, `not_found_policy` |
 | `pkpd` | `name`!: Identifier; `directions`!; `configuration_type`!: R; `format_type`!: S; `data_kind`: `enumeration` (default)/`predefined`. R path: `["Метаданные","Перечисления",name]` / `["Метаданные","Справочники",name]` respectively. | None |
 | `value_mapping` | `direction`!: `send`/`receive`, allowed by owner; `configuration_value`!: R `["Перечисления" or "Справочники",ownerType,value]`; `format_value`!: S. Unique send key = configuration value; receive key = format string. | None |
@@ -1763,12 +1764,15 @@ Kind changes require explicit flag **and** conversion (`{"kind":"conversion"}` c
 Targets must exist per owner/guard direction, including retained references. ПКО/ПКПД names
 share a space; same-name send/receive targets used in both directions require joint rename.
 Case mismatches stay diagnosed (`ed.writer.reference_case_mismatch`).
+`dangling_reference` reports the target kind/name and missing direction; create that target
+earlier or in the same packet. Table separators accept blank or whitespace-only lines;
+preserve retains them exactly. Table/column trailing comments survive edits and canonical rendering.
 
 | Reference field | Accepted shape |
 |---|---|
 | `conversion` | `{"kind":"pko","target_id":"<id>","resolution":"resolved"}` (or kind `pkpd`); alternatively `{ "kind":"pko", "name":"ExactName" }`, resolved by direction. Name defaults empty/inferred. Also `{"client_id":"earlier-rule"}` or nested target-ID reference. Empty: `{"kind":"conversion"}`. |
 | `used_pko` | Array of `{"kind":"pko","target_id":"<id>","resolution":"resolved"}` or client references; kind defaults `pko`, name empty/inferred. Name alone insufficient; `[]` removes all. |
-| Handler `target` | `{"kind":"code_unit","target_id":"<method-id>","resolution":"resolved"}`; optional name, no client reference. |
+| Handler `target` | `{"kind":"code_unit","target_id":"<method-id>","resolution":"resolved"}`; optional name. Also `{"client_id":"earlier-method"}` or nested target-ID reference. |
 
 ### Code frames, bodies and dependencies
 
@@ -1871,6 +1875,8 @@ Event binding/frame and conversion-event body update:
 [
   {"client_id":"handler-owner","kind":"pko","action":"create","patch":{"name":"HandledOwner","directions":["send"]}},
   {"client_id":"send-handler","kind":"handler","action":"create","owner_id":{"client_id":"handler-owner"},"patch":{"event":"ПриОтправкеДанных","body":"ДанныеXDTO.Вставить(\"Комментарий\", \"Example\");"}},
+  {"client_id":"shared-owner","kind":"pko","action":"create","patch":{"name":"SharedHandlerOwner","directions":["send"]}},
+  {"client_id":"shared-handler","kind":"handler","action":"create","owner_id":{"client_id":"shared-owner"},"patch":{"event":"ПриОтправкеДанных","target":{"client_id":"send-handler"}}},
   {"client_id":"before-conversion","kind":"conversion_event","action":"update","address":"Событие/ПередКонвертацией","patch":{"body":"\n\t// Agent-owned conversion body.\n"}}
 ]
 ```
@@ -1880,6 +1886,17 @@ Function algorithm with a defaulted parameter:
 <!-- ed-writer-example: algorithm -->
 ```json
 [{"client_id":"normalize","kind":"algorithm","action":"create","patch":{"name":"Normalize","routine_kind":"function","parameters":"Знач Text, Suffix = \"\"","exported":false,"body":"Возврат Text + Suffix;"}}]
+```
+
+Table-part group and a direct row property (the property owner is the group):
+
+<!-- ed-writer-example: table_part -->
+```json
+[
+  {"client_id":"row-owner","kind":"pko","action":"create","patch":{"name":"RowOwner","directions":["send","receive"]}},
+  {"client_id":"rows","kind":"table_part","action":"create","owner_id":{"client_id":"row-owner"},"patch":{"configuration_property":"Строки","format_property":"Rows"}},
+  {"client_id":"quantity","kind":"property","action":"create","owner_id":{"client_id":"rows"},"patch":{"configuration_property":"Количество","format_property":"Quantity"}}
+]
 ```
 
 ### Preview and apply responses

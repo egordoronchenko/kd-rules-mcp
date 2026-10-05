@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import fields, replace
@@ -15,7 +16,7 @@ from .address import build_addresses
 from .canonical import model_addresses
 from .errors import EdFormatError, EdReadError
 from .executor_profile import PROFILES
-from .forms import ENTRYPOINTS, POD_COLUMN_STATEMENT, VERSION_ROUTINE
+from .forms import ENTRYPOINTS, POD_COLUMN_STATEMENT, VERSION_ROUTINE, helper_forms
 from .lexer import lex, split_arguments, tokenize
 from .refs import build_references
 from .writer_model import (
@@ -361,7 +362,9 @@ def code_rule_references(
     )
 
 
-def property_directions(rule: ObjectRule, prop: Property, guards, group_guards=()) -> set[str]:
+def property_directions(
+    rule: ObjectRule, prop: Property | PropertyGroup, guards, group_guards=()
+) -> set[str]:
     """Направления фактического вызова ПКС, включая охраны и пустые стороны.
 
     ВыгрузитьСвойство, XDTO:1442–1444; КонвертацияСвойстваСтруктурыОбъектаXDTO,
@@ -636,6 +639,72 @@ class _Importer:
             )
             for d in document.diagnostics
         )
+
+        # Z13:672–690; §11.13.3: проверяются все токены обоих определений.
+        def normalized(text):
+            return tuple(
+                (t.kind, t.value if t.kind == "string" else t.folded)
+                for t in tokenize(text)
+                if t.kind != "comment"
+            )
+
+        variants = {}
+        for helper in ("ДобавитьПКС", "ДобавитьПКТЧ"):
+            definitions = [r for r in document.routines if r.name.casefold() == helper.casefold()]
+            if len(definitions) != 1:
+                variants[helper.casefold()] = None
+                continue
+            actual = normalized(definitions[0].raw_text)
+            modern = helper_forms(helper, document.manager_version)
+            legacy = modern[0].replace(', ПространствоИмен = ""', "")
+            legacy = "\n".join(
+                line for line in legacy.split("\n") if ".ПространствоИмен =" not in line
+            )
+            variants[helper.casefold()] = (
+                "modern"
+                if any(actual == normalized(form) for form in modern)
+                else "legacy-v2"
+                if actual == normalized(legacy)
+                else None
+            )
+        present_variants = set(variants.values())
+        self.helper_variant = next(iter(present_variants)) if len(present_variants) == 1 else None
+        # Модуль без групп может иметь только помощник ПКС (старый авторский оригинал).
+        if not document.routines or "добавитьпктч" not in self.routines:
+            self.helper_variant = variants["добавитьпкс"]
+        self.unverified_pks = "добавитьпкс" in self.routines and variants["добавитьпкс"] is None
+        if all(v is not None for v in variants.values()) and self.helper_variant is None:
+            self.unverified_pks = True
+        self.unverified_pktch = variants["добавитьпктч"] is None or self.helper_variant is None
+        if not any(name in self.routines for name in variants):
+            self.helper_variant = "modern"
+        self.module_identifier = Value()
+        self.identifier_routine = None
+        identifier = self.routines.get("подключаемый_идентификатормодуля")
+        if identifier is not None:
+            rows = [
+                s
+                for s in self.statements[identifier.span.file_id]
+                if identifier.body_span.char_start
+                <= s.span.char_start
+                < identifier.body_span.char_end
+            ]
+            if (
+                identifier.routine_kind == "function"
+                and identifier.exported
+                and not identifier.parameters
+                and len(rows) == 1
+                and len(rows[0].tokens) == 3
+                and rows[0].head == "возврат"
+                and rows[0].tokens[1].kind == "string"
+            ):
+                self.module_identifier = Value("string", rows[0].tokens[1].value)
+                self.identifier_routine = identifier.entity_id
+        self.clear_data_column = any(
+            normalized(s.raw_text) == normalized(POD_COLUMN_STATEMENT)
+            for rows in self.statements.values()
+            for s in rows
+        )
         self.directions: dict[str, tuple] = {}
         self.predefined_bounds: dict[str, tuple[int, int]] = {}
         for rule in (*document.pko, *document.pod):
@@ -698,6 +767,16 @@ class _Importer:
                 if rule.span.char_start < guard.span.char_start < rule.span.char_end:
                     self.guard_ids.add(guard.entity_id)
         pending = list(self.guard_ids)
+        # Пустая ветка заполнителя тоже часть рамки: смена направлений не
+        # должна превращать её при повторном чтении в другой вид сущности.
+        for guard in document.guards:
+            if guard.known_direction and any(
+                r.name in ENTRYPOINTS
+                and r.body_span.char_start <= guard.span.char_start < r.body_span.char_end
+                for r in document.routines
+            ):
+                self.guard_ids.add(guard.entity_id)
+                pending.append(guard.entity_id)
         guards = {g.entity_id: g for g in document.guards}
         while pending:
             parent = guards[pending.pop()].parent_id
@@ -1128,11 +1207,14 @@ class _Importer:
         )
         state: ImportState = (
             "editable"
-            if not in_group
-            and not unsafe
+            if not unsafe
             and not self.unsafe(item)
             and not self.unverified_pks
-            and (kind == "direct" or (not item.namespace and not item.condition_name))
+            and (self.helper_variant != "legacy-v2" or len(item.argument_presence) <= 5)
+            and (
+                (kind == "direct" and not in_group)
+                or (not item.namespace and not item.condition_name)
+            )
             and tokenize(item.raw_text)[0].folded == "добавитьпкс"
             else "retained"
         )
@@ -1164,6 +1246,8 @@ class _Importer:
             self.retain(item, owner)
             if self.unverified_pks:
                 self.entries[-1] = replace(self.entries[-1], reason="helper_semantics_unverified")
+            elif self.helper_variant == "legacy-v2" and len(item.argument_presence) > 5:
+                self.entries[-1] = replace(self.entries[-1], reason="helper_arguments_mismatch")
         return result
 
     def object_rule(self, rule: reader.ObjectRule, ordinal: int) -> ObjectRule:
@@ -1194,20 +1278,60 @@ class _Importer:
         )
         groups = []
         for n, group in enumerate(rule.groups, 1):
+            call_tokens = tuple(t for t in tokenize(group.raw_text) if t.kind != "comment")
+            opening = next(i for i, t in enumerate(call_tokens) if t.value == "(")
+            closing = len(call_tokens) - (2 if call_tokens[-1].value == ";" else 1)
+            arguments = split_arguments(call_tokens[opening + 1 : closing])
+            presence = tuple(bool(a) for a in arguments)
+            valid_names = all(
+                not name
+                or (
+                    (name[0].isalpha() or name[0] == "_")
+                    and all(c.isalnum() or c == "_" for c in name)
+                )
+                for name in (group.configuration_property, group.format_property)
+            )
+            supported = (
+                not unsafe
+                and valid_names
+                and not self.unsafe(group)
+                and not self.unverified_pks
+                and not self.unverified_pktch
+                and not group.namespace
+                and not group.condition_name
+                and presence == (True, True, True)
+            )
             groups.append(
                 PropertyGroup(
-                    **self.common(group, n, "retained"),
+                    **self.common(group, n, "editable" if supported else "retained"),
                     configuration_property=group.configuration_property,
                     format_property=group.format_property,
                     namespace=group.namespace,
                     condition_name=group.condition_name,
+                    argument_presence=presence,
                     properties=tuple(
-                        self.property(p, i, self.ids[group.entity_id], in_group=True)
+                        self.property(
+                            p, i, self.ids[group.entity_id], in_group=True, unsafe=not supported
+                        )
                         for i, p in enumerate(group.properties, 1)
                     ),
                 )
             )
-            self.retain(group, key)
+            if not supported:
+                self.retain(group, key)
+                self.entries = [
+                    replace(
+                        e,
+                        reason="invalid_table_part_name"
+                        if not valid_names
+                        else "helper_semantics_unverified"
+                        if self.unverified_pktch
+                        else "unsupported_table_part_form",
+                    )
+                    if e.logical_id == self.ids[group.entity_id]
+                    else e
+                    for e in self.entries
+                ]
         if unsafe:
             self.retain(rule, reason="unsafe_declaration", lock=True)
         routine = self.routines[rule.procedure_name.casefold()]
@@ -1487,7 +1611,76 @@ class _Importer:
                         )
                     )
                 else:
-                    result.append(text_leaf(file_id, left, end, owner))
+                    rule = members.get(owner)
+                    if (
+                        isinstance(rule, ObjectRule)
+                        and text[left:end] in ("\n", "\r\n")
+                        and rule.groups
+                        and (
+                            line_range(
+                                file_id,
+                                max(
+                                    (
+                                        mapped[p.logical_id].char_end
+                                        for p in rule.groups[-1].properties
+                                    ),
+                                    default=mapped[rule.groups[-1].logical_id].char_end,
+                                ),
+                                max(
+                                    (
+                                        mapped[p.logical_id].char_end
+                                        for p in rule.groups[-1].properties
+                                    ),
+                                    default=mapped[rule.groups[-1].logical_id].char_end,
+                                ),
+                            )[1]
+                            == left
+                        )
+                    ):
+                        result.append(
+                            LayoutElement(
+                                logical_id(self.project_id, owner + "/table-end"),
+                                "entity",
+                                entity_id=owner,
+                                field="table_end",
+                                source=span(file_id, left, end),
+                            )
+                        )
+                    elif (
+                        isinstance(rule, ObjectRule)
+                        and not rule.groups
+                        and text[left:end] in ("\n", "\r\n")
+                        and (
+                            (
+                                rule.properties
+                                and line_range(
+                                    file_id,
+                                    max(mapped[p.logical_id].char_end for p in rule.properties),
+                                    max(mapped[p.logical_id].char_end for p in rule.properties),
+                                )[1]
+                                == left
+                            )
+                            or (
+                                not rule.properties
+                                and re.fullmatch(
+                                    r"СвойстваШапки\s*=\s*ПравилоКонвертации\.Свойства(?:Шапки)?;",
+                                    text[text.rfind("\n", 0, max(left - 1, 0)) + 1 : left].strip(),
+                                    re.IGNORECASE,
+                                )
+                            )
+                        )
+                    ):
+                        result.append(
+                            LayoutElement(
+                                logical_id(self.project_id, owner + "/table-end"),
+                                "entity",
+                                entity_id=owner,
+                                field="properties_end",
+                                source=span(file_id, left, end),
+                            )
+                        )
+                    else:
+                        result.append(text_leaf(file_id, left, end, owner))
                 left = end
             return result
 
@@ -1802,7 +1995,21 @@ class _Importer:
                 start, end = line_range(
                     file_id, column[0].span.char_start, column[-1].span.char_end
                 )
-                candidates.append((start, end, text_leaf(file_id, start, end, key, "scaffold")))
+                candidates.append(
+                    (
+                        start,
+                        end,
+                        LayoutElement(
+                            logical_id(self.project_id, "header/clear_data_column"),
+                            "entity",
+                            entity_id=self.ids[doc.conversion.entity_id],
+                            field="header.clear_data_column",
+                            source=span(file_id, start, end),
+                        )
+                        if rule is None
+                        else text_leaf(file_id, start, end, key, "scaffold"),
+                    )
+                )
                 consumed.update(s.span.char_start for s in column)
             if isinstance(rule, ObjectRule):
                 for child in (
@@ -1821,6 +2028,74 @@ class _Importer:
                             start,
                             max(mapped[p.logical_id].char_end for p in child.properties),
                         )[1]
+                    if isinstance(child, PropertyGroup) and child.state == "editable":
+                        group_header_end = line_range(file_id, entry.char_start, entry.char_end)[1]
+                        tokens = tokens_by_file[file_id]
+                        starts = token_starts[file_id]
+                        tail = tokens[
+                            bisect_left(starts, entry.char_end) : bisect_left(
+                                starts, group_header_end
+                            )
+                        ]
+                        comment = next(
+                            (t.value for t in tail if t.kind == "comment"),
+                            "",
+                        )
+                        if comment:
+                            comments[child.logical_id] = comment
+                        group_start = start
+                        previous = self.sources[file_id].text.rfind("\n", 0, max(start - 1, 0)) + 1
+                        if self.sources[file_id].text[previous:start].rstrip("\r\n") == "\t":
+                            group_start = previous
+                        group_candidates = []
+                        for prop in child.properties:
+                            p_entry = mapped[prop.logical_id]
+                            a, b = line_range(file_id, p_entry.char_start, p_entry.char_end)
+                            tail = tokens[
+                                bisect_left(starts, p_entry.char_end) : bisect_left(starts, b)
+                            ]
+                            comment = next((t.value for t in tail if t.kind == "comment"), "")
+                            if comment:
+                                comments[prop.logical_id] = comment
+                            group_candidates.append(
+                                (
+                                    a,
+                                    b,
+                                    LayoutElement(
+                                        prop.logical_id,
+                                        "entity",
+                                        entity_id=prop.logical_id,
+                                        source=span(file_id, a, b),
+                                        trailing_comment=comment,
+                                    )
+                                    if prop.state == "editable"
+                                    else text_leaf(
+                                        file_id, a, b, child.logical_id, "pks", prop.logical_id
+                                    ),
+                                )
+                            )
+                        table = body(
+                            file_id,
+                            group_header_end,
+                            end,
+                            child.logical_id,
+                            "table_part",
+                            child.name,
+                            group_candidates,
+                            opening=span(file_id, group_start, group_header_end),
+                        )
+                        containers[-1] = replace(table, owner_id=key)
+                        candidates.append(
+                            (
+                                group_start,
+                                end,
+                                LayoutElement(
+                                    child.logical_id, "container", container_id=child.logical_id
+                                ),
+                            )
+                        )
+                        consumed.add(entry.char_start)
+                        continue
                     if child.state != "editable":
                         element = text_leaf(
                             file_id,
@@ -2191,6 +2466,21 @@ class _Importer:
                     left, right = line_range(
                         source.file_id, routine.span.char_start, routine.span.char_end
                     )
+                    if routine.entity_id == self.identifier_routine:
+                        candidates.append(
+                            (
+                                left,
+                                right,
+                                LayoutElement(
+                                    logical_id(self.project_id, "header/module_identifier"),
+                                    "entity",
+                                    entity_id=self.ids[doc.conversion.entity_id],
+                                    field="header.module_identifier",
+                                    source=span(source.file_id, left, right),
+                                ),
+                            )
+                        )
+                        continue
                     if routine.name.casefold() == VERSION_ROUTINE.casefold():
                         statements = [
                             s
@@ -2269,7 +2559,7 @@ class _Importer:
         }
         containers = [
             replace(c, owner_id=parents[c.logical_id])
-            if c.kind in ("conditional", "predefined", "values")
+            if c.kind in ("conditional", "predefined", "values", "table_part")
             else c
             for c in containers
         ]
@@ -2394,6 +2684,11 @@ class _Importer:
                 opening_blank_lines=gap,
                 line_suffix=suffix,
                 container_id=container_id,
+                compact_rule_separator=bool(
+                    isinstance(item, LayoutElement)
+                    and isinstance(members.get(item.entity_id or ""), Property)
+                    and ',"' in text
+                ),
             )
 
         model = replace(
@@ -2455,6 +2750,9 @@ class _Importer:
         predefined_names = {r.name.casefold(): r for r in doc.pkpd}
         excluded = {s.casefold() for s in ENTRYPOINTS} | {VERSION_ROUTINE.casefold()}
         for routine in doc.routines:
+            if routine.entity_id == self.identifier_routine:
+                self.common(routine, len(code) + 1, "editable")
+                continue
             if "rule" in routine.roles or routine.name.casefold() in excluded:
                 if routine.name.casefold() in (
                     "заполнитьправилаконвертациипредопределенныхданных",
@@ -2575,6 +2873,8 @@ class _Importer:
                     body_end=routine.body_span.char_end,
                     helper_verified=(not self.unverified_pks)
                     if routine.name.casefold() == "добавитьпкс"
+                    else (not self.unverified_pktch)
+                    if routine.name.casefold() == "добавитьпктч"
                     else None,
                     parameters_text=routine.parameters_raw if editable_code else None,
                     frame_comment=source.text[frame_start:comment_start],
@@ -2730,13 +3030,23 @@ class _Importer:
                 )
             )
         report = ImportReport(
-            tuple(self.entries), tuple((d.code, self.address(d)) for d in doc.diagnostics)
+            tuple(self.entries),
+            tuple(
+                (d.code, self.address(d))
+                for d in doc.diagnostics
+                if not (
+                    d.code == "helper_semantics_unverified" and self.helper_variant == "legacy-v2"
+                )
+            ),
         )
         source = doc.files[0]
         model = ManagerModel(
             project_id=self.project_id,
             header=Header(
                 manager_name=name,
+                helper_variant=cast(Literal["modern", "legacy-v2"] | None, self.helper_variant),
+                clear_data_column=self.clear_data_column,
+                module_identifier=self.module_identifier,
                 interface_version=doc.manager_version,
                 title=Value("string", doc.conversion.title)
                 if doc.conversion.title is not None

@@ -350,7 +350,7 @@ def test_preview_atomic_stale_conflict_and_idempotence():
     bad = ManagerOperation("unsupported", "table_part", "create")
     refused = preview(model, (op, bad), expected_revision=model.revision)
     assert refused.model == model and not refused.changes
-    assert "не поддержан" in refused.failures[0].message
+    assert "владельца" in refused.failures[0].message
     with pytest.raises(ManagerOperationError):
         apply(
             model,
@@ -403,7 +403,12 @@ def test_new_ids_moves_clears_and_non_cascading_delete():
     moved = execute(
         model,
         ManagerOperation(
-            "move", "property", "move", target_id=logical_id("new", "property2"), container_id=key
+            "move",
+            "property",
+            "move",
+            target_id=logical_id("new", "property2"),
+            container_id=key,
+            after_id=None,
         ),
     )
     assert moved.ordered_entity_ids(key)[0] == logical_id("new", "property2")
@@ -710,6 +715,7 @@ def test_report_addresses_and_rule_moves_are_executable():
                     "action": "move",
                     "target_id": target,
                     "container_id": model.root_layouts[0],
+                    "after_id": None,
                 }
             ),
         )
@@ -847,9 +853,8 @@ def test_review_helper_signature_and_presence_are_enforced():
     )
     model, report = imported(probe_module('ДобавитьПКС(СвойстваШапки, "A", "A");', extra=helper))
     prop = model.pko[0].properties[0]
-    assert prop.state == "retained" and any(
-        code == "helper_semantics_unverified" for code, _ in report.diagnostics
-    )
+    assert prop.state == "editable" and model.header.helper_variant == "legacy-v2"
+    assert not report.diagnostics
     op = ManagerOperation(
         "ns",
         "property",
@@ -1651,7 +1656,7 @@ def test_layout_address_replay_prefers_receipt_after_name_reuse():
     )
 
 
-def test_layout_exact_pod_column_scaffold_is_single_retained_leaf():
+def test_layout_exact_pod_column_is_model_field():
     text = SYNTHETIC.replace(
         '    Если НаправлениеОбмена = "Получение" Тогда\n        ДобавитьПОД_Items',
         '    Если НаправлениеОбмена = "Получение" Тогда\n'
@@ -1663,11 +1668,10 @@ def test_layout_exact_pod_column_scaffold_is_single_retained_leaf():
     assert all(exact for *_, exact in report.source_partition)
     use = next(u for u in model.rule_uses if u.rule.target_id == model.pod[0].logical_id)
     assert use.state == "editable" and use.inside_leaf_id is None
-    scaffold = next(b for b in model.retained_blocks if 'Колонки.Найти("ОчисткаДанных")' in b.text)
-    assert scaffold.text.strip().endswith("КонецЕсли;")
+    assert model.header.clear_data_column
+    assert not any('Колонки.Найти("ОчисткаДанных")' in b.text for b in model.retained_blocks)
     group = next(g for g in model.layouts if any(e.entity_id == use.logical_id for e in g.elements))
-    assert any(e.block_id == scaffold.logical_id for e in group.elements)
-    assert scaffold.owner_id == group.logical_id
+    assert any(e.field == "header.clear_data_column" for e in group.elements)
 
 
 def test_layout_chain_and_nested_conditions_keep_their_context():

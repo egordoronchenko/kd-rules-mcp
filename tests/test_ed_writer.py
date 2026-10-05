@@ -130,8 +130,21 @@ def pilot_model(interface_version=2, directions=("send", "receive")):
 def test_goldens_are_generated_complete_and_stable(factory, name):
     model = factory()
     output = render(model, "canonical")
-    assert output.data == (Path(__file__).parent / "data/ed/writer" / (name + ".bsl")).read_bytes()
     document, back = reread(model, output)
+    # Старый золотой файл проверяет весь прежний каркас; новый помощник W3 —
+    # отдельно по независимому шаблону эталона, без изменения файлов данных.
+    from kd2_rules_mcp.ed.forms import helper_forms
+    from kd2_rules_mcp.ed.lexer import tokenize
+
+    helper = next(r for r in document.routines if r.name == "ДобавитьПКТЧ")
+
+    def tokens(text):
+        return tuple((t.kind, t.folded) for t in tokenize(text))
+
+    assert tokens(helper.raw_text) == tokens(helper_forms(helper.name, 2)[0])
+    without_table = output.text.replace(helper.raw_text + "\r\n\r\n", "", 1)
+    old_golden = (Path(__file__).parent / "data/ed/writer" / (name + ".bsl")).read_bytes()
+    assert ("\ufeff" + without_table).encode("utf-8") == old_golden
     assert document.parse_status == "complete"
     assert not document.unknown
     assert canonicalize(model) == canonicalize(back)

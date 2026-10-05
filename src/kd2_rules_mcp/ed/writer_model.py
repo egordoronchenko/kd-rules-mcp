@@ -123,6 +123,25 @@ def content_hash(value: Any) -> str:
             if (
                 (kind is SourceSlice and name == "container_id" and not getattr(value, name))
                 or (
+                    kind is SourceSlice
+                    and name == "compact_rule_separator"
+                    and not getattr(value, name)
+                )
+                or (
+                    kind is Header and name == "helper_variant" and getattr(value, name) == "modern"
+                )
+                or (kind is Header and name == "clear_data_column" and not getattr(value, name))
+                or (
+                    kind is Header
+                    and name == "module_identifier"
+                    and getattr(value, name) == Value()
+                )
+                or (
+                    kind is PropertyGroup
+                    and name == "argument_presence"
+                    and getattr(value, name) == (True, True, True)
+                )
+                or (
                     kind is Decision
                     and name in ("position_container", "position_after")
                     and getattr(value, name) is None
@@ -237,6 +256,9 @@ class Header:
     interface_version: int | None = 2
     title: Value = Value()
     generated_at: Value = Value()
+    helper_variant: Literal["modern", "legacy-v2"] | None = "modern"
+    clear_data_column: bool = False
+    module_identifier: Value = Value()
     text_style: TextStyle = TextStyle()
 
 
@@ -355,7 +377,9 @@ class PropertyGroup(Member):
     namespace: str = ""
     condition_name: str = ""
     row_type: str = ""
+    # Совместимость снимков W2; поле не выбирает политику и всегда остаётся unset.
     update_policy: Value = Value()
+    argument_presence: tuple[bool, ...] = (True, True, True)
     properties: tuple[Property, ...] = ()
 
 
@@ -537,6 +561,7 @@ class SourceSlice:
     opening_blank_lines: int = 0
     line_suffix: str = ""
     container_id: str = ""
+    compact_rule_separator: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -575,7 +600,15 @@ class LayoutContainer:
 
     logical_id: str
     kind: Literal[
-        "module", "rule", "entrypoint", "conditional", "predefined", "values", "code", "dispatcher"
+        "module",
+        "rule",
+        "entrypoint",
+        "conditional",
+        "predefined",
+        "values",
+        "code",
+        "dispatcher",
+        "table_part",
     ]
     name: str
     owner_id: str | None = None
@@ -619,6 +652,19 @@ def leaf_fingerprint(
 ) -> str:
     """Отпечаток только своего оператора, без дочерних сущностей и координат."""
     if isinstance(item, LayoutContainer):
+        if item.kind == "table_part":
+            member = next(g for r in model.pko for g in r.groups if g.logical_id == item.logical_id)
+            return digest(
+                (
+                    item.kind,
+                    member.configuration_property,
+                    member.format_property,
+                    member.namespace,
+                    member.condition_name,
+                    member.argument_presence,
+                    member.trailing_comment,
+                )
+            )
         if item.kind in ("code", "dispatcher"):
             unit = next(u for u in model.code_units if u.logical_id == item.logical_id)
             return digest(
@@ -1133,6 +1179,13 @@ def validate_model(model: ManagerModel) -> None:
         or model.header.interface_version not in (1, 2, 3)
     ):
         raise ValueError("Неверный интерфейс менеджера")
+    if (
+        model.header.helper_variant not in (None, "modern", "legacy-v2")
+        or type(model.header.clear_data_column) is not bool
+        or model.header.module_identifier.state not in ("unset", "string")
+        or any(c in str(model.header.module_identifier.value) for c in "\r\n")
+    ):
+        raise ValueError("Неверные поля шапки W3")
     members = model.members()
     ids = [member.logical_id for member in members]
     if len(ids) > MAX_ENTITIES:
@@ -1207,6 +1260,7 @@ def validate_model(model: ManagerModel) -> None:
             "values",
             "code",
             "dispatcher",
+            "table_part",
         ) or container.state not in ("editable", "retained", "blocked"):
             raise ValueError("Неверный вид или состояние контейнера")
         check_slice(container.opening)
@@ -1281,6 +1335,10 @@ def validate_model(model: ManagerModel) -> None:
                 "Представление должно принадлежать живому листу и не входить в раскладку"
             )
     for rule in model.pko:
+        if any(g.update_policy != Value() for g in rule.groups):
+            raise ValueError(
+                "Политика обновления ТЧ не выбирается: исполнитель заменяет её целиком"
+            )
         for prop in (*rule.properties, *(p for g in rule.groups for p in g.properties)):
             if prop.state == "editable" and (
                 len(prop.argument_presence) != len(prop.argument_values) + 1

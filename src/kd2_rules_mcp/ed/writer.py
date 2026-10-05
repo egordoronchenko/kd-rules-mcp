@@ -22,6 +22,7 @@ from .writer_model import (
     PredefinedRule,
     ProcessingRule,
     Property,
+    PropertyGroup,
     RuleUse,
     SearchSet,
     SourceSlice,
@@ -280,6 +281,27 @@ def render(
             )
         if name == "header.interface_version":
             return forms.version(model.header.interface_version or 2)
+        if name == "header.clear_data_column":
+            return (
+                (
+                    'Если ПравилаОбработкиДанных.Колонки.Найти("ОчисткаДанных") '
+                    "= Неопределено Тогда\n"
+                    '\tПравилаОбработкиДанных.Колонки.Добавить("ОчисткаДанных");\n'
+                    "КонецЕсли;"
+                )
+                if model.header.clear_data_column
+                else ""
+            )
+        if name == "header.module_identifier":
+            return (
+                (
+                    "Функция Подключаемый_ИдентификаторМодуля() Экспорт\n\tВозврат "
+                    + forms.literal(model.header.module_identifier)
+                    + ";\nКонецФункции"
+                )
+                if model.header.module_identifier.state != "unset"
+                else ""
+            )
         if name == "properties_start":
             return "СвойстваШапки = ПравилоКонвертации.Свойства;"
         if name == "mode":
@@ -387,7 +409,8 @@ def render(
                 cases[0] == member.logical_id,
             )
         if isinstance(member, Property):
-            arguments = ["СвойстваШапки"]
+            group = members.get(owner.logical_id)
+            arguments = ["СвойстваТЧ" if isinstance(group, PropertyGroup) else "СвойстваШапки"]
             for flag, value in zip(
                 member.argument_presence[1:], member.argument_values, strict=True
             ):
@@ -399,8 +422,27 @@ def render(
                     parent = containers[parent.owner_id]
                 rule = members.get(parent.logical_id)
             if isinstance(rule, ObjectRule) and len(arguments) >= 3:
-                maximum = max((len(p.configuration_property) for p in rule.properties), default=0)
+                properties = (
+                    group.properties if isinstance(group, PropertyGroup) else rule.properties
+                )
+                maximum = max((len(p.configuration_property) for p in properties), default=0)
+                if mode == "preserve" and element.source and use_source_style:
+                    raw = original(element.source) or ""
+                    import re
+
+                    match = re.search(r'"(?:[^"]|"")*",(\s*)"', raw)
+                    if match:
+                        maximum = len(member.configuration_property) + max(len(match[1]) - 1, 0)
                 arguments[2] = " " * (maximum - len(member.configuration_property)) + arguments[2]
+            compact = use_source_style and (
+                element.source.compact_rule_separator
+                if element.source
+                else isinstance(group, PropertyGroup) and model.header.helper_variant == "legacy-v2"
+            )
+            if compact and len(arguments) >= 5 and arguments[3] == "1":
+                # Компактный разделитель относится только к аргументу правила;
+                # литералы остальных аргументов остаются точным текстом.
+                arguments[3:5] = [arguments[3] + "," + arguments[4]]
             return forms.property_call(tuple(arguments))
         if isinstance(member, SearchSet):
             return forms.search(member.fields)
@@ -438,6 +480,33 @@ def render(
     def frame(container: LayoutContainer, close: bool, span: SourceSlice | None) -> str:
         # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/
         # ШаблоныТекстовМодулей/Ext/Template.txt:21–22,41–43,62–63.
+        if container.kind == "table_part":
+            group = members[container.logical_id]
+            assert isinstance(group, PropertyGroup)
+            parent = container
+            while parent.owner_id and parent.kind != "rule":
+                parent = containers[parent.owner_id]
+            rule = members[parent.logical_id]
+            assert isinstance(rule, ObjectRule)
+            maximum = max((len(g.configuration_property) for g in rule.groups), default=0)
+            if mode == "preserve" and span and use_source_style:
+                raw = original(span) or ""
+                import re
+
+                match = re.search(r'"(?:[^"]|"")*",(\s*)"', raw)
+                if match:
+                    maximum = len(group.configuration_property) + max(len(match[1]) - 1, 0)
+            call = (
+                "СвойстваТЧ = ДобавитьПКТЧ(ПравилоКонвертации, "
+                + forms.literal(Value("string", group.configuration_property))
+                + ", "
+                + " " * (maximum - len(group.configuration_property))
+                + forms.literal(Value("string", group.format_property))
+                + ");"
+            )
+            if group.trailing_comment:
+                call += " " + group.trailing_comment
+            return "\t\n" + call
         if container.kind in ("code", "dispatcher"):
             unit = members[container.logical_id]
             assert isinstance(unit, CodeUnit)
@@ -501,7 +570,16 @@ def render(
         container = containers[key]
         framed = (
             container.kind
-            in ("rule", "entrypoint", "conditional", "predefined", "values", "code", "dispatcher")
+            in (
+                "rule",
+                "entrypoint",
+                "conditional",
+                "predefined",
+                "values",
+                "code",
+                "dispatcher",
+                "table_part",
+            )
             and container.branch != "chain"
         )
         for close in (False, True):
@@ -510,7 +588,7 @@ def render(
             has_frame = (
                 framed
                 and (not close or close_branch)
-                and not (container.kind == "predefined" and close)
+                and not (container.kind in ("predefined", "table_part") and close)
             )
             if has_frame:
                 source = original(span)
@@ -529,12 +607,20 @@ def render(
                 )
                 if container.kind in ("code", "dispatcher") and not close and text is not source:
                     text = frame(container, close, span)
+                if container.kind == "table_part" and text is not source:
+                    text = (
+                        "\t"
+                        + newline
+                        + generated(frame(container, close, span).split("\n", 1)[1], depth)
+                    )
                 if container.kind == "predefined" and text is not source:
                     text += indent * max(depth - 1, 0) + newline
                 frame_member = members.get(key)
                 emit(
                     key + ("/closing" if close else "/opening"),
-                    "pko"
+                    "pktch"
+                    if isinstance(members.get(key), PropertyGroup)
+                    else "pko"
                     if isinstance(members.get(key), ObjectRule)
                     else "pod"
                     if isinstance(members.get(key), ProcessingRule)
@@ -557,7 +643,9 @@ def render(
             if close:
                 break
             child_depth = depth + (
-                1 if framed and container.kind not in ("predefined", "values", "code") else 0
+                1
+                if framed and container.kind not in ("predefined", "values", "code", "table_part")
+                else 0
             )
             for n, element in enumerate(container.elements):
                 if element.container_id:
@@ -593,6 +681,11 @@ def render(
                         "verbatim"
                         if mode == "preserve" and valid and source is not None
                         else "regenerated",
+                    )
+                elif element.field in ("table_end", "properties_end"):
+                    text, state = (
+                        newline,
+                        "verbatim" if mode == "preserve" and source == newline else "regenerated",
                     )
                 elif mode == "preserve" and source is not None and valid:
                     text, state = source, "verbatim"

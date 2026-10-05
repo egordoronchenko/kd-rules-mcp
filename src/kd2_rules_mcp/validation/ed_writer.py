@@ -77,6 +77,62 @@ def _declarative_checks(model: ManagerModel, report: ValidationReport, addresses
                 "(XDTO:1294–1300,1530–1554,502–508)",
             )
     for rule in model.pko:
+        active_groups = defaultdict(list)
+        for group in rule.groups:
+            address = addresses[group.logical_id]
+            if group.configuration_property and group.format_property and not group.properties:
+                report.warning(
+                    "ed.writer.table_part_empty",
+                    address,
+                    "У группы с обеими сторонами нет ПКС (XDTO:5749–5767)",
+                )
+            for prop in group.properties:
+                if (
+                    prop.property_kind == "direct"
+                    and not (group.configuration_property and group.format_property)
+                    and not (
+                        property_directions(rule, group, guards) == {"send"}
+                        and group.format_property
+                        and any(p.algorithm_flag for p in group.properties)
+                    )
+                ):
+                    report.warning(
+                        "ed.writer.table_part_direct_empty",
+                        addresses[prop.logical_id],
+                        "Прямая ПКС в группе с пустой стороной не переносится напрямую "
+                        "(XDTO:1223,6601–6604)",
+                    )
+            for direction in ("send", "receive"):
+                if not _direction(rule, direction) or any(
+                    guards[g].direction not in (None, "both", direction)
+                    for g in (*rule.guards, *group.guards)
+                    if g in guards
+                ):
+                    continue
+                side = (
+                    group.format_property if direction == "send" else group.configuration_property
+                )
+                if side:
+                    active_groups[direction, side.casefold()].append(group)
+                needs_code = any(p.algorithm_flag for p in group.properties)
+                event = "ПриОтправкеДанных" if direction == "send" else "ПриКонвертацииДанныхXDTO"
+                if needs_code and not any(e.event == event and e.target.name for e in rule.events):
+                    report.warning(
+                        "ed.writer.table_part_algorithm_handler",
+                        address,
+                        f"Алгоритмическая группа {direction} без обработчика «{event}» "
+                        "(XDTO:1250–1270,6782–6790)",
+                    )
+        for (direction, side), groups in active_groups.items():
+            if len(groups) > 1:
+                emit = report.error if direction == "send" else report.warning
+                emit(
+                    "ed.writer.table_part_duplicate",
+                    addresses[groups[0].logical_id],
+                    f"Повтор ТЧ «{side}» в направлении {direction}: "
+                    + ", ".join(addresses[g.logical_id] for g in groups)
+                    + "; отправка затирает строки, получение заменяет ТЧ (XDTO:1246,7051–7062)",
+                )
         for group_guards, props in [
             ((), rule.properties),
             *((g.guards, g.properties) for g in rule.groups),
@@ -951,7 +1007,10 @@ def validate_writer(
                 )
     # helper_semantics_unverified остаётся препятствием готовности даже при сохранении листа.
     for diagnostic in document.diagnostics:
-        if diagnostic.code == "helper_semantics_unverified":
+        if (
+            diagnostic.code == "helper_semantics_unverified"
+            and model.header.helper_variant != "legacy-v2"
+        ):
             report.warning(
                 "ed.writer.incomplete",
                 "Код/ДобавитьПКС",
@@ -959,6 +1018,14 @@ def validate_writer(
             )
     if caps is not None:
         helpers = routines.get("добавитьпкс", ())
+        if not routines.get("добавитьпктч") and any(r.groups for r in model.pko):
+            report.warning(
+                "ed.writer.incomplete",
+                "Код/ДобавитьПКТЧ",
+                "ПКТЧ есть, помощник отсутствует; комплект не готов "
+                "(reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/"
+                "ШаблоныТекстовМодулей/Ext/Template.txt:175–188)",
+            )
         if not helpers and any(r.properties or r.groups for r in model.pko):
             report.warning(
                 "ed.writer.incomplete",
@@ -968,6 +1035,7 @@ def validate_writer(
             )
         if (
             helpers
+            and model.header.helper_variant != "legacy-v2"
             and tuple(p.name for p in helpers[0].parameters) != caps.helper_parameters
             and not any(
                 i.check == "ed.writer.incomplete" and i.address == "Код/ДобавитьПКС"

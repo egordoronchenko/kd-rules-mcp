@@ -286,7 +286,8 @@ def test_deferred_algorithm_binding_and_signature():
             patch=HandlerPatch(restore_dispatcher=True),
         ),
     )
-    assert len(model.dispatcher_cases[0].arguments) == 1
+    assert len(model.dispatcher_cases[0].arguments) == 2
+    assert any(i.check == "ed.writer.dispatcher_arguments" for i in code_report(model).issues)
     round_trip(model)
     model = execute(
         model,
@@ -382,7 +383,7 @@ def test_repeated_rule_rename_changes_only_reference_token_in_retained_group():
     text = render(model).text.replace(
         "\tСвойстваШапки = ПравилоКонвертации.Свойства;",
         "\tСвойстваШапки = ПравилоКонвертации.Свойства;\n"
-        '\tСвойстваТЧ = ДобавитьПКТЧ(ПравилоКонвертации, "Rows", "Rows");\n'
+        '\tСвойстваТЧ = ДобавитьПКТЧ(ПравилоКонвертации, "Rows", "Rows", "urn:extension");\n'
         '\tДобавитьПКС(СвойстваТЧ, "Ref", "Ref", 0, "Item");\n'
         '\tДобавитьПКС(СвойстваТЧ, "Other", "Other", , "Item");',
     )

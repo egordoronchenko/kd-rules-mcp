@@ -931,7 +931,7 @@ def test_unsupported_form_and_invalid_packet_are_atomic(writer_setup):
         service.ed_create(**args, interface_version=3)
     assert not service.manager_workspace.ids()
     created = service.ed_create(**args)
-    bad = [{"client_id": "future", "kind": "table_part", "action": "create", "patch": {}}]
+    bad = [{"client_id": "future", "kind": "routine", "action": "create", "patch": {}}]
     preview = service.ed_apply("positions", created["revision"], bad)
     assert preview["failures"]["total"]
     with pytest.raises(EdAuthoringPreconditionError) as error:
@@ -1264,11 +1264,39 @@ def test_documented_two_property_example_uses_service_ids(writer_setup, name, pa
         confirmations=preview["required_confirmations"],
     )
     assert applied["applied"] and applied["revision"] == preview["future_revision"]
+    if name == "handler":
+        model = service.manager_workspace.get("positions").model
+        events = [e for r in model.pko for e in r.events]
+        assert len(events) == 2
+        assert events[0].target.target_id == events[1].target.target_id
     if name == "catalog":
         checked = service.ed_validate(
             applied["document_id"], schema_id=args["schema_id"], structure_id="host"
         )
         assert checked["summary"]["errors"] == checked["summary"]["warnings"] == 0, checked
+    if name == "table_part":
+        model = service.manager_workspace.get("positions").model
+        rule = model.pko[0]
+        assert rule.groups[0].properties[0].format_property == "Quantity"
+        # Ограничения рядом с исполняемым примером: имя-идентификатор и повтор без регистра.
+        for client, configuration, format_name in (
+            ("invalid-name", "Строки 2", "OtherRows"),
+            ("case-duplicate", "ДругиеСтроки", "rows"),
+        ):
+            operation = writer_operations.parse_operation(
+                {
+                    "client_id": client,
+                    "kind": "table_part",
+                    "action": "create",
+                    "owner_id": rule.logical_id,
+                    "patch": {
+                        "configuration_property": configuration,
+                        "format_property": format_name,
+                    },
+                }
+            )
+            plan = writer_operations.preview(model, (operation,), expected_revision=model.revision)
+            assert any(f.reason == "model_invalid" for f in plan.failures)
 
 
 def writer_doc_table(marker):

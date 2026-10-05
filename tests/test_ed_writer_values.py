@@ -341,6 +341,7 @@ def test_mapping_crud_moves_and_duplicate_keys():
             "value_mapping",
             "move",
             target_id=blue.logical_id,
+            after_id=None,
             container_id=next(
                 c.logical_id for c in model.layouts if c.kind == "values" and c.direction == "send"
             ),
