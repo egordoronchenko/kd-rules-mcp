@@ -44,6 +44,7 @@ from .layer_reader import (
     layer_key,
     load_source,
     module_routines,
+    parse_annotation,
     property_conditions,
     read_dump,
     read_extension_file,
@@ -70,7 +71,7 @@ from .model import (
     RuleUse,
     SourceSpan,
 )
-from .reader import read_manager
+from .reader import read_manager, read_manager_text
 
 MAX_LAYERS = 16
 _UNIT = "\x1f"
@@ -175,6 +176,8 @@ def read_layers(
             manager_name = None
     route_readings: list[ExtensionReading] = []
     own: dict[str, tuple[EdDocument, LayerDescriptor]] = {}
+    executor_hooks = []
+    executor_files = []
     adopted: list[tuple[DumpObject, LayerDescriptor]] = []
     for dump, layer in zip(ext_dumps, ext_layers, strict=True):
         if dump.failed:
@@ -216,10 +219,54 @@ def read_layers(
                 continue
             if obj.kind != "CommonModule":
                 continue
+            if (
+                obj.name.casefold()
+                in {
+                    "обменданнымиxdtoсервер",
+                    "обменданнымисервер",
+                    "обменданнымисобытия",
+                    "обменданнымиповтисп",
+                }
+                and obj.belonging
+                and obj.belonging.casefold() == "adopted"
+            ):
+                executor_source = load_source(Path(obj.module_path), obj.module_path)
+                pending = None
+                for statement in lex(executor_source).statements:
+                    if statement.tokens[0].kind == "directive":
+                        annotation = parse_annotation(statement.tokens[0].value)
+                        if annotation:
+                            pending = annotation
+                    elif statement.head in {"процедура", "функция"}:
+                        if pending:
+                            kind, target = pending
+                            origin = Origin(
+                                layer.id,
+                                obj.kind,
+                                obj.name,
+                                executor_source.file_id,
+                                statement.span,
+                                statement.tokens[1].value,
+                                path=executor_source.path,
+                            )
+                            executor_hooks.append((obj.name, target, kind, origin))
+                        pending = None
+                    else:
+                        pending = None
+                executor_files.append(executor_source)
+                continue
             if obj.belonging is None:
                 if _looks_like_manager(Path(obj.module_path)):
                     try:
-                        own[obj.name] = (read_manager(obj.module_path), layer)
+                        own_source = load_source(Path(obj.module_path), obj.module_path)
+                        own[obj.name] = (
+                            read_manager_text(
+                                ("\ufeff" if own_source.bom else "") + own_source.text,
+                                file_id=own_source.file_id,
+                                path=own_source.path,
+                            ),
+                            layer,
+                        )
                     except (EdFormatError, EdReadError) as error:
                         skips.append(
                             LayerSkip(
@@ -306,6 +353,11 @@ def read_layers(
         manager_name=selected,
         manager_layer_id=source_layer,
         own=own,
+    )
+    layered = replace(
+        layered,
+        executor_hooks=tuple(executor_hooks),
+        source_files=_unique_files((*layered.source_files, *executor_files)),
     )
     if not tainted:
         return layered
@@ -559,6 +611,17 @@ def compose_manager(
         status,
         source,
         tuple(readings),
+        tuple(
+            (name, layer.id, doc.files[0])
+            for name, (doc, layer) in (own or {}).items()
+            if doc.files
+            and name.casefold() != manager_name.casefold()
+            and not any(
+                entry.state == "effective"
+                and (entry.manager_name or "").casefold() == name.casefold()
+                for entry in map_entries
+            )
+        ),
     )
     index = build_layer_addresses(layered)
     return replace(
@@ -684,11 +747,11 @@ def _context_state(
             certainty = Certainty.KNOWN if decision is True else Certainty.UNKNOWN
             payload = rule
             if collection == "pko":
-                payload, uncertain = _filter_properties(
+                payload, _uncertain = _filter_properties(
                     rule, direction, headers_only, conditions, snapshots
                 )
-                if uncertain:
-                    certainty = Certainty.UNKNOWN
+                # Непрозрачное условие исходной ПКС не меняет определённость
+                # самого ПКО. Проверки членов учитывают исходные guards отдельно.
             if certainty != Certainty.KNOWN:
                 faults.append(
                     LayerSkip(
@@ -751,6 +814,13 @@ def _context_state(
             call.effect == "call"
             or holds(call.pred, direction, headers_only, index, tips, snapshots) is False
         ):
+            continue
+        if call.effect == "unknown_call" and any(
+            item.reason == "external_rule_call" and item.span.char_start == call.span.char_start
+            for item in source.unknown
+        ):
+            # Непрочитанный вызов уже учтён базовым читателем. Слой не обещает
+            # определённость его действий и не загрязняет повторно базовые правила.
             continue
         origin = Origin(
             "base",
@@ -957,7 +1027,8 @@ def _apply(operation, tips, history, index, certainty, snapshots) -> bool:
 def _add_rule(operation, tips, history, index, certainty) -> None:
     entity = operation.value
     collection, _column, name = _split(operation.target_ref)
-    logical = f"{operation.origin.layer_id}:{entity.entity_id}"
+    # ID декларации уже различает файлы слоёв; второй префикс не нужен.
+    logical = entity.entity_id
     named = replace(entity, name=name or entity.name)
     _commit(
         logical,
@@ -1303,7 +1374,7 @@ def _commit(
             if item.revision_id == merged.revision_id:
                 history[index] = merged
         return
-    revision = f"{layer_id}:{logical}"
+    revision = f"{logical}:revision:{layer_id}"
     past = () if prev is None else prev.history
     origins = (operation.origin,) if prev is None else (*prev.origins, operation.origin)
     version = EntityVersion(
@@ -1746,13 +1817,13 @@ def _resolve(
     name, arounds, afters, source, readings, throws: bool, base_unknown: bool, kind: str
 ) -> str:
     def base_outcome() -> str:
-        if base_unknown:
-            return "unknown"
         if any(
             case.literal_name == name and case.returns == (kind == "function")
             for case in source.dispatcher_cases
         ):
             return "call"
+        if base_unknown:
+            return "unknown"
         return "throws" if throws else "no_call"
 
     def around_outcome(index: int) -> str:
@@ -1891,11 +1962,13 @@ def _choose_manager(
         and _looks_like_manager(Path(obj.module_path))
     ]
     if version_key:
-        keyed = [
-            entry.manager_name
+        matching = [
+            entry
             for entry in entries
             if entry.state == "effective" and entry.manager_name and entry.key == version_key
         ]
+        plan_entries = [entry for entry in matching if entry.role == "plan"]
+        keyed = [entry.manager_name for entry in (plan_entries or matching)]
         chosen = unique([name for name in keyed if name])
         if len(chosen) == 1:
             return chosen[0], ()

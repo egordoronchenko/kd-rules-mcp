@@ -26,10 +26,28 @@ def _escaped(name: str) -> str:
 
 def model_addresses(model: ManagerModel) -> dict[str, str]:
     """Квалификация повторов локальна родителю; логические ID не перенумеровываются."""
+    if model._cached_addresses is not None:
+        return dict(model._cached_addresses)
     result: dict[str, str] = {}
     used_addresses: set[str] = set()
+    containers = {c.logical_id: c for c in model.layouts}
+    layout_order = {}
+
+    def scan_order(key):
+        layout_order[key] = len(layout_order)
+        for element in containers[key].elements:
+            if element.block_id:
+                layout_order.setdefault(element.block_id, len(layout_order))
+            if element.container_id:
+                scan_order(element.container_id)
+            elif element.entity_id:
+                layout_order.setdefault(element.entity_id, len(layout_order))
+
+    for key in model.root_layouts:
+        scan_order(key)
 
     def level(prefix: str, members: tuple[Member, ...]) -> None:
+        members = tuple(sorted(members, key=lambda m: layout_order.get(m.logical_id, 10**9)))
         counts = Counter(item.name.casefold() for item in members)
         seen: dict[str, int] = defaultdict(int)
         for item in members:
@@ -51,7 +69,10 @@ def model_addresses(model: ManagerModel) -> dict[str, str]:
         ("Параметр", model.parameters),
         ("Код", model.code_units),
         ("Событие", model.conversion_events),
-        ("Использование", model.rule_uses),
+        (
+            "Использование",
+            tuple(sorted(model.rule_uses, key=lambda u: layout_order.get(u.logical_id, 10**9))),
+        ),
         ("Условие", model.guards),
         ("Ветка", model.dispatcher_cases),
     ):
@@ -85,10 +106,10 @@ def model_addresses(model: ManagerModel) -> dict[str, str]:
             if container.kind == "module"
             else "Раскладка/" + _escaped(container.name),
         )
-    containers = {c.logical_id: c for c in model.layouts}
 
     def chains(key):
         count = 0
+        directions = defaultdict(int)
         for element in containers[key].elements:
             if element.container_id is None:
                 continue
@@ -96,6 +117,14 @@ def model_addresses(model: ManagerModel) -> dict[str, str]:
             if child.kind == "conditional" and child.branch == "chain":
                 count += 1
                 result[child.logical_id] = result[key] + f"/Цепочка/{count}"
+            elif child.kind == "conditional":
+                directions[child.direction] += 1
+                result[child.logical_id] = (
+                    result[key]
+                    + "/Условие/"
+                    + str(child.direction)
+                    + f"/{directions[child.direction]}"
+                )
             chains(child.logical_id)
 
     for key in model.root_layouts:
@@ -106,8 +135,20 @@ def model_addresses(model: ManagerModel) -> dict[str, str]:
         for e in c.elements
         if e.block_id is not None and e.entity_id is not None
     }
+    guard_counts = defaultdict(int)
+    by_block = {b.logical_id: b for b in model.retained_blocks}
+    for guard in model.guards:
+        if guard.inside_leaf_id:
+            block = by_block[guard.inside_leaf_id]
+            guard_counts[block.logical_id] += 1
+            base = result.get(block_entities.get(block.logical_id, "")) or (
+                result.get(block.owner_id or "", "Раскладка") + "/Текст/" + block.sha256[:16]
+            )
+            result[guard.logical_id] = base + f"/Условие/{guard_counts[block.logical_id]}"
     block_counts = defaultdict(int)
-    for block in model.retained_blocks:
+    for block in sorted(
+        model.retained_blocks, key=lambda b: layout_order.get(b.logical_id, len(layout_order))
+    ):
         entity_id = block_entities.get(block.logical_id)
         base = result.get(entity_id or "")
         if base is None:
@@ -147,7 +188,8 @@ def model_addresses(model: ManagerModel) -> dict[str, str]:
                 result[entry.logical_id] = f"Источник/Неизвестное/{unknown}"
             elif any(kind in entry.reader_id for kind in (":routine:", ":version:")):
                 result[entry.logical_id] = "Источник/" + entry.address
-    return result
+    object.__setattr__(model, "_cached_addresses", result)
+    return dict(result)
 
 
 _ROOT_PHYSICAL = frozenset(
@@ -159,6 +201,7 @@ _ROOT_PHYSICAL = frozenset(
         "decisions",
         "confirmations",
         "import_report",
+        "module_styles",
     }
 )
 _LINKS = frozenset(
@@ -183,7 +226,7 @@ def canonical_value(
         if isinstance(value, RetainedBlock):
             excluded |= {"file_id", "source_hash", "char_start", "char_end"}
         if isinstance(value, CodeUnit):
-            excluded |= {"file_id", "body_start", "body_end"}
+            excluded |= {"file_id", "body_start", "body_end", "origin"}
         if isinstance(value, LayoutElement):
             excluded |= {"source"}
         if isinstance(value, LayoutContainer):
@@ -229,6 +272,15 @@ class CanonicalModel:
 def canonical_model(model: ManagerModel) -> CanonicalModel:
     ids = model_addresses(model)
     value = canonical_value(model, ids)
+
+    # Направления правила — множество: порядок использований в точках входа задаёт раскладка,
+    # а не порядок кортежа (после повторного чтения он всегда «отправка, получение»).
+    for catalog in ("pko", "pod"):
+        for rule in value.get(catalog, ()):
+            if isinstance(rule, dict) and isinstance(rule.get("directions"), list):
+                rule["directions"] = sorted(
+                    rule["directions"], key=("send", "receive", "both").index
+                )
 
     # Каталоги не задают порядок вывода. Он только в elements контейнеров.
     def catalogs(row):

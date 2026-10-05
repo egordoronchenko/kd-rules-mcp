@@ -8,6 +8,7 @@ from string import Template
 from kd2_rules_mcp.ed.address import build_addresses
 from kd2_rules_mcp.ed.model import ObjectRule
 from kd2_rules_mcp.ed.schema.model import EdSchema
+from kd2_rules_mcp.ed.writer_model import ManagerModel
 
 from .handlers import HandlerBindingPlan, HandlerOperationsPlan, operation_kind
 from .hook import bsl_string
@@ -38,6 +39,135 @@ def table(headers: tuple[str, ...], rows: Iterable[tuple[object, ...]]) -> str:
 
 def direction_label(direction: str) -> str:
     return "Отправка" if direction == "send" else "Получение"
+
+
+def manager_instruction_substitutions(
+    model: "ManagerModel",
+    *,
+    extension_name: str,
+    module_name: str,
+    plan_name: str,
+    version_key: str,
+    build_hash: str,
+    paths: tuple[str, ...],
+    form_evidence: Mapping[str, bool] | None = None,
+    compatibility_mode: str = "",
+    interface_compatibility_mode: str = "",
+) -> dict[str, str]:
+    """Данные русского шаблона; команды только отрисовываются и не исполняются.
+
+    Каталоги и строку соединения подставляет администратор. Каждый пакетный шаг
+    сохраняет отдельные журнал и результат в уже существующий каталог комплекта.
+    """
+    counts = []
+    names = []
+    for direction in ("send", "receive"):
+        pko = [r for r in model.pko if direction in r.directions or "both" in r.directions]
+        pod = [r for r in model.pod if direction in r.directions or "both" in r.directions]
+        pks = sum(len(r.properties) + sum(len(g.properties) for g in r.groups) for r in pko)
+        counts.append(
+            (
+                direction_label(direction),
+                len(pko),
+                len(pod),
+                pks,
+                pks + (len(pko) if direction == "send" else 0),
+            )
+        )
+        names.append(
+            (
+                direction_label(direction),
+                ", ".join(r.name for r in pko) or "Нет",
+                ", ".join(r.name for r in pod) or "Нет",
+            )
+        )
+    evidence = dict(form_evidence or {"Интерфейс 2: собственный модуль и маршрут с узлом": False})
+    result = dict(
+        extension_name=extension_name,
+        module_name=module_name,
+        module_name_literal=bsl_string(module_name),
+        plan_name=plan_name,
+        version_key=version_key,
+        version_literal=bsl_string(version_key),
+        build_hash=build_hash,
+        extension_version=build_hash[:12],
+        compatibility_mode=compatibility_mode,
+        interface_compatibility_mode=interface_compatibility_mode,
+        counts_table=table(
+            ("Направление", "ПКО", "ПОД", "ПКС в модели", "ПКС после инициализации"), counts
+        ),
+        names_table=table(("Направление", "Имена ПКО", "Имена ПОД"), names),
+        evidence_table=table(
+            ("Форма", "Проверена обменом на стенде"),
+            ((name, "Да" if proven else "Нет") for name, proven in sorted(evidence.items())),
+        ),
+        version_probe=extension_version_probe(extension_name, build_hash[:12]),
+        files_table=table(("Файл",), ((path,) for path in sorted(paths))),
+    )
+    target = 'DESIGNER /IBConnectionString "<строка соединения>"'
+    build = 'DESIGNER /F "<каталог пустой базы>"'
+    load = '/LoadConfigFromFiles "<каталог комплекта>/extension"'
+    steps = (
+        ("create_infobase", 'CREATEINFOBASE File="<каталог пустой базы>"', ""),
+        ("load_extension", target, load + " -Format Hierarchical"),
+        ("check_extension", target, "/CheckCanApplyConfigurationExtensions"),
+        (
+            "check_modules",
+            target,
+            "/CheckModules -Server -ExternalConnection -ThickClientOrdinaryApplication",
+        ),
+        ("update_extension", target, "/UpdateDBCfg"),
+        ("load_build_extension", build, load + " -Format Hierarchical"),
+        ("dump_extension", build, '/DumpCfg "<каталог комплекта>/' + extension_name + '.cfe"'),
+    )
+    for key, connection, action in steps:
+        command = "1cv8 " + connection
+        if action:
+            command += " " + action + ' -Extension "' + extension_name + '"'
+        result["command_" + key] = (
+            command
+            + ' /DisableStartupDialogs /Out "<каталог комплекта>/'
+            + key
+            + '.log"'
+            + ' /DumpResult "<каталог комплекта>/'
+            + key
+            + '.result"'
+        )
+    return result
+
+
+def render_manager_instruction(
+    model: "ManagerModel",
+    *,
+    extension_name: str,
+    module_name: str,
+    plan_name: str,
+    version_key: str,
+    build_hash: str,
+    paths: tuple[str, ...],
+    form_evidence: Mapping[str, bool] | None = None,
+    compatibility_mode: str = "",
+    interface_compatibility_mode: str = "",
+) -> str:
+    """Инструкция доставки W1 по (г) пилота; числа деклараций берутся из модели."""
+    template = (
+        files("kd2_rules_mcp.authoring.ed")
+        .joinpath("templates/manager_instruction.md")
+        .read_text("utf-8")
+    )
+    values = manager_instruction_substitutions(
+        model,
+        extension_name=extension_name,
+        module_name=module_name,
+        plan_name=plan_name,
+        version_key=version_key,
+        build_hash=build_hash,
+        paths=paths,
+        form_evidence=form_evidence,
+        compatibility_mode=compatibility_mode,
+        interface_compatibility_mode=interface_compatibility_mode,
+    )
+    return Template(template).substitute(values).rstrip() + "\n"
 
 
 def runtime_probes(prepared: PreparedAuthoring, meta: DumpMetadata) -> str:

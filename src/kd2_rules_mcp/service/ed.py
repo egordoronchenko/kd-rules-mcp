@@ -419,6 +419,19 @@ class EdMixin(ServiceBase):
         with self._lock:
             project = self._ed_project(project_id)
             if project.layered:
+                if kind == "change":
+                    return layer_views.change_page(
+                        project.layered,
+                        direction,
+                        headers_only,
+                        layer,
+                        entity_id,
+                        text,
+                        offset,
+                        limit,
+                        format_object,
+                        metadata_object,
+                    )
                 rows = layer_views.list_rows(
                     project.layered,
                     kind,

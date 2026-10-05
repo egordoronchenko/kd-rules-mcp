@@ -191,6 +191,11 @@ def effective_document(layered: LayeredManager, context: EffectiveContext) -> Ed
     dispatch_resolution = {
         (chain.kind, chain.target_name): chain.resolution for chain in context.dispatch_chains
     }
+    base_unknown_paths = {
+        (chain.kind, chain.target_name)
+        for chain in context.dispatch_chains
+        if chain.resolution == "unknown" and not any(link.hook for link in chain.links)
+    }
     original_bindings = {
         (rule.entity_id, event.event): event.target_name
         for rule in (*source.pko, *source.pod)
@@ -202,9 +207,13 @@ def effective_document(layered: LayeredManager, context: EffectiveContext) -> Ed
         for event in rule.events:
             signature = EVENT_INVOCATIONS.get(event.event)
             key = (signature.kind if signature else "procedure", event.target_name)
+            unchanged_base_path = (
+                key in base_unknown_paths
+                and original_bindings.get((rule.entity_id, event.event)) == event.target_name
+            )
             if key in dispatch_targets:
                 target_id = dispatch_targets[key]
-            elif layered.readings:
+            elif layered.readings and not unchanged_base_path:
                 target_id = None
             else:
                 target_id = event.target_id
@@ -232,6 +241,7 @@ def effective_document(layered: LayeredManager, context: EffectiveContext) -> Ed
                     if invalid
                     else "unknown"
                     if layered.readings
+                    and not unchanged_base_path
                     and (signature is None or dispatch_resolution.get(key) == "unknown")
                     else event.resolution,
                 )

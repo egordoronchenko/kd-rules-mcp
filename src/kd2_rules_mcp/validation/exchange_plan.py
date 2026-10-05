@@ -41,6 +41,13 @@
 - `handlers.export_key` — `КлючВыгружаемыхДанных` в `ПередВыгрузкой` без
   `ЗапоминатьВыгруженные = Истина`: кэш включён только при ссылке на себя и флаге ПКО
   (БСП:388–398, БСП:424, БСП:469–471), ищется после обработчика (БСП:607).
+- `handlers.export_cache_without_key` — обратное: `ПередВыгрузкой` ставит
+  `ЗапоминатьВыгруженные = Истина` и не задаёт ключ. До обработчика ключ — имя ПКО
+  (БСП:424); внутреннее представление подставляется только если локальный флаг уже
+  истина (БСП:469–471), а он истина лишь при ссылке на себя и флаге ПКО (БСП:398).
+  Флаг ПКО по умолчанию включён (БСП:5745), но обычную выгрузку это не запоминает:
+  присваивание в обработчике включает кэш с ключом имени ПКО (БСП:607–633).
+  На одном обработчике с `handlers.export_key` не совпадает.
 - `handlers.ignored_modified_flag` — `ОбъектМодифицирован = Ложь` в `ПриЗагрузке` /
   `ПослеЗагрузки`: флаг ставится в Истина и нигде не читается (БСП:10624, БСП:10953),
   объект записывается всегда (БСП:11119, БСП:11228).
@@ -57,6 +64,12 @@
 - `structure.multiple_pvd_same_type` — несколько включённых ПВД одного объекта выборки,
   и этот объект входит в состав плана: обмен через план берёт первое
   (БСП:6768, БСП:17931, БСП:18361–18367). Вне состава замечания нет.
+- `handlers.attached_processing` — обращение к `ДопОбработки.<Имя>` или
+  `ДопОбработки["<Имя>"]`. Переменная — пустая структура (БСП:39, БСП:14665);
+  `ЗагрузитьОбработки` её очищает (БСП:6735), `ЗагрузитьОбработку` читает хранилище,
+  параметры и описание (БСП:6688–6722) и в `ДопОбработки` экземпляр не помещает.
+  Имени нет в разделе «Обработки» — то же: загрузчик не добавляет ни одного ключа.
+  Собственное присваивание этого имени в любом включённом тексте правил гасит замечание везде.
 - `format.source_name`, `format.source_version` — `<Источник>` заголовка против структуры
   источника: имя без учёта регистра, из имени базы вырезано «БАЗОВАЯ» (`РПО:43–44`);
   версия — первые три числа (`РПО:64–69`, разбор — `ОбщегоНазначенияКлиентСервер:1030–1043`).
@@ -80,7 +93,9 @@ from kd2_rules_mcp.validation.address import (
     pks_segments,
     rule_address,
     side_name,
+    walk_pks,
 )
+from kd2_rules_mcp.validation.handlers import EVENT_AREAS
 from kd2_rules_mcp.validation.report import ValidationReport
 from kd2_rules_mcp.validation.structure import (
     REF_ONLY_LOAD_NOTE,
@@ -98,6 +113,8 @@ OBJECT_WRITE = "handlers.object_write"
 PVD_ARBITRARY = "handlers.pvd_arbitrary"
 PVD_SELECTION = "handlers.pvd_selection"
 EXPORT_KEY = "handlers.export_key"
+EXPORT_CACHE = "handlers.export_cache_without_key"
+ATTACHED = "handlers.attached_processing"
 MODIFIED_FLAG = "handlers.ignored_modified_flag"
 TABLE_NO_CLEAR = "handlers.table_no_clear"
 PVD_REFUSAL = "handlers.pvd_refusal"
@@ -241,6 +258,7 @@ def check_exchange_plan(
     _check_pvd(report, rules, algorithms)
     _check_pvd_refusal(report, rules, algorithms, plan_content)
     _check_export_key(report, rules, algorithms)
+    _check_attached(report, rules)
     _check_incoming(report, rules, algorithms)
     return report
 
@@ -993,22 +1011,345 @@ def _check_export_key(
             continue
         expanded = _expand(str(pko.get("ПередВыгрузкой")), algorithms)
         masked = _mask(expanded.code)
-        if not _EXPORT_KEY_ASSIGN.search(masked):
-            continue
-        if _REMEMBER_TRUE.search(masked):
-            continue
-        if expanded.opaque:
-            report.skip(
-                EXPORT_KEY,
-                f"{rule_address(pko)}: «ПередВыгрузкой» непрозрачен — не видно, "
-                "включает ли обработчик запоминание выгруженных",
-            )
-            continue
-        report.warning(
-            EXPORT_KEY,
-            rule_address(pko),
-            f"{_MANUAL}: «КлючВыгружаемыхДанных» без запоминания выгруженных",
+        has_key = _EXPORT_KEY_ASSIGN.search(masked) is not None
+        remembers = _REMEMBER_TRUE.search(masked) is not None
+        if has_key and not remembers:
+            if expanded.opaque:
+                report.skip(
+                    EXPORT_KEY,
+                    f"{rule_address(pko)}: «ПередВыгрузкой» непрозрачен — не видно, "
+                    "включает ли обработчик запоминание выгруженных",
+                )
+            else:
+                report.warning(
+                    EXPORT_KEY,
+                    rule_address(pko),
+                    f"{_MANUAL}: «КлючВыгружаемыхДанных» без запоминания выгруженных",
+                )
+                continue
+        _check_export_cache(report, pko, expanded, algorithms)
+
+
+def _check_export_cache(
+    report: ValidationReport, pko: Node, expanded: _Text, algorithms: dict[str, str]
+) -> None:
+    """Кэш включён присваиванием, а ключ остаётся именем ПКО.
+
+    Флаг ПКО сам по себе обычную выгрузку не запоминает: локальная переменная
+    до обработчика истинна только при ссылке объекта на себя (БСП:398). Ключ
+    к этому моменту — имя ПКО (БСП:424), внутреннее представление пишется раньше
+    обработчика и только при уже истинном флаге (БСП:469–471).
+    """
+    cleaned = _strip_comments(expanded.code)
+    state = _export_cache_state(cleaned)
+    address = rule_address(pko)
+    if state == "off" or state == "keyed":
+        return
+    if state == "literal" or _text_opaque(expanded, algorithms):
+        report.skip(
+            EXPORT_CACHE,
+            f"{address}: «ПередВыгрузкой» непрозрачен — не видно, задаёт ли обработчик "
+            "«КлючВыгружаемыхДанных» при включённом запоминании",
         )
+        return
+    report.warning(
+        EXPORT_CACHE,
+        address,
+        "«ПередВыгрузкой» включает запоминание выгруженных и не задаёт "
+        "«КлючВыгружаемыхДанных». В обычном входе ключ остаётся именем ПКО, "
+        "поэтому разные объекты принимаются за один",
+    )
+
+
+def _export_cache_state(code: str) -> str:
+    """Состояние кэша в обработчике.
+
+    `on` — `= Истина` без ключа; `keyed` — ключ задан;
+    `literal` — правая часть не булев литерал.
+    """
+    on = False
+    unknown = False
+    for raw in _assign_rhs(code, "ЗапоминатьВыгруженные"):
+        token = raw.strip().rstrip(";").strip().casefold()
+        if token == "истина":
+            on = True
+        elif token != "ложь":
+            unknown = True
+    if _assign_rhs(code, "КлючВыгружаемыхДанных"):
+        return "keyed"
+    if on:
+        return "on"
+    if unknown:
+        return "literal"
+    return "off"
+
+
+_STRUCTURE_METHODS = frozenset({"вставить", "свойство", "очистить", "количество", "удалить"})
+# Признак «структура присвоена целиком» среди имён с собственным присваиванием.
+_ATTACHED_WHOLE = "*"
+
+
+def _check_attached(report: ValidationReport, rules: ExchangeRules) -> None:
+    """Ссылка на вложенную обработку: загрузчик БСП экземпляр в `ДопОбработки` не кладёт.
+
+    Экземпляр обычно создают один раз — в событии конвертации или алгоритме, — а читают в
+    других обработчиках. Поэтому собственное присваивание имени в любом включённом тексте
+    правил гасит замечание везде, а присваивание `ДопОбработки` целиком — все замечания.
+    """
+    known = _processor_names(rules)
+    scanned: list[tuple[str, str, list[str], str]] = []
+    defined: set[str] = set()
+    for address, event, text in _iter_handler_code(rules):
+        if "допобработки" not in text.casefold():
+            continue
+        referenced, own, opaque = _attached_references(_strip_comments(text))
+        defined |= own
+        scanned.append((address, event, referenced, opaque))
+    if _ATTACHED_WHOLE in defined:
+        for address, event, _referenced, opaque in scanned:
+            if opaque:
+                report.skip(ATTACHED, f"{address}: «{event}» {opaque}")
+        return
+    for address, event, referenced, opaque in scanned:
+        names = [name for name in referenced if name.casefold() not in defined]
+        described = [known[name.casefold()] for name in names if name.casefold() in known]
+        missing = [name for name in names if name.casefold() not in known]
+        if described:
+            quoted = ", ".join(f"«{name}»" for name in described)
+            report.warning(
+                ATTACHED,
+                address,
+                f"В «{event}» обращение к вложенной обработке {quoted}: загрузчик сохраняет "
+                "описание, но не создаёт экземпляр в «ДопОбработки»",
+            )
+        if missing:
+            quoted = ", ".join(f"«{name}»" for name in missing)
+            report.warning(
+                ATTACHED,
+                address,
+                f"В «{event}» обращение к «ДопОбработки» {quoted}: обработка не описана "
+                "в правилах, загрузчик не помещает в «ДопОбработки» ни одного экземпляра",
+            )
+        if opaque and not names:
+            report.skip(ATTACHED, f"{address}: «{event}» {opaque}")
+        elif opaque:
+            report.skip(
+                ATTACHED,
+                f"{address}: «{event}» задаёт имя вложенной обработки кодом — это имя не сверяется",
+            )
+
+
+def _processor_names(rules: ExchangeRules) -> dict[str, str]:
+    """Имена раздела «Обработки»: свёртка → написание в правилах."""
+    root = rules.root.child("Обработки")
+    found: dict[str, str] = {}
+    if root is None:
+        return found
+    for item in root.items:
+        if item.kind.name != "data_processor":
+            continue
+        name = str(item.attrs.get("Имя", "")).strip()
+        if name:
+            found.setdefault(name.casefold(), name)
+    return found
+
+
+def _iter_handler_code(rules: ExchangeRules) -> Iterator[tuple[str, str, str]]:
+    """Включённые обработчики и тексты алгоритмов: адрес, событие, текст."""
+    for tag in _event_tags("exchange_rules"):
+        text = _event(rules, tag)
+        if text.strip():
+            yield CONVERSION_ADDRESS, tag, text
+    for pko in rules.pko():
+        if _disabled(pko):
+            continue
+        address = rule_address(pko)
+        for tag in _event_tags("pko"):
+            text = str(pko.get(tag))
+            if text.strip():
+                yield address, tag, text
+        properties = pko.child("Свойства")
+        if properties is not None:
+            yield from _pks_handler_code(pko.code, properties)
+    for pvd in rules.pvd():
+        if _disabled(pvd):
+            continue
+        yield from _node_handlers(pvd, "pvd")
+    for pod in rules.pod():
+        if _disabled(pod):
+            continue
+        yield from _node_handlers(pod, "pod")
+    parameters = rules.root.child("Параметры")
+    if parameters is not None:
+        for item in parameters.items:
+            if item.kind.name != "parameter":
+                continue
+            raw = item.attrs.get("ПослеЗагрузкиПараметра", "")
+            if isinstance(raw, str) and raw.strip():
+                yield rule_address(item), "ПослеЗагрузкиПараметра", raw
+    for algorithm in rules.algorithms():
+        text = str(algorithm.get("Текст"))
+        if text.strip():
+            yield rule_address(algorithm), "Текст", text
+
+
+def _pks_handler_code(pko_code: str, properties: Node) -> Iterator[tuple[str, str, str]]:
+    disabled: list[str] = []
+    for path, node in walk_pks(properties):
+        blocked = _disabled(node) or any(
+            path == prefix or path.startswith(prefix + "/") for prefix in disabled
+        )
+        if node.is_group and _disabled(node):
+            disabled.append(path)
+        if blocked:
+            continue
+        kind_name = "pks_group" if node.is_group else "pks"
+        address = pks_address(pko_code, path)
+        for tag in _event_tags(kind_name):
+            text = str(node.get(tag))
+            if text.strip():
+                yield address, tag, text
+
+
+def _node_handlers(node: Node, kind_name: str) -> Iterator[tuple[str, str, str]]:
+    address = rule_address(node)
+    for tag in _event_tags(kind_name):
+        text = str(node.get(tag))
+        if text.strip():
+            yield address, tag, text
+
+
+def _event_tags(kind_name: str) -> tuple[str, ...]:
+    return tuple(tag for kind, tag in EVENT_AREAS if kind == kind_name)
+
+
+def _attached_references(code: str) -> tuple[list[str], set[str], str]:
+    """Имена обращений, имена с собственным присваиванием и причина, если имя задано кодом.
+
+    Целиком присвоенная `ДопОбработки` прячет все имена: экземпляр мог быть создан
+    этой строкой, и порядок присваивания без разбора ветвлений не виден — во втором
+    элементе тогда `_ATTACHED_WHOLE`.
+    """
+    if "допобработки" not in code.casefold():
+        return [], set(), ""
+    referenced: list[str] = []
+    seen: set[str] = set()
+    defined: set[str] = set()
+    opaque = ""
+    folded = "допобработки"
+    size = len(folded)
+    lower = code.casefold()
+    index = 0
+    length = len(code)
+    while index < length:
+        if code[index] == '"':
+            index = _skip_bsl_string(code, index)
+            continue
+        if lower.startswith(folded, index) and _is_bare_name(code, index, size):
+            index += size
+            index = _skip_ws(code, index)
+            if index < length and code[index] == ".":
+                name, index, kind, literal = _attached_member(code, index + 1)
+                if kind == "defined" and name:
+                    defined.add(name.casefold())
+                elif kind == "defined" and literal:
+                    defined.add(literal.casefold())
+                elif kind == "read" and name:
+                    _remember_name(referenced, seen, name)
+                elif kind == "opaque":
+                    opaque = opaque or (
+                        "задаёт имя вложенной обработки кодом — это имя не сверяется"
+                    )
+                continue
+            if index < length and code[index] == "[":
+                literal, index, assigned, dynamic = _attached_index(code, index + 1)
+                if dynamic:
+                    opaque = opaque or (
+                        "задаёт имя вложенной обработки кодом — это имя не сверяется"
+                    )
+                elif literal and assigned:
+                    defined.add(literal.casefold())
+                elif literal:
+                    _remember_name(referenced, seen, literal)
+                continue
+            if index < length and code[index] == "=":
+                return (
+                    [],
+                    {_ATTACHED_WHOLE},
+                    "присваивает «ДопОбработки» целиком — не видно, создан ли экземпляр",
+                )
+        index += 1
+    return referenced, defined, opaque
+
+
+def _attached_member(code: str, start: int) -> tuple[str, int, str, str]:
+    """После точки: имя, новый индекс, `read`/`defined`/`opaque`/`skip`, литерал `Вставить`."""
+    index = _skip_ws(code, start)
+    name, index = _read_ident(code, index)
+    if not name:
+        return "", index, "skip", ""
+    index = _skip_ws(code, index)
+    if index < len(code) and code[index] == "=":
+        return name, index, "defined", ""
+    if index < len(code) and code[index] == "(":
+        folded = name.casefold()
+        if folded == "вставить":
+            literal, dynamic = _insert_key(code, index)
+            if dynamic:
+                return "", index + 1, "opaque", ""
+            if literal:
+                return "", index + 1, "defined", literal
+            return "", index + 1, "skip", ""
+        if folded in _STRUCTURE_METHODS:
+            return "", index + 1, "skip", ""
+        return name, index + 1, "read", ""
+    return name, index, "read", ""
+
+
+def _attached_index(code: str, start: int) -> tuple[str, int, bool, bool]:
+    """Скобка `ДопОбработки[…]`: литерал, индекс после неё, присваивание ли, динамический ключ."""
+    index = _skip_ws(code, start)
+    if index >= len(code) or code[index] != '"':
+        return "", index, False, True
+    end = _skip_bsl_string(code, index)
+    literal = code[index + 1 : end - 1].replace('""', '"')
+    index = _skip_ws(code, end)
+    if index < len(code) and code[index] == "]":
+        index += 1
+    index = _skip_ws(code, index)
+    assigned = index < len(code) and code[index] == "="
+    return literal, index, assigned, False
+
+
+def _insert_key(code: str, paren: int) -> tuple[str, bool]:
+    """Первый аргумент `Вставить`. Второй элемент истинен, если это не строковый литерал."""
+    index = _skip_ws(code, paren + 1)
+    if index < len(code) and code[index] == '"':
+        end = _skip_bsl_string(code, index)
+        return code[index + 1 : end - 1].replace('""', '"'), False
+    if index < len(code) and code[index] != ")":
+        return "", True
+    return "", False
+
+
+def _remember_name(found: list[str], seen: set[str], name: str) -> None:
+    key = name.casefold()
+    if key and key not in seen:
+        seen.add(key)
+        found.append(name)
+
+
+def _read_ident(text: str, index: int) -> tuple[str, int]:
+    start = index
+    while index < len(text) and (text[index].isalnum() or text[index] == "_"):
+        index += 1
+    return text[start:index], index
+
+
+def _skip_ws(text: str, index: int) -> int:
+    while index < len(text) and text[index] in " \t\r\n":
+        index += 1
+    return index
 
 
 def _check_incoming(

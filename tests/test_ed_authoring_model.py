@@ -769,6 +769,61 @@ def test_primitive_families_and_qualifiers(primitive, qualifiers, prop, directio
         assert checked.value_range == "длина источника=unbounded, приёмника=150"
 
 
+@pytest.mark.parametrize(
+    "stored,prop,compatible",
+    [
+        # Так состав даты пишет структура конфигурации — словами, с пробелами.
+        # «Дата» совместима с `dateTime`; «Дата и время» — с `xs:date`, время отбрасывается.
+        ("Дата и время", "Дата", True),
+        ("Дата", "День", True),
+        ("Время", "Время", True),
+        ("Дата", "Дата", True),
+        ("Дата и время", "День", True),
+        ("Время", "День", False),
+        ("Дата", "Время", False),
+    ],
+)
+def test_date_parts_as_stored_in_structure(stored, prop, compatible):
+    """Реквизит «Дата и время» из структуры совместим со свойством `dateTime` формата."""
+    assert OPERATION.new_attribute is not None
+    value = inputs()
+    _, profile, _, typ, _ = target_objects(value, OPERATION.target)
+    assert typ is not None
+    resolved = profile.resolve(typ, prop)
+    draft = draft_property(
+        replace(OPERATION.new_attribute, primitive="date", qualifiers={"date_parts": "Дата"})
+    )
+    attribute = replace(draft, qualifiers={"date_parts": stored})
+    checked = compatibility(
+        profile, profile.properties[resolved.property_ids[0]], attribute, "send"
+    )
+    assert checked.compatible is compatible
+    if stored == "Дата" and prop == "Дата":
+        assert checked.value_range is None
+    if stored == "Дата и время" and prop == "День":
+        assert checked.value_range == "время реквизита отбрасывается"
+
+
+def test_receiving_datetime_into_date_drops_time():
+    """Приём `dateTime` в реквизит состава «Дата» совместим и предупреждает о потере времени."""
+    assert OPERATION.new_attribute is not None
+    value = inputs()
+    _, profile, _, typ, _ = target_objects(value, OPERATION.target)
+    assert typ is not None
+    resolved = profile.resolve(typ, "Дата")
+    attribute = replace(
+        draft_property(
+            replace(OPERATION.new_attribute, primitive="date", qualifiers={"date_parts": "Дата"})
+        ),
+        qualifiers={"date_parts": "Дата"},
+    )
+    checked = compatibility(
+        profile, profile.properties[resolved.property_ids[0]], attribute, "receive"
+    )
+    assert checked.compatible
+    assert checked.value_range == "время из сообщения отбрасывается"
+
+
 def test_alias_occupied_and_different_owner_free():
     value = inputs()
     rule = value.document.pko[0]

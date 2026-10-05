@@ -26,6 +26,7 @@ from kd2_rules_mcp.ed.writer_model import (
     ProcessingRule,
     Property,
     Reference,
+    RetainedBlock,
     RuleUse,
     SearchSet,
     Signature,
@@ -37,6 +38,7 @@ from kd2_rules_mcp.ed.writer_model import (
     json_bytes,
     json_value,
     logical_id,
+    text_hash,
     validate_model,
 )
 from kd2_rules_mcp.errors import (
@@ -65,6 +67,10 @@ Action = Literal["create", "update", "delete", "move"]
 MAX_OPERATIONS = 100
 
 
+def _direction_rank(direction: str) -> int:
+    return {"send": 0, "receive": 1, "both": 2}.get(direction, 3)
+
+
 @dataclass(frozen=True, slots=True)
 class ManagerPatch:
     manager_name: str | None = None
@@ -87,6 +93,12 @@ class PodPatch:
     used_pko: tuple[Reference, ...] | None = None
     events: tuple[Event, ...] | None = None
 
+    def __post_init__(self) -> None:
+        if self.directions is not None:
+            object.__setattr__(
+                self, "directions", tuple(sorted(self.directions, key=_direction_rank))
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class PkoPatch:
@@ -96,6 +108,12 @@ class PkoPatch:
     format_object: Value | None = None
     group_flag: Value | None = None
     events: tuple[Event, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.directions is not None:
+            object.__setattr__(
+                self, "directions", tuple(sorted(self.directions, key=_direction_rank))
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,12 +154,18 @@ class ManagerOperation:
     patch: Patch | None = None
     clear: tuple[str, ...] = ()
     unsupported_payload: str = ""
+    position_mode: Literal["explicit", "default"] = "explicit"
 
     def __post_init__(self) -> None:
         if not isinstance(self.client_id, str) or not self.client_id or len(self.client_id) > 200:
             raise ValueError("Требуется client_id длиной 1–200")
         if self.kind not in get_args(OperationKind) or self.action not in get_args(Action):
             raise ValueError("Неизвестный вид или действие операции")
+        if self.position_mode not in ("explicit", "default") or (
+            self.position_mode == "default"
+            and (self.kind not in ("pko", "pod") or self.action != "create")
+        ):
+            raise ValueError("Позиция по умолчанию допустима только для создания правил")
         expected = _PATCHES.get(self.kind)
         if expected and self.unsupported_payload:
             raise ValueError("Поля будущих срезов недопустимы для операции W1")
@@ -198,6 +222,15 @@ class CanonicalOperation:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagerNotice:
+    code: str
+    address: str
+    message: str
+    references: tuple[str, ...]
+    notice_hash: str
+
+
+@dataclass(frozen=True, slots=True)
 class ManagerPreview:
     base_revision: str
     operations: tuple[CanonicalOperation, ...]
@@ -205,7 +238,7 @@ class ManagerPreview:
     changes: tuple[ManagerChange, ...]
     failures: tuple[ManagerFailure, ...]
     skipped: tuple[str, ...]
-    notices: tuple[str, ...]
+    notices: tuple[ManagerNotice, ...]
     preview_hash: str
     model: ManagerModel
 
@@ -325,6 +358,37 @@ def _order_uses(model: ManagerModel, kind: str, key: str, before: ManagerModel) 
 
 
 def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOperation:
+    if op.action == "create" and op.kind in ("pko", "pod") and op.container_id is None:
+        previous = next((d for d in model.decisions if d.client_id == op.client_id), None)
+        if previous is not None:
+            return replace(
+                op,
+                container_id=previous.position_container,
+                after_id=previous.position_after,
+                position_mode="default",
+            )
+        module = next(c for c in model.layouts if c.logical_id == model.root_layouts[0])
+        ids = {r.logical_id for r in getattr(model, op.kind)}
+        anchor = next(
+            (
+                e.logical_id
+                for e in reversed(module.elements)
+                if e.container_id in ids or e.entity_id in ids
+            ),
+            None,
+        )
+        if anchor is None:
+            blocks = {b.logical_id: b for b in model.retained_blocks}
+            area = "#область " + ("пко" if op.kind == "pko" else "под")
+            anchor = next(
+                (
+                    e.logical_id
+                    for e in module.elements
+                    if e.block_id and blocks[e.block_id].text.strip().casefold() == area
+                ),
+                None,
+            )
+        op = replace(op, container_id=module.logical_id, after_id=anchor, position_mode="default")
     if op.container_id is not None and op.after_id is not None:
         container = next((c for c in model.layouts if c.logical_id == op.container_id), None)
         if container is not None:
@@ -337,7 +401,7 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                 op = replace(op, after_id=matches[0])
     if not op.address:
         return op
-    if re.search(r"~\d+(?:#\d+)?(?:/|$)", op.address):
+    if re.search(r"(?:~|#)\d+(?:/|$)", op.address):
         _fail(
             "unstable_address",
             op.address,
@@ -388,7 +452,10 @@ def _field_layout(model, owner_id, entity_id, values):
         elif not existing:
             # Новое поле идёт после существующих полей владельца, не меняя
             # взаимного положения остальных операторов и человеческого текста.
-            position = max((i + 1 for i, e in enumerate(rows) if e.field), default=0)
+            position = max(
+                (i + 1 for i, e in enumerate(rows) if e.field and e.field != "properties_start"),
+                default=0,
+            )
             rows.insert(
                 position,
                 LayoutElement(
@@ -398,6 +465,29 @@ def _field_layout(model, owner_id, entity_id, values):
                     field=name,
                 ),
             )
+        if present and name in ("used_pko", "extensions"):
+            assert isinstance(value, tuple)
+            slots = [e for e in rows if e.entity_id == entity_id and e.field == name]
+            for extra in slots[len(value) :]:
+                rows.remove(extra)
+            for n in range(len(slots), len(value)):
+                position = max(
+                    (
+                        i + 1
+                        for i, e in enumerate(rows)
+                        if e.entity_id == entity_id and e.field == name
+                    ),
+                    default=0,
+                )
+                rows.insert(
+                    position,
+                    LayoutElement(
+                        logical_id(model.project_id, f"field/{entity_id}/{name}/{n}"),
+                        "entity",
+                        entity_id=entity_id,
+                        field=name,
+                    ),
+                )
     rule = next(r for r in (*model.pko, *model.pod) if r.logical_id == owner_id)
     containers[owner_id] = replace(
         container, name=rule.procedure_name, signature=rule.signature, elements=tuple(rows)
@@ -420,11 +510,70 @@ def _edit_layout(before, after, op, key, owner_id, address):
         None,
     )
     element = original[1] if original else LayoutElement(key, "entity", entity_id=key)
+    if original and element.source and not element.source.container_id:
+        # Старый снимок ещё не записывал владельца отрезка; до переноса он известен.
+        element = replace(
+            element, source=replace(element.source, container_id=original[0].logical_id)
+        )
     if op.kind in ("pko", "pod") and op.action == "create":
         rule = next(r for r in getattr(after, op.kind) if r.logical_id == key)
         containers[key] = LayoutContainer(
-            key, "rule", rule.procedure_name, signature=rule.signature
+            key,
+            "rule",
+            rule.procedure_name,
+            signature=rule.signature,
+            elements=(
+                LayoutElement(
+                    logical_id(after.project_id, f"field/{key}/properties_start"),
+                    "entity",
+                    entity_id=key,
+                    field="properties_start",
+                ),
+            )
+            if op.kind == "pko"
+            else (),
         )
+        if op.kind == "pko" and after.header.interface_version == 3:
+            from kd2_rules_mcp.ed.writer_forms import HEADERS_GUARD
+
+            newline = after.header.text_style.newline
+            newline = "\r\n" if newline == "mixed" else newline
+            tab = after.header.text_style.indent
+            text = newline.join(tab + line for line in HEADERS_GUARD.splitlines()) + newline
+            block_id = logical_id(after.project_id, f"headers/{key}")
+            guard_id = logical_id(after.project_id, f"headers/{key}/guard")
+            block = RetainedBlock(
+                logical_id=block_id,
+                name="Текст",
+                state="retained",
+                kind="scaffold",
+                text=text,
+                sha256=text_hash(text),
+                file_id="",
+                source_hash="",
+                owner_id=key,
+            )
+            guard = Guard(
+                logical_id=guard_id,
+                name="headers_only",
+                state="retained",
+                inside_leaf_id=block_id,
+                expression="ТолькоЗаголовки",
+                branch="if",
+                guard_kind="headers_only",
+            )
+            after = replace(
+                after,
+                retained_blocks=(*after.retained_blocks, block),
+                guards=(*after.guards, guard),
+            )
+            containers[key] = replace(
+                containers[key],
+                elements=(
+                    LayoutElement(block_id, "text", block_id=block_id),
+                    *containers[key].elements,
+                ),
+            )
         element = LayoutElement(key, "container", container_id=key)
     if original:
         source = containers[original[0].logical_id]
@@ -494,6 +643,28 @@ def _edit_layout(before, after, op, key, owner_id, address):
         _fail("model_invalid", address, "Декларация правила вставляется в модуль")
     rows = destination.elements
     position = 0
+    boundary = 0
+    if owner_id is not None and destination.kind == "rule":
+        boundary = next((n + 1 for n, e in enumerate(rows) if e.field == "properties_start"), -1)
+        if boundary < 0:
+            _fail("unsupported_form", address, "Нет границы инициализации свойств шапки")
+    elif destination.kind == "module":
+        blocks = {b.logical_id: b for b in after.retained_blocks}
+        boundary = next(
+            (
+                n
+                for n, e in enumerate(rows)
+                if e.container_id
+                or (e.entity_id and not e.field.startswith("header."))
+                or (e.block_id and blocks[e.block_id].kind == "routine")
+            ),
+            len(rows),
+        )
+        boundary = max(
+            boundary,
+            max((n + 1 for n, e in enumerate(rows) if e.field.startswith("header.")), default=0),
+        )
+    position = boundary
     if op.after_id is not None:
         positions = [
             n
@@ -505,8 +676,111 @@ def _edit_layout(before, after, op, key, owner_id, address):
         if len(positions) != 1:
             _fail("model_invalid", address, "Сосед отсутствует в выбранном контейнере")
         position = positions[0] + 1
+        if position < boundary:
+            _fail("model_invalid", address, "Позиция находится до инициализации контейнера")
+        if destination.kind == "module":
+            # Вставка после правила выходит за все области, содержащие только это правило.
+            blocks = {b.logical_id: b for b in after.retained_blocks}
+            rule_ids = {r.logical_id for r in (*after.pko, *after.pod)}
+            anchor_rule = (
+                rows[positions[0]].container_id in rule_ids
+                or rows[positions[0]].entity_id in rule_ids
+            )
+
+            def region(row):
+                block = blocks.get(row.block_id)
+                if block is None or block.kind != "trivia":
+                    return 0
+                text = block.text.strip().casefold()
+                return (
+                    1
+                    if text.startswith("#область")
+                    else -1
+                    if text.startswith("#конецобласти")
+                    else 0
+                )
+
+            opened = []
+            for i, row in enumerate(rows[:position]):
+                mark = region(row)
+                if mark == 1:
+                    opened.append(i)
+                elif mark == -1 and opened:
+                    opened.pop()
+            for preceding in reversed(opened):
+                depth = 1
+                following = None
+                for i in range(preceding + 1, len(rows)):
+                    depth += region(rows[i])
+                    if depth == 0:
+                        following = i
+                        break
+                if following is None:
+                    continue
+                entities = sum(
+                    bool(e.container_id or e.entity_id)
+                    or bool(e.block_id and blocks[e.block_id].kind == "routine")
+                    for e in rows[preceding:following]
+                )
+                category = blocks[
+                    rows[preceding].block_id
+                ].text.strip().casefold() == "#область " + ("пко" if op.kind == "pko" else "под")
+                if (
+                    anchor_rule
+                    and entities == 1
+                    and not (op.position_mode == "default" and category)
+                ):
+                    position = following + 1
+    if op.action == "create" and destination.kind == "module" and op.after_id is not None:
+        siblings = {
+            d.result_ids[0]
+            for d in before.decisions
+            if d.position_container == destination.logical_id and d.position_after == op.after_id
+        }
+        blocks = {b.logical_id: b for b in after.retained_blocks}
+        cursor = position
+        while cursor < len(rows):
+            row = rows[cursor]
+            if row.container_id in siblings:
+                position = cursor + 1
+            elif not (row.block_id and not blocks[row.block_id].text.strip()):
+                break
+            cursor += 1
+    inserted = [element]
+    if op.action == "create" and destination.kind == "module":
+        blocks = {b.logical_id: b for b in after.retained_blocks}
+
+        def procedure(row):
+            return bool(
+                row.container_id
+                or (row.block_id and blocks[row.block_id].kind == "routine")
+                or (row.entity_id and not row.field)
+            )
+
+        newline = after.header.text_style.newline
+        newline = "\r\n" if newline == "mixed" else newline
+        for side, needed in (
+            ("before", position > 0 and procedure(rows[position - 1])),
+            ("after", position < len(rows) and procedure(rows[position])),
+        ):
+            if needed:
+                block_id = logical_id(after.project_id, f"spacing/{key}/{side}")
+                block = RetainedBlock(
+                    logical_id=block_id,
+                    name="Текст",
+                    state="retained",
+                    kind="trivia",
+                    text=newline,
+                    sha256=text_hash(newline),
+                    file_id="",
+                    source_hash="",
+                    owner_id=destination.logical_id,
+                )
+                after = replace(after, retained_blocks=(*after.retained_blocks, block))
+                trivia = LayoutElement(block_id, "text", block_id=block_id)
+                inserted.insert(0, trivia) if side == "before" else inserted.append(trivia)
     containers[destination.logical_id] = replace(
-        destination, elements=(*rows[:position], element, *rows[position:])
+        destination, elements=(*rows[:position], *inserted, *rows[position:])
     )
     return replace(after, layouts=tuple(containers.values()))
 
@@ -537,7 +811,11 @@ def _replace_search_layout(before, after, owner_id, old, new):
         )
     remaining = tuple(replacements)
     if remaining:
-        container_id, position = placed[-1] if placed else (owner_id, 0)
+        container_id, position = (
+            placed[-1]
+            if placed
+            else (owner_id, len(next(c for c in containers if c.logical_id == owner_id).elements))
+        )
         containers = [
             replace(
                 c,
@@ -627,6 +905,37 @@ def _sync_use_layout(before, after, kind, key):
                 direction=direction,
             )
             containers[group_id] = destination
+            if kind == "pod" and direction == "send":
+                # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:2684–2688.
+                newline = after.header.text_style.newline
+                newline = "\r\n" if newline == "mixed" else newline
+                tab = after.header.text_style.indent
+                text = newline.join(
+                    (
+                        tab * 2 + 'Если ПравилаОбработкиДанных.Колонки.Найти("ОчисткаДанных") '
+                        "= Неопределено Тогда",
+                        tab * 3 + 'ПравилаОбработкиДанных.Колонки.Добавить("ОчисткаДанных");',
+                        tab * 2 + "КонецЕсли;",
+                        "",
+                    )
+                )
+                block_id = logical_id(after.project_id, group_id + "/clear-column")
+                block = RetainedBlock(
+                    logical_id=block_id,
+                    name="Текст",
+                    state="retained",
+                    kind="scaffold",
+                    text=text,
+                    sha256=text_hash(text),
+                    file_id="",
+                    source_hash="",
+                    owner_id=group_id,
+                )
+                destination = replace(
+                    destination, elements=(LayoutElement(block_id, "text", block_id=block_id),)
+                )
+                containers[group_id] = destination
+                after = replace(after, retained_blocks=(*after.retained_blocks, block))
             after = replace(
                 after,
                 guards=(
@@ -681,16 +990,82 @@ def _sync_use_layout(before, after, kind, key):
             destination,
             elements=(*destination.elements[:position], element, *destination.elements[position:]),
         )
+    for entry in entries:
+        current = containers[entry.logical_id]
+        branches = [
+            containers[e.container_id]
+            for e in current.elements
+            if e.container_id
+            and containers[e.container_id].kind == "conditional"
+            and containers[e.container_id].branch != "chain"
+        ]
+        if len(branches) == 2 and any(c.opening is None for c in branches):
+            ordered = sorted(branches, key=lambda c: c.direction != "send")
+            chain_id = logical_id(after.project_id, f"entrypoint/{kind}/chain")
+            branch_ids = {c.logical_id for c in ordered}
+            chain = LayoutContainer(
+                chain_id,
+                "conditional",
+                "Направления обмена",
+                owner_id=current.logical_id,
+                branch="chain",
+                elements=tuple(
+                    LayoutElement(c.logical_id, "container", container_id=c.logical_id)
+                    for c in ordered
+                ),
+            )
+            containers[chain_id] = chain
+            for n, c in enumerate(ordered):
+                containers[c.logical_id] = replace(
+                    c, owner_id=chain_id, branch="if" if n == 0 else "elseif"
+                )
+            first = next(i for i, e in enumerate(current.elements) if e.container_id in branch_ids)
+            kept = tuple(e for e in current.elements if e.container_id not in branch_ids)
+            containers[current.logical_id] = replace(
+                current,
+                elements=(
+                    *kept[:first],
+                    LayoutElement(chain_id, "container", container_id=chain_id),
+                    *kept[first:],
+                ),
+            )
+            after = replace(
+                after,
+                guards=tuple(
+                    replace(g, branch=containers[g.logical_id].branch)
+                    if g.logical_id in branch_ids
+                    else g
+                    for g in after.guards
+                ),
+            )
     return replace(after, layouts=tuple(containers.values()))
 
 
-def references_to(model: ManagerModel, target_id: str) -> tuple[str, ...]:
+def references_to(
+    model: ManagerModel, target_id: str, *, ignore_editable_pod: bool = False
+) -> tuple[str, ...]:
     addresses = model_addresses(model)
     result = []
     target = next((m for m in model.members() if m.logical_id == target_id), None)
     for member in model.members():
         if member.logical_id == target_id or isinstance(member, RuleUse):
             continue
+        refs = _references(member)
+        if (
+            ignore_editable_pod
+            and isinstance(member, ProcessingRule)
+            and member.state == "editable"
+            and member.inside_leaf_id is None
+        ):
+            refs = (
+                ref
+                for ref in refs
+                if not (
+                    ref.kind == "pko"
+                    and ref.target_id == target_id
+                    and ref.resolution == "resolved"
+                )
+            )
         if any(
             ref.target_id == target_id
             or (
@@ -700,7 +1075,7 @@ def references_to(model: ManagerModel, target_id: str) -> tuple[str, ...]:
                 and ref.kind
                 in ("pko", "pod", "pko_lookup", "instruction_rule", "pod_use", "conversion")
             )
-            for ref in _references(member)
+            for ref in refs
         ):
             result.append(addresses[member.logical_id])
     return tuple(dict.fromkeys(result))
@@ -825,7 +1200,45 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
             for key in ("host", "format_bindings", "executor_profile")
             if key in updates
         }
-        return replace(model, header=replace(model.header, **updates), **root), model.project_id
+        header = replace(model.header, **updates)
+        if header.text_style.encoding != "utf-8":
+            _fail("unsupported_form", address, "Писатель поддерживает UTF-8")
+        if (header.text_style.newline, header.text_style.indent) != (
+            model.header.text_style.newline,
+            model.header.text_style.indent,
+        ) and model.retained_blocks:
+            _fail(
+                "opaque_context_changed", address, "Смена оформления переписывает сохранённый текст"
+            )
+        if any(c in str(header.title.value) + str(header.generated_at.value) for c in "\r\n"):
+            _fail("model_invalid", address, "Заголовок должен занимать одну строку")
+        if header.title.state == "unset" and header.generated_at.state != "unset":
+            _fail("model_invalid", address, "Дата заголовка требует названия")
+        if " от " in str(header.generated_at.value) or (
+            header.generated_at.state == "unset" and " от " in str(header.title.value)
+        ):
+            _fail("unsupported_form", address, "Заголовок неоднозначен для формы генератора")
+        layouts = model.layouts
+        if "title" in updates or "generated_at" in updates:
+            module = next(c for c in layouts if c.kind == "module")
+            elements = tuple(e for e in module.elements if e.field != "header.title")
+            existing = next((e for e in module.elements if e.field == "header.title"), None)
+            if header.title.state != "unset":
+                if existing is None:
+                    existing = LayoutElement(
+                        logical_id(model.project_id, "header/title"),
+                        "entity",
+                        entity_id=logical_id(model.project_id, "header/entity"),
+                        field="header.title",
+                    )
+                    elements = (existing, *elements)
+                else:
+                    elements = module.elements
+            layouts = tuple(
+                replace(c, elements=elements) if c.logical_id == module.logical_id else c
+                for c in layouts
+            )
+        return replace(model, header=header, layouts=layouts, **root), model.project_id
     if op.kind not in _PATCHES:
         _fail("unsupported_form", address, "Вид операции не поддержан в этом срезе")
     if op.owner_id is not None and op.kind not in ("property", "identification"):
@@ -914,7 +1327,7 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
                 )
     if isinstance(current, ObjectRule) and any(
         field in updates and updates[field] != getattr(current, field)
-        for field in ("name", "directions", "configuration_object", "format_object", "group_flag")
+        for field in ("directions", "configuration_object", "format_object", "group_flag")
     ):
         opaque = tuple(
             addresses[item.logical_id]
@@ -967,23 +1380,7 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
         and current
         and (op.action == "delete" or ("name" in updates and updates["name"] != current.name))
     ):
-        dependencies = references_to(model, key)
-        computed = tuple(
-            addresses[u.logical_id]
-            for u in model.code_units
-            if any(
-                r.resolution == "computed"
-                and r.kind in ("pko", "pko_lookup", "instruction_rule", "pod_use", "conversion")
-                for r in u.dependencies
-            )
-        )
-        if computed:
-            _fail(
-                "opaque_context_changed",
-                address,
-                "Вычисляемые зависимости требуют ручного пересмотра",
-                computed,
-            )
+        dependencies = references_to(model, key, ignore_editable_pod=op.action != "delete")
         if op.action != "delete" and dependencies:
             _fail(
                 "opaque_context_changed",
@@ -1008,6 +1405,10 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
                 "argument_presence",
                 (True, True, True, False, False, True) if item.namespace else (True, True, True),
             )
+            if len(presence) > 3:
+                presence = (*presence[:3], False, *presence[4:])
+                while len(presence) > 3 and not presence[-1]:
+                    presence = presence[:-1]
             defaults = (
                 Value("number", 0),
                 Value("string", ""),
@@ -1025,7 +1426,16 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
             prefix = "ДобавитьПОД_" if op.kind == "pod" else "ДобавитьПКО_"
             signature = Signature(
                 parameters=tuple(
-                    Formal(name)
+                    Formal(
+                        name,
+                        default=(
+                            Value("string", "")
+                            if name == "ВерсияФорматаОбмена"
+                            else Value("boolean", False)
+                            if name == "ТолькоЗаголовки"
+                            else Value()
+                        ),
+                    )
                     for name in RULE_PARAMETERS[
                         "pod"
                         if op.kind == "pod"
@@ -1056,6 +1466,24 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
         items = (*items, item)
     elif op.action == "delete":
         assert current is not None
+        if op.kind == "pko":
+            event_leaves = {
+                e.entity_id: e.block_id for c in model.layouts for e in c.elements if e.block_id
+            }
+            saved_events = tuple(
+                addresses.get(
+                    e.inside_leaf_id or event_leaves.get(e.logical_id) or e.logical_id, address
+                )
+                for e in current.events
+                if e.state != "editable" or e.inside_leaf_id
+            )
+            if saved_events:
+                _fail(
+                    "opaque_context_changed",
+                    address,
+                    "Удаление затрагивает сохранённые привязки событий",
+                    saved_events,
+                )
         if op.kind == "pko" and (current.properties or current.groups):
             _fail(
                 "dangling_reference",
@@ -1120,6 +1548,18 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
         rule = next(item for item in items if item.logical_id == key)
         result = replace(
             result,
+            pod=tuple(
+                replace(
+                    pod,
+                    used_pko=tuple(
+                        replace(ref, name=rule.name) if ref.target_id == key else ref
+                        for ref in pod.used_pko
+                    ),
+                )
+                if op.kind == "pko" and pod.state == "editable"
+                else pod
+                for pod in result.pod
+            ),
             rule_uses=tuple(
                 replace(
                     use, name=rule.procedure_name, rule=replace(use.rule, name=rule.procedure_name)
@@ -1141,7 +1581,7 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
                 or RuleUse(
                     logical_id=logical_id(model.project_id, op.client_id + f"/use/{n}"),
                     name=rule.procedure_name,
-                    rule=Reference(op.kind, key, rule.procedure_name, "resolved"),
+                    rule=Reference("rule", key, rule.procedure_name, "resolved"),
                     direction=d,
                 )
                 for n, d in enumerate(rule.directions, 1)
@@ -1163,6 +1603,17 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
     return result, key
 
 
+def _matches_decision(decision: Decision, op: ManagerOperation, fingerprint: str | None = None):
+    """Снимки прежнего B1 не включали необязательный способ выбора позиции."""
+    if decision.operation_hash == (fingerprint or digest(op)):
+        return True
+    if decision.position_container is not None:
+        return False
+    legacy = json_value(op)
+    legacy.pop("position_mode")
+    return decision.operation_hash == digest(legacy)
+
+
 def preview(
     model: ManagerModel, operations: tuple[ManagerOperation, ...], *, expected_revision: str
 ) -> ManagerPreview:
@@ -1176,6 +1627,7 @@ def preview(
     canonical = []
     skipped = []
     deleted: list[tuple[str, str]] = []
+    notices: list[ManagerNotice] = []
     for op in operations:
         input_address = op.address
         try:
@@ -1186,11 +1638,17 @@ def preview(
         fingerprint = digest(op)
         previous = next((d for d in result.decisions if d.client_id == op.client_id), None)
         if previous:
-            if previous.operation_hash != fingerprint:
+            if not _matches_decision(previous, op, fingerprint):
                 failures.append(
                     ManagerFailure(
                         "model_invalid",
-                        op.address or op.target_id or "Конвертация",
+                        op.address
+                        or model_addresses(result).get(
+                            op.target_id or "",
+                            previous.address_aliases[-1]
+                            if previous.address_aliases
+                            else "Конвертация",
+                        ),
                         "Конфликт содержимого client_id",
                     )
                 )
@@ -1199,7 +1657,43 @@ def preview(
                 canonical.append(CanonicalOperation(op, fingerprint, previous.result_ids[0]))
             continue
         try:
+            pending = None
+            if op.kind in ("pko", "pod") and op.action in ("delete", "update"):
+                current = next(
+                    (r for r in getattr(result, op.kind) if r.logical_id == op.target_id), None
+                )
+                updates = _updates(op.patch)
+                if current and (
+                    op.action == "delete" or ("name" in updates and updates["name"] != current.name)
+                ):
+                    addresses = model_addresses(result)
+                    refs = tuple(
+                        addresses[u.logical_id]
+                        for u in result.code_units
+                        if any(
+                            r.resolution == "computed"
+                            and r.kind in ("pko", "pko_lookup", "instruction_rule", "conversion")
+                            for r in u.dependencies
+                        )
+                    )
+                    if refs:
+                        address = addresses[current.logical_id]
+                        pending = ManagerNotice(
+                            "computed_dependencies",
+                            address,
+                            "Проверьте обработчики с вычисляемым именем правила"
+                            + (
+                                f": {len(refs)} обработчиков; "
+                                "имена могут зависеть от входных данных"
+                                if len(refs) > 10
+                                else ""
+                            ),
+                            refs if len(refs) <= 10 else (),
+                            digest((op, refs, result.revision)),
+                        )
             changed, key = _apply_one(result, op)
+            if pending:
+                notices.append(pending)
             address = model_addresses(result).get(key, op.address or "Конвертация")
             if op.action == "delete":
                 deleted.append((key, address))
@@ -1218,6 +1712,8 @@ def preview(
                         fingerprint,
                         (key,),
                         tuple(dict.fromkeys(a for a in (input_address, address) if a)),
+                        op.container_id if op.action == "create" else None,
+                        op.after_id if op.action == "create" else None,
                     ),
                 ),
                 confirmations=(),
@@ -1286,9 +1782,17 @@ def preview(
                 )
     except ValueError as error:
         failures.append(ManagerFailure("model_invalid", "Конвертация", str(error)))
-    result = model if failures else result.with_revision()
+    result = (
+        model
+        if failures
+        else replace(
+            result, confirmations=tuple((n.code, n.notice_hash) for n in notices)
+        ).with_revision()
+    )
     changes = compare_models(model, result).changes
-    plan_hash = digest((expected_revision, canonical, result.revision, changes, failures, skipped))
+    plan_hash = digest(
+        (expected_revision, canonical, result.revision, changes, failures, skipped, notices)
+    )
     return ManagerPreview(
         expected_revision,
         tuple(canonical),
@@ -1296,7 +1800,7 @@ def preview(
         changes,
         tuple(failures),
         tuple(skipped),
-        (),
+        tuple(notices),
         plan_hash,
         result,
     )
@@ -1308,23 +1812,29 @@ def apply(
     *,
     expected_revision: str,
     expected_preview_hash: str,
+    confirmations: tuple[tuple[str, str], ...] = (),
 ) -> ManagerModel:
     resolved = tuple(_resolve_operation(model, op) for op in operations)
+    addresses = model_addresses(model)
     conflicts = tuple(
         ManagerFailure(
             "model_invalid",
-            op.address or op.target_id or "Конвертация",
+            op.address
+            or addresses.get(
+                op.target_id or "",
+                decision.address_aliases[-1] if decision.address_aliases else "Конвертация",
+            ),
             "Конфликт содержимого client_id",
         )
         for op in resolved
         for decision in model.decisions
-        if decision.client_id == op.client_id and decision.operation_hash != digest(op)
+        if decision.client_id == op.client_id and not _matches_decision(decision, op)
     )
     if conflicts:
         raise ManagerOperationError(conflicts)
     # Повтор уже применённого решения не требует отката на прежнюю ревизию.
     if operations and all(
-        any(d.client_id == op.client_id and d.operation_hash == digest(op) for d in model.decisions)
+        any(d.client_id == op.client_id and _matches_decision(d, op) for d in model.decisions)
         for op in resolved
     ):
         return model
@@ -1333,4 +1843,12 @@ def apply(
         raise EdAuthoringStaleError("Хеш просмотра менеджера не совпадает")
     if planned.failures:
         raise ManagerOperationError(planned.failures)
+    missing = tuple(n for n in planned.notices if (n.code, n.notice_hash) not in confirmations)
+    if missing:
+        raise ManagerOperationError(
+            tuple(
+                ManagerFailure("confirmation_required", n.address, n.message, n.references)
+                for n in missing
+            )
+        )
     return planned.model

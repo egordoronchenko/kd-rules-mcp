@@ -62,6 +62,29 @@ def previous_artifact(files: Mapping[str, bytes]) -> ArtifactManifest | None:
     return manifest
 
 
+def validate_manager_files(manifest: Mapping[str, object], files: Mapping[str, bytes]) -> None:
+    """Проверяет полный прежний комплект ed-manager/1, включая байты самого manifest."""
+    if (
+        manifest.get("generator_version") != "ed-manager/1"
+        or manifest.get("runtime_verified") is not False
+    ):
+        refuse("owned_content_changed", "Нужен манифест собственного менеджера ed-manager/1")
+    hashes = manifest.get("file_hashes")
+    if not isinstance(hashes, dict) or any(
+        not isinstance(p, str) or not isinstance(h, str) for p, h in hashes.items()
+    ):
+        refuse("owned_content_changed", "Повреждены хеши файлов прежнего комплекта")
+    changed = sorted(p for p, h in hashes.items() if p not in files or sha256(files[p]) != h)
+    changed.extend(sorted(set(files) - {*hashes, "manifest.json"}))
+    if files.get("manifest.json") != json_bytes(dict(manifest)):
+        changed.append("manifest.json")
+    if changed:
+        refuse(
+            "owned_content_changed",
+            "Изменены, отсутствуют или неизвестны файлы: " + ", ".join(changed),
+        )
+
+
 def _handler_bodies_match(manifest: ArtifactManifest, files: Mapping[str, bytes]) -> None:
     """Отпечаток процедуры ловит правку тела при согласованно переписанном хеше файла."""
     modules = {

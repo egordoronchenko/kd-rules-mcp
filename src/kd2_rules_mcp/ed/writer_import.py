@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import replace
+from itertools import pairwise
 from pathlib import PureWindowsPath
 from typing import Any, Literal, cast
 
@@ -18,6 +19,7 @@ from .writer_model import (
     CodeUnit,
     Direction,
     DispatcherCase,
+    EntityStyle,
     Event,
     ExecutorProfile,
     Formal,
@@ -50,11 +52,76 @@ from .writer_model import (
     Value,
     ValueMapping,
     ValueState,
+    leaf_fingerprint,
     logical_id,
     partition_report,
     text_hash,
     validate_model,
 )
+
+
+def infer_module_styles(model: ManagerModel) -> tuple[EntityStyle, ...]:
+    """Мода оформления из исходника; также адаптер для снимков до добавления module_styles."""
+    members = {m.logical_id: m for m in model.members()}
+    sources = {s.file_id: s.text for s in model.source_files}
+    widths, fields, gaps, indents, suffixes = (defaultdict(Counter) for _ in range(5))
+    seen = []
+    for container in model.layouts:
+        rule = members.get(container.logical_id)
+        if not isinstance(rule, ObjectRule | ProcessingRule):
+            continue
+        kind = "pko" if isinstance(rule, ObjectRule) else "pod"
+        direction = "receive" if any(d in ("receive", "both") for d in rule.directions) else "send"
+        key = (kind, direction)
+        if key not in seen:
+            seen.append(key)
+        if container.opening:
+            gaps[key][container.opening.opening_blank_lines] += 1
+            span = container.opening
+            opening = sources[span.file_id][span.char_start : span.char_end]
+            for line in opening.splitlines()[1:]:
+                if " = " in line:
+                    fields[(*key, "opening")][len(line.split(" = ")[0].lstrip(" \t"))] += 1
+                    break
+        for element in container.elements:
+            span = element.source
+            if span is None or element.block_id:
+                continue
+            member = members.get(element.entity_id or "")
+            selected = ("identification", direction) if isinstance(member, Identification) else key
+            if selected not in seen:
+                seen.append(selected)
+            text = sources[span.file_id][span.char_start : span.char_end]
+            first = text.splitlines()[0] if text else ""
+            prefix = first[: len(first) - len(first.lstrip(" \t"))]
+            if prefix:
+                indents[selected][prefix] += 1
+            assignment_width = len(first.split(" = ")[0].lstrip(" \t")) if " = " in first else 0
+            if assignment_width:
+                widths[selected][assignment_width] += 1
+                fields[(*selected, element.field)][assignment_width] += 1
+            if element.field:
+                suffixes[(*selected, element.field)][span.line_suffix] += 1
+
+    def mode(counts, default):
+        return counts.most_common(1)[0][0] if counts else default
+
+    return tuple(
+        EntityStyle(
+            kind=cast(Any, kind),
+            direction=cast(Any, direction),
+            assignment_width=mode(widths[kind, direction], 0),
+            field_widths=tuple(
+                (f, mode(c, 0)) for (k, d, f), c in fields.items() if (k, d) == (kind, direction)
+            ),
+            opening_blank_lines=mode(gaps[kind, direction], 0),
+            indent=mode(indents[kind, direction], model.header.text_style.indent),
+            line_suffixes=tuple(
+                (f, mode(c, "")) for (k, d, f), c in suffixes.items() if (k, d) == (kind, direction)
+            ),
+        )
+        for kind, direction in seen
+    )
 
 
 def import_expression(expression: reader.Expr | None) -> Value:
@@ -344,8 +411,32 @@ class _Importer:
             )
         ]
 
+    def header_groups(self, rule):
+        """Охрана интерфейса 3 из ObjectModule.bsl:2300–2304, непосредственно перед ПКС."""
+        if self.document.manager_version != 3 or not isinstance(rule, reader.ObjectRule):
+            return ()
+        rows = self.rule_statements(rule)
+        return tuple(
+            tuple(rows[n : n + 3])
+            for n in range(len(rows) - 3)
+            if [t.folded for t in rows[n].tokens] == ["если", "толькозаголовки", "тогда"]
+            and [t.folded for t in rows[n + 1].tokens] == ["возврат", ";"]
+            and [t.folded for t in rows[n + 2].tokens] == ["конецесли", ";"]
+            and [t.folded for t in rows[n + 3].tokens]
+            == ["свойствашапки", "=", "правилоконвертации", ".", "свойства", ";"]
+        )
+
     def rule_unsafe(self, rule: reader.ObjectRule | reader.ProcessingRule) -> bool:
         if self.unsafe(rule):
+            return True
+        rows = self.rule_statements(rule)
+        source = self.sources[rule.span.file_id].text
+        if any(
+            "\n" not in source[left.span.char_end : right.span.char_start]
+            and not (left.head == right.head == "добавитьпкс")
+            for left, right in pairwise(rows)
+        ):
+            # Совместная строка каркаса/поля не имеет независимой редактируемой формы.
             return True
         if any(
             import_expression(p.default).state == "unknown"
@@ -362,13 +453,18 @@ class _Importer:
             "clear_data",
         ):
             field = getattr(rule, name, None)
+            if field and import_field(field).state == "unknown":
+                return True
             if field and any(set(e.guards) - set(rule.guards) for e in field.assignments):
                 return True
         if isinstance(rule, reader.ObjectRule) and any(
             set(s.guards) - set(rule.guards) for s in rule.search_sets
         ):
             return True
+        header_rows = {s.span.char_start for group in self.header_groups(rule) for s in group}
         for statement in self.rule_statements(rule):
+            if statement.span.char_start in header_rows:
+                continue
             tokens = statement.tokens
             context = self.contexts[statement.span.file_id, statement.span.char_start]
             conditional = any(
@@ -588,7 +684,7 @@ class _Importer:
                 uses_by_routine[doc.routines[n].entity_id].append(use)
 
         def span(file_id, left, right):
-            return SourceSlice(file_id, left, right, left == 0 and self.sources[file_id].bom)
+            return SourceSlice(file_id, left, right)
 
         def line_range(file_id, left, right):
             text = self.sources[file_id].text
@@ -710,17 +806,46 @@ class _Importer:
             return container
 
         def exact_entry(routine):
+            all_rows = self.rule_statements(routine)
+            source = self.sources[routine.span.file_id].text
+            if any(
+                "\n" not in source[left.span.char_end : right.span.char_start]
+                for left, right in pairwise(all_rows)
+            ):
+                return False
             uses = {u.span.char_start for u in uses_by_routine[routine.entity_id]}
             scaffold = {s.span.char_start for group in column_groups(routine) for s in group}
             rows = [
                 s
-                for s in self.rule_statements(routine)
+                for s in all_rows
                 if routine.body_span.char_start <= s.span.char_start < routine.body_span.char_end
             ]
             return all(
                 s.span.char_start in uses
                 or s.span.char_start in scaffold
                 or s.head == "конецесли"
+                or (
+                    doc.manager_version == 3
+                    and [t.folded for t in s.tokens]
+                    in (
+                        [
+                            "направлениеобмена",
+                            "=",
+                            "компонентыобмена",
+                            ".",
+                            "направлениеобмена",
+                            ";",
+                        ],
+                        [
+                            "версияформатаобмена",
+                            "=",
+                            "компонентыобмена",
+                            ".",
+                            "версияформатаобмена",
+                            ";",
+                        ],
+                    )
+                )
                 or (
                     s.head in ("если", "иначеесли")
                     and self.guards_at[s.span.file_id, s.span.char_start]
@@ -765,6 +890,7 @@ class _Importer:
             "имя": "name",
             "объектвыборки": "configuration_selection",
             "объектвыборкиданные": "configuration_selection",
+            "объектвыборкиметаданные": "configuration_selection",
             "объектвыборкиформат": "format_selection",
             "очисткаданных": "clear_data",
             "используемыепко": "used_pko",
@@ -796,7 +922,11 @@ class _Importer:
             close_start, _ = line_range(file_id, routine.body_span.char_end, routine.span.char_end)
             candidates = []
             consumed = set()
-            columns = column_groups(routine) if rule is None else ()
+            columns = (
+                column_groups(routine)
+                if rule is None
+                else self.header_groups(reader_rules[routine.name.casefold()])
+            )
             for column in columns:
                 start, end = line_range(
                     file_id, column[0].span.char_start, column[-1].span.char_end
@@ -882,6 +1012,8 @@ class _Importer:
                 field_name = (
                     next((field_names[t] for t in names if t in field_names), "") if rule else ""
                 )
+                if rule and names[:3] == ["свойствашапки", "=", "правилоконвертации"]:
+                    field_name = "properties_start"
                 entity_id = (
                     rule.identification.logical_id
                     if isinstance(rule, ObjectRule) and field_name == "mode"
@@ -902,7 +1034,7 @@ class _Importer:
             # Каркас цепочки Если/ИначеЕсли принадлежит её веткам. Цепочка —
             # единый элемент тела: между ветками нельзя вставить оператор.
             for n, (start, end, element) in enumerate(candidates):
-                if element.entity_id and element.source:
+                if element.entity_id and element.source and not element.block_id:
                     rows = tokens_by_file[file_id]
                     starts = token_starts[file_id]
                     inside = rows[
@@ -918,6 +1050,30 @@ class _Importer:
                         )
                         if not element.field:
                             comments[element.entity_id] = inside[-1].value
+            # Несколько инструкций одной строки нельзя переносить по отдельности.
+            merged = []
+            for start, end, element in sorted(candidates, key=lambda row: row[0]):
+                text = self.sources[file_id].text
+                line_start = text.rfind("\n", 0, start) + 1
+                if merged and merged[-1][0] >= line_start:
+                    previous_start, _, previous = merged.pop()
+                    for old in (previous, element):
+                        if old.block_id:
+                            blocks[:] = [b for b in blocks if b.logical_id != old.block_id]
+                        if old.entity_id:
+                            comments.pop(old.entity_id, None)
+                    end = text.find("\n", max(start, end - 1))
+                    end = end + 1 if end >= 0 else len(text)
+                    merged.append(
+                        (
+                            previous_start,
+                            end,
+                            text_leaf(file_id, previous_start, end, key, "shared_line"),
+                        )
+                    )
+                else:
+                    merged.append((start, end, element))
+            candidates = merged
             stack = []
             for statement in statements:
                 if statement.span.char_start in consumed:
@@ -1029,10 +1185,7 @@ class _Importer:
                 rule_reader = reader_rules.get(routine.name.casefold())
                 # Иначе не имеет чистого сравнения; сохраняем весь контекст.
                 has_else = any(s.head == "иначе" for s in self.rule_statements(routine))
-                is_entry = routine.name.casefold() in {
-                    "заполнитьправилаконвертацииобъектов",
-                    "заполнитьправилаобработкиданных",
-                }
+                is_entry = routine.name.casefold() in {name.casefold() for name in ENTRYPOINTS}
                 if (rule and rule.state == "editable" and not has_else) or (
                     is_entry and exact_entry(routine) and not has_else
                 ):
@@ -1085,6 +1238,9 @@ class _Importer:
                         element = replace(
                             element, kind="entity", entity_id=self.ids[routine.entity_id]
                         )
+                        if members[self.ids[routine.entity_id]].state == "editable":
+                            blocks.pop()
+                            element = replace(element, block_id=None)
                     if rule and rule.state == "blocked":
                         blocks[-1] = replace(blocks[-1], state="blocked")
                     candidates.append((left, right, element))
@@ -1198,7 +1354,63 @@ class _Importer:
             },
         )
         states = {m.logical_id: m.state for m in model.members()}
-        self.entries = [replace(e, state=states.get(e.logical_id, e.state)) for e in self.entries]
+        self.entries = [
+            replace(
+                e,
+                state=states.get(e.logical_id, e.state),
+                reason=e.reason
+                or (
+                    "Внутри сохранённого листа раскладки"
+                    if states.get(e.logical_id, e.state) != "editable"
+                    else ""
+                ),
+            )
+            for e in self.entries
+        ]
+        imported = {m.logical_id: m for m in model.members()}
+
+        def formatted(source, item, container_id):
+            text = self.sources[source.file_id].text[source.char_start : source.char_end]
+            first = text.splitlines()[0] if text else ""
+            width = 0
+            if isinstance(item, LayoutElement) and item.field and " = " in first:
+                width = first.index(" = ") - (len(first) - len(first.lstrip(" \t")))
+            last = text.rstrip("\r\n").rsplit("\n", 1)[-1]
+            suffix = last[len(last.rstrip(" \t")) :]
+            gap = (
+                sum(not line.strip() for line in text.splitlines())
+                if isinstance(item, LayoutContainer) and item.kind == "rule"
+                else 0
+            )
+            return replace(
+                source,
+                fingerprint=leaf_fingerprint(model, item, imported),
+                assignment_width=width,
+                opening_blank_lines=gap,
+                line_suffix=suffix,
+                container_id=container_id,
+            )
+
+        model = replace(
+            model,
+            layouts=tuple(
+                replace(
+                    c,
+                    opening=formatted(c.opening, c, c.logical_id) if c.opening else None,
+                    closing=formatted(c.closing, c, c.logical_id) if c.closing else None,
+                    elements=tuple(
+                        replace(
+                            e,
+                            source=formatted(e.source, e, c.logical_id),
+                        )
+                        if e.source and not e.block_id
+                        else e
+                        for e in c.elements
+                    ),
+                )
+                for c in model.layouts
+            ),
+        )
         return model
 
     def build(
@@ -1275,6 +1487,10 @@ class _Importer:
             empty_event = "event" in routine.roles and not any(
                 t.kind != "comment" for t in tokenize(body)
             )
+            empty_event &= all(
+                p.name is not None and import_expression(p.default).state != "unknown"
+                for p in routine.parameters
+            )
             state: ImportState = "editable" if empty_event else "retained"
             deps = []
             for ref in references.entries:
@@ -1334,10 +1550,14 @@ class _Importer:
         uses = tuple(
             RuleUse(
                 **self.common(
-                    u, n, "editable" if u.direction and not self.unsafe(u) else "retained"
+                    u,
+                    n,
+                    "editable"
+                    if (u.direction or not u.guards) and not self.unsafe(u)
+                    else "retained",
                 ),
                 rule=self.reference("rule", u.rule_id, u.target_name),
-                direction=cast(Direction | None, u.direction),
+                direction=cast(Direction | None, u.direction or ("both" if not u.guards else None)),
             )
             for n, u in enumerate(doc.rule_uses, 1)
         )
@@ -1451,6 +1671,7 @@ class _Importer:
         )
         # Карта исходника служит диагностике; порядок и владение задаёт раскладка.
         model = self.build_layout(model)
+        model = replace(model, module_styles=infer_module_styles(model))
         report = replace(
             report, entries=tuple(self.entries), source_partition=partition_report(model)
         )

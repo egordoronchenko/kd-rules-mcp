@@ -930,6 +930,14 @@ def validate_layers(
     report.skipped.append(
         Skipped("ed.layer.runtime", "Активность и порядок подключения в базе не проверены")
     )
+    for module, target, kind, origin in layered.executor_hooks:
+        _skip(
+            report,
+            "ed.layer.executor.overridden",
+            _place(origin),
+            f"Исполнитель изменён расширением: {module}.{target}, {kind}; "
+            "выводы проверок об исполнителе для этой базы не гарантированы; тело не разбиралось",
+        )
     _hook_checks(layered, report)
     _route_checks(layered, routes, report)
     for reading in layered.readings:
@@ -955,6 +963,22 @@ def validate_layers(
     return report
 
 
+def _unread_property_reason(layered: LayeredManager, rule: ObjectRule) -> str:
+    """Причины неполного чтения ПКС только своего ПКО, без переноса на соседние."""
+    reasons = {
+        skip.reason
+        for skip in layered.skipped
+        if skip.reason
+        in {"nonliteral_property", "unsupported_property_arguments", "unknown_property_parent"}
+        and (
+            skip.origin.procedure == rule.procedure_name
+            or rule.entity_id in skip.affected_ids
+            or any(scope.split(_UNIT)[-1] == rule.name for scope in skip.affected_ids)
+        )
+    }
+    return ", ".join(sorted(reasons))
+
+
 def _uncertain_report(
     layered: LayeredManager, context: EffectiveContext, report: ValidationReport, family: str
 ) -> None:
@@ -978,11 +1002,18 @@ def _uncertain_report(
                 else ()
             )
         for check in applicable:
+            unread = (
+                _unread_property_reason(layered, version.payload)
+                if check == "ed.extension.unused" and isinstance(version.payload, ObjectRule)
+                else ""
+            )
             _skip(
                 report,
                 check,
                 _address(version),
-                f"Определённость {version.certainty}; правило не оценивалось",
+                f"ПКС прочитаны не полностью; {unread}"
+                if unread
+                else f"Определённость {version.certainty}; правило не оценивалось",
             )
     for scope in context.taints:
         if scope not in {"manager", "filler", "hook", "dispatcher", *_PREFIX}:
@@ -1010,7 +1041,14 @@ def _uncertain_report(
             )
             continue
         collection = dependent.get(issue.check)
-        if collection and _unknown(context, collection):
+        named_dependency = family == "links" and issue.check in {
+            "ed.reference.property_rule_missing",
+            "ed.reference.pod_pko_missing",
+            "ed.reference.code_rule_missing",
+        }
+        if collection and (
+            collection in context.taints if named_dependency else _unknown(context, collection)
+        ):
             _skip(
                 report, issue.check, issue.address, f"Зависимая коллекция {collection} неизвестна"
             )
@@ -1028,6 +1066,11 @@ def validate_effective_links(
     index = build_addresses(document)
     source = layered.source_document or layered.base
     uncertain = set()
+    unread_properties = {}
+    for rule in document.pko:
+        reason = _unread_property_reason(layered, rule)
+        if reason:
+            unread_properties[rule.entity_id] = reason
     if document is not source:
         applicable = Applicability.build(
             document, ValidationProfile.build(None, context.version_key, context.direction)
@@ -1197,6 +1240,23 @@ def validate_effective_links(
         and original_bindings[event.entity_id].target_name == event.target_name
         and event.resolution != "invalid_signature"
     )
+    # Непрочитанная ветка базового диспетчера не отменяет статическую декларацию
+    # владельца ИспользованиеПКО. При перехвате диспетчера это доказательство теряется.
+    baseline_pods = ()
+    if not any(h.target_name.casefold() in {_PROCEDURE, _FUNCTION} for h in layered.hooks):
+        baseline_pods = tuple(
+            replace(
+                rule,
+                events=tuple(
+                    original_bindings[event.entity_id]
+                    for event in rule.events
+                    if event.entity_id in original_bindings
+                    and original_bindings[event.entity_id].target_name == event.target_name
+                    and event.resolution != "invalid_signature"
+                ),
+            )
+            for rule in document.pod
+        )
     report = validate_links(
         document,
         index,
@@ -1207,8 +1267,23 @@ def validate_effective_links(
         context=context,
         declared_pko=declared_pko,
         declared_rules=declared_rules,
+        unknown_pko=frozenset(
+            norm_name(v.payload.name)
+            for other in layered.contexts
+            for v in other.entities
+            if isinstance(v.payload, ObjectRule) and v.certainty != Certainty.KNOWN
+        ),
+        unknown_rules=frozenset(
+            norm_name(v.payload.name)
+            for other in layered.contexts
+            for v in other.entities
+            if isinstance(v.payload, (ObjectRule, PredefinedRule))
+            and v.certainty != Certainty.KNOWN
+        ),
         declared_pod_formats=declared_pod_formats,
         baseline_bindings=baseline_bindings,
+        baseline_pods=baseline_pods,
+        unread_properties=unread_properties,
     )
     for rule in (*document.pko, *document.pod):
         for binding in rule.events:
@@ -1227,7 +1302,7 @@ def validate_effective_links(
     unknown_handlers = {
         norm_name(chain.target_name)
         for chain in context.dispatch_chains
-        if chain.resolution == "unknown"
+        if chain.resolution == "unknown" and any(link.hook for link in chain.links)
     }
     for name in unknown_handlers:
         for check in ("ed.dispatcher.target_missing", "ed.deferred.argument"):

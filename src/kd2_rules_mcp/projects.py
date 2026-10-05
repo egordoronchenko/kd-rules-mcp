@@ -38,7 +38,7 @@ _INSTANCE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class ProjectConfigError(Kd2Error):
-    """Ошибка в файле проектов или неизвестный проект, конфигурация, база."""
+    """Invalid projects file or unknown project, configuration or infobase."""
 
 
 @dataclass(frozen=True, slots=True)

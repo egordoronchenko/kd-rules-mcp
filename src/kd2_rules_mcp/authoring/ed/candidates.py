@@ -211,16 +211,48 @@ def compatibility(
         if q.get("string_fixed"):
             risks.append("реквизит имеет фиксированную длину")
     elif family == "Дата":
-        parts = str(q.get("date_parts", "ДатаВремя")).casefold()
-        expected = {
-            "date": {"дата", "date"},
-            "time": {"время", "time"},
-            "dateTime": {"датавремя", "datetime"},
-        }[local or "dateTime"]
-        if parts not in expected:
+        # Структура хранит состав словами («Дата и время»), операции авторинга — именем
+        # перечисления (`DateTime`): сравнение без пробелов и регистра. «Дата» входит в
+        # `dateTime` без потери; приём `dateTime` в «Дата» и отправка «Дата и время» в
+        # `date` отбрасывают время. «Время» и «Дата» друг в друга не входят.
+        parts = str(q.get("date_parts", "ДатаВремя")).casefold().replace(" ", "")
+        config_parts = {
+            "дата": frozenset({"date"}),
+            "date": frozenset({"date"}),
+            "время": frozenset({"time"}),
+            "time": frozenset({"time"}),
+            "датавремя": frozenset({"date", "time"}),
+            "датаивремя": frozenset({"date", "time"}),
+            "datetime": frozenset({"date", "time"}),
+        }.get(parts)
+        format_parts = {
+            "date": frozenset({"date"}),
+            "time": frozenset({"time"}),
+            "datetime": frozenset({"date", "time"}),
+        }.get((local or "dateTime").casefold())
+        if config_parts is None or format_parts is None:
             return Compatibility(
                 False, "Компоненты даты реквизита и свойства различаются", "type_incompatible"
             )
+        source, destination = (
+            (config_parts, format_parts) if direction == "send" else (format_parts, config_parts)
+        )
+        if source != destination:
+            extra = source - destination
+            if extra == frozenset({"time"}) and not destination - source:
+                risks.append(
+                    "время из сообщения отбрасывается"
+                    if direction == "receive"
+                    else "время реквизита отбрасывается"
+                )
+            elif destination - source == frozenset({"time"}) and not extra:
+                pass
+            else:
+                return Compatibility(
+                    False,
+                    "Компоненты даты реквизита и свойства различаются",
+                    "type_incompatible",
+                )
         if limits:
             return Compatibility(
                 False, "Ограничения даты не поддержаны прямой ПКС", "conversion_required"

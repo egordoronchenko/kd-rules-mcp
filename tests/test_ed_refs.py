@@ -95,7 +95,7 @@ def test_each_form_preserves_name_case_and_skips_non_candidates():
         ("instruction_rule", "insert", "Товар", "write"),
         ("instruction_rule", "assignment", "Товар", "write"),
         ("pod_use", "member", "Товар", "write"),
-        ("pod_use", "call", "Товар", "write"),
+        ("pod_use", "insert", "Товар", "write"),
         ("pod_use", "call", "Товар", "read"),
         ("pod_use", "call", "Товар", "read"),
         ("pod_use", "call", "Товар", "write"),

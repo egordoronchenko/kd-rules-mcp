@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:t="urn:test:writer" xmlns:m="urn:test:writer-message" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test:writer">
+  <import namespace="urn:test:writer-message"/>
+  <valueType name="Наименование10" base="xs:string" maxLength="10"/>
+  <valueType name="СправочникСсылка.Должности" base="m:Ref"/>
+  <valueType name="СправочникСсылка.Классификатор" base="m:Ref"/>
+  <objectType name="КлючевыеСвойстваДолжности">
+    <property name="Ссылка" type="t:СправочникСсылка.Должности" nillable="true"/>
+    <property name="Наименование" type="t:Наименование10"/>
+    <property name="Код" type="xs:string"/>
+  </objectType>
+  <objectType name="КлючевыеСвойстваКлассификатор">
+    <property name="Ссылка" type="t:СправочникСсылка.Классификатор" nillable="true"/>
+    <property name="Код" type="xs:string"/>
+    <property name="Наименование" type="xs:string"/>
+  </objectType>
+  <objectType name="ОбщиеСвойстваВымышленногоКлассификатора">
+    <property name="Код" type="xs:string"/>
+    <property name="Наименование" type="xs:string"/>
+  </objectType>
+  <objectType name="ОбщиеСвойстваОбъектовФормата">
+    <property name="Комментарий" type="xs:string"/>
+  </objectType>
+  <objectType name="СтрокаТоваров">
+    <property name="Номенклатура" type="xs:string"/>
+  </objectType>
+  <objectType name="Товары">
+    <property name="Строка" type="t:СтрокаТоваров" upperBound="-1"/>
+  </objectType>
+  <objectType name="Справочник.Должности">
+    <property name="КлючевыеСвойства" type="t:КлючевыеСвойстваДолжности"/>
+    <property name="НаименованиеКраткое" type="xs:string"/>
+    <property name="ОбщиеСвойстваОбъектовФормата" type="t:ОбщиеСвойстваОбъектовФормата"/>
+    <property name="Классификатор" type="t:КлючевыеСвойстваКлассификатор"/>
+    <property name="КодКлассификатора" type="t:ОбщиеСвойстваВымышленногоКлассификатора"/>
+    <property name="Товары" type="t:Товары"/>
+    <property name="Лишнее" type="xs:string"/>
+  </objectType>
+  <objectType name="Справочник.Классификатор">
+    <property name="КлючевыеСвойства" type="t:КлючевыеСвойстваКлассификатор"/>
+  </objectType>
+  <objectType name="Документ.Заказ">
+    <property name="Номер" type="xs:string"/>
+    <property name="НомерДок" type="xs:string"/>
+  </objectType>
+  <objectType name="Документ.Акт">
+    <property name="НомерДок" type="xs:string"/>
+  </objectType>
+  <objectType name="Документ.Должности">
+    <property name="Номер" type="xs:string"/>
+  </objectType>
+  <objectType name="Справочник.Подразделения">
+    <property name="Наименование" type="xs:string"/>
+  </objectType>
+  <objectType name="Справочник.Склады">
+    <property name="Наименование" type="xs:string"/>
+  </objectType>
+  <objectType name="Справочник.Должности.Сотрудники">
+    <property name="Наименование" type="xs:string"/>
+  </objectType>
+</package>

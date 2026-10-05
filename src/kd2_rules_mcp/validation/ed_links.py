@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from kd2_rules_mcp.ed.address import AddressIndex, escape_segment
@@ -81,8 +82,12 @@ def validate_links(
     preserved: frozenset[tuple[str, str]] = frozenset(),
     declared_pko: frozenset[str] = frozenset(),
     declared_rules: frozenset[str] = frozenset(),
+    unknown_pko: frozenset[str] = frozenset(),
+    unknown_rules: frozenset[str] = frozenset(),
+    unread_properties: Mapping[str, str] | None = None,
     declared_pod_formats: frozenset[str] = frozenset(),
     baseline_bindings: frozenset[str] = frozenset(),
+    baseline_pods: tuple[ProcessingRule, ...] = (),
 ) -> ValidationReport:
     """Шестнадцать проверок одного снимка. Чтения файлов и модели КД 2 нет."""
     if isinstance(document, LayeredManager):
@@ -296,6 +301,12 @@ def validate_links(
         hidden = _unknown_of(document, rule.entity_id)
         for prop in _properties(rule):
             if prop.conversion_rule.strip() and norm_name(prop.conversion_rule) not in rule_names:
+                if norm_name(prop.conversion_rule) in unknown_rules:
+                    skip(
+                        "ed.reference.property_rule_missing",
+                        f"{_address(addresses, prop)}: определённость цели неизвестна",
+                    )
+                    continue
                 emit(
                     "ed.reference.property_rule_missing",
                     prop,
@@ -324,10 +335,13 @@ def validate_links(
         for uri in rule.extensions:
             if any(item.namespace == uri for item in (*_properties(rule), *rule.groups)):
                 continue
-            if hidden is not None:
+            unread = (unread_properties or {}).get(rule.entity_id)
+            if hidden is not None or unread:
                 skip(
                     "ed.extension.unused",
-                    _hidden_reason(hidden.span, _address(addresses, rule)),
+                    _hidden_reason(hidden.span, _address(addresses, rule))
+                    if hidden
+                    else f"{_address(addresses, rule)}: ПКС прочитаны не полностью; {unread}",
                 )
             else:
                 emit(
@@ -416,6 +430,9 @@ def validate_links(
     for rule in document.pod:
         for ref in rule.used_pko:
             if ref.name.strip() and norm_name(ref.name) not in pko_names:
+                if norm_name(ref.name) in unknown_pko:
+                    skip("ed.reference.pod_pko_missing", f"Цель ПКО неизвестна: {ref.name}")
+                    continue
                 emit(
                     "ed.reference.pod_pko_missing",
                     rule,
@@ -463,19 +480,28 @@ def validate_links(
         rule.entity_id: {norm_name(item.name) for item in rule.used_pko if item.name.strip()}
         for rule in document.pod
     }
-    for rule in document.pod:
+    for rule in (*document.pod, *baseline_pods):
         seen_targets: set[str] = set()
         for binding in rule.events:
             if binding.target_id and binding.target_id not in seen_targets:
                 seen_targets.add(binding.target_id)
-                pods_by_handler[binding.target_id].append(rule)
+                if not any(
+                    p.entity_id == rule.entity_id for p in pods_by_handler[binding.target_id]
+                ):
+                    pods_by_handler[binding.target_id].append(rule)
 
     for ref in references.entries:
         if ref.kind not in _CODE_KINDS or ref.name is None or not ref.name.strip():
             continue
-        # XDTO:8402–8414 — ключи ИспользованиеПКО берутся только из ИспользуемыеПКО этого ПОД.
+        # XDTO:8402–8414 — исходные ключи берутся из ИспользуемыеПКО ПОД.
+        # ПрочитатьСообщениеОбмена, XDTO:7455–7475: Вставить добавляет ключ;
+        # исполнитель обходит структуру и ищет ПКО по имени, а не в исходном массиве.
         # XDTO:8450–8466 — ошибка ПриОбработке ставит отказ по объекту, обмен идёт дальше.
-        if ref.kind == "pod_use":
+        if (
+            ref.kind == "pod_use"
+            and ref.access == "write"
+            and ref.form in {"member", "index", "assignment"}
+        ):
             owners = pods_by_handler.get(ref.owner_id, [])
             absent = [
                 pod for pod in owners if norm_name(ref.name) not in used_pko_names[pod.entity_id]
@@ -502,6 +528,14 @@ def validate_links(
         if norm_name(ref.name) in pool:
             continue
         owner = by_entity.get(ref.owner_id)
+        unknown_pool = unknown_rules if ref.kind == "instruction_rule" else unknown_pko
+        if norm_name(ref.name) in unknown_pool:
+            skip(
+                "ed.reference.code_rule_missing",
+                f"{_address(addresses, owner) if owner else ref.owner_id}: "
+                f"определённость цели «{ref.name}» неизвестна",
+            )
+            continue
         emit_at(
             "ed.reference.code_rule_missing",
             ref.span.file_id,

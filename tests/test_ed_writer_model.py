@@ -31,6 +31,7 @@ from kd2_rules_mcp.ed.writer_model import (
     ManagerModel,
     Reference,
     Value,
+    decode_dto,
     dump_model,
     load_model,
     logical_id,
@@ -469,14 +470,8 @@ def test_identification_manager_and_strict_schema():
         {"client_id": "x", "kind": "algorithm", "action": "create", "patch": {"body": "Whatever"}}
     )
     assert preview(model, (known,), expected_revision=model.revision).failures
-    with pytest.raises(ValueError):
-        dump_model(
-            replace(
-                model,
-                executor_profile=ExecutorProfile(runtime_verified=True),
-                header=replace(model.header, interface_version=3),
-            )
-        )
+    with pytest.raises(ValueError, match="DTO"):
+        decode_dto(ExecutorProfile, {"runtime_verified": True})
 
 
 def test_workspace_recovery_concurrency_and_owned_bodies(tmp_path: Path):
@@ -543,7 +538,7 @@ def test_blocked_span_is_explicit_and_header_versions_are_editable():
             ),
         )
         assert changed.header.interface_version == version
-        assert not changed.executor_profile.runtime_verified
+        assert not hasattr(changed.executor_profile, "runtime_verified")
 
 
 def test_namespace_update_and_invalid_argument_positions():
@@ -573,7 +568,7 @@ def test_namespace_update_and_invalid_argument_positions():
     assert preview(updated, (bad,), expected_revision=updated.revision).failures
 
 
-def test_known_code_reference_and_computed_reference_block_rename():
+def test_known_code_reference_blocks_and_computed_reference_requires_confirmation():
     code = """\n#Область Алгоритмы
 Процедура Business(КомпонентыОбмена)
     ОбменДаннымиXDTOСервер.ПКОПоИмени(КомпонентыОбмена, "Item");
@@ -590,8 +585,26 @@ def test_known_code_reference_and_computed_reference_block_rename():
             patch=PkoPatch(name="Renamed"),
         )
         plan = preview(model, (op,), expected_revision=model.revision)
-        assert plan.failures and plan.failures[0].references
-        assert plan.model == model
+        if text == code:
+            assert plan.failures and plan.failures[0].references
+            assert plan.model == model
+        else:
+            assert not plan.failures and plan.notices[0].references
+            with pytest.raises(ManagerOperationError, match="вычисляемым"):
+                apply(
+                    model,
+                    (op,),
+                    expected_revision=model.revision,
+                    expected_preview_hash=plan.preview_hash,
+                )
+            confirmed = apply(
+                model,
+                (op,),
+                expected_revision=model.revision,
+                expected_preview_hash=plan.preview_hash,
+                confirmations=tuple((n.code, n.notice_hash) for n in plan.notices),
+            )
+            assert confirmed.pko[0].name == "Renamed"
     model, _ = imported(
         SYNTHETIC
         + code.replace(
@@ -811,13 +824,13 @@ def test_review_opaque_uses_and_retained_calls_block_rule_changes(uses):
     assert any(b.dependencies for b in model.retained_blocks)
 
 
-def test_review_profile_revision_is_semantic_and_report_is_not_revision():
+def test_review_profile_selection_is_semantic_and_report_is_not_revision():
     model, report = imported()
     left = replace(
-        model, executor_profile=ExecutorProfile(profile_id="p", revision="1")
+        model, executor_profile=ExecutorProfile(profile_id="p", receive_mode="ordinary")
     ).with_revision()
     right = replace(
-        left, executor_profile=replace(left.executor_profile, revision="2")
+        left, executor_profile=replace(left.executor_profile, receive_mode="object")
     ).with_revision()
     assert canonicalize(left) != canonicalize(right)
     assert compare_models(left, right).changes[0].address == "Конвертация/executor_profile"
@@ -1034,7 +1047,7 @@ def test_review_corrupt_compressed_project_does_not_stop_other_projects(tmp_path
         restored.get("A")
 
 
-def test_review_create_property_keeps_explicit_argument_presence():
+def test_review_create_property_uses_generator_optional_arguments():
     model = execute(
         ManagerModel("presence").with_revision(),
         ManagerOperation("rule", "pko", "create", patch=PkoPatch(name="A", directions=("send",))),
@@ -1049,8 +1062,8 @@ def test_review_create_property_keeps_explicit_argument_presence():
     )
     updated = execute(model, op)
     prop = updated.pko[0].properties[0]
-    assert prop.argument_presence == patch.argument_presence
-    assert prop.argument_values[2] == Value("number", 0) and prop.argument_values[3] == Value()
+    assert prop.argument_presence == (True, True, True)
+    assert len(prop.argument_values) == 2
     bad = replace(op, client_id="bad", patch=replace(patch, namespace="urn:x"))
     assert (
         preview(model, (bad,), expected_revision=model.revision).failures[0].reason
@@ -1110,7 +1123,7 @@ def layout_labels(model, container_id):
 BASE_LAYOUT = [
     "field:name",
     "field:format_object",
-    "scaffold",
+    "field:properties_start",
     "field:mode",
     "search:Code",
     "// C0 перед A",
@@ -1193,7 +1206,7 @@ def test_layout_operations_have_explicit_sequences_and_preserve_text():
     )
     check(changed, BASE_LAYOUT)
     for client, container, neighbor, expected, group_expected in (
-        ("start", rule.logical_id, None, ["X", *BASE_LAYOUT], None),
+        ("start", rule.logical_id, None, [*BASE_LAYOUT[:3], "X", *BASE_LAYOUT[3:]], None),
         (
             "afterA",
             rule.logical_id,
@@ -1367,7 +1380,8 @@ def test_layout_refusals_and_computed_dependency_scope():
     rename = ManagerOperation(
         "rename", "pko", "update", target_id=rule.logical_id, patch=PkoPatch(name="New")
     )
-    assert preview(model, (rename,), expected_revision=model.revision).failures
+    plan = preview(model, (rename,), expected_revision=model.revision)
+    assert not plan.failures and plan.notices[0].references == ("Код/Computed",)
 
 
 def test_layout_positional_addresses_are_refused_and_id_delete_replays():
@@ -1457,6 +1471,58 @@ def test_layout_bom_only_and_header_slots():
     assert (
         preview(model, (op,), expected_revision=model.revision).failures[0].reason
         == "opaque_context_changed"
+    )
+
+
+def test_third_review_single_rule_regions_and_retained_event_refusals():
+    from kd2_rules_mcp.ed.writer import render
+
+    text = SYNTHETIC.replace(
+        "Процедура ДобавитьПКО_Send", "#область Single\nПроцедура ДобавитьПКО_Send"
+    ).replace("Процедура ДобавитьПКО_Receive", "#конецобласти\nПроцедура ДобавитьПКО_Receive")
+    model, _ = imported(text)
+    changed = execute(
+        model,
+        ManagerOperation(
+            "after-region",
+            "pko",
+            "create",
+            container_id=model.root_layouts[0],
+            after_id=model.pko[0].logical_id,
+            patch=PkoPatch(name="Inserted", directions=("send",)),
+        ),
+    )
+    output = render(changed)
+    assert output.text.index("#конецобласти") < output.text.index("Процедура ДобавитьПКО_Inserted")
+    back, _ = imported(output.data.decode("utf-8"))
+    assert canonicalize(back) == canonicalize(changed)
+    event_text = layout_input().replace(
+        "    СвойстваШапки = ПравилоКонвертации.Свойства;",
+        '    ПравилоКонвертации.ПриОтправкеДанных = "H";\n'
+        "    СвойстваШапки = ПравилоКонвертации.Свойства;",
+    )
+    model, report = imported(event_text)
+    rule = model.pko[0]
+    assert rule.events and all(e.reason for e in report.entries if e.state == "retained")
+    op = ManagerOperation("delete-event-owner", "pko", "delete", target_id=rule.logical_id)
+    plan = preview(model, (op,), expected_revision=model.revision)
+    assert plan.failures[0].reason == "opaque_context_changed"
+    assert plan.failures[0].references
+    event_leaf = next(
+        e for c in model.layouts for e in c.elements if e.entity_id == rule.events[0].logical_id
+    )
+    op = ManagerOperation(
+        "before-alias",
+        "property",
+        "create",
+        owner_id=rule.logical_id,
+        container_id=rule.logical_id,
+        after_id=event_leaf.logical_id,
+        patch=PropertyPatch(configuration_property="Bad", format_property="Bad"),
+    )
+    assert (
+        preview(model, (op,), expected_revision=model.revision).failures[0].reason
+        == "model_invalid"
     )
 
 
@@ -1681,6 +1747,7 @@ def test_layout_field_operators_own_comments_and_new_fields_have_slots():
     assert {e.field: e.trailing_comment for e in container.elements if e.field} == {
         "name": "// имя",
         "format_object": "// формат",
+        "properties_start": "",
     }
     changed = execute(
         model,
@@ -1701,6 +1768,7 @@ def test_layout_field_operators_own_comments_and_new_fields_have_slots():
         ("name", "// имя"),
         ("format_object", "// формат"),
         ("configuration_object", ""),
+        ("properties_start", ""),
     ]
     cleared = execute(
         changed,
@@ -1739,6 +1807,7 @@ def test_layout_field_operators_own_comments_and_new_fields_have_slots():
     assert layout_labels(authored, authored.pko[0].logical_id) == [
         "field:name",
         "field:format_object",
+        "field:properties_start",
     ]
 
 

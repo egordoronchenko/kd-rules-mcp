@@ -10,7 +10,15 @@ from kd2_rules_mcp.service.views import report_summary, slice_rows
 from kd2_rules_mcp.validation.ed_routes import RouteComparison, SchemaDiff
 from kd2_rules_mcp.validation.report import ValidationReport
 
-ROUTE_SECTIONS = ("summary", "plans", "versions", "variants", "packages", "skipped")
+ROUTE_SECTIONS = (
+    "summary",
+    "plans",
+    "versions",
+    "variants",
+    "packages",
+    "format_extensions",
+    "skipped",
+)
 COMPARE_SECTIONS = ("issues", "versions", "schema_diff", "skipped")
 RAW_LIMIT = 240
 CHAIN_LIMIT = 4
@@ -34,6 +42,8 @@ def summary_counts(profile: RouteProfile) -> dict[str, int]:
         "packages": len(profile.packages),
         "variants": sum(len(plan.variants) for plan in profile.plans),
         "skipped": len(profile.skipped),
+        "format_extensions": len(profile.format_extensions)
+        + sum(len(p.declared_plan_extensions) for p in profile.plans),
     }
 
 
@@ -56,6 +66,11 @@ def route_summary(
         "available_sections": list(ROUTE_SECTIONS),
         "reused": reused,
         "stale": stale,
+        "format_extensions": {
+            "items": route_rows(profile, "format_extensions", None)[:10],
+            "total": summary_counts(profile)["format_extensions"],
+            "has_more": summary_counts(profile)["format_extensions"] > 10,
+        },
     }
 
 
@@ -100,6 +115,23 @@ def route_rows(profile: RouteProfile, section: str, plan_name: str | None) -> li
         ]
     if section == "versions":
         return _version_rows(profile, plan_name)
+    if section == "format_extensions":
+        return [
+            {
+                "context": context,
+                "plan": plan,
+                "uri": entry.uri,
+                "version": entry.version,
+                "state": entry.state,
+                "source": _origin(entry.source),
+            }
+            for context, plan, entries in (
+                ("without_node", None, profile.format_extensions),
+                *(("plan", p.plan_name, p.declared_plan_extensions) for p in profile.plans),
+            )
+            if plan_name is None or plan is None or plan_name == plan
+            for entry in entries
+        ]
     if section == "variants":
         return _variant_rows(profile, plan_name)
     if section == "packages":

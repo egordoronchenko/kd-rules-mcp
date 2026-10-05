@@ -18,6 +18,12 @@ from kd2_rules_mcp.errors import EdAuthoringResourceLimitError
 
 ImportState = Literal["editable", "retained", "blocked"]
 Direction = Literal["send", "receive", "both"]
+
+
+def _direction_order(direction: str) -> int:
+    return {"send": 0, "receive": 1, "both": 2}.get(direction, 3)
+
+
 ValueState = Literal[
     "unset", "string", "boolean", "number", "date", "undefined", "reference", "unknown"
 ]
@@ -104,6 +110,17 @@ def content_hash(value: Any) -> str:
     if dto:
         hasher = hashlib.sha256(kind.__name__.encode("ascii"))
         for name, label in _hash_fields(kind):
+            # Отсутствующие новые поля не меняют ревизию снимков предыдущего B1.
+            if (
+                (kind is SourceSlice and name == "container_id" and not getattr(value, name))
+                or (
+                    kind is Decision
+                    and name in ("position_container", "position_after")
+                    and getattr(value, name) is None
+                )
+                or (kind is ManagerModel and name == "module_styles" and not getattr(value, name))
+            ):
+                continue
             hasher.update(label + bytes.fromhex(content_hash(getattr(value, name))))
         result = hasher.hexdigest()
     elif isinstance(value, tuple):
@@ -176,9 +193,22 @@ class Value:
 @dataclass(frozen=True, slots=True)
 class TextStyle:
     encoding: str = "utf-8"
-    newline: Literal["\n", "\r\n", "mixed"] = "\n"
-    bom: bool = False
+    newline: Literal["\n", "\r\n", "mixed"] = "\r\n"
+    bom: bool = True
     indent: str = "\t"
+
+
+@dataclass(frozen=True, slots=True)
+class EntityStyle:
+    """Мода оформления по виду и направлению; при равенстве частот — первый образец."""
+
+    kind: Literal["pko", "pod", "identification"]
+    direction: Literal["send", "receive"]
+    assignment_width: int = 0
+    field_widths: tuple[tuple[str, int], ...] = ()
+    opening_blank_lines: int = 0
+    indent: str = "\t"
+    line_suffixes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +259,14 @@ class Signature:
 
 @dataclass(frozen=True, slots=True)
 class ExecutorProfile:
+    profile_id: str = ""
+    receive_mode: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyExecutorProfile:
+    """Только чтение прежних снимков; доказательства не попадают в текущую модель."""
+
     profile_id: str = ""
     revision: str = ""
     evidence: tuple[Evidence, ...] = ()
@@ -316,6 +354,9 @@ class ObjectRule(Member):
     groups: tuple[PropertyGroup, ...] = ()
     extensions: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "directions", tuple(sorted(self.directions, key=_direction_order)))
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ProcessingRule(Member):
@@ -327,6 +368,9 @@ class ProcessingRule(Member):
     clear_data: Value = Value()
     events: tuple[Event, ...] = ()
     used_pko: tuple[Reference, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "directions", tuple(sorted(self.directions, key=_direction_order)))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -446,12 +490,24 @@ class RetainedBlock(Member):
 
 @dataclass(frozen=True, slots=True)
 class SourceSlice:
-    """Отрезок UTF-8 исходника по границам символов; BOM принадлежит первому листу."""
+    """Отрезок и отпечаток; container_id — исходный владелец, BOM — только стиль шапки."""
 
     file_id: str
     char_start: int
     char_end: int
-    bom: bool = False
+    fingerprint: str = ""
+    assignment_width: int = 0
+    opening_blank_lines: int = 0
+    line_suffix: str = ""
+    container_id: str = ""
+
+    def __post_init__(self) -> None:
+        if (
+            self.assignment_width < 0
+            or self.opening_blank_lines < 0
+            or any(c not in " \t" for c in self.line_suffix)
+        ):
+            raise ValueError("Повреждён стиль исходного отрезка")
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,6 +573,36 @@ def layout_leaves(model: ManagerModel) -> tuple[tuple[str, SourceSlice], ...]:
     return tuple(result)
 
 
+def leaf_fingerprint(
+    model: ManagerModel,
+    item: LayoutElement | LayoutContainer,
+    members: dict[str, Any] | None = None,
+) -> str:
+    """Отпечаток только своего оператора, без дочерних сущностей и координат."""
+    if isinstance(item, LayoutContainer):
+        return digest((item.kind, item.name, item.signature, item.direction, item.branch))
+    if item.field.startswith("header."):
+        name = item.field.removeprefix("header.")
+        if name == "title":
+            return digest((name, model.header.title, model.header.generated_at))
+        return digest((name, getattr(model.header, name)))
+    if members is None:
+        members = {m.logical_id: m for m in model.members()}
+    member = members.get(item.entity_id or "")
+    if member is None:
+        return digest((item.field, item.trailing_comment))
+    if item.field:
+        return digest((item.field, getattr(member, item.field, None), item.trailing_comment))
+    excluded = {"logical_id", "inside_leaf_id", "guards", "state"}
+    return digest(
+        {
+            f.name: getattr(member, f.name)
+            for f in fields(member)
+            if not f.name.startswith("_") and f.name not in excluded
+        }
+    )
+
+
 def partition_report(model: ManagerModel) -> tuple[tuple[str, int, int, bool], ...]:
     """Проверяет разбиение по координатам и побайтовую склейку, а не покрытие строк."""
     leaves = layout_leaves(model)
@@ -526,15 +612,11 @@ def partition_report(model: ManagerModel) -> tuple[tuple[str, int, int, bool], .
         cursor = 0
         exact = True
         parts = []
-        for n, span in enumerate(slices):
+        for span in slices:
             exact &= span.char_start == cursor and span.char_end >= span.char_start
-            exact &= span.bom == (source.bom and n == 0)
-            parts.append(
-                (b"\xef\xbb\xbf" if span.bom else b"")
-                + source.text[span.char_start : span.char_end].encode("utf-8")
-            )
+            parts.append(source.text[span.char_start : span.char_end].encode("utf-8"))
             cursor = span.char_end
-        raw = b"".join(parts)
+        raw = (b"\xef\xbb\xbf" if model.header.text_style.bom else b"") + b"".join(parts)
         exact &= cursor == len(source.text) and raw == source.bytes()
         result.append((source.file_id, len(raw), len(source.bytes()), exact))
     return tuple(result)
@@ -542,10 +624,14 @@ def partition_report(model: ManagerModel) -> tuple[tuple[str, int, int, bool], .
 
 @dataclass(frozen=True, slots=True)
 class Decision:
+    """Позиция создания нужна для повторов и порядка вставок после одного соседа."""
+
     client_id: str
     operation_hash: str
     result_ids: tuple[str, ...] = ()
     address_aliases: tuple[str, ...] = ()
+    position_container: str | None = None
+    position_after: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -581,6 +667,7 @@ class ManagerModel:
     host: Host = Host()
     format_bindings: tuple[FormatBinding, ...] = ()
     executor_profile: ExecutorProfile = ExecutorProfile()
+    module_styles: tuple[EntityStyle, ...] = ()
     pod: tuple[ProcessingRule, ...] = ()
     pko: tuple[ObjectRule, ...] = ()
     pkpd: tuple[PredefinedRule, ...] = ()
@@ -601,6 +688,9 @@ class ManagerModel:
     import_report: ImportReport = ImportReport(())
     revision: str = ""
     _cached_hash: str = field(default="", init=False, compare=False, repr=False)
+    _cached_addresses: dict[str, str] | None = field(
+        default=None, init=False, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if not self.layouts and not self.source_files:
@@ -903,13 +993,42 @@ def load_model(
         # Отчёт уже проверен отдельно; повторное разворачивание и декодирование
         # десятков тысяч записей не относится к восстановлению ревизии модели.
         value.pop("import_report", None)
+    previous_profile = value.get("executor_profile", {})
+    if isinstance(previous_profile, dict):
+        legacy_fields = _dto_fields(_LegacyExecutorProfile) - _dto_fields(ExecutorProfile)
+        value["executor_profile"] = {
+            key: item for key, item in previous_profile.items() if key not in legacy_fields
+        }
     model: ManagerModel = decode_dto(ManagerModel, value)
     if restored_report is not None:
         model = replace(model, import_report=restored_report)
     validate_model(model)
     if model.revision != model.with_revision().revision:
-        raise ValueError("Ревизия модели не совпадает с содержимым")
+        if model.revision != _legacy_profile_revision(model, previous_profile):
+            raise ValueError("Ревизия модели не совпадает с содержимым")
+        model = model.with_revision()
     return model
+
+
+def _legacy_profile_revision(model: ManagerModel, payload: Any) -> str:
+    """Сверяет прежнюю ревизию до удаления доверенных ранее полей профиля."""
+    old = decode_dto(_LegacyExecutorProfile, payload)
+    profile_hash = hashlib.sha256(b"ExecutorProfile")
+    for item in fields(old):
+        profile_hash.update(
+            item.name.encode("ascii") + b"\0" + bytes.fromhex(content_hash(getattr(old, item.name)))
+        )
+    result = hashlib.sha256(b"ManagerModel")
+    for name, label in _hash_fields(ManagerModel):
+        if name == "module_styles" and not model.module_styles:
+            continue
+        hashed = (
+            profile_hash.hexdigest()
+            if name == "executor_profile"
+            else content_hash(getattr(model, name))
+        )
+        result.update(label + bytes.fromhex(hashed))
+    return result.hexdigest()
 
 
 def pack_json(value: Any) -> dict[str, str]:
@@ -949,8 +1068,6 @@ def validate_model(model: ManagerModel) -> None:
         or model.header.interface_version not in (1, 2, 3)
     ):
         raise ValueError("Неверный интерфейс менеджера")
-    if model.header.interface_version in (1, 3) and model.executor_profile.runtime_verified:
-        raise ValueError("Интерфейсы 1 и 3 не проверены обменом")
     members = model.members()
     ids = [member.logical_id for member in members]
     if len(ids) > MAX_ENTITIES:
@@ -966,6 +1083,22 @@ def validate_model(model: ManagerModel) -> None:
         raise ValueError("Неверное состояние или имя сущности")
     if len({item.key for item in model.format_bindings}) != len(model.format_bindings):
         raise ValueError("Повтор ключа версии формата")
+    if len({(s.kind, s.direction) for s in model.module_styles}) != len(model.module_styles):
+        raise ValueError("Повтор стиля вида и направления")
+    for style in model.module_styles:
+        if (
+            style.kind not in ("pko", "pod", "identification")
+            or style.direction not in ("send", "receive")
+            or style.assignment_width < 0
+            or style.opening_blank_lines < 0
+            or not style.indent
+            or any(c not in " \t" for c in style.indent)
+            or len(dict(style.field_widths)) != len(style.field_widths)
+            or any(n < 0 for _, n in style.field_widths)
+            or len(dict(style.line_suffixes)) != len(style.line_suffixes)
+            or any(any(c not in " \t" for c in suffix) for _, suffix in style.line_suffixes)
+        ):
+            raise ValueError("Неверный стиль модуля")
     if len({item.client_id for item in model.decisions}) != len(model.decisions):
         raise ValueError("Повтор идентификатора решения")
     for rule in (*model.pko, *model.pod):
@@ -1092,6 +1225,11 @@ def validate_model(model: ManagerModel) -> None:
                     for flag, value in zip(
                         prop.argument_presence[1:], prop.argument_values, strict=False
                     )
+                )
+                or prop.argument_values[:2]
+                != (
+                    Value("string", prop.configuration_property),
+                    Value("string", prop.format_property),
                 )
             ):
                 raise ValueError("Аргументы ПКС не соответствуют полям")

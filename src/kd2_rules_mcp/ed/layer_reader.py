@@ -2759,6 +2759,22 @@ class _Walker:
             self._unknown_call(statement, procedure, hook_id, "unknown_property_parent")
             return True
         args = [_expr(self.source, part, statement.span) for part in call[1]]
+        raw_args = tuple(args)
+        if not group and len(call[1]) == 6 and any(not part for part in call[1][3:]):
+            local_helper = self.routines.get(helper)
+            helper_routine = local_helper[0] if local_helper else self.targets.get(helper)
+            for index in range(3, 6):
+                if call[1][index]:
+                    continue
+                default = (
+                    helper_routine.parameters[index].default
+                    if helper_routine and len(helper_routine.parameters) > index
+                    else None
+                )
+                if default is None or default.literal_type not in {"string", "number"}:
+                    self._unknown_call(statement, procedure, hook_id, "nonliteral_property")
+                    return True
+                args[index] = default
         if any(
             arg.literal_type != "string"
             for index, arg in enumerate(args)
@@ -2825,7 +2841,7 @@ class _Walker:
             namespace=strings[5],
             condition_name=strings[6],
             argument_presence=presence,
-            raw_arguments=tuple(args),
+            raw_arguments=raw_args,
         )
         if builder_id:
             builder = self.builders[builder_id]
@@ -4109,9 +4125,21 @@ def _entity_from_builder(
             format_object=field_of("ОбъектФормата"),
             group_flag=field_of("ПравилоДляГруппыСправочника"),
             identification=field_of("ВариантИдентификации"),
-            events=tuple(builder.events),
-            properties=tuple(builder.properties),
-            groups=tuple(builder.groups),
+            events=tuple(replace(event, owner_id=common["entity_id"]) for event in builder.events),
+            properties=tuple(
+                replace(prop, owner_id=common["entity_id"]) for prop in builder.properties
+            ),
+            groups=tuple(
+                replace(
+                    group,
+                    owner_id=common["entity_id"],
+                    properties=tuple(
+                        replace(prop, owner_id=common["entity_id"], group_id=group.entity_id)
+                        for prop in group.properties
+                    ),
+                )
+                for group in builder.groups
+            ),
             search_sets=tuple(builder.searches),
             extensions=tuple(builder.extensions),
         )
@@ -5095,7 +5123,29 @@ def _bind_hook(
     elif applicability == Applicability.KNOWN and folded in (
         _FILLER_NAMES | set(_ROUTE_CALLBACKS) | {"выполнитьпроцедурумодуляменеджера"}
     ):
-        continuation = walker.walk_hook(hook_id, routine, tree, kind, target)
+        exact_settings = (
+            settings_hook_form(routine, source)
+            if folded == "приполучениинастроек" and kind == HookKind.AFTER
+            else None
+        )
+        if exact_settings is not None:
+            role, entries = exact_settings
+            walker.marks.append((routine.body_span, Classification.DECLARATIVE))
+            if role == "versions":
+                for key, name, entry_span in entries:
+                    walker.op(
+                        OperationKind.MAP_INSERT,
+                        f"plan/{walker.plan_name or ''}",
+                        (key,),
+                        Expr(name, entry_span, reference_parts=(name,)),
+                        entry_span,
+                        routine.name,
+                        (),
+                        hook_id,
+                    )
+            continuation = Continuation.ONCE
+        else:
+            continuation = walker.walk_hook(hook_id, routine, tree, kind, target)
     else:
         builders, collections = _builder_hook_scopes(targets, folded)
         target_class = (
@@ -5139,6 +5189,88 @@ def _bind_hook(
         origin,
         target_class,
     )
+
+
+def settings_hook_form(
+    routine: Routine,
+    source: SourceFile,
+) -> tuple[str, tuple[tuple[str, str, SourceSpan], ...]] | None:
+    """Две точные формы After настроек: новый словарь URI или защищённая подмена ключа.
+
+    Тело целиком проверяется по токенам. Соседние присваивания, вызовы и условия
+    не получают обещания, что карта версий осталась действующей.
+    """
+    if len(routine.parameters) != 1 or not routine.parameters[0].name:
+        return None
+    parameter = routine.parameters[0].name
+    body = [
+        s
+        for s in lex(source).statements
+        if routine.body_span.char_start <= s.span.char_start < routine.body_span.char_end
+    ]
+    if not body:
+        return None
+    role = "extensions"
+    receiver = parameter + ".РасширенияФорматаОбмена"
+    assignment = _assignment(body[0])
+    if (
+        assignment
+        and assignment[0].casefold() == receiver.casefold()
+        and _new_type(assignment[1], "соответствие")
+    ):
+        insertions = body[1:]
+        value_kind = "string"
+    elif (
+        assignment
+        and len(tokenize(assignment[0])) == 1
+        and tokenize(assignment[0])[0].kind == "identifier"
+        and assignment[0].casefold() != parameter.casefold()
+        and _new_type(assignment[1], "соответствие")
+        and len(body) >= 3
+    ):
+        final = _assignment(body[-1])
+        if (
+            not final
+            or final[0].casefold() != receiver.casefold()
+            or normalized(final[1]) != normalized(tokenize(assignment[0]))
+        ):
+            return None
+        receiver = assignment[0]
+        insertions = body[1:-1]
+        value_kind = "string"
+    else:
+        receiver = parameter + ".ВерсииФорматаОбмена"
+        expected = tokenize(f'Если ТипЗнч({receiver}) = Тип("Соответствие") Тогда')
+        if (
+            len(body) != 3
+            or normalized(body[0].tokens) != normalized(expected)
+            or body[-1].head != "конецесли"
+        ):
+            return None
+        insertions = body[1:2]
+        value_kind = "identifier"
+        role = "versions"
+    if not insertions:
+        return None
+    entries = []
+    for statement in insertions:
+        call = _call(statement.tokens)
+        if (
+            not call
+            or call[0].casefold() != (receiver + ".Вставить").casefold()
+            or len(call[1]) != 2
+        ):
+            return None
+        key, value = call[1]
+        if (
+            len(key) != 1
+            or key[0].kind != "string"
+            or len(value) != 1
+            or value[0].kind != value_kind
+        ):
+            return None
+        entries.append((key[0].value, value[0].value, statement.span))
+    return role, tuple(entries)
 
 
 def _builder_hook_scopes(targets, target_name):

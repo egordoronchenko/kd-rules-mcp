@@ -344,6 +344,7 @@ def test_summary_pages_and_plan_case(service):
         "versions",
         "variants",
         "packages",
+        "format_extensions",
         "skipped",
     ]
     again = service.ed_routes(path=str(GRAMMAR))

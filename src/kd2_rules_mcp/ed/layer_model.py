@@ -394,6 +394,8 @@ class LayeredManager:
     # включая операции с ложной защитой «цель отсутствует».
     source_document: EdDocument | None = None
     readings: tuple[ExtensionReading, ...] = ()
+    unselected_managers: tuple[tuple[str, str, SourceFile], ...] = ()
+    executor_hooks: tuple[tuple[str, str, str, Origin], ...] = ()
 
     @property
     def previous_calls(self) -> tuple[PreviousCall, ...]:

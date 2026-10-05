@@ -566,7 +566,12 @@ def _add_family(
                 access = _CALL_ACCESS.get(member.folded)
                 if access is not None:
                     if arguments:
-                        add_expression(kind, arguments[0], "call", access, chain_start)
+                        form = (
+                            "insert"
+                            if kind == "pod_use" and member.folded == "вставить"
+                            else "call"
+                        )
+                        add_expression(kind, arguments[0], form, access, chain_start)
                     else:
                         add(kind, None, chain_start, chain_start, "call", access)
             else:

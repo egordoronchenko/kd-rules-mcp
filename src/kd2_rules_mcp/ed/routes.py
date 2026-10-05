@@ -19,6 +19,7 @@ from lxml import etree as ET
 from .errors import EdFormatError, EdReadError, EdResourceLimitError
 from .forms import MANAGER_VERSIONS, VERSION_ROUTINE
 from .layer_model import LayeredManager, OperationKind
+from .layer_reader import settings_hook_form
 from .lexer import Lexed, Statement, Token, lex, normalized, split_arguments, tokenize
 from .model import EdDocument, Expr, ParseStatus, SourceFile, SourceSpan
 from .reader import read_manager
@@ -328,6 +329,55 @@ def apply_route_layers(
     # Для слоя проверяем тело уже принятой грамматикой; базовые ответы не меняются.
     for hook in route_hooks:
         if hook in unknown_hooks or hook in extra_hooks:
+            continue
+        reading = next(
+            (r for r in layers.readings if r.source.file_id == hook.origin.file_id), None
+        )
+        exact = (
+            settings_hook_form(hook.routine, reading.source)
+            if reading
+            and hook.target_name.casefold() == _SETTINGS.casefold()
+            and hook.kind == "after"
+            else None
+        )
+        if exact is not None:
+            assert reading is not None
+            role, entries = exact
+            if role == "extensions":
+                origin = hook.origin
+                plan_index = next(
+                    (
+                        i
+                        for i, p in enumerate(plans)
+                        if p.plan_name.casefold() == origin.metadata_name.casefold()
+                    ),
+                    None,
+                )
+                if plan_index is not None:
+                    declarations = tuple(
+                        FormatExtension(
+                            key,
+                            version,
+                            RouteSource(
+                                _relative(
+                                    Path(descriptors[origin.layer_id].root), Path(origin.path)
+                                ),
+                                span.line_start,
+                                span.line_end,
+                                hook.routine.name,
+                                (hook.origin.span,),
+                                origin.layer_id,
+                                reading.source.sha256,
+                            ),
+                            state="overwritten"
+                            if any(later_key == key for later_key, _, _ in entries[ordinal + 1 :])
+                            else "effective",
+                        )
+                        for ordinal, (key, version, span) in enumerate(entries)
+                    )
+                    plans[plan_index] = replace(
+                        plans[plan_index], declared_plan_extensions=declarations
+                    )
             continue
         owner = reader(hook.origin.layer_id)
         module = owner._load_bsl(Path(hook.origin.path))

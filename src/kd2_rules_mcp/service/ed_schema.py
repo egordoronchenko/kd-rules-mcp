@@ -71,7 +71,7 @@ class EdSchemaMixin(ServiceBase):
     def _schema_open_view(project: SchemaProject, reused: bool, changed: bool) -> dict[str, Any]:
         schema = project.schema
         base = schema.packages[0]
-        return {
+        result = {
             "schema_id": schema.schema_id,
             "base_namespace": schema.base_namespace,
             "format_version": project.format_version,
@@ -82,6 +82,22 @@ class EdSchemaMixin(ServiceBase):
             "reused": reused,
             "source_changed": changed,
         }
+        missing = sorted(
+            {
+                item.namespace
+                for package in schema.packages
+                for item in package.imports
+                if item.status != "resolved" and item.resolved_source_id is None
+            }
+        )
+        if missing:
+            result["missing_imports"] = missing
+            result["imports_hint"] = (
+                "Передайте imports: URI недостающего пакета → путь к XML или Package.bin"
+            )
+        elif any(d.code == "unresolved_type" for d in schema.diagnostics):
+            result["imports_hint"] = "Есть неразрешённые типы; проверьте imports: URI пакета → путь"
+        return result
 
     def ed_schema_open(
         self,

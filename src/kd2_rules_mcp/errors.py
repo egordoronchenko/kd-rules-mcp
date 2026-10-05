@@ -9,7 +9,7 @@ class Kd2Error(Exception):
 
 
 class EdAuthoringPreconditionError(Kd2Error):
-    """Предусловия автора не выполнены; подробности — failures и summary."""
+    """Authoring preconditions failed; see failures and summary."""
 
     def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
@@ -17,99 +17,99 @@ class EdAuthoringPreconditionError(Kd2Error):
 
 
 class EdAuthoringAckRequiredError(EdAuthoringPreconditionError):
-    """Нужны подтверждения конкретных замечаний для текущего preview_hash."""
+    """Specific notices need acknowledgement for the current preview_hash."""
 
 
 class EdAuthoringStaleError(EdAuthoringPreconditionError):
-    """Изменились входные файлы, решения preview или прежний manifest."""
+    """Input files, preview decisions or the previous manifest changed."""
 
 
 class EdAuthoringPathError(EdAuthoringPreconditionError):
-    """Каталог вне workspace, чужое содержимое, символическая ссылка или junction."""
+    """Directory outside workspace, foreign content, symbolic link or junction."""
 
 
 class EdAuthoringResourceLimitError(EdAuthoringPreconditionError):
-    """Превышен предел операций, менеджеров, профилей или файлов комплекта."""
+    """Operation, manager, profile or kit file limit exceeded."""
 
 
 class EdAuthoringIoError(EdAuthoringPreconditionError):
-    """Ошибка чтения или атомарной записи; прежний комплект сохранён."""
+    """Read or atomic write failed; the previous kit is preserved."""
 
 
 class EdSchemaNotFoundError(Kd2Error):
-    """Схема формата не открыта."""
+    """Format schema is not open."""
 
 
 class EdSchemaTypeNotFoundError(Kd2Error):
-    """Тип отсутствует в открытой схеме."""
+    """Type is absent from the open schema."""
 
 
 class EdSchemaReadError(Kd2Error):
-    """Файл пакета XDTO недоступен."""
+    """XDTO package file is unavailable."""
 
 
 class EdSchemaFormatError(Kd2Error):
-    """Повреждённый XML или неподдержанный формат пакета."""
+    """Malformed XML or unsupported package format."""
 
 
 class EdSchemaConflictError(Kd2Error):
-    """Один QName имеет разные определения."""
+    """One QName has conflicting definitions."""
 
 
 class EdSchemaAmbiguousImportError(Kd2Error):
-    """Несколько описаний пакетов имеют одинаковый URI импорта."""
+    """Several package descriptions share an import URI."""
 
 
 class EdSchemaProfileMismatchError(Kd2Error):
-    """Версия, описание пакета или расширение не согласованы с базовым пакетом."""
+    """Version, package description or extension disagrees with the base package."""
 
 
 class EdSchemaResourceLimitError(Kd2Error):
-    """Превышен лимит чтения или хранения схем."""
+    """Schema read or storage limit exceeded."""
 
 
 class EdReadError(Kd2Error):
-    """Файл менеджера ED недоступен или имеет неподдержанную кодировку."""
+    """ED manager file is unavailable or has an unsupported encoding."""
 
 
 class EdFormatError(Kd2Error):
-    """Модуль не соответствует безопасно читаемому формату менеджера ED."""
+    """Module is outside the safely readable ED manager subset."""
 
 
 class EdResourceLimitError(Kd2Error):
-    """Менеджер ED превышает предел размера или числа строк."""
+    """ED manager size or line count limit exceeded."""
 
 
 class EdRouteProfileNotFoundError(Kd2Error):
-    """Неизвестный или вытесненный снимок маршрутов."""
+    """Route snapshot is unknown or evicted."""
 
 
 class EdRouteReadError(Kd2Error):
-    """Выгрузка маршрутов недоступна по пути или корень не прочитать."""
+    """Route dump path or root is unreadable."""
 
 
 class EdRouteFormatError(Kd2Error):
-    """Это не полная XML-выгрузка конфигурации или повреждён Configuration.xml."""
+    """Incomplete configuration XML dump or malformed Configuration.xml."""
 
 
 class EdRouteResourceLimitError(Kd2Error):
-    """Превышен лимит чтения выгрузки или хранения снимков маршрутов."""
+    """Route dump read or snapshot storage limit exceeded."""
 
 
 class RulesFormatError(Kd2Error):
-    """Файл правил не разбирается или не соответствует формату КД 2."""
+    """Rules file cannot be parsed or is outside the KD 2 format."""
 
 
 class StructureFormatError(Kd2Error):
-    """Файл структуры метаданных не разбирается или не является ожидаемой выгрузкой."""
+    """Configuration structure cannot be parsed or is not the expected dump."""
 
 
 class StructureNotFoundError(Kd2Error):
-    """Структуры с таким идентификатором нет в кэше."""
+    """Configuration structure ID is absent from the cache."""
 
 
 class ObjectNotFoundError(Kd2Error):
-    """Объекта метаданных нет в структуре; `suggestions` — похожие имена."""
+    """Metadata object is absent from the structure; suggestions lists similar names."""
 
     def __init__(self, message: str, suggestions: Sequence[str] = ()) -> None:
         super().__init__(message)
@@ -121,31 +121,31 @@ class WorkspacePathError(Kd2Error):
 
 
 class ProjectNotFoundError(Kd2Error):
-    """Рабочего проекта с таким идентификатором нет."""
+    """Rules project or ED snapshot ID is not open."""
 
 
 class DuplicateProjectError(Kd2Error):
-    """Идентификатор рабочего проекта уже занят."""
+    """Rules project ID is already in use."""
 
 
 class RuleEditError(Kd2Error):
-    """Правка правила отклонена."""
+    """Rule edit was rejected."""
 
 
 class UnknownFieldError(RuleEditError):
-    """Поле не входит в схему этого вида правила."""
+    """Field is outside the schema for this rule kind."""
 
 
 class DuplicateRuleError(RuleEditError):
-    """Код или имя уже заняты в своём списке."""
+    """Code or name is already in use in its list."""
 
 
 class RuleNotFoundError(RuleEditError):
-    """Правило по адресу не найдено."""
+    """No rule was found at the address."""
 
 
 class AmbiguousAddressError(RuleNotFoundError):
-    """Адрес ПКС совпал с несколькими правилами одного контейнера."""
+    """Address matches several rules or entities; qualify it explicitly."""
 
     def __init__(self, message: str, candidates: Sequence[str] = ()) -> None:
         super().__init__(message)
@@ -154,4 +154,28 @@ class AmbiguousAddressError(RuleNotFoundError):
 
 
 class DanglingReferenceError(RuleEditError):
-    """Ссылка на отсутствующее правило, объект, свойство или значение."""
+    """Reference to a missing rule, object, property or value."""
+
+
+class RegistrationRetargetError(Kd2Error):
+    """Retargeting registration rules to another exchange plan was rejected."""
+
+
+class NotRegistrationRulesError(RegistrationRetargetError):
+    """The document is not registration rules."""
+
+
+class InvalidRegistrationNameError(RegistrationRetargetError):
+    """Empty or invalid exchange plan name or node property name."""
+
+
+class DuplicateTargetPropertyError(RegistrationRetargetError):
+    """Two different node properties are renamed to the same name."""
+
+
+class PropertyNameClashError(RegistrationRetargetError):
+    """The new name is already used by another node property in these rules."""
+
+
+class RetargetInvariantError(RegistrationRetargetError):
+    """The result changed places that retargeting must not change."""

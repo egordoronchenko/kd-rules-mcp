@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.resources import files
 from types import MappingProxyType
 from typing import Any, cast
@@ -16,7 +16,7 @@ from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
 
 from .hook import valid_identifier
 from .identity import IdentityMap, logical_path, refuse
-from .model import AttributeDraft, PreparedAuthoring
+from .model import AttributeDraft, ExtensionIdentity, PreparedAuthoring
 from .operations import unsupported_qualifiers
 
 M = "http://v8.1c.ru/8.3/MDClasses"
@@ -409,4 +409,181 @@ def dump_extension(
                     children, key, draft, metadata.language.props["LanguageCode"], identity
                 )
         result[description.kind + "s/" + description.name + ".xml"] = serialize(root)
+    return MappingProxyType(result)
+
+
+@dataclass(frozen=True, slots=True)
+class ManagerHost:
+    """Снимок принимающей конфигурации для доставки собственного менеджера.
+
+    UUID языка и плана — из основной конфигурации, а не UUID объектов расширения.
+    Оба режима совместимости берутся из основной конфигурации. Пустое значение
+    означает отсутствующие сведения и не заменяется режимом платформы сборщика.
+    """
+
+    configuration_uuid: str
+    language: Description
+    exchange_plan: Description
+    compatibility_mode: str = ""
+    identity: ExtensionIdentity = field(
+        default_factory=lambda: ExtensionIdentity("кд3м_Менеджер", "кд3м_", "Менеджер обмена ED")
+    )
+    interface_compatibility_mode: str = ""
+
+
+def manager_compatibility_modes(configuration: Description) -> tuple[str, str]:
+    """Обязательные режимы принимающей конфигурации, без умолчаний и подмен идентичностью."""
+    modes = []
+    for key in ("CompatibilityMode", "InterfaceCompatibilityMode"):
+        value = configuration.props.get(key, "")
+        if not value.strip():
+            refuse(
+                "metadata_profile_unsupported",
+                "В описании основной конфигурации не задан " + key,
+                configuration.path,
+                address="Конфигурация/" + key,
+            )
+        modes.append(value)
+    return modes[0], modes[1]
+
+
+def read_manager_host(
+    descriptions: Mapping[str, str],
+    plan_name: str,
+    *,
+    identity: ExtensionIdentity | None = None,
+) -> ManagerHost:
+    """Читает переданные XML: без поиска соседних объектов и без доступа к диску."""
+    if "Configuration.xml" not in descriptions:
+        refuse("metadata_profile_unsupported", "Не передано описание Configuration.xml")
+    config = read_description(
+        "Configuration.xml", descriptions["Configuration.xml"], "Configuration"
+    )
+    compatibility, interface = manager_compatibility_modes(config)
+    language_name = config.props.get("DefaultLanguage", "").removeprefix("Language.")
+    language_path = "Languages/" + language_name + ".xml"
+    plan_path = "ExchangePlans/" + plan_name + ".xml"
+    for path in (language_path, plan_path):
+        if path not in descriptions:
+            refuse("metadata_profile_unsupported", "Не передано описание " + path, path)
+    language = read_description(
+        language_path, descriptions[language_path], "Language", language_name
+    )
+    plan = read_description(plan_path, descriptions[plan_path], "ExchangePlan", plan_name)
+    identity = identity or ExtensionIdentity("кд3м_Менеджер", "кд3м_", "Менеджер обмена ED")
+    return ManagerHost(config.uuid, language, plan, compatibility, identity, interface)
+
+
+def manager_identity_roles(
+    host: ManagerHost, module_name: str
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Роли UUID по составу пилота: конфигурация, язык, свой модуль и план."""
+    plan_key = "ExchangePlan/" + host.exchange_plan.name
+    language_key = "Language/" + host.language.name
+    paths = [
+        "Configuration",
+        *("Contained/" + c for c in profile_template()["class_ids"]),
+        language_key,
+        "CommonModule/" + module_name,
+        plan_key,
+        plan_key + "/ThisNode",
+        *(
+            plan_key + "/GeneratedType/" + category + "/" + role
+            for category in ("Object", "Ref", "Selection", "List", "Manager")
+            for role in ("TypeId", "ValueId")
+        ),
+    ]
+    return tuple(paths), {language_key: host.language.uuid, plan_key: host.exchange_plan.uuid}
+
+
+def dump_manager_extension(
+    host: ManagerHost, module_name: str, identity: IdentityMap, *, version: str
+) -> Mapping[str, bytes]:
+    """XML собственного модуля и заимствованного плана: состав (в) пилота маршрута.
+
+    Флаги модуля: BR/CommonModules/МенеджерОбменаЧерезУниверсальныйФормат13.xml:13-20.
+    ThisNode/GeneratedType/ManagerModule — XML работавшего расширения пилота, строки 4-30.
+    """
+    root, obj = new_object("Configuration", "Configuration", identity)
+    info = node(obj, "InternalInfo")
+    for class_id in profile_template()["class_ids"]:
+        item = node(info, "xr:ContainedObject")
+        node(item, "xr:ClassId", class_id)
+        node(item, "xr:ObjectId", identity.objects[logical_path("Contained/" + class_id)])
+    props = node(obj, "Properties")
+    node(props, "ObjectBelonging", "Adopted")
+    node(props, "Name", host.identity.name)
+    synonym(props, host.identity.synonym, host.language.props["LanguageCode"])
+    node(props, "Comment")
+    node(props, "ConfigurationExtensionPurpose", "Customization")
+    node(props, "KeepMappingToExtendedConfigurationObjectsByIDs", "true")
+    node(props, "NamePrefix", host.identity.prefix)
+    node(props, "ConfigurationExtensionCompatibilityMode", host.compatibility_mode)
+    node(props, "DefaultRunMode", "ManagedApplication")
+    purpose = node(node(props, "UsePurposes"), "v8:Value", "PlatformApplication")
+    purpose.set(f"{{{XSI}}}type", "app:ApplicationUsePurpose")
+    node(props, "ScriptVariant", "Russian")
+    node(props, "DefaultRoles")
+    node(props, "Vendor")
+    node(props, "Version", version)
+    node(props, "DefaultLanguage", "Language." + host.language.name)
+    for key in profile_template()["configuration_empty_information"]:
+        node(props, key)
+    node(props, "InterfaceCompatibilityMode", host.interface_compatibility_mode)
+    children = node(obj, "ChildObjects")
+    for kind, name in (
+        ("Language", host.language.name),
+        ("CommonModule", module_name),
+        ("ExchangePlan", host.exchange_plan.name),
+    ):
+        node(children, kind, name)
+    result = {"Configuration.xml": serialize(root)}
+    language, _ = adopted_xml(host.language, identity)
+    result["Languages/" + host.language.name + ".xml"] = serialize(language)
+    root, obj = new_object("CommonModule", "CommonModule/" + module_name, identity)
+    props = node(obj, "Properties")
+    node(props, "Name", module_name)
+    synonym(
+        props, "Менеджер обмена через универсальный формат", host.language.props["LanguageCode"]
+    )
+    node(props, "Comment")
+    for key, value in (
+        ("Global", "false"),
+        ("ClientManagedApplication", "false"),
+        ("Server", "true"),
+        ("ExternalConnection", "true"),
+        ("ClientOrdinaryApplication", "true"),
+        ("ServerCall", "false"),
+        ("Privileged", "false"),
+        ("ReturnValuesReuse", "DontUse"),
+    ):
+        node(props, key, value)
+    result["CommonModules/" + module_name + ".xml"] = serialize(root)
+    key = "ExchangePlan/" + host.exchange_plan.name
+    root, obj = new_object("ExchangePlan", key, identity)
+    info = node(obj, "InternalInfo")
+    node(info, "xr:ThisNode", identity.objects[logical_path(key + "/ThisNode")])
+    for category in ("Object", "Ref", "Selection", "List", "Manager"):
+        item = node(
+            info,
+            "xr:GeneratedType",
+            name="ExchangePlan" + category + "." + host.exchange_plan.name,
+            category=category,
+        )
+        for role in ("TypeId", "ValueId"):
+            node(
+                item,
+                "xr:" + role,
+                identity.objects[logical_path(key + "/GeneratedType/" + category + "/" + role)],
+            )
+    state = node(info, "xr:PropertyState")
+    node(state, "xr:Property", "ManagerModule")
+    node(state, "xr:State", "Extended")
+    props = node(obj, "Properties")
+    node(props, "ObjectBelonging", "Adopted")
+    node(props, "Name", host.exchange_plan.name)
+    node(props, "Comment")
+    node(props, "ExtendedConfigurationObject", host.exchange_plan.uuid)
+    node(obj, "ChildObjects")
+    result["ExchangePlans/" + host.exchange_plan.name + ".xml"] = serialize(root)
     return MappingProxyType(result)

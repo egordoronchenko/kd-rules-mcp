@@ -27,7 +27,11 @@ from kd2_rules_mcp.ed.layer_reader import read_dump
 from kd2_rules_mcp.ed.layers import compose_manager, read_layers
 from kd2_rules_mcp.errors import AmbiguousAddressError, EdReadError, Kd2Error, RuleNotFoundError
 from kd2_rules_mcp.service import ed_views as views
-from kd2_rules_mcp.validation.ed_projection import effective_document, select_context
+from kd2_rules_mcp.validation.ed_projection import (
+    effective_document,
+    event_direction,
+    select_context,
+)
 
 KINDS = frozenset({"layer", "change", "hook", "layer_unknown"})
 
@@ -42,11 +46,19 @@ class ContextView:
 
 
 @dataclass(frozen=True)
+class ChangeEntry:
+    version: EntityVersion
+    address: str
+    contexts: tuple[tuple[str, bool], ...]
+
+
+@dataclass(frozen=True)
 class LayerSnapshot:
     manager: LayeredManager
     key: tuple[str, ...]
     dependencies: tuple[tuple[Path, str | None], ...]
     contexts: tuple[ContextView, ...]
+    changes: tuple[ChangeEntry, ...] = ()
 
 
 def checked_dump(root: Path, required_module: str | None = None):
@@ -407,6 +419,27 @@ def snapshot(manager: LayeredManager, key: tuple[str, ...]) -> LayerSnapshot:
             pkpd=tuple(p for p in payloads if isinstance(p, ed.PredefinedRule)),
             parameters=tuple(p for p in payloads if isinstance(p, ed.Parameter)),
         )
+        # Обзор хранит last_known привязки неизвестного ПКО. Перехват его тела
+        # остаётся объявленным обработчиком слоя, даже когда ПКО исключён из проверок.
+        body_origins = {
+            change.origin
+            for rule in (*document.pko, *document.pod)
+            for event in rule.events
+            if event_direction(event.event) in (None, context.direction)
+            for change in getattr(event, "body_changes", ())
+        }
+        body_handler_ids = {
+            hook.routine.entity_id for hook in manager.hooks if hook.origin in body_origins
+        }
+        document = replace(
+            document,
+            routines=tuple(
+                replace(routine, roles=routine.roles | {"handler"})
+                if routine.entity_id in body_handler_ids
+                else routine
+                for routine in document.routines
+            ),
+        )
         document = replace(
             document,
             pko=tuple(
@@ -461,7 +494,132 @@ def snapshot(manager: LayeredManager, key: tuple[str, ...]) -> LayerSnapshot:
     dependencies = tuple(
         (p, source_hashes[p] if p in source_hashes else file_hash(p)) for p in sorted(paths)
     )
-    return LayerSnapshot(manager, key, dependencies, tuple(contexts))
+    return LayerSnapshot(
+        manager, key, dependencies, tuple(contexts), change_index(manager, contexts)
+    )
+
+
+def change_index(manager: LayeredManager, contexts: list[ContextView]) -> tuple[ChangeEntry, ...]:
+    """Индекс истории строится один раз; адрес и контексты не ищутся для каждой страницы."""
+    root_ids = {v.logical_id for v in manager.revisions}
+    revisions = (
+        *manager.revisions,
+        *(v for view in contexts for v in view.versions.values() if v.logical_id not in root_ids),
+    )
+    addresses = {}
+    for hit in build_layer_addresses(manager).by_address.values():
+        if hit.entity is not None and hit.address.startswith("Слой/"):
+            addresses.setdefault(
+                (hit.address.split("/")[1], hit.entity.entity_id, entity_signature(hit.entity)),
+                hit.address,
+            )
+    source_index = build_addresses(manager.source_document or manager.base)
+    grouped: dict[tuple, tuple[EntityVersion, set[tuple[str, bool]]]] = {}
+    for version in revisions:
+        if version.state == "base":
+            continue
+        key = (
+            version.revision_id,
+            version.payload,
+            version.changes,
+            version.state,
+            version.certainty,
+        )
+        if version.logical_id not in root_ids and version.payload is not None:
+            key = (
+                version.logical_id,
+                entity_signature(version.payload),
+                version.state,
+                version.certainty,
+                tuple(c.operation_id for c in version.changes),
+            )
+        if key not in grouped:
+            grouped[key] = (version, set())
+        grouped[key][1].add((version.direction, version.headers_only))
+    entries = []
+    for version, visible in grouped.values():
+        payload = version.payload
+        address = (
+            addresses.get(
+                (escape_segment(version.layer_id), payload.entity_id, entity_signature(payload))
+            )
+            if payload
+            else None
+        )
+        if address is None:
+            address = f"Слой/{escape_segment(version.layer_id)}/" + (
+                views.address_of(payload, source_index)
+                if payload
+                else f"Ревизия/{escape_segment(version.revision_id)}"
+            )
+        entries.append(ChangeEntry(version, address, tuple(sorted(visible))))
+    return tuple(entries)
+
+
+def change_page(
+    snap: LayerSnapshot,
+    direction: str | None,
+    headers_only: bool,
+    layer: str | None,
+    entity_id: str | None,
+    text: str | None,
+    offset: int,
+    limit: int,
+    format_object: str | None = None,
+    metadata_object: str | None = None,
+) -> dict[str, Any]:
+    """Линейный отбор по индексу; дорогие строки ответа создаются только для страницы."""
+    selected = select_views(snap, direction, headers_only)
+    if layer is not None and layer not in {item.id for item in snap.manager.layers}:
+        raise ValueError(f"Неизвестный слой: {layer}; выберите id из ed_list(kind=layer)")
+    if entity_id is not None and not any(
+        entity_id in (v.logical_id, v.revision_id, getattr(v.payload, "entity_id", None))
+        for v in (*snap.manager.revisions, *(v for c in snap.contexts for v in c.versions.values()))
+    ):
+        raise RuleNotFoundError(f"Сущность истории не найдена: {entity_id}")
+    visible = {(v.context.direction, v.context.headers_only) for v in selected}
+    matches = []
+    for entry in snap.changes:
+        version = entry.version
+        if not visible.intersection(entry.contexts):
+            continue
+        if layer is not None and version.layer_id != layer:
+            continue
+        if entity_id is not None and entity_id not in (
+            version.logical_id,
+            version.revision_id,
+            getattr(version.payload, "entity_id", None),
+        ):
+            continue
+        if format_object is not None or metadata_object is not None:
+            continue  # У строки истории нет полей сторон, как и в прежнем ответе.
+        if text is not None and not any(
+            text.casefold() in value.casefold()
+            for value in (getattr(version.payload, "name", ""), entry.address)
+        ):
+            continue
+        matches.append(entry)
+    result = views.page(matches, offset, limit)
+    result["items"] = [
+        {
+            "address": entry.address,
+            "kind": "change",
+            "name": getattr(entry.version.payload, "name", ""),
+            "entity_id": entry.version.logical_id,
+            "revision_id": entry.version.revision_id,
+            "state": entry.version.state,
+            "layer_id": entry.version.layer_id,
+            "certainty": entry.version.certainty,
+            "changed_fields": sorted({".".join(c.path) for c in entry.version.changes}),
+            "contexts": [
+                context_row(v.context)
+                for v in selected
+                if (v.context.direction, v.context.headers_only) in entry.contexts
+            ],
+        }
+        for entry in result["items"]
+    ]
+    return result
 
 
 def file_hash(path: Path) -> str | None:
@@ -532,7 +690,18 @@ def composition(snap: LayerSnapshot, *, overview: bool = False) -> dict[str, Any
         state: sum(s == state for _, s in changed) for state in ("added", "changed", "deleted")
     }
     unknown = sum(op.kind == "unknown" or op.resolution == "unknown" for op in manager.operations)
+    executor_warning = (
+        {
+            "executor_note": (
+                "Выводы проверок по типовому исполнителю для этой базы "
+                "не гарантированы; тела перехватов не разбирались."
+            )
+        }
+        if manager.executor_hooks
+        else {}
+    )
     result = {
+        **executor_warning,
         "composition_status": manager.status,
         "layers": {
             "total": len(manager.layers),
@@ -546,12 +715,28 @@ def composition(snap: LayerSnapshot, *, overview: bool = False) -> dict[str, Any
             "total": len(manager.skipped),
             "by_reason": dict(Counter(s.reason for s in manager.skipped)),
         },
+        "unselected_managers": [
+            {
+                "name": name,
+                "layer_id": layer_id,
+                "file_id": source.file_id,
+                "reason": "Собственный модуль менеджера расширения, маршрутом не выбран",
+            }
+            for name, layer_id, source in manager.unselected_managers
+        ],
+        "executor_overrides": [
+            {"module": module, "procedure": target, "kind": kind, "origin": origin_row(origin)}
+            for module, target, kind, origin in manager.executor_hooks
+        ],
     }
     if not overview:
         return result
     return {
+        **executor_warning,
         "status": manager.status,
         "base_parse_status": manager.base.parse_status.value,
+        "unselected_managers": result["unselected_managers"],
+        "executor_overrides": result["executor_overrides"],
         "effective_counts": effective,
         "changes_summary": changes,
         "known_operations": len(manager.operations) - unknown,
@@ -651,6 +836,19 @@ def list_rows(
     metadata_object: str | None = None,
     text: str | None = None,
 ) -> list[dict[str, Any]]:
+    if kind == "change":
+        return change_page(
+            snap,
+            direction,
+            headers_only,
+            layer,
+            entity_id,
+            text,
+            0,
+            max(len(snap.changes), 1),
+            format_object,
+            metadata_object,
+        )["items"]
     selected = select_views(snap, direction, headers_only)
     manager = snap.manager
     if layer is not None and layer not in {item.id for item in manager.layers}:
@@ -712,76 +910,6 @@ def list_rows(
             for n, s in enumerate(manager.skipped, 1)
             if layer is None or s.origin.layer_id == layer
         ]
-    if kind == "change":
-        rows = []
-        seen = set()
-        for version in revisions:
-            if version.state == "base" or (layer is not None and version.layer_id != layer):
-                continue
-            if entity_id is not None and entity_id not in (
-                version.logical_id,
-                version.revision_id,
-                getattr(version.payload, "entity_id", None),
-            ):
-                continue
-            if not any(
-                version.direction == view.context.direction
-                and version.headers_only == view.context.headers_only
-                for view in selected
-            ):
-                continue
-            key = (
-                version.revision_id,
-                version.payload,
-                version.changes,
-                version.state,
-                version.certainty,
-            )
-            if version.logical_id not in root_ids and version.payload is not None:
-                key = (
-                    version.logical_id,
-                    entity_signature(version.payload),
-                    version.state,
-                    version.certainty,
-                    tuple(c.operation_id for c in version.changes),
-                )
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append(
-                {
-                    "address": revision_address(manager, version),
-                    "kind": kind,
-                    "name": getattr(version.payload, "name", ""),
-                    "entity_id": version.logical_id,
-                    "revision_id": version.revision_id,
-                    "state": version.state,
-                    "layer_id": version.layer_id,
-                    "certainty": version.certainty,
-                    "changed_fields": sorted({".".join(c.path) for c in version.changes}),
-                    "contexts": [
-                        context_row(v.context)
-                        for v in selected
-                        if any(
-                            r.revision_id == version.revision_id
-                            and (
-                                r.payload == version.payload
-                                or (
-                                    version.logical_id not in root_ids
-                                    and r.payload is not None
-                                    and version.payload is not None
-                                    and entity_signature(r.payload)
-                                    == entity_signature(version.payload)
-                                )
-                            )
-                            and r.direction == v.context.direction
-                            and r.headers_only == v.context.headers_only
-                            for r in revisions
-                        )
-                    ],
-                }
-            )
-        return rows
     rows = []
     grouped: dict[str, dict[str, Any]] = {}
     for view in selected:
@@ -846,30 +974,6 @@ def list_rows(
         key=lambda row: (file_order.get(row["file_id"], 0), row["line_start"], row["address"])
     )
     return rows
-
-
-def revision_address(manager: LayeredManager, version: EntityVersion) -> str:
-    for hit in build_layer_addresses(manager).by_address.values():
-        if (
-            version.payload is not None
-            and hit.entity is not None
-            and hit.address.startswith(f"Слой/{escape_segment(version.layer_id)}/")
-            and hit.entity.entity_id == version.payload.entity_id
-            and entity_signature(hit.entity) == entity_signature(version.payload)
-        ):
-            return hit.address
-        if (
-            hit.version
-            and hit.version.revision_id == version.revision_id
-            and hit.version.payload == version.payload
-        ):
-            return hit.address
-    if version.payload is not None:
-        source = manager.source_document or manager.base
-        return f"Слой/{escape_segment(version.layer_id)}/" + views.address_of(
-            version.payload, build_addresses(source)
-        )
-    return f"Слой/{escape_segment(version.layer_id)}/Ревизия/{escape_segment(version.revision_id)}"
 
 
 def _ambiguous(address: str, candidates: tuple[str, ...], offset: int, limit: int):

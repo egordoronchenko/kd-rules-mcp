@@ -180,6 +180,8 @@ def row(
         # Объект правила уже есть в адресе; в строке свойства нужны сами свойства сторон.
         result["configuration_property"] = short(entity.configuration_property)
         result["format_property"] = short(entity.format_property)
+        if entity.namespace:
+            result["namespace"] = entity.namespace
     else:
         if configuration is not None:
             result["configuration_object"] = short(configuration)

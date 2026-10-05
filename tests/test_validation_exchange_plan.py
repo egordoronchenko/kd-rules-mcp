@@ -11,8 +11,10 @@ from kd2_rules_mcp.structures.db import SCHEMA
 from kd2_rules_mcp.structures.store import StructureStore
 from kd2_rules_mcp.validation.exchange_plan import (
     AMBIGUOUS_PKO,
+    ATTACHED,
     DOCUMENT_POSTING,
     ENUM_PKZ,
+    EXPORT_CACHE,
     EXPORT_KEY,
     INCOMING_KEY,
     MODIFIED_FLAG,
@@ -94,12 +96,14 @@ def exchange(
     target_version: str = "9.9.9.9",
     events: str = "",
     algorithms: str = "",
+    processors: str = "",
 ) -> bytes:
     return f"""<ПравилаОбмена>
 <ВерсияФормата>2.01</ВерсияФормата>
 <Источник ВерсияКонфигурации="{source_version}">{source}</Источник>
 <Приемник ВерсияКонфигурации="{target_version}">{target}</Приемник>
 {events}
+{processors}
 <ПравилаКонвертацииОбъектов>{pko}</ПравилаКонвертацииОбъектов>
 <ПравилаВыгрузкиДанных>{pvd}</ПравилаВыгрузкиДанных>
 <Алгоритмы>{algorithms}</Алгоритмы>
@@ -426,6 +430,330 @@ def test_export_key_without_remembering_warns(sides: tuple[sqlite3.Connection, .
     assert skips(skipped, EXPORT_KEY) == [
         "ПКО «Номенклатура»: «ПередВыгрузкой» непрозрачен — не видно, "
         "включает ли обработчик запоминание выгруженных"
+    ]
+
+
+def test_export_cache_without_key_warns_and_does_not_overlap_export_key(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    """Включение кэша без ключа — отдельное замечание; оба присваивания не дают ни одного."""
+    source, target = sides
+    remember = "<ПередВыгрузкой>ЗапоминатьВыгруженные = Истина;</ПередВыгрузкой>"
+    warned = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=remember)),
+        source,
+        target,
+    )
+    assert [(issue.address, issue.message) for issue in hits(warned, EXPORT_CACHE)] == [
+        (
+            "ПКО «Номенклатура»",
+            "«ПередВыгрузкой» включает запоминание выгруженных и не задаёт "
+            "«КлючВыгружаемыхДанных». В обычном входе ключ остаётся именем ПКО, "
+            "поэтому разные объекты принимаются за один",
+        )
+    ]
+    assert hits(warned, EXPORT_KEY) == []
+    both = (
+        "<ПередВыгрузкой>ЗапоминатьВыгруженные = Истина;\n"
+        "КлючВыгружаемыхДанных = Ссылка;</ПередВыгрузкой>"
+    )
+    clean = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=both)), source, target
+    )
+    assert hits(clean, EXPORT_CACHE) == []
+    assert hits(clean, EXPORT_KEY) == []
+    comment = "<ПередВыгрузкой>// ЗапоминатьВыгруженные = Истина;</ПередВыгрузкой>"
+    assert (
+        hits(
+            run(
+                exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=comment)),
+                source,
+                target,
+            ),
+            EXPORT_CACHE,
+        )
+        == []
+    )
+    literal = '<ПередВыгрузкой>Сообщить("ЗапоминатьВыгруженные = Истина");</ПередВыгрузкой>'
+    assert (
+        hits(
+            run(
+                exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=literal)),
+                source,
+                target,
+            ),
+            EXPORT_CACHE,
+        )
+        == []
+    )
+    disabled = remember
+    assert (
+        hits(
+            run(
+                exchange(
+                    pko(
+                        "Номенклатура",
+                        NOMENCLATURE,
+                        NOMENCLATURE,
+                        extra=disabled,
+                        attrs=' Отключить="true"',
+                    )
+                ),
+                source,
+                target,
+            ),
+            EXPORT_CACHE,
+        )
+        == []
+    )
+    compared = (
+        "<ПередВыгрузкой>Если ЗапоминатьВыгруженные = Истина Тогда\nКонецЕсли;</ПередВыгрузкой>"
+    )
+    assert (
+        hits(
+            run(
+                exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=compared)),
+                source,
+                target,
+            ),
+            EXPORT_CACHE,
+        )
+        == []
+    )
+    # Флаг ПКО уже включён по умолчанию, но обычную выгрузку он не запоминает (БСП:398).
+    flag_on = (
+        "<Правило><Код>Н</Код><ПередВыгрузкой>ЗапоминатьВыгруженные = Истина;"
+        "</ПередВыгрузкой></Правило>"
+    )
+    assert hits(run(exchange(flag_on), source, target), EXPORT_CACHE)
+    opaque = "<ПередВыгрузкой>ЗапоминатьВыгруженные = Истина;\nВыполнить(Код);</ПередВыгрузкой>"
+    skipped = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=opaque)), source, target
+    )
+    assert hits(skipped, EXPORT_CACHE) == []
+    assert skips(skipped, EXPORT_CACHE) == [
+        "ПКО «Номенклатура»: «ПередВыгрузкой» непрозрачен — не видно, задаёт ли обработчик "
+        "«КлючВыгружаемыхДанных» при включённом запоминании"
+    ]
+    unknown = "<ПередВыгрузкой>ЗапоминатьВыгруженные = ФлагКэша;</ПередВыгрузкой>"
+    unknown_report = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=unknown)), source, target
+    )
+    assert hits(unknown_report, EXPORT_CACHE) == []
+    assert skips(unknown_report, EXPORT_CACHE)
+    via_algorithm = "<ПередВыгрузкой>Выполнить(Алгоритмы.Запомнить);</ПередВыгрузкой>"
+    algorithms = (
+        '<Алгоритм Имя="Запомнить"><Текст>ЗапоминатьВыгруженные = Истина;</Текст></Алгоритм>'
+    )
+    from_algorithm = run(
+        exchange(
+            pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=via_algorithm),
+            algorithms=algorithms,
+        ),
+        source,
+        target,
+    )
+    assert [issue.address for issue in hits(from_algorithm, EXPORT_CACHE)] == ["ПКО «Номенклатура»"]
+
+
+def test_attached_processing_requires_an_instance_the_loader_does_not_create(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    """`ДопОбработки` остаётся пустой структурой, даже если обработка описана в правилах."""
+    source, target = sides
+    processors = (
+        '<Обработки><Обработка Имя="Библиотека" Наименование="Библиотека">'
+        "AAAA</Обработка></Обработки>"
+    )
+    call = "<ПередВыгрузкой>ДопОбработки.Библиотека.Выполнить();</ПередВыгрузкой>"
+    warned = run(
+        exchange(
+            pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=call),
+            processors=processors,
+        ),
+        source,
+        target,
+    )
+    found = hits(warned, ATTACHED)
+    assert len(found) == 1
+    assert found[0].address == "ПКО «Номенклатура»"
+    assert "Библиотека" in found[0].message
+    assert "не создаёт экземпляр" in found[0].message
+    bracket = '<ПередВыгрузкой>ДопОбработки["Библиотека"].Выполнить();</ПередВыгрузкой>'
+    bracketed = run(
+        exchange(
+            pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=bracket),
+            processors=processors,
+        ),
+        source,
+        target,
+    )
+    assert len(hits(bracketed, ATTACHED)) == 1
+    own = (
+        "<ПередВыгрузкой>ДопОбработки.Библиотека = Создать();\n"
+        "ДопОбработки.Библиотека.Выполнить();</ПередВыгрузкой>"
+    )
+    assert (
+        hits(
+            run(
+                exchange(
+                    pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=own),
+                    processors=processors,
+                ),
+                source,
+                target,
+            ),
+            ATTACHED,
+        )
+        == []
+    )
+    inserted = (
+        '<ПередВыгрузкой>ДопОбработки.Вставить("Библиотека", Создать());\n'
+        "ДопОбработки.Библиотека.Выполнить();</ПередВыгрузкой>"
+    )
+    assert (
+        hits(
+            run(
+                exchange(
+                    pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=inserted),
+                    processors=processors,
+                ),
+                source,
+                target,
+            ),
+            ATTACHED,
+        )
+        == []
+    )
+    comment = "<ПередВыгрузкой>// ДопОбработки.Библиотека.Выполнить();</ПередВыгрузкой>"
+    assert (
+        hits(
+            run(
+                exchange(
+                    pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=comment),
+                    processors=processors,
+                ),
+                source,
+                target,
+            ),
+            ATTACHED,
+        )
+        == []
+    )
+    literal = '<ПередВыгрузкой>Сообщить("ДопОбработки.Библиотека");</ПередВыгрузкой>'
+    assert (
+        hits(
+            run(
+                exchange(
+                    pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=literal),
+                    processors=processors,
+                ),
+                source,
+                target,
+            ),
+            ATTACHED,
+        )
+        == []
+    )
+    disabled = call
+    assert (
+        hits(
+            run(
+                exchange(
+                    pko(
+                        "Номенклатура",
+                        NOMENCLATURE,
+                        NOMENCLATURE,
+                        extra=disabled,
+                        attrs=' Отключить="true"',
+                    ),
+                    processors=processors,
+                ),
+                source,
+                target,
+            ),
+            ATTACHED,
+        )
+        == []
+    )
+    missing = "<ПередВыгрузкой>ДопОбработки.Чужая.Выполнить();</ПередВыгрузкой>"
+    missed = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=missing)),
+        source,
+        target,
+    )
+    missed_hits = hits(missed, ATTACHED)
+    assert len(missed_hits) == 1
+    assert "не описана" in missed_hits[0].message
+    dynamic = "<ПередВыгрузкой>ДопОбработки[Имя].Выполнить();</ПередВыгрузкой>"
+    dynamic_report = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=dynamic)),
+        source,
+        target,
+    )
+    assert hits(dynamic_report, ATTACHED) == []
+    assert skips(dynamic_report, ATTACHED) == [
+        "ПКО «Номенклатура»: «ПередВыгрузкой» задаёт имя вложенной обработки кодом — "
+        "это имя не сверяется"
+    ]
+    algorithms = (
+        '<Алгоритм Имя="Вызов"><Текст>ДопОбработки.Библиотека.Выполнить();</Текст></Алгоритм>'
+    )
+    from_algorithm = run(
+        exchange(
+            pko(
+                "Номенклатура",
+                NOMENCLATURE,
+                NOMENCLATURE,
+                extra="<ПередВыгрузкой>Алгоритмы.Вызов();</ПередВыгрузкой>",
+            ),
+            algorithms=algorithms,
+            processors=processors,
+        ),
+        source,
+        target,
+    )
+    algorithm_hits = hits(from_algorithm, ATTACHED)
+    assert [issue.address for issue in algorithm_hits] == ["алгоритм «Вызов»"]
+    assert "Библиотека" in algorithm_hits[0].message
+
+
+def test_attached_processing_instance_created_elsewhere_silences_every_reader(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    """Экземпляр создают один раз (алгоритм, событие конвертации), читают в других обработчиках."""
+    source, target = sides
+    call = "<ПередВыгрузкой>ДопОбработки.Библиотека.Выполнить();</ПередВыгрузкой>"
+    created = (
+        '<Алгоритм Имя="Создать"><Текст>ДопОбработки.Вставить("Библиотека", '
+        "Обработки.Библиотека.Создать());</Текст></Алгоритм>"
+    )
+    report = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=call), algorithms=created),
+        source,
+        target,
+    )
+    assert hits(report, ATTACHED) == []
+    other = (
+        '<Алгоритм Имя="Создать"><Текст>ДопОбработки.Вставить("Другая", '
+        "Обработки.Другая.Создать());</Текст></Алгоритм>"
+    )
+    still = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=call), algorithms=other),
+        source,
+        target,
+    )
+    assert len(hits(still, ATTACHED)) == 1
+    whole = '<Алгоритм Имя="Создать"><Текст>ДопОбработки = ПолучитьОбработки();</Текст></Алгоритм>'
+    replaced = run(
+        exchange(pko("Номенклатура", NOMENCLATURE, NOMENCLATURE, extra=call), algorithms=whole),
+        source,
+        target,
+    )
+    assert hits(replaced, ATTACHED) == []
+    assert skips(replaced, ATTACHED) == [
+        "алгоритм «Создать»: «Текст» присваивает «ДопОбработки» целиком — не видно, "
+        "создан ли экземпляр"
     ]
 
 

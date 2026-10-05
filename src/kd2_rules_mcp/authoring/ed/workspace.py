@@ -205,6 +205,7 @@ class ManagerWorkspace:
         *,
         expected_revision: str,
         expected_preview_hash: str,
+        confirmations: tuple[tuple[str, str], ...] = (),
     ) -> ManagerProject:
         with self._lock, self._disk_lock(project_id):
             project = self.get(project_id)
@@ -214,6 +215,7 @@ class ManagerWorkspace:
                 operations,
                 expected_revision=expected_revision,
                 expected_preview_hash=expected_preview_hash,
+                confirmations=confirmations,
             )
             if updated is project.model:
                 return project

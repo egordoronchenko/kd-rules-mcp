@@ -30,7 +30,16 @@ def compare_models(before: ManagerModel, after: ManagerModel) -> ManagerDiff:
     old_addresses, new_addresses = model_addresses(before), model_addresses(after)
     old = {m.logical_id: m for m in before.members()}
     new = {m.logical_id: m for m in after.members()}
-    pairs = {key: key for key in old if key in new}
+    same_sources = tuple((s.file_id, s.sha256) for s in before.source_files) == tuple(
+        (s.file_id, s.sha256) for s in after.source_files
+    )
+    # При повторном чтении позиционный ID может случайно совпасть с ID другого
+    # соседнего листа. Устойчивые ID имеют приоритет только в одном снимке исходника.
+    pairs = {
+        key: key
+        for key in old
+        if key in new and (same_sources or old_addresses[key] == new_addresses[key])
+    }
     matched_targets = set(pairs.values())
     unmatched = {new_addresses[key]: key for key in new if key not in matched_targets}
     for key in old:
@@ -62,7 +71,7 @@ def compare_models(before: ManagerModel, after: ManagerModel) -> ManagerDiff:
         if isinstance(member, RetainedBlock):
             excluded |= {"file_id", "source_hash", "char_start", "char_end"}
         if isinstance(member, CodeUnit):
-            excluded |= {"file_id", "body_start", "body_end"}
+            excluded |= {"file_id", "body_start", "body_end", "origin"}
         return {
             f.name: ids[getattr(member, f.name).logical_id]
             if f.name == "identification"

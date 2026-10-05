@@ -42,3 +42,4 @@ tmp/
 
 # Кэш uv для воркера Codex в worktree (скилл codex-delegate)
 /.uv-cache/
+docs/plans/evals/2026-10-05-prod-queries/*.xlsx

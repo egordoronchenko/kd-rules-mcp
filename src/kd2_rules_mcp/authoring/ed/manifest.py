@@ -36,6 +36,31 @@ def json_bytes(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
+def manager_decision_hash(inputs: Mapping[str, object]) -> str:
+    """Отдельный контракт ed-manager/1; хеш не зависит от прежней сборки и времени."""
+    return sha256(json_bytes(dict(inputs)))
+
+
+def manager_changes(
+    entities: Mapping[str, str],
+    previous: Mapping[str, str] | None = None,
+    *,
+    reasons: tuple[str, ...] = (),
+) -> dict[str, tuple[str, ...]]:
+    """Дельта отпечатков по устойчивым ID; отпечаток включает и порождённый текст."""
+    previous = previous or {}
+    result = {
+        "added": tuple(sorted(entities.keys() - previous.keys())),
+        "changed": tuple(
+            sorted(k for k in entities.keys() & previous.keys() if entities[k] != previous[k])
+        ),
+        "removed": tuple(sorted(previous.keys() - entities.keys())),
+    }
+    if reasons:
+        result["reasons"] = reasons
+    return result
+
+
 def operation_dict(op: AddHeaderProperty) -> dict:
     draft = op.new_attribute
     return {
