@@ -90,6 +90,7 @@ from kd2_rules_mcp.validation.ed_authoring import (
     check_profile,
     compare_reports,
     enforce_delta,
+    own_property_version_notice,
     prepare_authoring,
     prepare_handler_operations,
 )
@@ -1565,7 +1566,11 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             for n in bundle.prepared.notices
             if not (n.id == "ed.author.missing_value_clears" and n.operation_id in preserved)
         }
-        notices.update((n.notice_id, n) for n in plan.notices)
+        for notice in plan.notices:
+            # Перечень версий value_range уже собран подготовкой прямой ПКС.
+            if notice.id == "ed.author.value_range" and notice.notice_id in notices:
+                continue
+            notices[notice.notice_id] = notice
         for op in plan.operations:
             unavailable = tuple(
                 k for k, schema in entry.value.schemas.items() if not isinstance(schema, EdSchema)
@@ -1579,36 +1584,12 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     unavailable,
                 )
                 notices[notice.notice_id] = notice
-            incompatible = tuple(
-                c.before.version
-                for c in other_comparisons
-                if c.before.direction == op.target.direction and not c.delta.no_new_issues
-            )
-            if incompatible:
-                reasons = sorted(
-                    {
-                        f"Версия {c.before.version}: {i.address}: {i.message}"
-                        for c in other_comparisons
-                        if c.before.direction == op.target.direction
-                        and c.before.version in incompatible
-                        for i in c.delta.new
-                    }
-                    | {
-                        f"Версия {c.before.version}: {s.check}: {s.reason}"
-                        for c in other_comparisons
-                        if c.before.direction == op.target.direction
-                        and c.before.version in incompatible
-                        for s in c.delta.new_relevant_skipped
-                    }
-                )
-                notice = Notice(
-                    "ed.author.other_version_incompatible",
-                    op.operation_id,
-                    op.target.pko_address,
-                    "Доработка несовместима с другими версиями менеджера: " + "; ".join(reasons),
-                    tuple(sorted(set(incompatible))),
-                )
-                notices[notice.notice_id] = notice
+            # Текст прямой ПКС остаётся таким, как до перехода на новую форму.
+            # Алгоритмическая ПКС называет только своё свойство; обработчик чужую ПКС не получает.
+            if isinstance(op, AddAlgorithmicHeaderProperty):
+                own = own_property_version_notice(op, tuple(other_comparisons))
+                if own is not None:
+                    notices[own.notice_id] = own
         validation = json.loads(bundle.files["validation.json"])
 
         def profile_rows(comparisons):
@@ -2124,7 +2105,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     level=level,
                     check_prefix=check_prefix,
                     address_prefix=address_prefix,
-                    rebuild=bool(previous and (changed_inputs or drop_operations)),
+                    rebuild=bool(changed_inputs),
                     changed_inputs=changed_inputs,
                     handler_plans=handler_plans,
                     previous=previous,

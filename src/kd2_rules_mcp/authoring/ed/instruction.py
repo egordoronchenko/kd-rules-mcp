@@ -333,6 +333,7 @@ def render_handlers_instruction(
     projects: tuple[str, ...] = (),
     form_evidence: Mapping[str, bool] | None = None,
     pko_names: Mapping[str, str] | None = None,
+    extension_version: str = "",
 ) -> str:
     """Инструкция §7. Подстановки только для применимых событий и preset.
 
@@ -350,10 +351,12 @@ def render_handlers_instruction(
         isinstance(op, AddHeaderProperty) and op.target.direction == "receive"
         for op in plan.operations
     )
+    has_receive = any(op.target.direction == "receive" for op in plan.operations)
     for condition, active in (
         ("has_missing_section", has_missing_section),
         ("has_preset", has_preset),
         ("no_preset", has_missing_section and not has_preset),
+        ("has_receive", has_receive),
         ("extension", delivery == "extension"),
         ("manual", delivery != "extension"),
     ):
@@ -393,12 +396,10 @@ def render_handlers_instruction(
             f"реквизиту {prop.configuration_attribute} найденного объекта прежнее значение: "
             "без обработчика "
             "обычная загрузка реквизит очищает. У нового объекта реквизит остаётся с начальным "
-            "значением. Пустое значение отправитель в сообщение не пишет, поэтому очистить "
-            "реквизит приёмника пустым значением нельзя — сохранится прежнее; для намеренной "
-            "очистки нужна отдельная договорённость сторон. Подписки и обработчики конфигурации "
-            "при записи объекта могут изменить реквизит независимо от этого правила. "
-            "Явно переданное пустое значение (пустой элемент в сообщении) реквизит очищает: "
-            "обработчик сохраняет значение только при отсутствии свойства."
+            "значением. Отправитель пустое значение в сообщение не пишет, поэтому «очистили "
+            "в источнике» до приёмника не доходит — значение сохранится. Если же в сообщении "
+            "свойство передано явно пустым элементом, реквизит очищается. Подписки и обработчики "
+            "конфигурации при записи объекта могут изменить реквизит независимо от этого правила."
         )
     evidence = {
         binding.handler_name: binding.runtime_verified
@@ -448,6 +449,8 @@ def render_handlers_instruction(
             "runtime_verified": str(plan.runtime_verified).lower(),
             "runtime_status": status,
             "runtime_probes": handler_runtime_probes(plan, names, paths),
+            "version_probe": extension_version_probe(extension_name, extension_version),
+            "extension_version": extension_version,
             "unverified_table": table(
                 ("Форма не проверена обменом",), ((name,) for name in unverified)
             )
@@ -505,15 +508,30 @@ def handler_runtime_probes(
                 [
                     f'Правило = Правила.Найти({bsl_string(name)}, "ИмяПКО");',
                     "Если Правило = Неопределено Тогда",
-                    f"\tСообщить({bsl_string('ПКО ' + name + ' отсутствует')});",
+                    f"\tРезультат = {bsl_string('ПКО ' + name + ' отсутствует')};",
+                    "\tСообщить(Результат);",
                     "Иначе",
-                    f"\tСообщить(Строка(Правило.{binding.event})); "
-                    f"// Ожидается: {binding.handler_name}",
+                    f"\tРезультат = Строка(Правило.{binding.event});",
+                    f"\tСообщить(Результат); // Ожидается: {binding.handler_name}",
                     "КонецЕсли;",
                 ]
             )
         blocks.append("```bsl\n" + "\n".join(lines) + "\n```")
     return "\n\n".join(blocks) or "В комплекте нет привязок обработчиков."
+
+
+def extension_version_probe(name: str, version: str) -> str:
+    """Проба свойства «Версия»: результат и в переменную, и в сообщение."""
+    lines = [
+        f'Найденные = РасширенияКонфигурации.Получить(Новый Структура("Имя", {bsl_string(name)}));',
+        "Если Найденные.Количество() = 0 Тогда",
+        '\tРезультат = "";',
+        "Иначе",
+        "\tРезультат = Найденные[0].Версия;",
+        "КонецЕсли;",
+        f"Сообщить(Результат); // Ожидается: {version}",
+    ]
+    return "```bsl\n" + "\n".join(lines) + "\n```"
 
 
 def _bindings_in_order(plan: HandlerOperationsPlan) -> tuple[HandlerBindingPlan, ...]:

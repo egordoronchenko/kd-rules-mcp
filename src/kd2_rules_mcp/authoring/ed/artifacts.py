@@ -1,5 +1,6 @@
 """Чистая политика имён и владения комплектом; файловую систему обслуживает сервис."""
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from uuid import UUID
@@ -11,6 +12,7 @@ from kd2_rules_mcp.ed.model import ObjectRule
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
 
 from .handler_render import procedure_block
+from .handlers import canonical_operations_bytes
 from .hook import valid_identifier
 from .identity import IdentityMap, refuse
 from .manifest import ArtifactManifest, json_bytes, sha256, validate_previous
@@ -122,6 +124,7 @@ def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring
         raise ValueError("Нужен хотя бы один комплект")
     if len(bundles) == 1:
         return bundles[0]
+    handlers_form = any(b.manifest.schema_version >= 2 for b in bundles)
     bundles = sorted(bundles, key=lambda b: b.prepared.generated_hook.source.path)
     first = bundles[0]
     files: dict[str, bytes] = {}
@@ -163,6 +166,13 @@ def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring
             if old is None or old == content:
                 files[path] = content
                 continue
+            if (
+                handlers_form
+                and path == "extension/Configuration.xml"
+                and _without_version(old) == _without_version(content)
+            ):
+                files[path] = old
+                continue
             if not path.startswith("extension/") or not path.endswith(".xml"):
                 refuse("identifier_conflict", "Два менеджера порождают разное содержимое", path)
             parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
@@ -173,6 +183,11 @@ def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring
                 refuse("identifier_conflict", "Конфликт общих описаний", path)
             left[0].remove(left_children)
             right[0].remove(right_children)
+            if handlers_form and path == "extension/Configuration.xml":
+                for element in (left, right):
+                    found = element.find(f".//{{{M}}}Version")
+                    if found is not None:
+                        found.text = "0"
             if serialize(left) != serialize(right):
                 refuse("identifier_conflict", "Разные свойства одного владельца", path)
             merged: dict[tuple[str, str], etree._Element] = {}
@@ -222,6 +237,18 @@ def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring
         )
         + "\n"
     )
+    stamp = ""
+    if handlers_form:
+        stamp = sha256(canonical_operations_bytes(operations))[:12]
+        for bundle in bundles:
+            previous_version = bundle.manifest.extension_version
+            if previous_version and previous_version != stamp:
+                instruction = instruction.replace(
+                    f"равна {previous_version}", f"равна {stamp}"
+                ).replace(f"// Ожидается: {previous_version}", f"// Ожидается: {stamp}")
+        config = "extension/Configuration.xml"
+        if config in files:
+            files[config] = _replace_version(files[config], stamp)
     files["instruction.md"] = instruction.encode("utf-8")
     manifest = replace(
         first.manifest,
@@ -249,6 +276,23 @@ def combine_artifacts(bundles: Sequence[RenderedAuthoring]) -> RenderedAuthoring
             for r in b.manifest.handler_bindings
         ),
         dispatcher_order=tuple(name for b in bundles for name in b.manifest.dispatcher_order),
+        extension_version=stamp,
     )
     files["manifest.json"] = manifest.to_bytes()
     return RenderedAuthoring(files, manifest, instruction, "ready", first.prepared)
+
+
+_VERSION = re.compile(r"(<Version>)[^<]*(</Version>)")
+
+
+def _without_version(content: bytes) -> bytes:
+    return _VERSION.sub(r"\1\2", content.decode("utf-8"), count=1).encode("utf-8")
+
+
+def _replace_version(content: bytes, version: str) -> bytes:
+    updated, count = _VERSION.subn(
+        lambda match: match.group(1) + version + match.group(2), content.decode("utf-8"), count=1
+    )
+    if count != 1:
+        refuse("metadata_profile_unsupported", "В Configuration.xml нет свойства версии")
+    return updated.encode("utf-8")

@@ -676,6 +676,11 @@ def test_instruction_real_uri_and_explained_route_states():
     assert "Пояснение" in text
 
 
+def xml_except_version(payload: bytes) -> bytes:
+    """Равенство выгрузки без свойства версии расширения."""
+    return re.sub(rb"<Version>[^<]*</Version>", b"<Version></Version>", payload, count=1)
+
+
 def test_v1_kit_plus_handler_keeps_object_uuids_and_rejects_tamper():
     """Переход на форму с обработчиками — явный просмотр; UUID объектов остаются."""
     from kd2_rules_mcp.authoring.ed.artifacts import previous_artifact
@@ -710,7 +715,15 @@ def test_v1_kit_plus_handler_keeps_object_uuids_and_rejects_tamper():
     assert migrated.manifest.procedures
     assert all("runtime_verified" in item for item in migrated.manifest.handler_bindings)
     for path, payload in first.files.items():
-        if path.endswith(".xml"):
+        if not path.endswith(".xml"):
+            continue
+        if path == "extension/Configuration.xml":
+            assert xml_except_version(migrated.files[path]) == xml_except_version(payload)
+            assert migrated.files[path] != payload
+            assert migrated.manifest.extension_version.encode() in migrated.files[path]
+            assert migrated.manifest.extension_version == plan.decision_hash[:12]
+            assert migrated.manifest.identity.version == first.manifest.identity.version
+        else:
             assert migrated.files[path] == payload
     module = next(
         path for path in migrated.files if path.startswith("modules/") and path.endswith(".bsl")
@@ -777,13 +790,19 @@ def test_handler_only_xml_matches_v1_on_an_existing_attribute():
     differ = sorted(path for path, payload in only.files.items() if first.files[path] != payload)
     assert differ == [
         "extension/CommonModules/Менеджер2/Ext/Module.bsl",
+        "extension/Configuration.xml",
         "instruction.md",
         "manifest.json",
         "modules/CommonModules/Менеджер2/Ext/Module.bsl",
         "validation.json",
     ]
     for path, payload in first.files.items():
-        if path.endswith(".xml"):
+        if not path.endswith(".xml"):
+            continue
+        if path == "extension/Configuration.xml":
+            assert xml_except_version(only.files[path]) == xml_except_version(payload)
+            assert only.manifest.extension_version == plan.decision_hash[:12]
+        else:
             assert only.files[path] == payload
 
 
@@ -833,7 +852,12 @@ def test_version_two_adds_and_drops_an_operation_only_when_named():
     assert second.manifest.schema_version == 2
     assert second.manifest.identity_map == first.manifest.identity_map
     for path, payload in first.files.items():
-        if path.endswith(".xml"):
+        if not path.endswith(".xml"):
+            continue
+        if path == "extension/Configuration.xml":
+            assert xml_except_version(second.files[path]) == xml_except_version(payload)
+            assert second.manifest.extension_version != first.manifest.extension_version
+        else:
             assert second.files[path] == payload
     added = {op.operation_id for op in second.manifest.handler_operations} - {
         op.operation_id for op in first.manifest.handler_operations

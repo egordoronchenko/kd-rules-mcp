@@ -1517,6 +1517,7 @@ def test_stand_body_reads_new_attribute_from_same_or_previous_kit(setup):
         if r["kind"] == "set_object_handler"
     )
     removed = preview(reopened, operations=[], drop_operations=[handler_id])
+    assert removed["rebuild"] is False and removed["changed_input_groups"] == []
     assert {c["kind"] for c in removed["changes"]} >= {
         "operation_removed",
         "binding_removed",
@@ -1548,6 +1549,11 @@ def test_stand_body_failure_preserves_name_and_line(setup, body, name):
         name in f["message"] and "строка тела 2" in f["message"] and f["source"]["line"] == 2
         for f in refused["failures"]
     )
+    if name == "НетСвойства":
+        assert any(
+            "свойство формата (`format_property`)" in f["message"] for f in refused["failures"]
+        )
+        assert all("ссылка format_property" not in f["message"] for f in refused["failures"])
 
 
 def test_stand_chained_validation_records_previous_call_and_changed_procedure(setup):
@@ -1572,6 +1578,7 @@ def test_stand_chained_validation_records_previous_call_and_changed_procedure(se
     incoming[0]["body"] += "\n// Изменение тела\n"
     old_id = report["handler_slots"][0]["operation_ids"][0]
     viewed = preview(current, operations=incoming, drop_operations=[old_id])
+    assert viewed["rebuild"] is False and viewed["changed_input_groups"] == []
     assert any(
         c["kind"] == "procedure_changed" and c["name"] == report["handler_slots"][0]["handler_name"]
         for c in viewed["changes"]
@@ -1639,6 +1646,104 @@ def test_stand_section_budget_excludes_header_and_packs_whole_records():
     assert result == rows
 
 
+def test_recheck_migration_keeps_property_notices_and_fits_summary_page(setup):
+    """Переход v1 → v2 той же ПКС: текст и перечень версий не раздувают страницу.
+
+    Форма длинного замечания взята из перепроверки
+    ``docs/plans/evals/2026-10-05-ed-handlers-stand/recheck`` (Н-С1): семь версий,
+    каждая дважды и с внутренним кодом, четыре подтверждения в шапке.
+    """
+    from kd2_rules_mcp.service.ed_authoring_views import compact_page, json_size
+
+    recheck = (
+        Path(__file__).parents[1]
+        / "docs/plans/evals/2026-10-05-ed-handlers-stand/recheck/logs/s-server-probes.txt"
+    )
+    # Протокол стенда лежит только в рабочем репозитории: в открытой копии его нет, сам тест —
+    # на синтетике и от файла не зависит.
+    if recheck.exists():
+        probe = recheck.read_text(encoding="utf-8")
+        assert "acknowledgement_notices ≈ 8 КБ" in probe
+        assert "ed.schema.type_incompatible" in probe
+
+    fixture = json.loads((HANDLERS / "dto/preserve-receive.json").read_text("utf-8"))
+    current, _ = handler_setup(setup, fixture)
+    prop, preserve = current[1]["operations"]
+    before = preview(current, operations=[prop])
+    write(current, before, operations=[prop])
+    after = preview(current, operations=[preserve])
+
+    def picked(view, notice_id):
+        return {
+            n["operation_id"]: n for n in view["acknowledgement_notices"] if n["id"] == notice_id
+        }
+
+    same = picked(before, "ed.author.other_version_incompatible")
+    migrated = picked(after, "ed.author.other_version_incompatible")
+    assert same and same.keys() == migrated.keys()
+    for operation_id, notice in same.items():
+        assert migrated[operation_id]["message"] == notice["message"]
+        assert migrated[operation_id]["version_keys"] == notice["version_keys"]
+        assert "ed.schema." not in notice["message"]
+        assert notice["message"].startswith("В версиях ")
+    ranges_before = picked(before, "ed.author.value_range")
+    ranges_after = picked(after, "ed.author.value_range")
+    assert ranges_before and ranges_before.keys() == ranges_after.keys()
+    for operation_id, notice in ranges_before.items():
+        assert ranges_after[operation_id]["version_keys"] == notice["version_keys"]
+        assert ranges_after[operation_id]["message"] == notice["message"]
+        assert notice["message"].startswith("В версиях ")
+    assert len(after["items"]) > 1
+    bindings = [c for c in after["changes"] if str(c["kind"]).startswith("binding_")]
+    assert bindings and all(c["module"].endswith("Module.bsl") for c in bindings)
+    assert after["rebuild"] is False
+
+    versions = ["1.3", "1.4", "1.5", "1.6", "1.8", "1.10", "1.11"]
+    clauses = []
+    for version in versions:
+        clauses.append(
+            f"Версия {version}: ed.schema.type_incompatible: owner_type_unavailable: "
+            "ПКО/Справочник_Должности/ПКС/Комментарий"
+        )
+        clauses.append(
+            f"Версия {version}: ПКО/Справочник_Должности/ПКС/Комментарий: "
+            "Свойство формата «Комментарий» отсутствует в типе"
+        )
+    long = "Доработка несовместима с другими версиями менеджера: " + "; ".join(clauses)
+    short = next(iter(same.values()))["message"]
+
+    def page_of(message):
+        rows = [
+            {
+                "kind": "notice",
+                "id": "ed.author.other_version_incompatible",
+                "message": message,
+                "notice_id": f"n{i}",
+                "operation_id": f"n{i}",
+                "address": "ПКО/Справочник_Должности",
+                "version_keys": versions,
+                "methods": [],
+                "detail_key": "",
+            }
+            for i in range(4)
+        ]
+        rows.append({"kind": "file", "name": "manifest.json", "size": 10, "sha256": "ab"})
+        base = {"acknowledgement_notices": rows[:4], "section": "summary", "status": "ready"}
+        opened = compact_page(base, rows, 0, 50)
+        header = json_size({"acknowledgement_notices": opened["acknowledgement_notices"]})
+        return opened, header
+
+    long_page, long_header = page_of(long)
+    short_page, short_header = page_of(short)
+    live_header = json_size({"acknowledgement_notices": after["acknowledgement_notices"]})
+    assert len(long_page["items"]) == 1
+    assert len(short_page["items"]) > 1
+    assert short_header < long_header
+    assert long_header > 4096
+    assert live_header < long_header
+    assert len(after["items"]) > len(long_page["items"])
+
+
 @pytest.mark.parametrize(
     "scenario", ["set-send", "set-receive-before-write", "preserve-receive", "algorithmic-send"]
 )
@@ -1659,15 +1764,36 @@ def test_stand_instruction_probes_sections_hash_and_installation(setup, scenario
     assert ("## Отсутствующее свойство" in instruction) is (scenario == "preserve-receive")
     if scenario == "preserve-receive":
         assert (
-            "Явно переданное пустое значение (пустой элемент в сообщении) реквизит очищает:"
-            in instruction
-        )
+            "Отправитель пустое значение в сообщение не пишет, поэтому «очистили "
+            "в источнике» до приёмника не доходит — значение сохранится. Если же в сообщении "
+            "свойство передано явно пустым элементом, реквизит очищается."
+        ) in instruction
+        assert "\n## Отсутствующее свойство\n\n" in instruction
+    receive = scenario in ("set-receive-before-write", "preserve-receive")
+    assert ("первым выполните обмен из этой базы к корреспонденту" in instruction) is receive
     assert "число вызовов\n   сервер доказывает по тексту модуля" in instruction
     assert "при обновлении существующего расширения режим сохраняется прежним" in instruction
     assert "### Установка без конфигуратора базы" in instruction
-    assert "РасширенияКонфигурации.Получить(Новый Структура" in instruction
-    assert "Записать(Новый ДвоичныеДанные(<файл>))" in instruction
-    assert "первым выполните обмен из этой базы к корреспонденту" in instruction
+    assert '1cv8 CREATEINFOBASE File="<папка>"' in instruction
+    assert "Записать(ДвоичныеДанные)" in instruction
+    assert "Основная конфигурация пустой базе не нужна" in instruction
+    assert (
+        "Защита = Новый ОписаниеЗащитыОтОпасныхДействий; "
+        "Защита.ПредупреждатьОбОпасныхДействиях = Ложь; "
+        "Расширение.ЗащитаОтОпасныхДействий = Защита; "
+        "Расширение.БезопасныйРежим = Ложь; Расширение.Записать();"
+    ) in instruction
+    assert (
+        f"версия расширения {manifest['identity']['name']} равна {manifest['extension_version']}"
+        in (instruction)
+    )
+    assert "Результат = Найденные[0].Версия;" in instruction
+    assert "Сообщить(Результат);" in instruction
+    assert manifest["extension_version"] == next(
+        line.split(">", 1)[1].split("<", 1)[0]
+        for line in files["extension/Configuration.xml"].decode().splitlines()
+        if "<Version>" in line
+    )
     assert "[if " not in instruction and "[/if]" not in instruction
     for previous_line, line in zip(
         instruction.splitlines(), instruction.splitlines()[1:], strict=False

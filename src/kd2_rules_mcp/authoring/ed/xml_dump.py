@@ -262,7 +262,11 @@ def serialize(root: etree._Element) -> bytes:
 
 
 def configuration_xml(
-    prepared: PreparedAuthoring, meta: DumpMetadata, identity: IdentityMap
+    prepared: PreparedAuthoring,
+    meta: DumpMetadata,
+    identity: IdentityMap,
+    *,
+    version: str | None = None,
 ) -> bytes:
     root, obj = new_object("Configuration", "Configuration", identity)
     info = node(obj, "InternalInfo")
@@ -286,7 +290,7 @@ def configuration_xml(
     node(props, "ScriptVariant", meta.configuration.props["ScriptVariant"])
     node(props, "DefaultRoles")
     node(props, "Vendor")
-    node(props, "Version", prepared.identity.version)
+    node(props, "Version", prepared.identity.version if version is None else version)
     node(props, "DefaultLanguage", "Language." + meta.language.name)
     for key in profile_template()["configuration_empty_information"]:
         node(props, key)
@@ -387,9 +391,13 @@ def attribute_xml(
 
 
 def dump_extension(
-    prepared: PreparedAuthoring, metadata: DumpMetadata, identity: IdentityMap
+    prepared: PreparedAuthoring,
+    metadata: DumpMetadata,
+    identity: IdentityMap,
+    *,
+    version: str | None = None,
 ) -> Mapping[str, bytes]:
-    result = {"Configuration.xml": configuration_xml(prepared, metadata, identity)}
+    result = {"Configuration.xml": configuration_xml(prepared, metadata, identity, version=version)}
     for description in (metadata.language, metadata.module, *metadata.owners):
         root, obj = adopted_xml(description, identity)
         key = description.kind + "/" + description.name

@@ -1,5 +1,6 @@
 """Baseline/delta автора ED: существующие проверки неизменны, профили разделены заранее."""
 
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -16,6 +17,7 @@ from kd2_rules_mcp.authoring.ed.handlers import (
 )
 from kd2_rules_mcp.authoring.ed.hook import generate_hook
 from kd2_rules_mcp.authoring.ed.model import (
+    AddAlgorithmicHeaderProperty,
     AddHeaderProperty,
     AuthoringInputs,
     AuthoringPreconditionError,
@@ -761,6 +763,69 @@ def prepare_authoring(
         runtime_verified(inputs.document.manager_version),
         preparation_inputs=inputs,
     )
+
+
+def own_property_version_notice(
+    operation: AddAlgorithmicHeaderProperty, comparisons: tuple[ProfileComparison, ...]
+) -> Notice | None:
+    """Несовместимость других версий — только у своей ПКС, без внутренних кодов.
+
+    Прямая ПКС уже получила тот же текст в ``prepare_authoring``. Обработчику
+    чужая ПКС не приписывается: у него нет собственного свойства формата.
+    """
+    prop = operation.format_property
+    pko = operation.target.pko_address
+    reasons: dict[str, str] = {}
+    for comparison in comparisons:
+        if comparison.before.direction != operation.target.direction:
+            continue
+        version = comparison.before.version
+        if version in reasons:
+            continue
+        clause = ""
+        for issue in comparison.delta.new:
+            if _about_property(issue.address, issue.message, pko, prop):
+                clause = _human_clause(issue.message)
+                break
+        if not clause:
+            for skipped in comparison.delta.new_relevant_skipped:
+                if _about_property("", skipped.reason, pko, prop):
+                    clause = _human_clause(skipped.reason)
+                    break
+        if clause:
+            reasons[version] = clause
+    if not reasons:
+        return None
+    versions = sorted(reasons)
+    if len(set(reasons.values())) == 1:
+        message = f"В версиях {', '.join(versions)}: {reasons[versions[0]]}"
+    else:
+        message = "; ".join(f"В версии {version}: {reasons[version]}" for version in versions)
+    return Notice(
+        "ed.author.other_version_incompatible",
+        operation.operation_id,
+        pko,
+        message,
+        tuple(versions),
+    )
+
+
+def _about_property(address: str, text: str, pko: str, prop: str) -> bool:
+    if prop not in address and prop not in text:
+        return False
+    if address and not (address == pko or address.startswith(pko + "/")):
+        return False
+    return not ("ПКО/" in text and pko not in text and not address)
+
+
+def _human_clause(text: str) -> str:
+    """Убирает идентификаторы проверок; русская причина и адрес остаются."""
+    parts = [part.strip() for part in text.split(":") if part.strip()]
+    human = [part for part in parts if not _CODE.fullmatch(part)]
+    return ": ".join(human)
+
+
+_CODE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 
 def _prepare_metadata_shell(

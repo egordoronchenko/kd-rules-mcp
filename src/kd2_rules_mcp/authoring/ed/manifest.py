@@ -101,6 +101,8 @@ class ArtifactManifest:
     dispatcher_order: tuple[str, ...] = ()
     # Не в operations: сервис первого среза читает это поле как прямые ПКС.
     handler_operations: tuple[Operation, ...] = ()
+    # Первые 12 символов decision_hash итогового набора; в XML — свойство «Версия».
+    extension_version: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_hashes", MappingProxyType(dict(self.source_hashes)))
@@ -146,6 +148,7 @@ class ArtifactManifest:
             payload["dispatcher_name"] = self.dispatcher_name
             payload["dispatcher_order"] = list(self.dispatcher_order)
             payload["procedures"] = [dict(item) for item in self.procedures]
+            payload["extension_version"] = self.extension_version
         return payload
 
     def to_bytes(self) -> bytes:
@@ -202,6 +205,7 @@ class ArtifactManifest:
                     "handler_operations": tuple(
                         op for op in parsed if not isinstance(op, AddHeaderProperty)
                     ),
+                    "extension_version": value["extension_version"],
                 }
             elif len(headers) != len(parsed):
                 refuse(

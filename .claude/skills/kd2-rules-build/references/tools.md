@@ -1178,13 +1178,24 @@ Preview ничего не создаёт. Write требует `expected_preview
 Шапка `instruction.md` содержит именно `manifest.build_hash` (для нескольких менеджеров — общий);
 он отличается от хеша preview, который также учитывает отчёт проверки и порождённые файлы.
 
+`rebuild: true` — изменились входы с прошлой сборки (`changed_input_groups` не пуст: конфигурация,
+структура, маршруты, схемы, расширения или файлы менеджера). Новые операции и `drop_operations`
+при тех же входах этот признак не ставят: решения пересобраны, снимки конфигурации прежние.
+
+У комплекта manifest версии 2 свойство расширения «Версия» в `extension/Configuration.xml`
+(элемент `Version` в `Properties`, после `Vendor`) — первые 12 символов отпечатка итогового
+набора решений (`decision_hash`, не `build_hash`). То же значение лежит в `extension_version`
+манифеста. Комплект версии 1 по-прежнему пишет версию из `extension.version`; переход меняет
+в XML только эту строку. Проба в `instruction.md` читает `РасширенияКонфигурации.Получить`
+и свойство `Версия`.
+
 Ответ build содержит `status` (ready/written/unchanged), `build_hash`, `output_dir` путём агента,
 `written`, `runtime_verified`, короткий список идентификаторов `runtime_unverified`, `scopes`,
 `change_counts`, `validation`, `required_acknowledgements` и страницу `items` выбранного `section`:
 
 `changes` — дельта к прежнему комплекту (без него список пуст): `schema_version` с `from`/`to`,
 `operation_added`/`operation_removed` с ID, видом и target,
-`binding_added`/`binding_removed` с ПКО, направлением, событием и именем процедуры,
+`binding_added`/`binding_removed` с ПКО, направлением, событием, именем процедуры и модулем,
 `procedure_added`/`procedure_removed`/`procedure_changed` с именем и модулем.
 `change_counts` по-прежнему считает состав всего результата, а не дельту.
 

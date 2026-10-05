@@ -699,9 +699,21 @@ def test_preset_supported_and_does_not_remove_other_notices(version):
 def test_preset_conflicts_and_wrong_dependencies():
     value = handler_inputs()
     prop, preset = preset_operations()
-    assert_refusal(
+    refused = assert_refusal(
         value, (prop, preset, handler("ПриКонвертацииДанныхXDTO")), "preserve_handler_conflict"
     )
+    text = (
+        f"у правила «Товар» есть операция сохранения значения ({preset.operation_id}): "
+        "она допускает только пустые события получения этого правила. "
+        "Снимите сохранение (`drop_operations`) и перенесите его логику "
+        "в свой обработчик `ПередЗаписьюПолученныхДанных` либо откажитесь от своего обработчика"
+    )
+    matched = [f for f in refused.failures if text in f.message]
+    assert {f.id for f in matched} == {
+        "ed.author.handler_slot_conflict",
+        "ed.author.preserve_handler_conflict",
+    }
+    assert "set_object_handler" not in " ".join(f.message for f in matched)
     assert_refusal(
         handler_inputs(event="ПередЗаписьюПолученныхДанных", previous="Типовой"),
         (prop, preset),

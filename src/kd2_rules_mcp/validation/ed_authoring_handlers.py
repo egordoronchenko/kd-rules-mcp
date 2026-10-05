@@ -34,6 +34,27 @@ from kd2_rules_mcp.ed.refs import EdReference, build_references
 from kd2_rules_mcp.errors import EdAuthoringResourceLimitError
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key, standard_attribute
 
+_FIELD_TITLES = {
+    "format_property": "свойство формата",
+    "configuration_attribute": "реквизит конфигурации",
+    "conversion_rule": "правило конвертации",
+    "received_property": "реквизит полученных данных",
+    "pko_lookup": "поиск правила",
+    "instruction_rule": "правило конвертации",
+    "parameter": "параметр",
+    "additional_key": "дополнительное свойство",
+    "pod_use": "правило обработки",
+}
+
+
+def _named_field(name: str) -> str:
+    """Имя поля входа в обратных кавычках, пояснение — по-русски."""
+    title = _FIELD_TITLES.get(name)
+    if title is None:
+        return f"`{name}`"
+    return f"{title} (`{name}`)"
+
+
 # XDTO:502–517,4493–4540 — известные функции поиска возвращают строки правил.
 RULE_LOOKUP_CALLS = frozenset(
     {
@@ -842,7 +863,7 @@ def check_body(
         if reference.name is None:
             fail(
                 "body_dynamic_reference",
-                f"вычисляемое имя {reference.kind} «{label}»",
+                f"вычисляемое имя {_named_field(reference.kind)} «{label}»",
                 line=line,
             )
             continue
@@ -882,7 +903,7 @@ def check_body(
                 continue
             fail(
                 "body_reference_unresolved",
-                f"известная ссылка {reference.kind} «{label}» не разрешилась",
+                f"известная ссылка {_named_field(reference.kind)} «{label}» не разрешилась",
                 line=line,
             )
     return BodyCheck(
@@ -1275,10 +1296,15 @@ def validate_handler_operations(
                 and h.event in ("ПриКонвертацииДанныхXDTO", "ПередЗаписьюПолученныхДанных")
                 for h in handlers
             )
+            conflict = (
+                f"у правила «{canonical_pko}» есть операция сохранения значения "
+                f"({op.operation_id}): она допускает только пустые события получения "
+                "этого правила. Снимите сохранение (`drop_operations`) и перенесите "
+                "его логику в свой обработчик `ПередЗаписьюПолученныхДанных` "
+                "либо откажитесь от своего обработчика"
+            )
             if authored:
-                fail(
-                    "handler_slot_conflict", "Preset и агентский обработчик одного ПКО несовместимы"
-                )
+                fail("handler_slot_conflict", conflict)
             from kd2_rules_mcp.authoring.ed.operations import extension_conflicts
 
             if (
@@ -1287,11 +1313,7 @@ def validate_handler_operations(
                 or extension_conflicts(inputs, property_op, context)
                 or (inputs.source_set.extensions and not inputs.extension_sources)
             ):
-                fail(
-                    "preserve_handler_conflict",
-                    "Для сохранения при непустых событиях или чужих воздействиях "
-                    "нужна set_object_handler с телом агента",
-                )
+                fail("preserve_handler_conflict", conflict)
             preset_slots.setdefault((target, event), []).append(op.operation_id)
             # Стенд D, §8: сохранение с прямой ПКС, обычный путь, найденный объект.
             op_verified = interface == 2
@@ -1324,7 +1346,8 @@ def validate_handler_operations(
                 or handler.event != "ПриОтправкеДанных"
             ):
                 fail(
-                    "handler_property_dependency", "Нужен SetObjectHandler отправки того же target"
+                    "handler_property_dependency",
+                    "Нужен обработчик отправки (`set_object_handler`) того же правила конвертации",
                 )
                 continue
             checked = context.handler_bodies.get(handler.operation_id)
@@ -1458,7 +1481,8 @@ def _validate_conversion_rule(inputs, op, types, profile, applicable, prop, fail
     if not op.conversion_rule or len(candidates) != 1:
         fail(
             "handler_property_rule",
-            "Для сложного типа нужно существующее literal conversion_rule выбранного направления",
+            "Для сложного типа нужно существующее "
+            f"{_named_field('conversion_rule')} выбранного направления",
         )
         return
     conversion = candidates[0]
@@ -1495,7 +1519,9 @@ def _validate_conversion_rule(inputs, op, types, profile, applicable, prop, fail
     ):
         fail(
             "handler_property_rule",
-            "Типы configuration_attribute и format_property не совпадают с conversion_rule",
+            "Типы "
+            f"{_named_field('configuration_attribute')} и {_named_field('format_property')} "
+            f"не совпадают с {_named_field('conversion_rule')}",
         )
 
 

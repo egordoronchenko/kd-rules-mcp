@@ -302,8 +302,9 @@ def render_handlers_authoring(
         previous=previous.identity_map if previous else None,
         external=identity_map,
     )
+    extension_version = plan.decision_hash[:12]
     try:
-        xml_files = dump_extension(prepared, metadata, ids)
+        xml_files = dump_extension(prepared, metadata, ids, version=extension_version)
     except ValueError:
         refuse("metadata_profile_unsupported", "Решения содержат символы, недопустимые в XML")
     try:
@@ -341,7 +342,9 @@ def render_handlers_authoring(
         else ()
     )
     by_name = {binding.handler_name: binding for binding in plan.bindings}
-    bindings = tuple(binding_record(by_name[name]) for name in plan.dispatcher_order)
+    bindings = tuple(
+        binding_record(by_name[name]) | {"module": module_path} for name in plan.dispatcher_order
+    )
     build_hash = digest(
         (
             GENERATOR_VERSION_V2,
@@ -375,6 +378,7 @@ def render_handlers_authoring(
         paths=tuple(sorted((*result, "manifest.json", "instruction.md"))),
         form_evidence=form_evidence,
         pko_names=pko_names_from_document(inputs.document),
+        extension_version=extension_version,
     )
     result["instruction.md"] = instruction.encode("utf-8")
     manifest = ArtifactManifest(
@@ -397,6 +401,7 @@ def render_handlers_authoring(
         plan.dispatcher_name,
         plan.dispatcher_order,
         tuple(op for op in ordered if not isinstance(op, AddHeaderProperty)),
+        extension_version,
     )
     result["manifest.json"] = manifest.to_bytes()
     status = (
