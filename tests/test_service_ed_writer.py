@@ -18,6 +18,8 @@ from kd2_rules_mcp.ed.writer import render
 from kd2_rules_mcp.ed.writer_model import json_value, logical_id
 from kd2_rules_mcp.errors import (
     EdAuthoringAckRequiredError,
+    EdAuthoringIoError,
+    EdAuthoringPathError,
     EdAuthoringPreconditionError,
     EdAuthoringStaleError,
     ProjectNotFoundError,
@@ -1240,10 +1242,11 @@ def test_rebind_recovers_each_write_r2(
     with monkeypatch.context() as patch:
         patch.setattr(service_module, "_atomic_json", flaky_json)
         patch.setattr(workspace_module, "_atomic_write", flaky_write)
-        with pytest.raises(OSError):
+        with pytest.raises(EdAuthoringIoError) as caught:
             service.ed_create(
                 "positions", mode="rebind", configuration_path=str(other), structure_id="other"
             )
+        assert error_payload(caught.value, service)["code"] == "ed_authoring_io"
     assert writes
     restarted = Kd2Service(service.settings) if restart else service
     saved = restarted._manager_project("positions").model
@@ -1461,6 +1464,64 @@ def test_explicit_legacy_extension_keeps_uuid_seed_r2(writer_setup, tmp_path):
         (Path(write_kit(other, second)["output_dir"]) / "manifest.json").read_bytes()
     )
     assert current["identity_map"] == original["identity_map"]
+
+
+@pytest.mark.parametrize("explicit_first", [False, True])
+def test_extension_selection_difference_names_public_argument(writer_setup, explicit_first):
+    service, args, _ = writer_setup
+    first = args | ({"extensions": []} if explicit_first else {})
+    second = args | ({} if explicit_first else {"extensions": []})
+    service.ed_create(**first)
+    with pytest.raises(EdAuthoringPreconditionError) as caught:
+        service.ed_create(**second)
+    differences = caught.value.details["differences"]
+    assert {d["field"] for d in differences} == {"extensions"}
+    assert differences[0]["existing"] == ([] if explicit_first else None)
+    assert differences[0]["requested"] == (None if explicit_first else [])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Ограничение путей Win32")
+def test_long_windows_project_path_refuses_before_writing(writer_setup):
+    service, args, _ = writer_setup
+    before = files_at(service.manager_workspace.directory)
+    with pytest.raises(EdAuthoringPathError) as caught:
+        service.ed_create(**(args | {"project_id": "x" * 128}))
+    assert error_payload(caught.value, service)["code"] == "ed_authoring_path"
+    assert files_at(service.manager_workspace.directory) == before
+
+
+def test_default_extension_suffix_uses_platform_letters_and_preserves_saved_name(writer_setup):
+    service, args, root = writer_setup
+    identifier = "ﬁ²٣-Яё_A1"
+    created = service.ed_create(**(args | {"project_id": identifier}))
+    name = service._manager_metadata(identifier)["arguments"]["identity"]["name"]
+    assert re.fullmatch(r"[A-Za-zА-Яа-яЁё0-9_]+", name)
+    assert "____Яё_A1" in name
+    # Старое имя уже сохранённого проекта не пересчитывается после обновления сервера.
+    folder = service.manager_workspace.directory / identifier
+    metadata = service._manager_metadata(identifier)
+    metadata["arguments"]["identity"]["name"] = "кд3м_Менеджер_ﬁ²٣"
+    (folder / "creation.json").write_text(json.dumps(metadata, ensure_ascii=False), "utf-8")
+    restarted = Kd2Service(service.settings)
+    restarted.ed_schema_open(
+        "1.20",
+        path=str(root / "Schemas/format.bin"),
+        imports={"urn:test:writer-message": str(DATA / "message.bin")},
+    )
+    repeated = restarted.ed_create(**(args | {"project_id": identifier}))
+    assert repeated["revision"] == created["revision"]
+    restarted.ed_create(identifier, mode="rebind")
+    assert (
+        restarted._manager_metadata(identifier)["arguments"]["identity"]["name"]
+        == "кд3м_Менеджер_ﬁ²٣"
+    )
+    explicit = service.ed_create(
+        **(args | {"project_id": "explicit-name", "identity": {"name": "кд3м_ﬁ²٣"}})
+    )
+    assert (
+        service._manager_metadata(explicit["project_id"])["arguments"]["identity"]["name"]
+        == "кд3м_ﬁ²٣"
+    )
 
 
 def test_stale_reader_can_close_without_removing_current_manager(writer_setup):

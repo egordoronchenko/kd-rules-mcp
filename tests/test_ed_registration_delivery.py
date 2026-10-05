@@ -30,7 +30,7 @@ from kd2_rules_mcp.errors import (
     RegistrationMissingAttributeError,
     RegistrationPlanNotFoundError,
 )
-from kd2_rules_mcp.kd2.rules_io import load_registration_rules
+from kd2_rules_mcp.kd2.rules_io import dump_rules, load_registration_rules
 from kd2_rules_mcp.structures.queries import ObjectCard, ObjectProperty
 from kdbase.ed_registration_kit_check import check_registration_kit, compare_extension, main
 
@@ -55,6 +55,57 @@ def result(*, code: bool = False):
         node_properties={"OldFlag": ATTR.name, "OldDate": "DateStart"},
         target_plan=card,
     )
+
+
+@pytest.mark.parametrize("usage", ["tabular", "dereference", "date", "unload"])
+def test_delivery_itself_rejects_incompatible_own_header(usage: str) -> None:
+    transferred = result()
+    rule = transferred.document.rules()[0]
+    filters = rule.child("ОтборПоСвойствамПланаОбмена")
+    assert filters is not None
+    leaf = filters.items[0]
+    if usage == "tabular":
+        leaf.values["СвойствоПланаОбмена"] = "[reg_Flag].Field"
+    elif usage == "dereference":
+        leaf.values["СвойствоПланаОбмена"] = "reg_Flag.Code"
+    elif usage == "date":
+        leaf.values.update(
+            ЭтоСтрокаКонстанты=True, ТипСвойстваОбъекта="Дата", СвойствоОбъекта="2020-01-01"
+        )
+    else:
+        rule.values["РеквизитРежимаВыгрузки"] = "reg_Flag"
+    with pytest.raises(RegistrationMissingAttributeError):
+        render_registration_kit(
+            transferred,
+            read_plan_host(DATA / "dump", "TargetPlan"),
+            own_attributes=[ATTR],
+            extension_name="reg_Registration",
+            prefix="reg_",
+        )
+
+
+@pytest.mark.parametrize("usage", ["comparison", "unload", "bare_tabular"])
+def test_delivery_itself_checks_existing_reference_and_type(usage: str) -> None:
+    transferred = result()
+    rule = transferred.document.rules()[0]
+    filters = rule.child("ОтборПоСвойствамПланаОбмена")
+    assert filters is not None
+    if usage == "comparison":
+        filters.items[1].values.update(
+            ЭтоСтрокаКонстанты=True, ТипСвойстваОбъекта="Булево", СвойствоОбъекта="true"
+        )
+    elif usage == "unload":
+        rule.values["РеквизитРежимаВыгрузки"] = "DateStart"
+    else:
+        filters.items[1].values["СвойствоПланаОбмена"] = "[Organizations]"
+    with pytest.raises(RegistrationMissingAttributeError):
+        render_registration_kit(
+            transferred,
+            read_plan_host(DATA / "dump", "TargetPlan"),
+            own_attributes=[ATTR],
+            extension_name="reg_Registration",
+            prefix="reg_",
+        )
 
 
 def kit(
@@ -90,6 +141,9 @@ def test_repeatable_files_manifest_and_previous() -> None:
     assert kit().files == first.files
     assert kit(previous_manifest=restored).files == first.files
     assert first.manifest.input_hashes["source_rules"] == sha256(
+        dump_rules(load_registration_rules(DATA / "RegistrationRules.xml"))
+    )
+    assert first.manifest.input_hashes["source_file"] == sha256(
         (DATA / "RegistrationRules.xml").read_bytes()
     )
     assert first.manifest.input_hashes["ExchangePlans/TargetPlan.xml"] == sha256(

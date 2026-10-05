@@ -1,0 +1,7 @@
+<package xmlns="http://v8.1c.ru/8.1/xdto" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" targetNamespace="urn:fiction:base">
+	<valueType name="Ref" base="xs:string" variety="Atomic"/>
+	<objectType name="Object" abstract="true">
+		<property name="Extra" type="xs:anyType" lowerBound="0"/>
+	</objectType>
+	<valueType name="ExternalRef" base="xs:string"/>
+</package>

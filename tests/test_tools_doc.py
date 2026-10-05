@@ -56,14 +56,28 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
         ensure_ascii=False,
     )
     # Виды правил и синтаксис адресов нужны агенту без локального docs/tools.md.
-    assert len(serialized) <= 47_000, f"Схемы: {len(serialized)} знаков"
+    # Перенос регистрации добавляет отдельную схему preview/write (#67).
+    assert len(serialized) <= 48_000, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:
         assert len(tool.description or "") <= 450, tool.name
+        if tool.name == "registration_retarget":
+            size = len(
+                json.dumps(
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            assert size <= 1_300, f"registration_retarget: {size} знаков"
     cyrillic = sum("\u0400" <= char <= "\u04ff" for char in serialized)
     assert cyrillic / len(serialized) <= 0.08, f"Кириллица: {cyrillic / len(serialized):.2%}"
-    assert len(INSTRUCTIONS) <= 1976, f"INSTRUCTIONS: {len(INSTRUCTIONS)} знаков"
+    # Писатель и перенос регистрации добавили по строке о порядке работы.
+    assert len(INSTRUCTIONS) <= 2_100, f"INSTRUCTIONS: {len(INSTRUCTIONS)} знаков"
 
 
 def test_schema_titles_keep_named_properties_and_literal_values() -> None:

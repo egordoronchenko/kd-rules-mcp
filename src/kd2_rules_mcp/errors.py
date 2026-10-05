@@ -160,25 +160,52 @@ class DanglingReferenceError(RuleEditError):
 class RegistrationRetargetError(Kd2Error):
     """Retargeting registration rules to another exchange plan was rejected."""
 
+    code = "registration.retarget"
+
 
 class NotRegistrationRulesError(RegistrationRetargetError):
     """The document is not registration rules."""
+
+    code = "registration.not_registration"
 
 
 class InvalidRegistrationNameError(RegistrationRetargetError):
     """Empty or invalid exchange plan name or node property name."""
 
+    code = "registration.invalid_name"
+
 
 class DuplicateTargetPropertyError(RegistrationRetargetError):
     """Two different node properties are renamed to the same name."""
+
+    code = "registration.duplicate_target"
 
 
 class PropertyNameClashError(RegistrationRetargetError):
     """The new name is already used by another node property in these rules."""
 
+    code = "registration.property_clash"
+
 
 class RetargetInvariantError(RegistrationRetargetError):
     """The result changed places that retargeting must not change."""
+
+    code = "registration.invariant"
+
+
+class RegistrationToolError(Kd2Error):
+    """Перенос регистрации отклонён; код и адреса объясняют, что исправить."""
+
+    def __init__(
+        self,
+        message: str,
+        details: dict[str, Any] | None = None,
+        *,
+        code: str = "registration.precondition",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 class RegistrationDeliveryError(Kd2Error):
@@ -221,3 +248,35 @@ class RegistrationExtensionClashError(RegistrationDeliveryError):
     """Another extension already owns a requested node attribute."""
 
     code = "registration.extension_clash"
+
+
+class EdFormatPackageError(Kd2Error):
+    """Format package authoring preconditions were not met."""
+
+
+class EdFormatDuplicateNameError(EdFormatPackageError):
+    """A local type or property name is repeated in its namespace."""
+
+
+class EdFormatUnknownTypeError(EdFormatPackageError):
+    """A QName does not resolve in the own package or explicit imports."""
+
+
+class EdFormatIdentifierError(EdFormatPackageError):
+    """A metadata identifier or XDTO local name is invalid."""
+
+
+class EdFormatNamespaceError(EdFormatPackageError):
+    """The own namespace conflicts with the base or a declaration."""
+
+
+class EdFormatEmptyObjectError(EdFormatPackageError):
+    """An authored object type has no properties."""
+
+
+class EdFormatMissingKeyError(EdFormatPackageError):
+    """An exported object lacks a property of the declared key type."""
+
+
+class EdFormatShapeError(EdFormatPackageError):
+    """A declaration is inconsistent or outside the supported XDTO profile."""

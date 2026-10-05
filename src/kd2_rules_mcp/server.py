@@ -62,6 +62,9 @@ from kd2_rules_mcp.errors import (
     Kd2Error,
     ObjectNotFoundError,
     ProjectNotFoundError,
+    RegistrationDeliveryError,
+    RegistrationRetargetError,
+    RegistrationToolError,
     RuleEditError,
     RuleNotFoundError,
     RulesFormatError,
@@ -77,6 +80,9 @@ logger = logging.getLogger("kd2_rules_mcp")
 
 # Код ошибки по классу; порядок важен — подклассы раньше базовых.
 ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (RegistrationToolError, "registration.precondition"),
+    (RegistrationDeliveryError, "registration.delivery"),
+    (RegistrationRetargetError, "registration.retarget"),
     (EdAuthoringAckRequiredError, "ed_authoring_ack_required"),
     (EdAuthoringStaleError, "ed_authoring_stale"),
     (EdAuthoringPathError, "ed_authoring_path"),
@@ -127,6 +133,7 @@ pko_create_from_candidates → rules_validate → handlers_export for a syntax c
 rules_save to workspace or project rules_dir. Compare versions with rules_diff.
 rules_close removes the snapshot, keeping saved files. Use registration_build for registration
 rules and correspondent_draft for reverse rules. The agent makes semantic decisions.
+Retarget registration: registration_retarget preview → write with hash and notice IDs.
 Lists use offset, limit≤200, has_more. Tool errors are JSON with code.
 ED: ed_open → ed_overview → ed_list/get/locate → ed_validate. Reread with ed_close/open.
 Managers: ed_create → ed_apply preview/apply → ed_validate → ed_authoring_build.
@@ -192,6 +199,12 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
     """JSON ошибки инструмента: код, текст и сведения для выбора действия."""
     code = next((code for kind, code in ERROR_CODES if isinstance(error, kind)), "internal")
     payload: dict[str, Any] = {"code": code, "message": str(error)}
+    if isinstance(
+        error, (RegistrationRetargetError, RegistrationDeliveryError, RegistrationToolError)
+    ):
+        payload["code"] = error.code
+    if isinstance(error, RegistrationToolError):
+        payload.update(error.details)
     if isinstance(error, EdAuthoringPreconditionError):
         payload.update(error.details)
     if isinstance(error, StructureNotFoundError) and service is not None:
@@ -1456,6 +1469,40 @@ def create_server(service: Kd2Service) -> MCPServer:
             format_property,
             scope,
             reference_document_id,
+        )
+
+    @server.tool()
+    async def registration_retarget(
+        project_id: Annotated[str, Field(description="Registration project")],
+        exchange_plan: Annotated[str, Field(description="Target plan")],
+        node_properties: Annotated[dict, Field(description="Old→new: Name/[T]/[T].Name")],
+        source: Annotated[dict, Field(description="project/configuration_path")],
+        structure_id: Annotated[Any, Field(description="Structure ID")] = None,
+        own_attributes: Annotated[Any, Field(description="name,type,synonym")] = None,
+        node_values: Annotated[Any, Field(description="source,target,instruction")] = None,
+        extension: Annotated[Any, Field(description="Name and prefix")] = None,
+        mode: Annotated[str, Field(description="preview/write")] = "preview",
+        expected_preview_hash: Annotated[Any, Field(description="Write hash")] = None,
+        acknowledged_notices: Annotated[Any, Field(description="Notice IDs")] = None,
+        offset: Annotated[int, Field(description="Offset")] = 0,
+        limit: Annotated[int, Field(description="Limit")] = 50,
+    ) -> dict[str, Any]:
+        """Retarget registration into a workspace kit. Details: docs/tools.md."""
+        return await call(
+            service.registration_retarget,
+            project_id,
+            exchange_plan,
+            node_properties,
+            source,
+            structure_id,
+            own_attributes,
+            node_values,
+            extension,
+            mode,
+            expected_preview_hash,
+            acknowledged_notices,
+            offset,
+            limit,
         )
 
     @server.tool()

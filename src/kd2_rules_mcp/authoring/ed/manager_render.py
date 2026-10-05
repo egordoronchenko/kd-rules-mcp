@@ -165,9 +165,42 @@ class ManagerKit:
         object.__setattr__(self, "files", MappingProxyType(dict(sorted(self.files.items()))))
 
 
-def render_manager_route(route: ManagerRoute, *, module_name: str, prefix: str) -> str:
+def render_manager_route(
+    route: ManagerRoute,
+    *,
+    module_name: str | None = None,
+    prefix: str,
+    format_namespace: str | None = None,
+    settings_parameter: str = "Настройки",
+) -> str:
     """Точная форма (б) пилота; путь без узла этим перехватом не обслуживается."""
     key = _route_key(route)
+    if format_namespace is not None:
+        if not valid_identifier(settings_parameter):
+            refuse("identifier_conflict", "Недопустимое имя параметра настроек")
+        body = ""
+        if module_name is not None:
+            body += (
+                f"\tЕсли ТипЗнч({settings_parameter}.ВерсииФорматаОбмена) "
+                '= Тип("Соответствие") Тогда\n'
+                f"\t\t{settings_parameter}.ВерсииФорматаОбмена.Вставить({bsl_string(key)}, "
+                f"{module_name});\n\tКонецЕсли;\n"
+            )
+        body += (
+            f"\tЕсли ТипЗнч({settings_parameter}.РасширенияФорматаОбмена) "
+            '= Тип("Соответствие") Тогда\n'
+            f"\t\t{settings_parameter}.РасширенияФорматаОбмена.Вставить("
+            f"{bsl_string(format_namespace)}, {bsl_string(key)});\n\tКонецЕсли;\n"
+        )
+        return (
+            "#Если Сервер Или ТолстыйКлиентОбычноеПриложение Или ВнешнееСоединение Тогда\n\n"
+            '&После("ПриПолученииНастроек")\n'
+            f"Процедура {prefix}ПриПолученииНастроек({settings_parameter})\n"
+            + body
+            + "КонецПроцедуры\n\n#КонецЕсли\n"
+        )
+    if module_name is None:
+        refuse("route_scope_conflict", "Не задано дополнение настроек плана")
     return (
         "#Если Сервер Или ТолстыйКлиентОбычноеПриложение Или ВнешнееСоединение Тогда\n\n"
         "// Подмена маршрута: ключ версии формата этого плана "

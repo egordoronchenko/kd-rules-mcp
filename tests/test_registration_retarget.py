@@ -90,6 +90,48 @@ def _names(table: Node | None) -> list[str]:
     return [str(row.get("Наименование")) for row in table.items]
 
 
+def test_bare_tabular_reference_is_invalid_even_without_card() -> None:
+    result = retarget_registration(
+        _tiny(_rule("Документ.Test", "[Rows]")), plan_name=PLAN, node_properties={}
+    )
+    assert result.remarks[0].reference == "[Rows]"
+    assert "без поля" in result.remarks[0].message
+
+
+def test_same_plan_keeps_header_text_and_does_not_report_plan_in_code() -> None:
+    source = _tiny(_rule("Документ.Test", "Old"))
+    plan = source.root.child("ПланОбмена")
+    assert plan is not None
+    plan.text = "ПланОбменаСсылка.СтарыйПлан"
+    source.rules()[0].values["ПриОбработке"] = "Узел = ПланыОбмена.СтарыйПлан.НайтиПоКоду(Код);"
+    result = retarget_registration(source, plan_name="СтарыйПлан", node_properties={"Old": "New"})
+    target = result.document.root.child("ПланОбмена")
+    assert target is not None
+    assert target.attrs == plan.attrs and target.text == plan.text
+    assert result.code_mentions == 0
+    assert _plan_leaf(result.document.rules()[0], 0).get("СвойствоПланаОбмена") == "New"
+
+
+def test_case_normalization_updates_linked_table_and_unload_mode() -> None:
+    source = _load()
+    metadata = _card(
+        ("ДАТАНОВАЯ", "Реквизит", False),
+        ("ФИРМЫ", "ТабличнаяЧасть", True),
+        ("ФИРМЫ.ФИРМА", "Реквизит", False),
+        ("РЕЖИМДРУГОЙ", "Реквизит", False),
+    )
+    before = dump_rules(source)
+    result = retarget_registration(
+        source, plan_name=PLAN, node_properties=MAPPING, target_plan=metadata
+    )
+    date = _plan_leaf(result.document.rules()[0], 0)
+    assert date.get("СвойствоПланаОбмена") == "ДАТАНОВАЯ"
+    assert _names(date.child("ТаблицаСвойствПланаОбмена")) == ["ДАТАНОВАЯ"]
+    assert result.document.rules()[0].get("РеквизитРежимаВыгрузки") == "РЕЖИМДРУГОЙ"
+    assert any(n.check == "registration.property_case" for n in result.notices)
+    assert dump_rules(source) == before
+
+
 def test_plan_name_changes_only_the_header_attribute() -> None:
     """Имя плана — атрибут `ПланОбмена`. Синоним и комментарий с тем же текстом остаются."""
     source = _load()
@@ -270,6 +312,114 @@ def test_target_name_already_used_by_another_node_property() -> None:
     rules = _tiny(_rule("Документ.А", "Дата") + _rule("Документ.Б", "Флаг"))
     with pytest.raises(PropertyNameClashError):
         retarget_registration(rules, plan_name=PLAN, node_properties={"Флаг": "Дата"})
+
+
+@pytest.mark.parametrize("occupied", ["FlagB", "flagb", "FLAGB"])
+@pytest.mark.parametrize("target", ["FlagB", "flagb"])
+def test_case_insensitive_property_clash(occupied: str, target: str) -> None:
+    rules = _tiny(_rule("Документ.A", "OldFlag") + _rule("Документ.B", occupied))
+    with pytest.raises(PropertyNameClashError):
+        retarget_registration(
+            rules,
+            plan_name=PLAN,
+            node_properties={"OldFlag": target},
+            target_plan=_card(("FlagB", "Реквизит", False)),
+        )
+
+
+@pytest.mark.parametrize("targets", [("FlagB", "FlagB"), ("FlagB", "flagb"), ("flagb", "FLAGB")])
+def test_case_insensitive_duplicate_target(targets: tuple[str, str]) -> None:
+    rules = _tiny(_rule("Документ.A", "OldA") + _rule("Документ.B", "OldB"))
+    with pytest.raises(DuplicateTargetPropertyError):
+        retarget_registration(
+            rules,
+            plan_name=PLAN,
+            node_properties=dict(zip(("OldA", "OldB"), targets, strict=True)),
+            target_plan=_card(("FlagB", "Реквизит", False)),
+        )
+
+
+@pytest.mark.parametrize("target", ["DateA", "FlagB", "flAGb"])
+def test_absent_mapping_key_does_not_participate_in_collisions(target: str) -> None:
+    rules = _tiny(_rule("Документ.A", "OldFlag") + _rule("Документ.B", "DateA"))
+    result = retarget_registration(
+        rules, plan_name=PLAN, node_properties={"OldFlag": "FlagB", "OldDate": target}
+    )
+    assert result.unused == ("OldDate",)
+    assert _plan_leaf(result.document.rules()[0], 0).get("СвойствоПланаОбмена") == "FlagB"
+
+
+@pytest.mark.parametrize("overlap", [True, False])
+def test_composite_object_property_type_needs_intersection(overlap: bool) -> None:
+    rules = _tiny(_rule("Документ.A", "RefA"))
+    _plan_leaf(rules.rules()[0], 0).values.update(
+        ЭтоСтрокаКонстанты=False,
+        ТипСвойстваОбъекта="СправочникСсылка.Items, СправочникСсылка.Other",
+        СвойствоОбъекта="Item",
+    )
+    card = ObjectCard(
+        "ПланОбмена.НовыйПлан",
+        "ПланОбменаСсылка.НовыйПлан",
+        "ПланОбмена",
+        (
+            ObjectProperty(
+                "RefA",
+                "Реквизит",
+                False,
+                ("СправочникСсылка.Items" if overlap else "СправочникСсылка.Third",),
+                (),
+            ),
+        ),
+    )
+    result = retarget_registration(rules, plan_name=PLAN, node_properties={}, target_plan=card)
+    assert any(n.blocking for n in result.notices) is not overlap
+
+
+def test_case_insensitive_mapping_renames_header_table_and_unload_mode() -> None:
+    rules = _tiny(
+        _rule("Документ.A", "OldFlag", unload="OldMode") + _rule("Документ.B", "[OldRows].OldField")
+    )
+    result = retarget_registration(
+        rules,
+        plan_name=PLAN,
+        node_properties={
+            "OLDFLAG": "FlagB",
+            "oldmode": "ModeB",
+            "[oldrows]": "RowsB",
+            "[OLDROWS].oldfield": "FieldB",
+        },
+        target_plan=_card(
+            ("FlagB", "Реквизит", False),
+            ("ModeB", "Реквизит", False),
+            ("RowsB", "ТабличнаяЧасть", True),
+            ("RowsB.FieldB", "Реквизит", False),
+        ),
+    )
+    assert result.unused == ()
+    first, second = result.document.rules()
+    assert _plan_leaf(first, 0).get("СвойствоПланаОбмена") == "FlagB"
+    assert _plan_leaf(second, 0).get("СвойствоПланаОбмена") == "[RowsB].FieldB"
+    assert first.get("РеквизитРежимаВыгрузки") == "ModeB"
+
+
+@pytest.mark.parametrize("occupied", ["[Rows].fieldb", "Other"])
+def test_case_insensitive_clashes_include_table_fields_and_unload_mode(occupied: str) -> None:
+    rules = _tiny(
+        _rule("Документ.A", "[Rows].OldField", unload="modeb") + _rule("Документ.B", occupied)
+    )
+    mapping = {"[rows].oldfield": "FieldB"} if occupied.startswith("[") else {"other": "ModeB"}
+    with pytest.raises(PropertyNameClashError):
+        retarget_registration(rules, plan_name=PLAN, node_properties=mapping)
+
+
+def test_case_insensitive_mapping_still_reports_old_name_in_handler() -> None:
+    rules = _tiny(_rule("Документ.A", "OldFlag"))
+    rules.rules()[0].values["ПередОбработкой"] = "Узел.OldFlag = Истина;"
+    result = retarget_registration(rules, plan_name=PLAN, node_properties={"OLDFLAG": "FlagB"})
+    assert result.unused == ()
+    assert result.code_mentions == 1
+    assert result.mentions[0].name == "OLDFLAG"
+    assert result.document.rules()[0].get("ПередОбработкой") == "Узел.OldFlag = Истина;"
 
 
 def test_unload_mode_name_stays_occupied() -> None:

@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import tempfile
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, NoReturn
@@ -71,6 +71,56 @@ def _refuse(reason: str, message: str, **details) -> NoReturn:
     raise EdAuthoringPreconditionError(
         message, {"failures": [{"id": reason, "message": message}], **details}
     )
+
+
+def _creation_differences(existing: dict, requested: dict) -> list[dict]:
+    """Служебный признак проверки расширений показывается аргументом extensions."""
+    rows = [
+        {"field": k, "existing": existing.get(k), "requested": v}
+        for k, v in requested.items()
+        if k != "extensions_checked" and existing.get(k) != v
+    ]
+    if existing.get("extensions_checked", False) != requested.get("extensions_checked", False):
+        rows = [r for r in rows if r["field"] != "extensions"]
+        rows.append(
+            {
+                "field": "extensions",
+                "existing": existing.get("extensions")
+                if existing.get("extensions_checked")
+                else None,
+                "requested": requested.get("extensions")
+                if requested.get("extensions_checked")
+                else None,
+            }
+        )
+    return rows
+
+
+def _check_project_path(folder: Path) -> None:
+    """Учитывает самый длинный путь тела/квитанции до первой записи в Win32."""
+    if (
+        os.name == "nt"
+        and max(
+            len(str(folder / name / ("f" * 64 + suffix)))
+            for name, suffix in (("bodies", ".bsl"), ("applied", ".json"))
+        )
+        >= 260
+    ):
+        raise EdAuthoringPathError(
+            "Путь проекта слишком длинный для Windows; сократите project_id или путь рабочей папки."
+        )
+
+
+@contextmanager
+def _rebind_io():
+    """Отказ по вводу-выводу включает вход/выход блокировки и все записи журнала."""
+    try:
+        yield
+    except OSError as error:
+        raise EdAuthoringIoError(
+            "Не удалось записать перепривязку проекта; проверьте доступ к рабочей папке. "
+            "Следующее обращение восстановит согласованное состояние."
+        ) from error
 
 
 def _atomic_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
@@ -367,6 +417,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 _refuse("model_invalid", "Идентификатор занят снимком ED")
             folder = self.manager_workspace._folder(project_id)
             self._safe_path(folder)
+            _check_project_path(folder)
             if (folder / "manager.ed.json").is_file():
                 if project_id not in self.manager_workspace.ids():
                     self.manager_workspace = ManagerWorkspace(self.workspace.root)
@@ -467,7 +518,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 **asdict(
                     ExtensionIdentity(
                         "кд3м_Менеджер_"
-                        + re.sub(r"\W", "_", project_id)[:32]
+                        + re.sub(r"[^A-Za-zА-Яа-яЁё0-9_]", "_", project_id)[:32]
                         + "_"
                         + digest(project_id)[:12],
                         "кд3м_",
@@ -525,11 +576,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 _refuse("model_invalid", "Идентификатор занят снимком ED")
             if project_id in self.manager_workspace.ids():
                 metadata = self._manager_metadata(project_id)
-                differences = [
-                    {"field": k, "existing": metadata["arguments"].get(k), "requested": v}
-                    for k, v in args.items()
-                    if metadata["arguments"].get(k) != v
-                ]
+                differences = _creation_differences(metadata["arguments"], args)
                 model = self._manager_project(project_id).model
                 if differences and not rebinding:
                     _refuse(
@@ -582,7 +629,7 @@ class EdWriterMixin(EdAuthoringMixin):
                     )
                     # Журнал публикуется первым; решение в сохранённой модели
                     # фиксирует новую сторону транзакции независимо от дальнейших правок.
-                    with self.manager_workspace._disk_lock(project_id):
+                    with _rebind_io(), self.manager_workspace._disk_lock(project_id):
                         current = self._manager_project(project_id)
                         if current.model.revision != model.revision:
                             raise EdAuthoringStaleError(

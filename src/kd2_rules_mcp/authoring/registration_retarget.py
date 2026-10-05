@@ -25,11 +25,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import cast
 
 from lxml import etree
 
@@ -44,16 +44,10 @@ from kd2_rules_mcp.errors import (
 )
 from kd2_rules_mcp.kd2.diff import diff_rules
 from kd2_rules_mcp.kd2.model import Node, RegistrationRules, RulesDocument
-from kd2_rules_mcp.structures.queries import ObjectCard
+from kd2_rules_mcp.kd2.rules_io import dump_rules
+from kd2_rules_mcp.structures.queries import ObjectCard, ObjectProperty
 from kd2_rules_mcp.validation.address import pro_addresses
-from kd2_rules_mcp.validation.registration import (
-    _header_field,
-    _Index,
-    _Obj,
-    _plan_field_exists,
-    _Prop,
-    _split_plan_property,
-)
+from kd2_rules_mcp.validation.registration import _split_plan_property
 
 # Буква или «_», дальше буквы, цифры и «_». Так платформа именует метаданные.
 _IDENTIFIER = re.compile(r"[^\W\d]\w*")
@@ -91,6 +85,7 @@ class RetargetRemark:
     leaf: str
     property_name: str
     message: str
+    reference: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +97,31 @@ class CodeMention:
     line: int
     name: str
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetargetNotice:
+    """Проверка использования типа или приведение имени к написанию метаданных."""
+
+    check: str
+    address: str
+    leaf: str
+    reference: str
+    message: str
+    blocking: bool = False
+    requires_acknowledgement: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class NodeReference:
+    """Вид ссылки и найденный реквизит; одинаковы для структуры и выгрузки."""
+
+    tabular: str
+    head: str
+    tail: str
+    canonical: str
+    field: ObjectProperty | None
+    missing: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +139,8 @@ class RetargetResult:
     only_expected: bool
     code_mentions: int
     mentions: tuple[CodeMention, ...]
+    source_rules_hash: str = ""
+    notices: tuple[RetargetNotice, ...] = ()
 
 
 def retarget_registration(
@@ -127,6 +149,7 @@ def retarget_registration(
     plan_name: str,
     node_properties: Mapping[str, str],
     target_plan: ObjectCard | None = None,
+    target_properties: frozenset[str] | None = None,
 ) -> RetargetResult:
     """Копия правил регистрации с новым именем плана и реквизитами узла.
 
@@ -141,9 +164,11 @@ def retarget_registration(
 
     ``target_plan`` — карточка плана из структуры. Нет реквизита или
     табличной части, на которые после замены ссылается лист или режим
-    выгрузки, — замечание, не исключение. Сверяется только реквизит узла,
-    без разыменования: полный путь — уже ``registration.plan_property``
-    при ``rules_validate``.
+    выгрузки, — замечание, не исключение. Вид ссылки, тип использования и
+    написание имён сверяются одинаково по карточке структуры и выгрузки.
+    Разыменование ссылочного типа требует ручной проверки, простого — запрещено.
+    ``target_properties`` — прежний вход только по именам без типов;
+    сервис передаёт полную карточку из общего читателя метаданных.
     """
     document = _registration(rules)
     name = _check_identifier(plan_name, "плана обмена")
@@ -152,25 +177,40 @@ def retarget_registration(
             f"Сведения целевого плана относятся к «{target_plan.kind}», а не к плану обмена"
         )
     filter_names, unload_names = _node_names(document)
-    mapping = _mapping(node_properties, filter_names, unload_names)
+    mapping = _mapping(node_properties)
     old_plan = document.exchange_plan
+    if target_plan is None and target_properties is not None:
+        target_plan = _names_card(name, target_properties)
+    effective, case_notices = _canonical_mapping(document, mapping, target_plan)
+    _check_targets(mapping, effective, filter_names | unload_names)
+    _check_clash(effective, filter_names, unload_names)
     cloned = _clone(document)
     _set_plan_name(cloned, name, old_plan)
-    stats, applied = _rename_filters(cloned, mapping)
-    _rename_unload_modes(cloned, mapping, applied)
-    mentions = _code_mentions(cloned, old_plan, mapping)
+    stats, applied = _rename_filters(cloned, effective)
+    _rename_unload_modes(cloned, effective, applied)
+    mentions = _code_mentions(cloned, old_plan if old_plan != name else "", mapping)
     seen_in_code = _mapping_keys_in_code(mapping, mentions)
     result = RetargetResult(
         document=cloned,
         rules=tuple(stats),
-        unused=tuple(key for key in mapping if key not in applied and key not in seen_in_code),
-        remarks=_remarks(cloned, name, target_plan),
+        unused=tuple(
+            key for key in mapping if key.casefold() not in applied and key not in seen_in_code
+        ),
+        remarks=registration_node_remarks(cloned, name, target_plan, target_properties),
         only_expected=True,
         code_mentions=len(mentions),
         mentions=mentions,
+        source_rules_hash=hashlib.sha256(dump_rules(document)).hexdigest(),
+        notices=case_notices + registration_type_notices(cloned, target_plan),
     )
-    _assert_only_expected(document, result.document, name, mapping)
+    _assert_only_expected(document, result.document, name, effective)
     return result
+
+
+def applicable_node_keys(rules: RegistrationRules, mapping: Mapping[str, str]) -> bool:
+    """Есть ли структурная ссылка, к которой применим хотя бы один ключ."""
+    filters, modes = _node_names(rules)
+    return bool({key.casefold() for key in filters | modes} & {key.casefold() for key in mapping})
 
 
 def _registration(rules: RulesDocument) -> RegistrationRules:
@@ -192,26 +232,40 @@ def _check_identifier(value: object, what: str) -> str:
     )
 
 
-def _mapping(
-    raw: Mapping[str, str], filter_names: set[str], unload_names: set[str]
-) -> dict[str, str]:
+def _mapping(raw: Mapping[str, str]) -> dict[str, str]:
     if not isinstance(raw, Mapping):
         raise InvalidRegistrationNameError("Отображение реквизитов узла должно быть словарём")
     mapping: dict[str, str] = {}
-    by_target: dict[str, list[str]] = {}
+    sources: set[str] = set()
     for key, value in raw.items():
         old = _check_mapping_key(key)
         new = _check_identifier(value, "реквизита узла")
+        if old.casefold() in sources:
+            raise InvalidRegistrationNameError(
+                f"Ключ отображения «{old}» повторяется без учёта регистра"
+            )
+        sources.add(old.casefold())
         mapping[old] = new
-        by_target.setdefault(new, []).append(old)
-    for new, sources in by_target.items():
+    return mapping
+
+
+def _check_targets(
+    mapping: Mapping[str, str], effective: Mapping[str, str], occupied: set[str]
+) -> None:
+    """Сравнивает приведённые имена только применимых ключей отображения."""
+    present = {name.casefold() for name in occupied}
+    by_target: dict[str, list[str]] = {}
+    for old in mapping:
+        if old.casefold() in present:
+            new = effective[old.casefold()]
+            by_target.setdefault(new.casefold(), []).append(old)
+    for sources in by_target.values():
         if len(sources) > 1:
             listed = "», «".join(sources)
+            new = effective[sources[0].casefold()]
             raise DuplicateTargetPropertyError(
                 f"Реквизиты «{listed}» переименовываются в одно имя «{new}»"
             )
-    _check_clash(mapping, filter_names, unload_names)
-    return mapping
 
 
 def _check_mapping_key(value: object) -> str:
@@ -229,12 +283,11 @@ def _check_clash(mapping: dict[str, str], filter_names: set[str], unload_names: 
 
     Режим выгрузки переписывается тем же отображением и занимает уже новое имя.
     """
-    occupied = filter_names | unload_names
-    for old, new in mapping.items():
-        if old == new:
-            continue
-        stays = [name for name in occupied if mapping.get(name, name) == new and name != old]
-        if stays:
+    final_names: dict[str, str] = {}
+    for old in sorted(filter_names | unload_names):
+        new = _rename_plan_property(old, mapping)
+        previous = final_names.setdefault(new.casefold(), old.casefold())
+        if previous != old.casefold():
             raise PropertyNameClashError(
                 f"Имя «{new}» уже используется другим реквизитом узла в этих правилах"
             )
@@ -279,6 +332,8 @@ def _copy_node(node: Node) -> Node:
 
 
 def _set_plan_name(rules: RegistrationRules, plan_name: str, old_name: str) -> None:
+    if plan_name == old_name:
+        return
     node = rules.root.child("ПланОбмена")
     if node is None:
         node = Node.new("exchange_plan", "ПланОбмена")
@@ -312,10 +367,10 @@ def _rename_unload_modes(
 ) -> None:
     for rule in rules.rules():
         old = str(rule.values.get(_UNLOAD_MODE, "")).strip()
-        if not old or old not in mapping:
+        if not old or old.casefold() not in mapping:
             continue
-        applied.add(old)
-        new = mapping[old]
+        applied.add(old.casefold())
+        new = mapping[old.casefold()]
         if new != old:
             rule.values[_UNLOAD_MODE] = new
 
@@ -324,15 +379,15 @@ def _rename_plan_leaf(item: Node, mapping: Mapping[str, str], applied: set[str])
     old = str(item.values.get(_PLAN_PROPERTY, ""))
     tabular, head = _node_parts(old)
     if tabular:
-        section_key = f"[{tabular}]"
+        section_key = f"[{tabular}]".casefold()
         if section_key in mapping:
             applied.add(section_key)
         if head:
-            attr_key = f"[{tabular}].{head}"
+            attr_key = f"[{tabular}].{head}".casefold()
             if attr_key in mapping:
                 applied.add(attr_key)
-    elif head in mapping:
-        applied.add(head)
+    elif head.casefold() in mapping:
+        applied.add(head.casefold())
     new = _rename_plan_property(old, mapping)
     if new != old and (_PLAN_PROPERTY in item.values or new):
         item.values[_PLAN_PROPERTY] = new
@@ -361,11 +416,11 @@ def _rename_plan_property(raw: str, mapping: Mapping[str, str]) -> str:
     head = segments[0] if segments else ""
     rest = segments[1:]
     if tabular:
-        new_tab = mapping.get(f"[{tabular}]", tabular)
-        new_head = mapping.get(f"[{tabular}].{head}", head) if head else ""
+        new_tab = mapping.get(f"[{tabular}]".casefold(), tabular)
+        new_head = mapping.get(f"[{tabular}].{head}".casefold(), head) if head else ""
     else:
         new_tab = ""
-        new_head = mapping.get(head, head) if head else ""
+        new_head = mapping.get(head.casefold(), head) if head else ""
     new_attr = ".".join([new_head, *rest]) if segments else ""
     if new_tab:
         return f"[{new_tab}].{new_attr}" if new_attr else f"[{new_tab}]"
@@ -390,14 +445,14 @@ def _rename_row_names(raw: str, names: list[str], mapping: Mapping[str, str]) ->
         if cursor >= len(expected):
             break
         kind, name = expected[cursor]
-        if kind == "tabular" and current in (f"[{name}]", name):
-            new_name = mapping.get(f"[{name}]", name)
+        if kind == "tabular" and current.casefold() in (f"[{name}]".casefold(), name.casefold()):
+            new_name = mapping.get(f"[{name}]".casefold(), name)
             bracket = current.startswith("[") and current.endswith("]")
             result[index] = f"[{new_name}]" if bracket else new_name
             cursor += 1
-        elif kind == "attribute" and current == name:
+        elif kind == "attribute" and current.casefold() == name.casefold():
             key = f"[{tabular}].{name}" if tabular else name
-            result[index] = mapping.get(key, name)
+            result[index] = mapping.get(key.casefold(), name)
             cursor += 1
     return result
 
@@ -424,17 +479,23 @@ def _leaf_label(tag: str, path: tuple[int, ...]) -> str:
     return "/".join((tag, *(str(index) for index in path)))
 
 
-def _remarks(
-    rules: RegistrationRules, plan_name: str, target_plan: ObjectCard | None
+def registration_node_remarks(
+    rules: RegistrationRules,
+    plan_name: str,
+    target_plan: ObjectCard | None,
+    target_properties: frozenset[str] | None = None,
 ) -> tuple[RetargetRemark, ...]:
-    if target_plan is None:
-        return ()
-    obj = _obj_from_card(target_plan)
+    """Недостающие поля и недопустимые ссылки, включая ТЧ без поля."""
+    card = target_plan
+    if card is None and target_properties is not None:
+        card = _names_card(plan_name, target_properties)
+
     remarks: list[RetargetRemark] = []
     for address, rule in zip(pro_addresses(rules.rules()), rules.rules(), strict=True):
         for path, item in _leaves(rule, _PLAN_FILTER):
             raw = str(item.values.get(_PLAN_PROPERTY, ""))
-            missing = _missing_node_property(obj, raw)
+            reference = registration_reference(raw, card)
+            missing = reference.missing
             if missing is None:
                 continue
             leaf = _leaf_label(_PLAN_FILTER, path)
@@ -443,8 +504,12 @@ def _remarks(
                     address=address,
                     leaf=leaf,
                     property_name=missing,
+                    reference=raw,
                     message=(
-                        f"{address}, лист {leaf}: реквизит узла «{missing}» "
+                        f"{address}, лист {leaf}: ссылка «{raw}» указывает на табличную часть "
+                        "без поля; БСП не сможет построить условие запроса."
+                        if reference.tabular and not reference.head
+                        else f"{address}, лист {leaf}: реквизит узла «{missing}» "
                         f"не найден у плана обмена «{plan_name}»"
                     ),
                 )
@@ -452,7 +517,7 @@ def _remarks(
         mode = str(rule.values.get(_UNLOAD_MODE, "")).strip()
         if not mode:
             continue
-        missing_mode = _missing_node_property(obj, mode)
+        missing_mode = registration_reference(mode, card).missing
         if missing_mode is None:
             continue
         remarks.append(
@@ -460,6 +525,7 @@ def _remarks(
                 address=address,
                 leaf=_UNLOAD_MODE,
                 property_name=missing_mode,
+                reference=mode,
                 message=(
                     f"{address}, {_UNLOAD_MODE}: реквизит узла «{missing_mode}» "
                     f"не найден у плана обмена «{plan_name}»"
@@ -469,55 +535,260 @@ def _remarks(
     return tuple(remarks)
 
 
-def _obj_from_card(card: ObjectCard) -> _Obj:
-    properties = {
-        item.path: _Prop(item.kind, item.is_group, item.types, item.unresolved)
-        for item in card.properties
-    }
-    return _Obj(card.name, card.type_name, card.kind, properties)
+def own_attribute_remarks(rules: RegistrationRules, names: set[str]) -> tuple[RetargetRemark, ...]:
+    """Булев реквизит шапки не заменяет ТЧ, ссылку, иной тип или режим выгрузки.
 
-
-def _missing_node_property(obj: _Obj, raw: str) -> str | None:
-    """Имя недостающего реквизита или табличной части. None — реквизит узла есть.
-
-    Совпадает с ``_plan_field_exists`` на пути без разыменования. Расхождение
-    с этой проверкой — ошибка функции, а не замечание.
+    Константа и тип значения: ВыгрузкаРегистрации:323–343,
+    ЗагрузкаПравилРегистрацииОбъектов:448–484. Режим сравнивается с
+    перечислением, а не Булево: ОбменДаннымиСобытия:2206–2212,2884–2888.
     """
-    if not raw:
-        return None
-    tabular, head = _node_parts(raw)
-    owned = _owned_reference(tabular, head)
-    exists = bool(owned) and _plan_field_exists(cast(_Index, None), obj, owned)
-    missing = _missing_piece(obj, tabular, head, raw)
-    if exists != (missing is None):
-        raise RetargetInvariantError(
-            "Сверка реквизита узла разошлась с проверкой registration.plan_property"
-        )
-    return missing
+    issues = []
+    for address, rule in zip(pro_addresses(rules.rules()), rules.rules(), strict=True):
+        leaves = [
+            (_leaf_label(_PLAN_FILTER, path), item) for path, item in _leaves(rule, _PLAN_FILTER)
+        ]
+        for leaf, item in leaves:
+            raw = str(item.get(_PLAN_PROPERTY)).strip()
+            reference = registration_reference(raw)
+            tabular, head = reference.tabular, reference.head
+            if not ({tabular.casefold(), head.casefold()} & names):
+                continue
+            reason = ""
+            if tabular:
+                reason = (
+                    "Расширение добавляет только реквизиты шапки, а не табличные части и их поля."
+                )
+            elif raw != head:
+                reason = "Булев реквизит нельзя разыменовывать: у него нет вложенных полей."
+            elif not _boolean_comparison(item):
+                reason = (
+                    "Собственный булев реквизит подходит только для сравнения с булевым значением; "
+                    "тип этого сравнения не подтверждён."
+                )
+            if reason:
+                issues.append(RetargetRemark(address, leaf, head or tabular, reason, raw))
+        mode = str(rule.get(_UNLOAD_MODE)).strip()
+        if mode.casefold() in names:
+            issues.append(
+                RetargetRemark(
+                    address,
+                    _UNLOAD_MODE,
+                    mode,
+                    "Реквизит режима выгрузки сравнивается с перечислением режимов; "
+                    "собственный булев реквизит для него не подходит.",
+                    mode,
+                )
+            )
+    return tuple(issues)
 
 
-def _owned_reference(tabular: str, head: str) -> str:
-    if tabular and head:
-        return f"[{tabular}].{head}"
-    return head
+def _boolean_comparison(item: Node) -> bool:
+    """Не исполняет алгоритм; неизвестное значение не признаётся булевым."""
+    extra = {str(n.tag): n.text or "" for n in item.unknown if not len(n) and not n.attrib}
+    if extra.get("Вид", "Константа") != "Константа":
+        return False
+    declared = str(item.get("ТипСвойстваОбъекта")).strip()
+    if declared and declared != "Булево":
+        return False
+    if item.get("ЭтоСтрокаКонстанты") is True:
+        return declared == "Булево" and str(item.get("СвойствоОбъекта")).strip().casefold() in {
+            "true",
+            "false",
+            "истина",
+            "ложь",
+        }
+    # Старые/внешние файлы могут хранить эти поля вне известной схемы листа.
+    if extra.get("Вид") == "Константа":
+        return extra.get("ЗначениеКонстанты", "").strip() in {"true", "false"}
+    return declared == "Булево" and bool(item.get("СвойствоОбъекта"))
 
 
-def _missing_piece(obj: _Obj, tabular: str, head: str, raw: str) -> str | None:
+def own_attribute_covers(remark: RetargetRemark, names: set[str]) -> bool:
+    """Имя без скобок и точек обозначает только реквизит шапки."""
+    return (
+        remark.reference.casefold() in names
+        and "." not in remark.reference
+        and "[" not in remark.reference
+    )
+
+
+def _names_card(name: str, properties: frozenset[str]) -> ObjectCard:
+    """Совместимость старого входа без типов; сервис передаёт полную карточку."""
+    sections = {p[1:-1].casefold() for p in properties if p.startswith("[") and p.endswith("]")}
+    rows = []
+    for raw in sorted(properties):
+        tabular, head = _node_parts(raw)
+        path = (f"{tabular}.{head}" if head else tabular) if tabular else raw
+        group = not head if tabular else raw.casefold() in sections
+        rows.append(ObjectProperty(path, "ТабличнаяЧасть" if group else "Реквизит", group, (), ()))
+    return ObjectCard(f"ПланОбмена.{name}", f"ПланОбменаСсылка.{name}", "ПланОбмена", tuple(rows))
+
+
+def registration_reference(raw: str, card: ObjectCard | None = None) -> NodeReference:
+    """Проверяет вид ссылки и наличие поля без учёта регистра имён 1С.
+
+    ТЧ без поля запрещена: ЗагрузкаПравилРегистрацииОбъектов:466–484,836–838,894.
+    Хвост разыменования остаётся отдельным, его тип нельзя выводить из типа головы.
+    """
+    tabular, attribute = _split_plan_property(raw)
+    head, dot, rest = attribute.partition(".")
+    tail = dot + rest
+    properties = {p.path.casefold(): p for p in card.properties} if card else {}
+    section = properties.get(tabular.casefold()) if tabular else None
+    path = f"{tabular}.{head}" if tabular else head
+    field = properties.get(path.casefold())
+    missing = None
     if tabular:
-        section = obj.properties.get(tabular)
-        if section is None or section.kind != "ТабличнаяЧасть":
-            return tabular
         if not head:
-            return f"[{tabular}]"
-        field = obj.properties.get(f"{tabular}.{head}")
-        if field is None or field.is_group:
-            return f"[{tabular}].{head}"
-        return None
-    if not head:
-        return raw
-    if _header_field(obj, head) is None:
-        return head
-    return None
+            missing = f"[{tabular}]"
+        elif card and (section is None or section.kind != "ТабличнаяЧасть"):
+            missing = tabular
+        elif card and (field is None or field.is_group):
+            missing = f"[{tabular}].{head}"
+    elif raw and card and (field is None or field.is_group):
+        missing = head or raw
+    canonical = raw
+    if field is not None and missing is None:
+        if tabular:
+            section_name, _, field_name = field.path.partition(".")
+            canonical = f"[{section_name}].{field_name}{tail}"
+        else:
+            canonical = field.path + tail
+    return NodeReference(tabular, head, tail, canonical, field, missing)
+
+
+def _references(rules: RegistrationRules) -> Iterator[tuple[str, str, Node | None, str]]:
+    for address, rule in zip(pro_addresses(rules.rules()), rules.rules(), strict=True):
+        for path, item in _leaves(rule, _PLAN_FILTER):
+            yield address, _leaf_label(_PLAN_FILTER, path), item, str(item.get(_PLAN_PROPERTY))
+        mode = str(rule.get(_UNLOAD_MODE)).strip()
+        if mode:
+            yield address, _UNLOAD_MODE, None, mode
+
+
+def _canonical_mapping(
+    rules: RegistrationRules, mapping: dict[str, str], card: ObjectCard | None
+) -> tuple[dict[str, str], tuple[RetargetNotice, ...]]:
+    explicit = {key.casefold(): value for key, value in mapping.items()}
+    effective = dict(explicit)
+    notices = []
+    for address, leaf, _, raw in _references(rules):
+        mapped = _rename_plan_property(raw, explicit)
+        resolved = registration_reference(mapped, card)
+        if resolved.canonical == mapped:
+            continue
+        old_tabular, old_head = _node_parts(raw)
+        new_tabular, new_head = _node_parts(resolved.canonical)
+        if old_tabular:
+            effective[f"[{old_tabular}]".casefold()] = new_tabular
+            if old_head:
+                effective[f"[{old_tabular}].{old_head}".casefold()] = new_head
+        else:
+            effective[old_head.casefold()] = new_head
+        notices.append(
+            RetargetNotice(
+                "registration.property_case",
+                address,
+                leaf,
+                mapped,
+                f"{address}, {leaf}: имя «{mapped}» приведено к написанию метаданных "
+                f"«{resolved.canonical}».",
+            )
+        )
+    return effective, tuple(notices)
+
+
+_PRIMITIVE_TYPES = frozenset({"Булево", "Дата", "Число", "Строка"})
+_PRIMITIVE_NAMES = frozenset(t.casefold() for t in _PRIMITIVE_TYPES)
+_REFERENCE_TYPE = re.compile(r"[^.]+Ссылка\.[^.]+", re.IGNORECASE)
+_MODE_TYPE = "ПеречислениеСсылка.РежимыВыгрузкиОбъектовОбмена"
+
+
+def _known_types(types: tuple[str, ...]) -> bool:
+    return bool(types) and all(
+        t.casefold() in _PRIMITIVE_NAMES or _REFERENCE_TYPE.fullmatch(t) for t in types
+    )
+
+
+def _comparison_types(item: Node) -> tuple[str, ...]:
+    declared = str(item.get("ТипСвойстваОбъекта")).strip()
+    if declared:
+        return tuple(t.strip() for t in declared.split(",") if t.strip())
+    if item.get("ЭтоСтрокаКонстанты") is True:
+        return ()
+    # Совместимость внешнего синтетического формата; типизированная константа КД
+    # без ТипСвойстваОбъекта остаётся неизвестной (ЗагрузкаПравилРегистрацииОбъектов:450).
+    extra = {str(n.tag): n.text or "" for n in item.unknown if not len(n) and not n.attrib}
+    if extra.get("Вид") != "Константа":
+        return ()
+    value = extra.get("ЗначениеКонстанты", "").strip()
+    if value in {"true", "false"}:
+        return ("Булево",)
+    if re.fullmatch(r"\d{4}-\d\d-\d\d(?:T[\d:]+)?", value):
+        return ("Дата",)
+    if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", value):
+        return ("Число",)
+    if value.startswith('"') and value.endswith('"'):
+        return ("Строка",)
+    return ()
+
+
+def registration_type_notices(
+    rules: RegistrationRules, card: ObjectCard | None
+) -> tuple[RetargetNotice, ...]:
+    """Сверяет тип существующего поля с использованием, не исполняя BSL.
+
+    Тип сравнения: ЗагрузкаПравилРегистрацииОбъектов:448–484. Режим выгрузки:
+    ОбменДаннымиСобытия:2206–2212,2884–2888 — перечисление режимов.
+    """
+    notices = []
+    for address, leaf, item, raw in _references(rules):
+        ref = registration_reference(raw, card)
+        if ref.missing is not None or ref.field is None:
+            continue
+        node_types = ref.field.types + ref.field.unresolved
+        comparison = _comparison_types(item) if item else (_MODE_TYPE,)
+        known_node = _known_types(node_types) and not ref.field.unresolved
+        reason = ""
+        unknown = not known_node or not _known_types(comparison)
+        if (
+            item is not None
+            and item.get("ЭтоСтрокаКонстанты") is True
+            and not str(item.get("ТипСвойстваОбъекта")).strip()
+        ):
+            reason = "У константы не задан тип свойства; БСП не сможет загрузить правила."
+        elif item is None and (ref.tabular or ref.tail):
+            reason = "Режим выгрузки должен быть реквизитом шапки без разыменования."
+        elif ref.tail:
+            if known_node and all(t in _PRIMITIVE_TYPES for t in node_types):
+                reason = "У простого типа реквизита нет вложенных полей для разыменования."
+            else:
+                unknown = True
+        elif not unknown and not {t.casefold() for t in comparison} & {
+            t.casefold() for t in node_types
+        }:
+            reason = "Тип реквизита узла несовместим с использованием в правиле."
+        blocked = bool(reason)
+        if not blocked and not unknown:
+            continue
+        types = (
+            f"Тип узла: {', '.join(node_types) or 'неизвестен'}; "
+            f"тип сравнения: {', '.join(comparison) or 'неизвестен'}."
+        )
+        if not reason:
+            reason = "Тип сравнения не удалось проверить; перенос неполон: проверьте его вручную."
+        notices.append(
+            RetargetNotice(
+                "registration.attribute_type" if blocked else "registration.type_unchecked",
+                address,
+                leaf,
+                raw,
+                f"{address}, {leaf}, «{raw}»: {reason} {types}",
+                blocking=blocked,
+                requires_acknowledgement=not blocked,
+            )
+        )
+    return tuple(notices)
 
 
 def _code_mentions(
@@ -556,10 +827,10 @@ def _code_names(plan_name: str, mapping: Mapping[str, str]) -> dict[str, str]:
     """Идентификатор в коде → имя, которое попадёт в замечание."""
     names: dict[str, str] = {}
     if plan_name:
-        names[plan_name] = plan_name
+        names[plan_name.casefold()] = plan_name
     for key in mapping:
         token = _key_token(key)
-        names.setdefault(token, token)
+        names.setdefault(token.casefold(), token)
     return names
 
 
@@ -575,14 +846,16 @@ def _key_token(key: str) -> str:
 def _mapping_keys_in_code(
     mapping: Mapping[str, str], mentions: tuple[CodeMention, ...]
 ) -> set[str]:
-    found = {item.name for item in mentions}
-    return {key for key in mapping if _key_token(key) in found}
+    found = {item.name.casefold() for item in mentions}
+    return {key for key in mapping if _key_token(key).casefold() in found}
 
 
 def _mentions_in(
     address: str, event: str, text: str, names: Mapping[str, str]
 ) -> list[CodeMention]:
-    patterns = {token: re.compile(rf"(?<![\w]){re.escape(token)}(?![\w])") for token in names}
+    patterns = {
+        token: re.compile(rf"(?<![\w]){re.escape(token)}(?![\w])", re.IGNORECASE) for token in names
+    }
     found: list[CodeMention] = []
     for line_no, line in enumerate(_code_without_comments(text), 1):
         for token, pattern in patterns.items():
@@ -660,7 +933,7 @@ def _assert_only_expected(
             problems.append(f"текст плана в диффе «{change.new}»")
         elif change.field == _UNLOAD_MODE:
             previous = change.old or ""
-            if change.new != mapping.get(previous, previous):
+            if change.new != mapping.get(previous.casefold(), previous):
                 problems.append(f"режим выгрузки в диффе «{change.new}»")
     problems.extend(_snapshot_problems(source, result, mapping))
     problems.extend(_leaf_problems(source, result, mapping))

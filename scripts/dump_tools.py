@@ -65,7 +65,11 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "pko_create_from_candidates",
     ),
     "Checks": ("rules_validate", "rules_diff", "handlers_export", "handlers_locate"),
-    "Registration and correspondent rules": ("registration_build", "correspondent_draft"),
+    "Registration and correspondent rules": (
+        "registration_build",
+        "registration_retarget",
+        "correspondent_draft",
+    ),
     "EnterpriseData reader": (
         "ed_open",
         "ed_overview",
@@ -100,6 +104,9 @@ EXTRA_FIELDS = {
 
 # «Когда» для кодов, у классов которых docstring чужой или уже узкий.
 WHEN = {
+    "registration.precondition": (
+        "Registration retargeting preconditions were not met; see code and failures."
+    ),
     "path_outside_workspace": "Write path outside the workspace and project rules directories.",
     "rejected": "Other server refusal (`Kd2Error`); see `message` for the reason.",
     "invalid_argument": "Invalid argument value, such as an unknown severity or confidence class.",

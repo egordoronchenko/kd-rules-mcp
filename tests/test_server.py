@@ -16,6 +16,7 @@ from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
 from tests.test_ed_authoring_handlers import HANDLERS
 from tests.test_service_ed_authoring import handler_setup
 from tests.test_service_ed_authoring import setup as setup
+from tests.test_service_registration_retarget import setup as registration_setup
 
 DATA = Path(__file__).parent / "data"
 DUMP = DATA / "xmldump" / "main"
@@ -46,6 +47,36 @@ async def _error(client: Client, tool: str, /, **arguments: Any) -> dict[str, An
     text = "".join(getattr(item, "text", "") for item in result.content)
     # SDK добавляет «Error executing tool <имя>: » перед текстом ошибки.
     return json.loads(text[text.index("{") :])
+
+
+async def test_registration_retarget_tool(tmp_path: Path) -> None:
+    service, arguments = registration_setup(tmp_path)
+    async with Client(create_server(service)) as client:
+        preview = await _call(client, "registration_retarget", **arguments)
+        assert preview["counts"]["renamed_leaves"] == 2
+        assert not Path(preview["output_path"]).exists()
+        stale = await _error(client, "registration_retarget", **(arguments | {"mode": "write"}))
+        assert stale["code"] == "registration.stale"
+        written = await _call(
+            client,
+            "registration_retarget",
+            **(arguments | {"mode": "write", "expected_preview_hash": preview["preview_hash"]}),
+        )
+        assert written["status"] == "written"
+        invalid = await _error(
+            client, "registration_retarget", **(arguments | {"structure_id": []})
+        )
+        assert invalid["code"] == "invalid_argument"
+        unsafe = arguments | {"structure_id": None, "own_attributes": None, "extension": None}
+        blocked = await _call(client, "registration_retarget", **unsafe)
+        assert blocked["status"] == "blocked"
+        rejected = await _error(
+            client,
+            "registration_retarget",
+            **(unsafe | {"mode": "write", "expected_preview_hash": blocked["preview_hash"]}),
+        )
+        assert rejected["code"] == "registration.missing_attribute"
+        assert rejected["failures"][0]["address"]
 
 
 EXPECTED_TOOLS = {
@@ -98,6 +129,7 @@ EXPECTED_TOOLS = {
     "handlers_export",
     "handlers_locate",
     "registration_build",
+    "registration_retarget",
     "correspondent_draft",
 }
 

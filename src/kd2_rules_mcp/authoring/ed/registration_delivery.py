@@ -18,7 +18,13 @@ from types import MappingProxyType
 
 from lxml import etree
 
-from kd2_rules_mcp.authoring.registration_retarget import RetargetResult
+from kd2_rules_mcp.authoring.registration_retarget import (
+    RetargetResult,
+    own_attribute_covers,
+    own_attribute_remarks,
+    registration_node_remarks,
+    registration_type_notices,
+)
 from kd2_rules_mcp.errors import (
     RegistrationAttributeClashError,
     RegistrationAttributePrefixError,
@@ -29,6 +35,9 @@ from kd2_rules_mcp.errors import (
     RegistrationPlanNotFoundError,
 )
 from kd2_rules_mcp.kd2.rules_io import dump_rules
+from kd2_rules_mcp.structures.queries import ObjectCard, ObjectProperty
+from kd2_rules_mcp.structures.xmlbuild import STUBS, Builder, Metadata, Prop
+from kd2_rules_mcp.structures.xmldump import AUX_KINDS, KINDS, ConfigDump, MetaObject, read_object
 
 from .hook import valid_identifier
 from .identity import IdentityMap, logical_path, make_identity_map
@@ -85,6 +94,7 @@ class PlanHost:
     properties: frozenset[str]
     extension_attributes: frozenset[str]
     input_hashes: Mapping[str, str]
+    card: ObjectCard
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_hashes", MappingProxyType(dict(self.input_hashes)))
@@ -128,8 +138,86 @@ def _properties(obj: etree._Element) -> set[str]:
     return found - {""}
 
 
+def _plan_metadata(
+    root: Path, config: bytes, plan_name: str, hashes: dict[str, str], prefix: str = ""
+) -> ConfigDump:
+    """Общий читатель структуры: план, наборы типов, общие реквизиты и имена ссылок.
+
+    Остальные объекты представлены именами: для типов AnyRef нужны все ссылочные
+    имена, но реквизиты этих объектов комплект не использует и не проверяет.
+    Каждый прочитанный файл входит в хеш входов, включая определения типов.
+    """
+    xml = parse_xml("Configuration.xml", config.decode("utf-8-sig"))[0]
+    model = ConfigDump(root, is_extension=bool(prefix))
+    for item in xml.findall(f"{{{M}}}ChildObjects/*"):
+        tag = etree.QName(item).localname
+        name = (item.text or "").strip()
+        directory = KINDS[tag][0] if tag in KINDS else AUX_KINDS.get(tag)
+        if not directory or not name:
+            continue
+        if tag in {"DefinedType", "CommonAttribute", "ChartOfCharacteristicTypes"} or (
+            tag == "ExchangePlan" and name == plan_name
+        ):
+            path = f"{directory}/{name}.xml"
+            raw = _read(root / path)
+            obj = read_object(root / path, tag)
+            if _read(root / path) != raw:
+                raise RegistrationDeliveryProfileError("Выгрузка изменилась во время чтения")
+            hashes[prefix + path] = sha256(raw)
+        else:
+            obj = MetaObject(tag, name)
+        model.objects.setdefault(tag, []).append(obj)
+    # Внешние минимальные выгрузки могут не перечислять план в Configuration.xml.
+    if not any(p.name == plan_name for p in model.objects.get("ExchangePlan", [])):
+        path = f"ExchangePlans/{plan_name}.xml"
+        if (root / path).is_file():
+            model.objects.setdefault("ExchangePlan", []).append(
+                read_object(root / path, "ExchangePlan")
+            )
+    return model
+
+
+def _plan_card(metadata: Metadata, name: str) -> ObjectCard:
+    """Те же свойства и разрешённые типы, что у карточки XML-структуры."""
+    obj = metadata.get(f"ПланОбмена.{name}")
+    if obj is None:
+        raise RegistrationPlanNotFoundError("План обмена не найден в выгрузке")
+    known = (
+        {name for name, _, _ in STUBS}
+        | {
+            KINDS[tag][4] + item.name
+            for tag, objects in metadata.objects.items()
+            if tag in KINDS
+            for item in objects
+        }
+        | {
+            f"ТочкаМаршрутаБизнесПроцессаСсылка.{obj.name}"
+            for obj in metadata.of("BusinessProcess")
+        }
+    )
+    rows = []
+
+    def flatten(props: Sequence[Prop], parent: str = "") -> None:
+        for prop in props:
+            path = f"{parent}.{prop.name}" if parent else prop.name
+            names = prop.type.names if prop.type else []
+            rows.append(
+                ObjectProperty(
+                    path,
+                    prop.kind,
+                    prop.is_group,
+                    tuple(sorted(t for t in names if t in known)),
+                    tuple(sorted(t for t in names if t not in known)),
+                )
+            )
+            flatten(prop.children, path)
+
+    flatten(Builder(metadata).object_properties(obj))
+    return ObjectCard(f"ПланОбмена.{name}", f"ПланОбменаСсылка.{name}", "ПланОбмена", tuple(rows))
+
+
 def read_plan_host(dump: Path, plan_name: str, *, extensions: Sequence[Path] = ()) -> PlanHost:
-    """Читает только описания конфигурации, языка и выбранного плана с диска."""
+    """Читает профиль комплекта и типизированную карточку выбранного плана."""
     if not valid_identifier(plan_name):
         raise RegistrationDeliveryProfileError("Недопустимое имя плана обмена")
     plan_path = f"ExchangePlans/{plan_name}.xml"
@@ -163,12 +251,17 @@ def read_plan_host(dump: Path, plan_name: str, *, extensions: Sequence[Path] = (
             plan_path: sha256(plan_raw),
         }
         properties = _properties(obj)
+        main = _plan_metadata(dump, config_raw, plan_name, hashes)
+        overlays = []
         own: set[str] = set()
         for index, extension in enumerate(extensions):
             # Даже расширение без этого плана должно быть существующей выгрузкой.
             ext_config = _read(extension / "Configuration.xml")
             parse_xml("Configuration.xml", ext_config.decode("utf-8-sig"))
             hashes[f"extensions/{index}/Configuration.xml"] = sha256(ext_config)
+            overlays.append(
+                _plan_metadata(extension, ext_config, plan_name, hashes, f"extensions/{index}/")
+            )
             path = extension / plan_path
             if not path.is_file():
                 continue
@@ -196,8 +289,15 @@ def read_plan_host(dump: Path, plan_name: str, *, extensions: Sequence[Path] = (
             frozenset(p.casefold() for p in properties),
             frozenset(own),
             hashes,
+            _plan_card(Metadata(main, overlays), plan_name),
         )
-    except (AuthoringPreconditionError, UnicodeError) as error:
+    except (
+        AuthoringPreconditionError,
+        UnicodeError,
+        etree.XMLSyntaxError,
+        OSError,
+        ValueError,
+    ) as error:
         raise RegistrationDeliveryProfileError("Выгрузка вне профиля XML 2.20") from error
 
 
@@ -373,6 +473,8 @@ def render_registration_kit(
     extension_name: str,
     prefix: str,
     previous_manifest: RegistrationManifest | None = None,
+    source_file_hash: str | None = None,
+    notices: Sequence[str] = (),
 ) -> RegistrationKit:
     """Собирает повторяемые байты; никакой установки в базу и записи на диск."""
     if not valid_identifier(extension_name) or not valid_identifier(prefix):
@@ -402,22 +504,41 @@ def render_registration_kit(
                 "Тип собственного реквизита вне профиля «Булево»"
             )
         names.add(key)
-    for remark in result.remarks:
-        if remark.property_name.casefold() not in host.properties | names:
+    invalid = own_attribute_remarks(result.document, names)
+    if invalid:
+        raise RegistrationMissingAttributeError(invalid[0].message)
+    type_notices = registration_type_notices(result.document, host.card)
+    for notice in type_notices:
+        if notice.blocking:
+            raise RegistrationMissingAttributeError(notice.message)
+    for remark in (
+        *result.remarks,
+        *registration_node_remarks(result.document, host.exchange_plan.name, host.card),
+    ):
+        if not own_attribute_covers(remark, names):
             raise RegistrationMissingAttributeError(
                 "Правила ссылаются на реквизит, которого не будет в базе: " + remark.property_name
             )
-    remarks = tuple(
-        r.message
-        + ("; реквизит будет добавлен расширением" if r.property_name.casefold() in names else "")
-        for r in result.remarks
-    ) + tuple(m.message for m in result.mentions)
+    remarks = (
+        tuple(
+            r.message
+            + (
+                "; реквизит будет добавлен расширением"
+                if r.property_name.casefold() in names
+                else ""
+            )
+            for r in result.remarks
+        )
+        + tuple(m.message for m in result.mentions)
+        + tuple(dict.fromkeys((*notices, *(n.message for n in type_notices))))
+    )
     if result.code_mentions and not result.mentions:
         remarks += (f"В коде остались старые имена: {result.code_mentions} упоминаний.",)
     content = dump_rules(result.document)
     hashes = {
         **host.input_hashes,
-        "source_rules": sha256(result.document.origin),
+        "source_rules": result.source_rules_hash,
+        "source_file": source_file_hash or sha256(result.document.origin),
         "retargeted_rules": sha256(content),
         "decisions": sha256(
             json_bytes(
