@@ -51,6 +51,8 @@ async def _error(client: Client, tool: str, /, **arguments: Any) -> dict[str, An
 EXPECTED_TOOLS = {
     "ed_authoring_candidates",
     "ed_authoring_build",
+    "ed_create",
+    "ed_apply",
     "ed_schema_open",
     "ed_schema_types",
     "ed_schema_type",

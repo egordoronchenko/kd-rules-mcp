@@ -1,4 +1,4 @@
-"""Скиллы kd2-*: один источник в `.claude/skills`, без копий для клиентов; справочники на месте;
+"""Скиллы сервера: один источник в `.claude/skills`, без копий для клиентов; справочники на месте;
 тексты, которые работают в папке проекта 1С, не ссылаются на этот репозиторий."""
 
 import re
@@ -11,11 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import build_packs  # noqa: E402 — скрипт из scripts/, не пакет
+import our_skills  # noqa: E402 — скрипт из scripts/, не пакет
 
 SKILLS_DIR = ROOT / ".claude" / "skills"
-SKILLS = sorted(path.name for path in SKILLS_DIR.glob("kd2-*") if path.is_dir())
+SKILLS = sorted(path.name for path in our_skills.our_skills(SKILLS_DIR))
 REFERENCE = re.compile(r"`(references/[^`]+\.md)`")
-OTHER_SKILL_REFERENCE = re.compile(r"`(kd2-[\w-]+/references/[^`]+\.md)`")
+OTHER_SKILL_REFERENCE = re.compile(rf"`({our_skills.SKILL_NAME}/references/[^`]+\.md)`")
 MARKDOWN_LINK = re.compile(r"\]\(([^)\s]+)\)")
 
 
@@ -28,6 +29,16 @@ def _texts(skill: str) -> dict[Path, str]:
 
 def test_skills_found() -> None:
     assert SKILLS
+    assert set(SKILLS) == {
+        path.name
+        for path in SKILLS_DIR.iterdir()
+        if path.is_dir() and our_skills.is_our_skill(path.name)
+    }
+    for foreign in ("other-tool-skill", "review-helper", "kdx-rules", "kd2", "kd-"):
+        assert not our_skills.is_our_skill(foreign)
+    assert our_skills.is_our_skill("kd2-rules-build")
+    assert our_skills.is_our_skill("kd-install")
+    assert our_skills.is_our_skill("kd3-rules")
 
 
 def test_no_client_copies() -> None:
@@ -35,7 +46,7 @@ def test_no_client_copies() -> None:
     copies = [
         path.relative_to(ROOT).as_posix()
         for folder in (ROOT / ".cursor" / "skills", ROOT / ".agents" / "skills")
-        for path in folder.glob("kd2-*")
+        for path in our_skills.our_skills(folder)
     ]
     assert copies == [], "Копии скиллов вне .claude/skills — источник один"
     assert not (ROOT / ".cursor" / "rules" / "mcp-1c.mdc").exists(), (
@@ -55,7 +66,7 @@ def test_references_are_linked(skill: str) -> None:
 
 @pytest.mark.parametrize("skill", SKILLS)
 def test_cross_skill_references_exist(skill: str) -> None:
-    """`kd2-…/references/….md` из текстов скилла — существующие файлы соседних скиллов."""
+    """Ссылка `…/references/….md` на соседний скилл сервера — существующий файл."""
     missing = sorted(
         {
             f"{path.name}: {name}"

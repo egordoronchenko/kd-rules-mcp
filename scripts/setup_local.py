@@ -16,9 +16,14 @@
   При `token` у `kd2-rules-mcp` — заголовок `Authorization: Bearer`.
 
 Запуск: `uv run python scripts/setup_local.py`, затем `docker compose up -d`.
+Если имена контейнера и проекта compose уже не прежние, а старый контейнер или проект
+ещё запущен, скрипт печатает одну строку — чем его остановить — и сам ничего не меняет.
+Docker не установлен или не отвечает — молчит.
 """
 
 import json
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -27,6 +32,8 @@ import yaml
 
 from kd2_rules_mcp.console import utf8_stdout
 from kd2_rules_mcp.projects import (
+    DEFAULT_COMPOSE_PROJECT,
+    DEFAULT_CONTAINER_NAME,
     DEFAULT_PUBLISHED_PORT,
     Catalog,
     LocalSettings,
@@ -44,7 +51,12 @@ from kd2_rules_mcp.projects import (
 ROOT = Path(__file__).resolve().parents[1]
 
 SERVER = "kd2-rules-mcp"
+# Прежние имена. Строки с LEGACY_ скрипт переименования не меняет: после смены имён
+# setup предупреждает, что старый контейнер ещё занимает порт.
+LEGACY_CONTAINER = "kd2_rules_mcp"
+LEGACY_COMPOSE_PROJECT = "kd2-rules-mcp"
 HEADER = "# Сгенерировано scripts/setup_local.py из projects.local.yaml — не править руками.\n"
+_DOCKER_TIMEOUT_S = 10
 
 
 def _compose_bind(bind: str) -> str:
@@ -232,6 +244,9 @@ def main() -> None:
         f"Контейнер {names['KD2_CONTAINER']}, порт {host}:{names['KD2_PUBLISHED_PORT']}, "
         f"том {names['KD2_CACHE_VOLUME']}"
     )
+    notice = legacy_runtime_notice()
+    if notice:
+        print(notice)
     print(f"Проекты: {', '.join(local.project_dirs) or 'нет'}")
     writable = existing_rules_dirs(catalog, local)
     if writable:
@@ -272,6 +287,97 @@ def _add(
         warnings.append(f"{label} — нет в .mcp.json проекта (или это не HTTP-сервер), пропущен")
         return
     servers[name] = {"url": str(url)}
+
+
+def legacy_runtime_notice(
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> str | None:
+    """Одна строка, чем остановить прежний контейнер или проект compose.
+
+    Пока текущие имена совпадают с прежними, это ещё не «старый» контейнер — молчим.
+    Команды только читают (`docker ps`, `docker compose ls`). Нет docker — None.
+    """
+    if (
+        LEGACY_CONTAINER == DEFAULT_CONTAINER_NAME
+        and LEGACY_COMPOSE_PROJECT == DEFAULT_COMPOSE_PROJECT
+    ):
+        return None
+    run = runner or subprocess.run
+    try:
+        listed = run(
+            ["docker", "ps", "--filter", f"name=^{LEGACY_CONTAINER}$", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_DOCKER_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0:
+        return None
+    names = [line.strip() for line in (listed.stdout or "").splitlines()]
+    container = LEGACY_CONTAINER in names
+    project = _legacy_compose_project(run)
+    if project and container:
+        return (
+            f"Прежний контейнер {LEGACY_CONTAINER} и проект compose {LEGACY_COMPOSE_PROJECT} "
+            "ещё запущены и занимают порт. "
+            f"Остановите: docker compose -p {LEGACY_COMPOSE_PROJECT} down"
+        )
+    if project:
+        return (
+            f"Прежний проект compose {LEGACY_COMPOSE_PROJECT} ещё запущен и занимает порт. "
+            f"Остановите: docker compose -p {LEGACY_COMPOSE_PROJECT} down"
+        )
+    if container:
+        return (
+            f"Прежний контейнер {LEGACY_CONTAINER} ещё запущен и занимает порт. "
+            f"Остановите: docker stop {LEGACY_CONTAINER}"
+        )
+    return None
+
+
+def _legacy_compose_project(run: Callable[..., subprocess.CompletedProcess[str]]) -> bool:
+    try:
+        listed = run(
+            ["docker", "compose", "ls", "--format", "json"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_DOCKER_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if listed.returncode != 0:
+        return False
+    return _compose_names(listed.stdout or "")
+
+
+def _compose_names(stdout: str) -> bool:
+    text = stdout.strip()
+    if not text:
+        return False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload.append(json.loads(line))
+            except json.JSONDecodeError:
+                return False
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        return False
+    return any(
+        isinstance(item, dict) and item.get("Name") == LEGACY_COMPOSE_PROJECT for item in payload
+    )
 
 
 def localhost_server_url_warning(local: LocalSettings) -> str | None:

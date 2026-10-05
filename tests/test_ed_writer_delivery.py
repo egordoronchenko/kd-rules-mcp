@@ -735,18 +735,25 @@ def test_review_previous_manifest_owns_old_generator_bytes(monkeypatch, legacy_o
     assert repeat.status == "unchanged" and repeat.files == new.files
 
 
-@pytest.mark.parametrize("input_change", ["evidence", "project"])
-def test_review_changes_recomputed_when_decision_hash_is_same(input_change):
+def test_review_changes_recomputed_when_decision_hash_is_same():
     model = golden_model()
     old = build_kit(model)
-    kwargs = {"form_evidence": {"Интерфейс 2": True}} if input_change == "evidence" else {}
-    if input_change == "project":
-        model = replace(model, project_id="another-project")
+    kwargs = {"form_evidence": {"Интерфейс 2": True}}
     new = build_kit(model, previous_manifest=old.manifest, previous_files=old.files, **kwargs)
     assert new.status == "ready" and new.manifest.decision_hash == old.manifest.decision_hash
     assert new.manifest.changes == {"added": (), "changed": (), "removed": ()}
     repeat = build_kit(model, previous_manifest=new.manifest, previous_files=new.files, **kwargs)
     assert repeat.status == "unchanged" and repeat.files == new.files
+
+
+def test_kit_of_another_project_is_not_overwritten():
+    """Комплект помнит свой проект: другой проект с тем же именем расширения получает отказ."""
+    model = golden_model()
+    old = build_kit(model)
+    other = replace(model, project_id="another-project")
+    with pytest.raises(AuthoringPreconditionError) as error:
+        build_kit(other, previous_manifest=old.manifest, previous_files=old.files)
+    assert "another-project" in str(error.value)
 
 
 @pytest.mark.parametrize("method", REQUIRED_ROUTINES)

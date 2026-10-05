@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import build_packs  # noqa: E402 — скрипт из scripts/, не пакет
+import our_skills  # noqa: E402 — скрипт из scripts/, не пакет
 
 URL = "http://kd2.example:8061/mcp"
 
@@ -23,7 +24,8 @@ def _skill_files(prefix: str) -> set[str]:
     skills = build_packs.SKILLS
     return {
         f"{prefix}/{path.relative_to(skills).as_posix()}"
-        for path in skills.glob("kd2-*/**/*")
+        for skill in our_skills.our_skills(skills)
+        for path in skill.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
     }
 
@@ -118,7 +120,7 @@ def test_rules_entry_is_short_and_points_into_pack() -> None:
     files = build_packs.pack_files("agents")
     named = set(re.findall(r"`(\.agents/skills/[^`]+)`", text))
     assert named
-    # Файл — точное имя; папка (`…/`) или маска (`kd2-*`) — хотя бы один файл под ней.
+    # Файл — точное имя; папка (`…/`) или маска — хотя бы один файл под ней.
     missing = [name for name in named if not any(f.startswith(name.rstrip("*")) for f in files)]
     assert sorted(missing) == []
     references = {
@@ -393,3 +395,79 @@ def test_dest_keeps_broken_mcp_json(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="не тронут"):
         build_packs.install(tmp_path, "claude", URL)
     assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == "{не json"
+
+
+def test_install_replaces_previous_server_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Прежний ключ сервера заменяется текущим и не остаётся второй записью."""
+    monkeypatch.setattr(build_packs, "default_server_headers", lambda: None)
+    old = build_packs.LEGACY_SERVER
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    old: {"type": "http", "url": "http://old/mcp"},
+                    "proj-1c-code": {"type": "http", "url": "http://x/mcp"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor" / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    old: {"url": "http://old/mcp"},
+                    "proj-1c-code": {"url": "http://x/mcp"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    build_packs.install(tmp_path, "claude", URL)
+
+    for path in (tmp_path / ".mcp.json", tmp_path / ".cursor" / "mcp.json"):
+        servers = json.loads(path.read_text(encoding="utf-8"))["mcpServers"]
+        assert servers[build_packs.SERVER]["url"] == URL
+        assert [name for name in servers if name in {old, build_packs.SERVER}] == [
+            build_packs.SERVER
+        ]
+        assert servers["proj-1c-code"]["url"] == "http://x/mcp"
+
+
+def test_install_removes_obsolete_marked_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Устаревшие папка и файл снимаются одной строкой, если это наша упаковка."""
+    monkeypatch.setattr(build_packs, "default_server_headers", lambda: None)
+    skill = "kd2-retired-pack"
+    rules = "KD2-RETIRED.md"
+    mark = "# Правила обмена КД 2 и сервер marker"
+    monkeypatch.setattr(build_packs, "LEGACY_SKILL_NAMES", (skill,))
+    monkeypatch.setattr(build_packs, "LEGACY_RULES_FILE", rules)
+    monkeypatch.setattr(build_packs, "LEGACY_RULES_MARK", mark)
+    folder = tmp_path / ".claude" / "skills" / skill
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: d\n---\n", encoding="utf-8")
+    unmarked = tmp_path / ".claude" / "skills" / "kd2-user-notes"
+    unmarked.mkdir(parents=True)
+    (unmarked / "SKILL.md").write_text("свои заметки\n", encoding="utf-8")
+    (tmp_path / rules).write_text(mark + "\nдальше\n", encoding="utf-8")
+    (tmp_path / "NOTES.md").write_text(mark + "\n", encoding="utf-8")
+    foreign = tmp_path / ".claude" / "skills" / "project-skill"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("x", encoding="utf-8")
+
+    report = build_packs.install(tmp_path, "claude", URL)
+
+    assert not folder.exists()
+    assert not (tmp_path / rules).exists()
+    assert (unmarked / "SKILL.md").is_file()
+    assert (foreign / "SKILL.md").is_file()
+    assert (tmp_path / "NOTES.md").is_file()
+    assert [line for line in report if line.startswith("удалены устаревшие")] == [
+        f"удалены устаревшие имена поставки: {skill}, {rules}"
+    ]

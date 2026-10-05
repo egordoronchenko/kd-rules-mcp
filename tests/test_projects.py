@@ -235,6 +235,71 @@ def test_env_file_port_instance_and_server_url_warning(tmp_path: Path) -> None:
     assert setup_local.server_url_port_warning(LocalSettings()) is None
 
 
+def test_legacy_runtime_notice_names_the_stop_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Подставной docker: найден прежний контейнер или проект — одна строка с командой остановки."""
+    monkeypatch.setattr(setup_local, "DEFAULT_CONTAINER_NAME", "other_container")
+    monkeypatch.setattr(setup_local, "DEFAULT_COMPOSE_PROJECT", "other-project")
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        if args[1] == "ps":
+            return subprocess.CompletedProcess(args, 0, setup_local.LEGACY_CONTAINER + "\n", "")
+        payload = json.dumps([{"Name": setup_local.LEGACY_COMPOSE_PROJECT, "Status": "running(1)"}])
+        return subprocess.CompletedProcess(args, 0, payload, "")
+
+    text = setup_local.legacy_runtime_notice(runner)
+    assert text is not None
+    assert "\n" not in text
+    assert f"docker compose -p {setup_local.LEGACY_COMPOSE_PROJECT} down" in text
+    assert setup_local.LEGACY_CONTAINER in text
+    assert calls[0][:2] == ["docker", "ps"]
+    assert calls[1][:3] == ["docker", "compose", "ls"]
+    assert all("stop" not in call and "down" not in call and "rm" not in call for call in calls)
+
+    def only_container(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[1] == "ps":
+            return subprocess.CompletedProcess(args, 0, setup_local.LEGACY_CONTAINER + "\n", "")
+        return subprocess.CompletedProcess(args, 0, "[]", "")
+
+    container_only = setup_local.legacy_runtime_notice(only_container)
+    assert container_only is not None
+    assert f"docker stop {setup_local.LEGACY_CONTAINER}" in container_only
+    assert "down" not in container_only
+
+    def missing(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError
+
+    assert setup_local.legacy_runtime_notice(missing) is None
+
+    def unavailable(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 1, "", "Cannot connect to the Docker daemon")
+
+    assert setup_local.legacy_runtime_notice(unavailable) is None
+
+    def empty(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        out = "[]" if args[1] == "compose" else ""
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    assert setup_local.legacy_runtime_notice(empty) is None
+
+
+def test_legacy_runtime_notice_silent_while_names_are_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пока текущие имена совпадают с прежними, docker не спрашиваем."""
+    monkeypatch.setattr(setup_local, "DEFAULT_CONTAINER_NAME", setup_local.LEGACY_CONTAINER)
+    monkeypatch.setattr(setup_local, "DEFAULT_COMPOSE_PROJECT", setup_local.LEGACY_COMPOSE_PROJECT)
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, setup_local.LEGACY_CONTAINER, "")
+
+    assert setup_local.legacy_runtime_notice(runner) is None
+    assert calls == []
+
+
 def test_compose_config_resolves_publication_from_env(tmp_path: Path) -> None:
     """`docker compose config` подставляет .env; контейнер не запускается.
 
@@ -407,3 +472,36 @@ async def test_project_tools_load_by_name(tmp_path: Path) -> None:
         assert missing.is_error
         text = "".join(getattr(item, "text", "") for item in missing.content)
         assert "beta" in text
+
+
+def test_generated_configs_replace_previous_server_key(tmp_path: Path) -> None:
+    """Генерация переписывает файлы целиком: прежний ключ не остаётся второй записью."""
+    catalog = load_catalog(_write_catalog(tmp_path))
+    local = LocalSettings()
+    previous = "kd2" + "-rules-mcp"
+    override = tmp_path / "docker-compose.override.yml"
+    override.write_text(f"services:\n  {previous}: {{}}\n", encoding="utf-8")
+    override.write_bytes(setup_local.compose_override(catalog, local).encode("utf-8"))
+    services = yaml.safe_load(override.read_text(encoding="utf-8"))["services"]
+    assert list(services) == [setup_local.SERVER]
+    assert previous not in services or previous == setup_local.SERVER
+
+    servers, _warnings = setup_local.mcp_servers(catalog, local)
+    stale = {
+        "mcpServers": {previous: {"url": "http://old/mcp"}, "keep": {"url": "http://keep/mcp"}}
+    }
+    for name in (".mcp.json", ".cursor/mcp.json"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(stale), encoding="utf-8")
+        if name == ".mcp.json":
+            payload = {
+                "mcpServers": {key: {"type": "http", **entry} for key, entry in servers.items()}
+            }
+        else:
+            payload = {"mcpServers": servers}
+        setup_local._write_json(path, payload)
+        written = json.loads(path.read_text(encoding="utf-8"))["mcpServers"]
+        assert list(written) == list(servers)
+        assert "keep" not in written
+        assert previous not in written or previous == setup_local.SERVER

@@ -55,7 +55,8 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
         ],
         ensure_ascii=False,
     )
-    assert len(serialized) <= 45_000, f"Схемы: {len(serialized)} знаков"
+    # Виды правил и синтаксис адресов нужны агенту без локального docs/tools.md.
+    assert len(serialized) <= 47_000, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:

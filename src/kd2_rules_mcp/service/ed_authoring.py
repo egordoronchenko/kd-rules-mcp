@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from functools import wraps
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from kd2_rules_mcp.authoring.ed.artifacts import (
     artifact_name,
@@ -102,6 +102,9 @@ from kd2_rules_mcp.validation.ed_layers import (
 from kd2_rules_mcp.validation.ed_projection import effective_document, select_context
 from kd2_rules_mcp.validation.ed_routes import _format_uri
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
+
+if TYPE_CHECKING:
+    from kd2_rules_mcp.service.ed_writer import EdWriterMixin
 
 MAX_OPERATIONS = 100
 MAX_MANAGERS = 16
@@ -724,7 +727,17 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         limit: int = 50,
         configuration_attribute: str | None = None,
         format_property: str | None = None,
+        scope: str | None = None,
+        reference_document_id: str | None = None,
     ) -> dict[str, Any]:
+        if scope == "manager":
+            if configuration_attribute is not None or format_property is not None:
+                raise ValueError("scope=manager не принимает поля прежнего авторинга")
+            return cast("EdWriterMixin", self)._manager_candidates(
+                target, kind, text, offset, limit, reference_document_id
+            )
+        if scope not in (None, "overlay") or reference_document_id is not None:
+            raise ValueError("scope: overlay или manager; reference_document_id только для manager")
         validate_page(offset, limit)
         if kind not in ("format", "configuration") or not isinstance(text, str):
             raise ValueError("kind: format или configuration; text: строка")
@@ -967,7 +980,11 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         files: Mapping[str, bytes],
         previous: Mapping[str, bytes],
         entries: list[_Inputs],
+        *,
+        previous_reader=None,
+        verify=None,
     ) -> str:
+        previous_reader = previous_reader or self._previous
         self._safe_path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=destination.parent))
@@ -982,8 +999,10 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             for entry in entries:
                 self._verify_inputs(entry)
                 self._check_route(entry.route)
+            if verify is not None:
+                verify()
             try:
-                _, current = self._previous(destination)
+                _, current = previous_reader(destination)
             except (AuthoringPreconditionError, EdAuthoringPathError) as error:
                 raise EdAuthoringStaleError(
                     "Прежний комплект изменился во время записи", {}
@@ -999,7 +1018,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             try:
                 if moved:
                     try:
-                        _, saved = self._previous(backup)
+                        _, saved = previous_reader(backup)
                         if saved != dict(previous):
                             raise EdAuthoringStaleError("Комплект изменился при переименовании", {})
                     except (AuthoringPreconditionError, EdAuthoringPathError) as error:
@@ -1677,10 +1696,10 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
     @_timed_build
     def ed_authoring_build(
         self,
-        project: str,
-        configuration: str,
-        extension: dict,
-        operations: list[dict],
+        project: str | None = None,
+        configuration: str | None = None,
+        extension: dict | None = None,
+        operations: list[dict] | None = None,
         version_scope: str | None = None,
         mode: str = "preview",
         delivery: str = "extension",
@@ -1694,13 +1713,50 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         check_prefix: str | None = None,
         address_prefix: str | None = None,
         drop_operations: list[str] | None = None,
+        scope: str | None = None,
+        project_id: str | None = None,
+        expected_revision: str | None = None,
+        route: dict | None = None,
     ) -> dict[str, Any]:
+        if scope == "manager":
+            if any(
+                v is not None
+                for v in (
+                    project,
+                    configuration,
+                    extension,
+                    operations,
+                    version_scope,
+                    drop_operations,
+                )
+            ):
+                raise ValueError("scope=manager не принимает поля прежнего авторинга")
+            return cast("EdWriterMixin", self)._manager_build(
+                project_id,
+                expected_revision,
+                route,
+                mode,
+                delivery,
+                output_dir,
+                expected_preview_hash,
+                acknowledged_notices,
+                offset,
+                limit,
+                section,
+                level,
+                check_prefix,
+                address_prefix,
+            )
+        if scope not in (None, "overlay") or any(
+            v is not None for v in (project_id, expected_revision, route)
+        ):
+            raise ValueError("scope: overlay или manager; поля менеджера требуют scope=manager")
         validate_page(offset, limit)
         views.validate_options(section, level, check_prefix, address_prefix)
         if mode == "write" and section != "summary":
             raise ValueError("mode=write допускает только section=summary")
-        _text(project, "project")
-        _text(configuration, "configuration")
+        project = _text(project, "project")
+        configuration = _text(configuration, "configuration")
         if mode not in ("preview", "write"):
             raise ValueError("mode: preview или write")
         if delivery == "extension_with_load":

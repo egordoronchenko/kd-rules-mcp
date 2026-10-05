@@ -22,8 +22,8 @@
 | `kdbase/` | финальные проверки: `kd_check.py` (база КД), `bsp_check.py` (загрузка правил БСП), `exchange_check.py` (живой обмен между песочницами), `ed_exchange_check.py` (живой обмен через универсальный формат), `ed_kd3_check.py` (круг «модуль менеджера → база КД 3 → модуль» на копии файловой базы, отчёт потерь), исходники EPF | да |
 | `scripts/setup_local.py` | настройка машины по `projects.local.yaml` | да |
 | `scripts/dump_tools.py` | генерирует справочник `docs/tools.md` из сервера (`--write`; `--check` — устарел ли) | да |
-| `scripts/build_packs.py` | копии справочников `docs/` в `references/` скилла (`--write`, `--check`); установка скиллов `kd2-*` и записи сервера в папку проекта 1С (`--dest <папка> --client claude\|agents`) | да |
-| `.claude/skills/kd2-*` | знания пользователя сервера: скиллы и справочники — единственный источник для Claude Code, Cursor, OpenCode | да |
+| `scripts/build_packs.py` | копии справочников `docs/` в `references/` скилла (`--write`, `--check`); установка скиллов сервера (имена `kd-`, `kd2-` или `kd3-`) и записи сервера в папку проекта 1С (`--dest <папка> --client claude\|agents`) | да |
+| `.claude/skills/` | знания пользователя сервера: скиллы (имена `kd-`, `kd2-` или `kd3-`) и справочники — единственный источник для Claude Code, Cursor, OpenCode | да |
 | `docs/architecture.md` | устройство сервера: слои и модули, поток данных, инварианты, границы, развёртывание, как добавить инструмент, проверку, тег | да |
 | `docs/tools.md` | справочник инструментов MCP: параметры, ответы, коды ошибок; верх генерируется `scripts/dump_tools.py`, тест `tests/test_tools_doc.py` | да |
 | `docs/checks.md` | лестница проверок (`rules_validate` → синтакс-чекер → `kd_check` → `bsp_check` → `exchange_check`) и все идентификаторы проверок `rules_validate`; новая проверка — строка туда | да |
@@ -115,7 +115,10 @@
   формата: `ed_routes` двух выгрузок → `ed_route_compare` (снимки в памяти; статическая совместимость
   карт; версия узла неизвестна). Авторинг: открыть модуль, схему и структуру проекта →
   `ed_authoring_candidates` → `ed_authoring_build` preview → write с хешем и подтверждениями
-  замечаний. Комплект пишется только в рабочую папку; установка и живой обмен выполняются отдельно.
+  замечаний. Комплект пишется только в рабочую папку; установка и живой обмен выполняются отдельно. Собственный модуль
+  правил вместо типового (с нуля или импортом типового): `ed_create` → `ed_authoring_candidates`
+  (`scope="manager"`) → `ed_apply` preview → apply → `ed_validate` → `ed_authoring_build` (`scope="manager"`);
+  проект хранится в `workspace\.ed-projects\`, после обновления конфигурации — `ed_create` с `mode="rebind"`.
 - Ошибка инструмента — JSON с полем `code`.
 
 MCP-серверы 1С (код и метаданные проектов, граф, справка, БСП, шаблоны, проверка кода, сервер данных базы) —
@@ -130,7 +133,7 @@ MCP-серверы 1С (код и метаданные проектов, гра�
 `.claude/skills/kd2-install` — установка агентом (человеческая версия — `docs/INSTALL.md`,
 менять вместе).
 
-Знания пользователя — `.claude/skills/kd2-*` и `docs/rules/`; это единственный источник. Cursor и OpenCode читают
+Знания пользователя — скиллы сервера в `.claude/skills` (имена `kd-`, `kd2-` или `kd3-`) и `docs/rules/`; это единственный источник. Cursor и OpenCode читают
 `.claude/skills` сами — копий в `.cursor/skills` нет (тест `tests/test_skills.py`). В `references/` скилла
 `kd2-rules-build` лежат копии `docs/rules/mcp-1c.md`, `docs/checks.md`, `docs/tools.md`, `docs/glossary.md`:
 после правки источника — `uv run python scripts/build_packs.py --write` (тест `tests/test_build_packs.py`).

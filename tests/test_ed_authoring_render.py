@@ -14,7 +14,12 @@ import pytest
 from lxml import etree
 
 from kd2_rules_mcp.authoring.ed import ArtifactManifest, IdentityMap, render_authoring
-from kd2_rules_mcp.authoring.ed.identity import artifact_uuid, identity_map_from_xml
+from kd2_rules_mcp.authoring.ed.identity import (
+    EXTENSION_IDENTITY_SEED,
+    artifact_uuid,
+    identity_map_from_xml,
+    make_identity_map,
+)
 from kd2_rules_mcp.authoring.ed.model import (
     AttributeDraft,
     AuthoringPreconditionError,
@@ -408,11 +413,23 @@ def test_all_qualifier_variants(primitive, property_name, qualifiers):
         )
 
 
+def test_extension_identity_uuids_stay_pinned():
+    """УИД расширения и его объекта зафиксированы: зерно не зависит от имени пакета."""
+    config = "00000000-0000-0000-0000-000000000001"
+    name = "ДоработкаОбмена"
+    key = "Catalog/Товары/Attribute/доп_Заметка"
+    assert artifact_uuid(config, name) == "a0e1c48a-a154-59a6-a136-d4371d2a1cc6"
+    mapped = make_identity_map(config, name, (key,), {})
+    assert mapped.objects["catalog/товары/attribute/доп_заметка"] == (
+        "e7f7215f-71f0-5277-b950-106a86d3c5b6"
+    )
+
+
 def test_uuid_formula_augmentation_subset_and_manifest_round_trip():
     first = render_authoring(prepared(), descriptions())
     expected_namespace = uuid5(
         NAMESPACE_URL,
-        "kd2-rules-mcp/ed-authoring/v1/00000000-0000-0000-0000-000000000001/доработкаобмена",
+        EXTENSION_IDENTITY_SEED + "00000000-0000-0000-0000-000000000001/доработкаобмена",
     )
     assert artifact_uuid("00000000-0000-0000-0000-000000000001", IDENTITY.name) == str(
         expected_namespace
@@ -1102,3 +1119,19 @@ def test_resources_in_built_wheel(tmp_path):
                 packaged
                 == files("kd2_rules_mcp.authoring.ed").joinpath("templates/" + name).read_bytes()
             )
+
+
+def refresh_goldens() -> None:
+    """Перезаписывает байтовые эталоны текущим рендером.
+
+    УИДы комплекта считаются от замороженного зерна и при переименовании проекта
+    не меняются. Вызывать, когда меняется сам рендер, а не имя пакета.
+    """
+    rendered = descriptions()
+    for case in CASES:
+        bundle = render_authoring(prepared(case), rendered)
+        dest = DATA / "expected" / case
+        for rel, content in bundle.files.items():
+            path = dest / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)

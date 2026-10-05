@@ -34,7 +34,8 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
-exclude = ["reference", "base", "structures", "**/__pycache__", ".venv"]
+# docs/plans — история: пробные скрипты не переписываются вместе с пакетом.
+exclude = ["reference", "base", "structures", "docs/plans", "**/__pycache__", ".venv"]
 venvPath = "."
 venv = ".venv"
 # Скрипты scripts/ и kdbase/ импортируются тестами как модули.

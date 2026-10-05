@@ -8,13 +8,14 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from kd2_rules_mcp import ed
 from kd2_rules_mcp.ed import address as addresses
 from kd2_rules_mcp.ed.schema.profile import ValidationProfile
 from kd2_rules_mcp.errors import (
     AmbiguousAddressError,
+    EdAuthoringPreconditionError,
     EdFormatError,
     EdReadError,
     EdResourceLimitError,
@@ -43,6 +44,9 @@ from kd2_rules_mcp.validation.ed_schema import validate_schema
 from kd2_rules_mcp.validation.ed_structure import validate_structure
 from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 from kd2_rules_mcp.validation.report import Issue, Level, ValidationReport
+
+if TYPE_CHECKING:
+    from kd2_rules_mcp.service.ed_writer import EdWriterMixin
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,7 @@ class EdProject:
     references: ed.ReferenceIndex | None = None
     layered: layer_views.LayerSnapshot | None = None
     validation_cache: dict[tuple, LayerValidation] = field(default_factory=dict, compare=False)
+    manager_project_id: str | None = None
 
 
 class EdMixin(ServiceBase):
@@ -128,7 +133,12 @@ class EdMixin(ServiceBase):
     def _ed_project(self, project_id: str) -> EdProject:
         if project_id not in self._ed_projects:
             raise ProjectNotFoundError(f"Проект ED «{project_id}» не открыт")
-        return self._ed_projects[project_id]
+        project = self._ed_projects[project_id]
+        if project.manager_project_id:
+            cast("EdWriterMixin", self)._manager_check_document(
+                project.manager_project_id, project_id
+            )
+        return project
 
     def _ensure_references(self, project_id: str) -> tuple[EdProject, ed.ReferenceIndex]:
         """Индекс ссылок строится один раз и хранится рядом со снимком."""
@@ -218,6 +228,7 @@ class EdMixin(ServiceBase):
             changed = False
             if existing:
                 project_id, opened_project = existing
+                cast("EdWriterMixin", self)._manager_check_reader_id(project_id)
                 try:
                     # Хеш повторного открытия вычисляется потоково, без нового разбора.
                     with local.open("rb") as stream:
@@ -239,8 +250,10 @@ class EdMixin(ServiceBase):
                 named = local.parent.parent if local.parent.name.casefold() == "ext" else local
                 stem = re.sub(r"[^\w-]+", "-", named.stem).strip("-") or "module"
                 project_id = f"ed-{stem}-{digest[:12]}"
+                cast("EdWriterMixin", self)._manager_check_reader_id(project_id)
                 if project_id in self._ed_projects:
                     project_id = f"ed-{stem}-{digest}"
+                cast("EdWriterMixin", self)._manager_check_reader_id(project_id)
                 index = addresses.build_addresses(document)
                 entities = {e.entity_id: e for e in document.entities()}
                 by_address = {a.casefold(): e for a, e in index.by_address.items()}
@@ -286,6 +299,8 @@ class EdMixin(ServiceBase):
                 )
             if existing:
                 ident, project = existing
+                with self._lock:
+                    cast("EdWriterMixin", self)._manager_check_reader_id(ident)
                 assert project.layered is not None
                 changed = layer_views.source_changed(project.layered)
             else:
@@ -305,6 +320,7 @@ class EdMixin(ServiceBase):
                     layered=snap,
                 )
                 with self._lock:
+                    cast("EdWriterMixin", self)._manager_check_reader_id(ident)
                     previous = self._ed_projects.setdefault(ident, project)
                 changed = False
                 if previous is not project:
@@ -316,6 +332,8 @@ class EdMixin(ServiceBase):
             raise EdResourceLimitError(str(error)) from error
         except ed.EdFormatError as error:
             raise EdFormatError(str(error)) from error
+        except EdAuthoringPreconditionError:
+            raise
         except (ed.EdReadError, OSError, Kd2Error) as error:
             raise EdReadError(str(error)) from error
         assert project.layered is not None
@@ -815,6 +833,12 @@ class EdMixin(ServiceBase):
                 "Структура конфигурации не передана: проверки по структуре не выполнялись",
             )
         report.issues = list(dict.fromkeys(report.issues))
+        writer_metadata = {}
+        if project.manager_project_id is not None:
+            writer_report, writer_metadata = cast("EdWriterMixin", self)._manager_validation(
+                project.manager_project_id, project.document.files[0].text, project_id
+            )
+            report.extend(writer_report)
 
         def issue_key(issue: Issue) -> tuple[str, int, str, str]:
             entity = project.index.by_address.get(issue.address)
@@ -829,6 +853,7 @@ class EdMixin(ServiceBase):
         report.skipped.sort(key=lambda item: (item.check, item.reason))
         return {
             "project_id": project_id,
+            **writer_metadata,
             **views.validation_view(
                 report, level, check_prefix, address_prefix, section, offset, limit
             ),
@@ -1093,6 +1118,13 @@ class EdMixin(ServiceBase):
 
     def ed_close(self, project_id: str) -> dict[str, Any]:
         with self._lock:
-            self._ed_project(project_id).validation_cache.clear()
+            manager_closed = getattr(self, "_manager_close", lambda _: None)(project_id)
+            if manager_closed is not None:
+                return manager_closed
+            # Закрытие старого read-only снимка не требует актуальной модели владельца.
+            snapshot = self._ed_projects.get(project_id)
+            if snapshot is None:
+                raise ProjectNotFoundError(f"Проект ED «{project_id}» не открыт")
+            snapshot.validation_cache.clear()
             del self._ed_projects[project_id]
             return {"project_id": project_id, "closed": True}

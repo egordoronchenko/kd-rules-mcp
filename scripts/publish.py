@@ -111,8 +111,8 @@ def _sync(files: list[str], target: Path) -> None:
 
 
 def _remove_empty_parents(target: Path, folder: Path) -> None:
-    """Удаляет опустевшие каталоги до корня копии: пустая папка `.cursor/skills/kd2-*` — тоже копия
-    скилла для теста `test_skills.py`."""
+    """Удаляет опустевшие каталоги до корня копии: пустая папка скилла сервера
+    (`our_skills.is_our_skill`) — тоже копия для теста `test_skills.py`."""
     while folder != target and folder.is_dir() and not any(folder.iterdir()):
         folder.rmdir()
         folder = folder.parent

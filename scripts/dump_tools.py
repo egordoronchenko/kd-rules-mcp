@@ -82,7 +82,12 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "ed_schema_close",
     ),
     "EnterpriseData routes": ("ed_routes", "ed_route_compare"),
-    "EnterpriseData authoring": ("ed_authoring_candidates", "ed_authoring_build"),
+    "EnterpriseData authoring": (
+        "ed_create",
+        "ed_apply",
+        "ed_authoring_candidates",
+        "ed_authoring_build",
+    ),
 }
 
 # Что значат дополнительные поля JSON ошибки (`error_payload` в server.py).

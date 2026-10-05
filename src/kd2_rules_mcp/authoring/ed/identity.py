@@ -21,13 +21,16 @@ def logical_path(path: str) -> str:
     return path.casefold()
 
 
+# зерно идентификаторов расширений; не менять никогда:
+# от него зависят УИДы уже установленных расширений
+EXTENSION_IDENTITY_SEED = "kd2-rules-mcp/ed-authoring/v1/"
+
+
 def artifact_uuid(base_configuration_uuid: str, extension_name: str) -> str:
     """Namespace не зависит от списка операций, версии писателя и времени."""
     base = str(UUID(base_configuration_uuid))
     return str(
-        uuid5(
-            NAMESPACE_URL, "kd2-rules-mcp/ed-authoring/v1/" + base + "/" + extension_name.casefold()
-        )
+        uuid5(NAMESPACE_URL, EXTENSION_IDENTITY_SEED + base + "/" + extension_name.casefold())
     )
 
 

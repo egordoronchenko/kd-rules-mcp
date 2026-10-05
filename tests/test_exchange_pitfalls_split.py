@@ -350,8 +350,17 @@ def test_exchange_pitfalls_skill_fits() -> None:
 
 
 def test_exchange_pitfalls_old_lines_kept() -> None:
-    """Каждая сохранённая строка прежнего SKILL.md есть в скилле дословно."""
-    found = {hashlib.sha256(line.encode("utf-8")).hexdigest() for line in _lines()}
+    """Каждая сохранённая строка прежнего SKILL.md есть в скилле дословно.
+
+    Имя сервера в строке не входит в смысл переноса: хеш считается по прежнему
+    написанию, чтобы проверка жила и до переименования проекта, и после.
+    """
+    previous = "kd2" + "-rules-mcp"
+    current_name = "kd" + "-rules-mcp"
+    found = {
+        hashlib.sha256(line.replace(current_name, previous).encode("utf-8")).hexdigest()
+        for line in _lines()
+    }
     assert found >= OLD_LINE_HASHES
 
 

@@ -24,6 +24,7 @@ from kd2_rules_mcp.ed.writer_model import (
     CodeUnit,
     ManagerModel,
     RetainedBlock,
+    digest,
     dump_model,
     validate_model,
 )
@@ -77,6 +78,8 @@ class ManagerManifest:
     entity_addresses: Mapping[str, str]
     changes: Mapping[str, tuple[str, ...]]
     form_evidence: Mapping[str, bool]
+    project_id: str
+    creation_fingerprint: str
 
     @property
     def extension_version(self) -> str:
@@ -89,6 +92,8 @@ class ManagerManifest:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": 1,
+            "project_id": self.project_id,
+            "creation_fingerprint": self.creation_fingerprint,
             "generator_version": MANAGER_GENERATOR_VERSION,
             "identity": asdict(self.identity),
             "identity_map": {
@@ -120,6 +125,11 @@ class ManagerManifest:
                 value["generator_version"] != MANAGER_GENERATOR_VERSION
                 or value["schema_version"] != 1
                 or value["runtime_verified"] is not False
+                or not isinstance(value["project_id"], str)
+                or not value["project_id"]
+                or not isinstance(value["creation_fingerprint"], str)
+                or len(value["creation_fingerprint"]) != 64
+                or any(c not in "0123456789abcdef" for c in value["creation_fingerprint"])
             ):
                 raise ValueError("Неподдерживаемый формат")
             result = cls(
@@ -133,6 +143,8 @@ class ManagerManifest:
                 value["entity_addresses"],
                 {k: tuple(v) for k, v in value["changes"].items()},
                 value["form_evidence"],
+                value["project_id"],
+                value["creation_fingerprint"],
             )
             if result.to_bytes() != content:
                 raise ValueError("Неканонический манифест")
@@ -436,6 +448,7 @@ def render_manager_kit(
     previous_manifest: ManagerManifest | None = None,
     previous_files: Mapping[str, bytes] | None = None,
     keep_version: bool = False,
+    creation_fingerprint: str = "",
 ) -> ManagerKit:
     """Порождает байты, ничего не записывает. Профильные ed.writer.* проверяет сервис.
 
@@ -522,6 +535,12 @@ def render_manager_kit(
         refuse("owned_content_changed", "Прежний манифест и все файлы нужны вместе")
     if previous_manifest is not None:
         assert previous_files is not None
+        if previous_manifest.project_id != model.project_id:
+            refuse(
+                "kit_owned_by_other_project",
+                f"Комплект проекта «{previous_manifest.project_id}» нельзя заменить проектом "
+                f"«{model.project_id}». Выберите другое identity.name или закройте прежний проект.",
+            )
         _check_previous(previous_manifest, previous_files)
     _reread(model, rendered)
     paths, borrowed = manager_identity_roles(host, module_name)
@@ -609,6 +628,8 @@ def render_manager_kit(
         },
         changes,
         dict(form_evidence or {}),
+        model.project_id,
+        creation_fingerprint or digest((model.host, model.format_bindings)),
     )
     status: Literal["ready", "unchanged"] = "ready"
     if previous_manifest is not None and previous_files is not None:

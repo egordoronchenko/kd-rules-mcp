@@ -167,7 +167,7 @@ uv run python scripts/check_server.py
 uv run python scripts/build_packs.py --dest <папка проекта> --client claude
 ```
 
-Скрипт кладёт скиллы `kd2-*` в `.claude\skills\` проекта (их читают Claude Code, Cursor и OpenCode) вместе со
+Скрипт кладёт скиллы сервера (имена `kd-`, `kd2-` или `kd3-`) в `.claude\skills\` проекта (их читают Claude Code, Cursor и OpenCode) вместе со
 справочниками и правилом работы с серверами 1С, добавляет `kd2-rules-mcp` в `.mcp.json` проекта (и в
 `.cursor\mcp.json`, если он есть) и не трогает другие серверы. Адрес — `server_url` из `projects.local.yaml`,
 другой — `--server-url`. Заголовок с токеном (если он задан в `projects.local.yaml`) скрипт переносит сам.

@@ -77,7 +77,7 @@
 | Внешние проверки | `kdbase/kd_check.py`, `bsp_check.py`, `bsp_load.py`, `exchange_check.py` | Штатная загрузка в базу КД (толстый клиент). Загрузка правил БСП без записи идёт через сервер данных или COM, код загрузки общий с живым обменом (`write=False` / `write=True`). Живой обмен между песочницами — сервер данных базы | |
 | Машина | `scripts/setup_local.py`, `check_server.py` | Генерация `docker-compose.override.yml`, `.mcp.json`, `.cursor/mcp.json`; проверка установки | |
 | Корпус КД 3 | `scripts/kd3_inventory.py` | Повторяемый перечень модулей менеджеров, планов обмена, пакетов EnterpriseData и читателей БСП по выгрузкам проектов и расширений | |
-| Знания агента | `.claude/skills/kd2-*`, `docs/rules/mcp-1c.md`; сборка — `scripts/build_packs.py` | Порядок построения правил и справочники, грабли живых обменов, установка; правило работы с серверами MCP для 1С. Источник один (Cursor и OpenCode читают `.claude/skills`); копии справочников `docs/` в `references/` и установку в проект 1С делает `build_packs.py` | |
+| Знания агента | `.claude/skills/` (имена `kd-`, `kd2-` или `kd3-`), `docs/rules/mcp-1c.md`; сборка — `scripts/build_packs.py` | Порядок построения правил и справочники, грабли живых обменов, установка; правило работы с серверами MCP для 1С. Источник один (Cursor и OpenCode читают `.claude/skills`); копии справочников `docs/` в `references/` и установку в проект 1С делает `build_packs.py` | |
 
 Пути модулей — от `src/kd2_rules_mcp/`, кроме `kdbase/`, `scripts/` и знаний агента.
 

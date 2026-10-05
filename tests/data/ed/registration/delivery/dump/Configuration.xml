@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+  <Configuration uuid="11b42451-e422-4e55-96e1-9d6b309eeb11">
+    <Properties>
+      <Name>TestConfiguration</Name>
+      <CompatibilityMode>Version8_3_24</CompatibilityMode>
+      <InterfaceCompatibilityMode>TaxiEnableVersion8_2</InterfaceCompatibilityMode>
+      <DefaultLanguage>Language.Russian</DefaultLanguage>
+    </Properties>
+    <ChildObjects><Language>Russian</Language><ExchangePlan>TargetPlan</ExchangePlan></ChildObjects>
+  </Configuration>
+</MetaDataObject>

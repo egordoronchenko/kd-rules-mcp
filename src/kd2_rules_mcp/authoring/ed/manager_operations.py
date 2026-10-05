@@ -1784,7 +1784,7 @@ def preview(
         failures.append(ManagerFailure("model_invalid", "Конвертация", str(error)))
     result = (
         model
-        if failures
+        if failures or result is model
         else replace(
             result, confirmations=tuple((n.code, n.notice_hash) for n in notices)
         ).with_revision()
@@ -1837,7 +1837,7 @@ def apply(
         any(d.client_id == op.client_id and _matches_decision(d, op) for d in model.decisions)
         for op in resolved
     ):
-        return model
+        return preview(model, operations, expected_revision=model.revision).model
     planned = preview(model, operations, expected_revision=expected_revision)
     if planned.preview_hash != expected_preview_hash:
         raise EdAuthoringStaleError("Хеш просмотра менеджера не совпадает")

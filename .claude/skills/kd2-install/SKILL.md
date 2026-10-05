@@ -171,7 +171,7 @@ uv run python scripts/check_server.py
   uv run python scripts/build_packs.py --dest <папка проекта> --client claude
   ```
 
-  Ставит скиллы `kd2-*` в `.claude\skills\` проекта (их читают Claude Code, Cursor и OpenCode) вместе со
+  Ставит скиллы сервера (имена `kd-`, `kd2-` или `kd3-`) в `.claude\skills\` проекта (их читают Claude Code, Cursor и OpenCode) вместе со
   справочниками и правилом серверов 1С, добавляет `kd2-rules-mcp` в `.mcp.json` проекта (и в `.cursor\mcp.json`,
   если он есть), чужие серверы не трогает; адрес — `server_url` из `projects.local.yaml` (другой —
   `--server-url`). Человек работает в Cursor — добавить `--cursor`: Cursor `.mcp.json` проекта не читает, и

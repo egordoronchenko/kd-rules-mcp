@@ -179,3 +179,45 @@ class PropertyNameClashError(RegistrationRetargetError):
 
 class RetargetInvariantError(RegistrationRetargetError):
     """The result changed places that retargeting must not change."""
+
+
+class RegistrationDeliveryError(Kd2Error):
+    """Registration kit delivery preconditions were not met."""
+
+    code = "registration.delivery"
+
+
+class RegistrationAttributeClashError(RegistrationDeliveryError):
+    """An own node attribute collides with existing metadata."""
+
+    code = "registration.attribute_clash"
+
+
+class RegistrationAttributePrefixError(RegistrationDeliveryError):
+    """An own node attribute does not use the extension prefix."""
+
+    code = "registration.attribute_prefix"
+
+
+class RegistrationMissingAttributeError(RegistrationDeliveryError):
+    """Rules reference an attribute absent from the delivered metadata."""
+
+    code = "registration.missing_attribute"
+
+
+class RegistrationDeliveryProfileError(RegistrationDeliveryError):
+    """The input is outside the supported registration delivery profile."""
+
+    code = "registration.delivery_profile"
+
+
+class RegistrationPlanNotFoundError(RegistrationDeliveryError):
+    """The target exchange plan was not found in the configuration dump."""
+
+    code = "registration.plan_not_found"
+
+
+class RegistrationExtensionClashError(RegistrationDeliveryError):
+    """Another extension already owns a requested node attribute."""
+
+    code = "registration.extension_clash"

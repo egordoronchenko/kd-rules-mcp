@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+  <ExchangePlan uuid="b3b52d69-eb65-40fc-9bbc-2a5a356a45c5">
+    <Properties><Name>TargetPlan</Name></Properties>
+    <ChildObjects>
+      <Attribute uuid="9488fc16-48b0-4909-9500-6f6d02756b68"><Properties><Name>DateStart</Name><Type><v8:Type>xs:dateTime</v8:Type></Type></Properties></Attribute>
+      <TabularSection uuid="8375916f-3b86-4cf9-b245-0bded0d5f099"><Properties><Name>Organizations</Name></Properties><ChildObjects>
+        <Attribute uuid="1a5f085c-1eb5-42b6-8b68-e9abcf5d0c1c"><Properties><Name>Organization</Name><Type><v8:Type>xs:string</v8:Type></Type></Properties></Attribute>
+      </ChildObjects></TabularSection>
+    </ChildObjects>
+  </ExchangePlan>
+</MetaDataObject>

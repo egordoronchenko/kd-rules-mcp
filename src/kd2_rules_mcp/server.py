@@ -128,8 +128,10 @@ rules_save to workspace or project rules_dir. Compare versions with rules_diff.
 rules_close removes the snapshot, keeping saved files. Use registration_build for registration
 rules and correspondent_draft for reverse rules. The agent makes semantic decisions.
 Lists use offset, limit≤200, has_more. Tool errors are JSON with code.
-ED: ed_open → ed_overview → ed_list/get/locate → ed_validate. Snapshots stay in memory;
-reread with ed_close/open. Layers: path + configuration_path + ordered extensions, or
+ED: ed_open → ed_overview → ed_list/get/locate → ed_validate. Reread with ed_close/open.
+Managers: ed_create → ed_apply preview/apply → ed_validate → ed_authoring_build.
+Manager projects persist; ed_close removes the project, keeping kits.
+Layers: path + configuration_path + ordered extensions, or
 project + module; extensions=null uses project settings, [] disables extensions.
 ed_list/get return effective rules and origins by direction/headers_only; Слой/<id>/… selects
 a source revision. ed_validate checks contexts and ed.layer.*; supply route_profile_id for
@@ -151,9 +153,8 @@ ObjectName = Annotated[
 RuleKind = Annotated[
     str,
     Field(
-        description=(
-            "Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, conversion, pro"
-        )
+        description="Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, "
+        "parameter, conversion, pro"
     ),
 ]
 RuleKey = Annotated[
@@ -170,7 +171,7 @@ RuleKey = Annotated[
 Owner = Annotated[str, Field(description="Owner ПКО code for pks/pks_group/pkz; otherwise empty")]
 RuleGroup = Annotated[
     str,
-    Field(description=("Group codes separated by /; pko/pvd/pod only; empty = list root")),
+    Field(description=("Group codes joined by /; empty = root")),
 ]
 Fields = Annotated[
     dict[str, Any] | None,
@@ -178,7 +179,7 @@ Fields = Annotated[
 ]
 OptionalStructure = Annotated[
     str | None,
-    Field(description=("Structure for object/property checks; null skips that side")),
+    Field(description="Validation structure"),
 ]
 
 ConfidenceFilter = Annotated[
@@ -287,9 +288,8 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def project_list() -> dict[str, Any]:
-        """List 1C projects, configurations, infobases, MCP servers and exchange plans. Call
-        before loading structures or choosing writable rules_dir paths. MCP names match
-        project clients; login is a boolean, never credentials."""
+        """List 1C projects, configurations, infobases, MCP names and exchange plans. Call before
+        structure loading or choosing writable rules_dir. Login is a boolean."""
         return await call(service.project_list)
 
     @server.tool()
@@ -302,21 +302,19 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         force: Annotated[
             bool,
-            Field(
-                description=("Rebuild after manual XML edits even if the fingerprint is unchanged")
-            ),
+            Field(description="Refresh manually edited XML"),
         ] = False,
     ) -> dict[str, Any]:
-        """Load a project structure using configured paths and extensions at the start of each
-        task. Unchanged caches are reused; use force after manual XML edits."""
+        """Load configured project metadata and extensions. Reuse unchanged caches; use force
+        after manual XML edits."""
         return await call(
             service.structure_load_project, project, configuration, structure_id, force
         )
 
     @server.tool()
     async def structure_list() -> dict[str, Any]:
-        """List cached structures with configuration names, versions and extensions. Use their
-        IDs for queries and matching."""
+        """List cached structures, configuration names, versions and extensions. IDs are used
+        for queries and matching."""
         return await call(service.structure_list)
 
     @server.tool()
@@ -331,13 +329,11 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         force: Annotated[
             bool,
-            Field(
-                description=("Rebuild after manual XML edits even if the fingerprint is unchanged")
-            ),
+            Field(description="Refresh manually edited XML"),
         ] = False,
     ) -> dict[str, Any]:
-        """Build a structure from explicit XML dump paths with only the listed extensions.
-        Unchanged fingerprints reuse the cache; use force after manual XML edits."""
+        """Load XML metadata with explicit extensions. Unchanged inputs reuse the cache; manual
+        edits require force."""
         return await call(
             service.structure_load_xml,
             structure_id,
@@ -352,13 +348,11 @@ def create_server(service: Kd2Service) -> MCPServer:
         path: Annotated[str, Field(description="MD83Exp XML file")],
         force: Annotated[
             bool,
-            Field(
-                description=("Rebuild after manual XML edits even if the fingerprint is unchanged")
-            ),
+            Field(description="Refresh manually edited XML"),
         ] = False,
     ) -> dict[str, Any]:
-        """Load an MD83Exp configuration structure when sources are unavailable. Large files can
-        take time; query the returned ID."""
+        """Load an MD83Exp structure when configuration sources are unavailable. Query the
+        returned structure ID."""
         return await call(service.structure_load_md83exp, structure_id, path, force)
 
     @server.tool()
@@ -369,24 +363,24 @@ def create_server(service: Kd2Service) -> MCPServer:
         offset: Offset = 0,
         limit: Limit = 50,
     ) -> dict[str, Any]:
-        """List metadata objects by kind, name or synonym without expanding properties. Use
-        structure_object for the selected object and its typed properties."""
+        """List metadata objects by kind, name or synonym. Expand typed properties with
+        structure_object."""
         return await call(service.structure_objects, structure_id, kind, text, offset, limit)
 
     @server.tool()
     async def structure_object(
         structure_id: StructureId, name: ObjectName, offset: Offset = 0, limit: Limit = 50
     ) -> dict[str, Any]:
-        """Return an object and paged typed properties, including tabular sections and
-        dimensions. Use structure_values for values or predefined items."""
+        """Read an object and paged typed properties, tabular sections and dimensions. Values:
+        structure_values."""
         return await call(service.structure_object, structure_id, name, offset, limit)
 
     @server.tool()
     async def structure_values(
         structure_id: StructureId, name: ObjectName, offset: Offset = 0, limit: Limit = 50
     ) -> dict[str, Any]:
-        """List enumeration values or predefined items for an object. Use match_values to obtain
-        conversion candidates between two objects."""
+        """List enumeration values or predefined items. Use match_values for conversion
+        candidates."""
         return await call(service.structure_values, structure_id, name, offset, limit)
 
     @server.tool()
@@ -396,8 +390,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         offset: Offset = 0,
         limit: Limit = 50,
     ) -> dict[str, Any]:
-        """List exchange plan objects and automatic registration flags. Use them to choose
-        registration objects; live node settings are unverified."""
+        """List exchange plan objects and automatic registration flags to choose registration
+        objects. Live node settings are unknown."""
         return await call(
             service.structure_plan_content, structure_id, exchange_plan, offset, limit
         )
@@ -408,8 +402,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         new_structure: StructureId,
         limit: Annotated[int, Field(description="Maximum items per list", ge=1)] = 50,
     ) -> dict[str, Any]:
-        """Compare structures for added, removed or changed objects, properties and values. Use
-        rules_diff for rule projects or XML."""
+        """Compare metadata objects, properties and values. Rule project/XML changes use
+        rules_diff."""
         return await call(service.structure_compare, old_structure, new_structure, limit)
 
     # --- Кандидаты -----------------------------------------------------------------------
@@ -461,8 +455,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description="Only uncovered pairs"),
         ] = False,
     ) -> dict[str, Any]:
-        """Return ПКС candidates; auto=false requires an agent decision. Supply rules_project_id
-        and code together for existing ПКС coverage; otherwise coverage keys are absent."""
+        """Find ПКС candidates; auto=false needs an agent decision. Existing coverage requires
+        rules_project_id and code."""
         return await call(
             service.match_properties,
             source_structure,
@@ -486,8 +480,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         offset: Offset = 0,
         limit: Limit = 50,
     ) -> dict[str, Any]:
-        """Return ПКЗ candidates by enumeration value or predefined item name. Candidates are
-        suggestions; apply auto=false pairs only after an agent decision."""
+        """Find enumeration/predefined ПКЗ candidates. Apply auto=false only after an agent
+        decision."""
         return await call(
             service.match_values,
             source_structure,
@@ -508,9 +502,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Isolate edits from other agents; always create a new project")),
         ] = False,
     ) -> dict[str, Any]:
-        """Open rules XML, reusing the shared project for that path by default. Use private=true
-        for independent edits by multiple agents: always create a new project, leaving the
-        shared one untouched."""
+        """Open rules XML; reuse the path's shared project. private=true creates an isolated
+        project for independent edits."""
         return await call(service.rules_open, path, private)
 
     @server.tool()
@@ -522,8 +515,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("New ID; default new-<source>-<target>")),
         ] = None,
     ) -> dict[str, Any]:
-        """Create an empty exchange rules project with a KD-style header from two structures. No
-        rules are inferred; add them with rule_create or pko_create_from_candidates."""
+        """Create empty rules with a KD-style header from two structures. Add explicit rules
+        through rule_create or pko_create_from_candidates."""
         return await call(service.rules_create, source_structure, target_structure, project_id)
 
     @server.tool()
@@ -534,8 +527,8 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def rules_overview(project_id: ProjectId) -> dict[str, Any]:
-        """Return counts, groups, configuration names and paths; conversion counts filled
-        events. Use rules_list/get for rule details."""
+        """Read counts, groups, configurations and paths; conversion counts filled events.
+        Details: rules_list/get."""
         return await call(service.rules_overview, project_id)
 
     @server.tool()
@@ -557,8 +550,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         offset: Offset = 0,
         limit: Limit = 50,
     ) -> dict[str, Any]:
-        """List rule summaries and addresses. Section pks spans all ПКО; conversion has one row.
-        Registration projects expose registration, not exchange sections."""
+        """List rule summaries and addresses. pks spans all ПКО; conversion is one row.
+        Registration projects expose registration."""
         return await call(service.rules_list, project_id, section, text, offset, limit)
 
     @server.tool()
@@ -569,8 +562,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         owner: Owner = "",
         limit: Annotated[int, Field(description="Maximum ПКС/ПКЗ items", ge=1)] = 100,
     ) -> dict[str, Any]:
-        """Return rule fields, sides and children, or conversion events and stored header
-        fields. Code and child lists are truncated; use addresses for edits."""
+        """Read rule fields, sides and children or conversion events/header. Code and children
+        are truncated; addresses support edits."""
         return await call(service.rules_get, project_id, kind, key, owner, limit)
 
     @server.tool()
@@ -582,15 +575,14 @@ def create_server(service: Kd2Service) -> MCPServer:
         ],
         overwrite: Annotated[bool, Field(description="Replace existing file")] = False,
     ) -> dict[str, Any]:
-        """Save rules XML to workspace or project rules_dir and report format checks.
-        Overwriting preserves unchanged line endings; validate rules and syntax before
-        delivery."""
+        """Save XML to workspace/rules_dir with format checks. Preserve unchanged line endings;
+        validate rules and syntax before delivery."""
         return await call(service.rules_save, project_id, path, overwrite)
 
     @server.tool()
     async def rules_close(project_id: ProjectId) -> dict[str, Any]:
-        """Close a project and remove its snapshot, keeping saved files. Save pending changes
-        first; reopen XML with rules_open."""
+        """Close a project and delete its snapshot; saved files remain. Save pending changes
+        first."""
         return await call(service.rules_close, project_id)
 
     @server.tool()
@@ -612,9 +604,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = "",
         overwrite: Annotated[bool, Field(description="Replace existing ZIP")] = False,
     ) -> dict[str, Any]:
-        """Pack a БСП ZIP kit with required filenames and unchanged file bytes. Supply a folder
-        or explicit files; each kind is checked. Inspect warnings for non-mirrored rules or
-        mismatched registration."""
+        """Pack a БСП ZIP from a folder or files, preserving bytes and checking kinds. Inspect
+        warnings for rule/registration mismatches."""
         return await call(
             service.rules_pack,
             folder,
@@ -638,8 +629,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         target_structure: OptionalStructure = None,
         group: RuleGroup = "",
     ) -> dict[str, Any]:
-        """Create a rule, rejecting missing objects and dangling ПКО references. Infer missing
-        ПКС Код/Порядок from siblings; use rule_update for the single conversion event set."""
+        """Create a rule; reject missing objects/dangling ПКО links. Infer ПКС Код/Порядок.
+        Conversion events use rule_update."""
         return await call(
             service.rule_create,
             project_id,
@@ -662,8 +653,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         source_structure: OptionalStructure = None,
         target_structure: OptionalStructure = None,
     ) -> dict[str, Any]:
-        """Update supplied fields atomically; refusal leaves the rule unchanged. Conversion
-        accepts event code only: empty code deletes an event, and header edits are rejected."""
+        """Update supplied fields atomically. Conversion accepts event code only; empty code
+        deletes an event."""
         return await call(
             service.rule_update,
             project_id,
@@ -698,9 +689,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         source_structure: OptionalStructure = None,
         target_structure: OptionalStructure = None,
     ) -> dict[str, Any]:
-        """Update identical fields in pks, pks_group or pkz children of one ПКО atomically.
-        Unknown addresses or invalid edits reject the whole batch; use rule_update for one
-        rule."""
+        """Update identical fields in pks/pks_group/pkz children of one ПКО atomically. Unknown
+        addresses or invalid edits reject the batch."""
         return await call(
             service.rule_update_many,
             project_id,
@@ -722,8 +712,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         source_structure: OptionalStructure = None,
         target_structure: OptionalStructure = None,
     ) -> dict[str, Any]:
-        """Delete a rule unless it is a ПКО referenced elsewhere. Remove those references first;
-        the shared conversion event set is update-only, so delete events with rule_update."""
+        """Delete a rule after removing its ПКО references. Conversion events are deleted via
+        rule_update with empty code."""
         return await call(
             service.rule_delete,
             project_id,
@@ -745,9 +735,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         fields: Fields = None,
         group: RuleGroup = "",
     ) -> dict[str, Any]:
-        """Create a ПКО with ПКС from auto=true точно/синоним КД pairs; disable unmatched target
-        properties. Other pairs remain not_applied; apply auto=false separately after an
-        agent decision."""
+        """Create ПКО/ПКС from auto=true точно/синоним КД pairs; disable unmatched targets.
+        auto=false requires an agent decision."""
         return await call(
             service.pko_create_from_candidates,
             project_id,
@@ -784,9 +773,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Exchange project for registration ПВД coverage")),
         ] = None,
     ) -> dict[str, Any]:
-        """Validate rules against supplied structures and page through issues; inspect skipped
-        checks. For registration, source_structure holds the plan and exchange_project_id
-        enables ПВД coverage."""
+        """Validate rules against structures; inspect skipped checks. Registration uses
+        source_structure for the plan and exchange_project_id for ПВД coverage."""
         return await call(
             service.rules_validate,
             project_id,
@@ -830,8 +818,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Detail: full/полный, brief/кратко/краткий")),
         ] = None,
     ) -> dict[str, Any]:
-        """Compare same-kind projects or XML files by address without XML noise. Return section
-        counts and paged changes; brief keeps addresses, full includes field/handler changes."""
+        """Compare same-kind rules by address. Counts and paged changes; full includes
+        field/handler differences."""
         return await call(
             service.rules_diff,
             left,
@@ -850,8 +838,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         folder: Annotated[str, Field(description="BSL directory in workspace/rules_dir")],
         limit: Annotated[int, Field(description="Maximum files listed", ge=1)] = 50,
     ) -> dict[str, Any]:
-        """Export handler and algorithm BSL wrappers for a syntax checker. Run the checker
-        separately, then use handlers_locate to map its line errors back to rules and events."""
+        """Export BSL wrappers for a separate syntax checker. Map reported lines back to rules
+        with handlers_locate."""
         return await call(service.handlers_export, project_id, folder, limit)
 
     @server.tool()
@@ -860,8 +848,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         file_name: Annotated[str, Field(description="BSL filename from handlers_export")],
         line: Annotated[int, Field(description="File line, starting at 1", ge=1)],
     ) -> dict[str, Any]:
-        """Map a syntax-checker wrapper line to its rule, event and handler line. Call after
-        handlers_export and use the exported filename, not a source XML line."""
+        """Map an exported syntax-checker wrapper line to rule/event/handler. Use the filename
+        from handlers_export."""
         return await call(service.handlers_locate, project_id, file_name, line)
 
     # --- Регистрация и корреспондент -----------------------------------------------------
@@ -877,15 +865,7 @@ def create_server(service: Kd2Service) -> MCPServer:
         objects: Annotated[
             list[dict[str, Any]] | None,
             Field(
-                description=(
-                    "Objects: metadata_name, code, name, comment, unload_mode, plan_filters, "
-                    "object_filters. Plan leaf: plan_property, object_property, property_type, "
-                    "comparison, constant; object leaf: object_property, property_type, "
-                    "comparison, constant_value. Flat lists use И; "
-                    "groups: {operator: И|ИЛИ, items: [leaf/group]}. "
-                    "comparison: Равно, НеРавно, Больше, БольшеИлиРавно, Меньше, МеньшеИлиРавно. "
-                    "Details: docs/tools.md"
-                )
+                description=("Objects and nested plan/object filters; DTO shapes: docs/tools.md")
             ),
         ] = None,
         project_id: Annotated[
@@ -893,10 +873,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("New or existing registration project ID")),
         ] = None,
     ) -> dict[str, Any]:
-        """Build registration rules from plan content, explicit objects or exchange ПВД. For
-        existing registration projects, nonempty objects replace only selected filters.
-        Warnings/losses report missing attributes or lost filters/handlers without undoing
-        the build."""
+        """Build registration from plan content, objects or ПВД. Existing projects replace
+        selected filters only. Inspect warnings/losses for missing attributes or handlers."""
         return await call(
             service.registration_build,
             structure_id,
@@ -923,9 +901,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("New ID; default corr-<project_id>")),
         ] = None,
     ) -> dict[str, Any]:
-        """Draft reverse rules for selected ПКО; transfer handlers manually, with conversion
-        events listed once. Missing reverse objects/properties/types disable affected rules;
-        unresolved ПКО references are cleared and noted."""
+        """Draft reverse ПКО; transfer handlers manually. Missing reverse metadata disables
+        rules; unresolved ПКО links are cleared and reported."""
         return await call(
             service.correspondent_draft,
             project_id,
@@ -958,16 +935,15 @@ def create_server(service: Kd2Service) -> MCPServer:
         module: Annotated[str | None, Field(description="Exact manager common module name")] = None,
         configuration: Annotated[str, Field(description="Project configuration")] = "full",
     ) -> dict[str, Any]:
-        """Open a read-only ED manager snapshot from path or project/module with optional
-        ordered layers. Snapshots stay in memory; reread changed sources with ed_close/open.
-        Registration managers are unsupported."""
+        """Open a read-only ED module from path or project/module and ordered layers. Changed
+        sources require ed_close/open; registration managers are unsupported."""
         return await call(
             service.ed_open, path, configuration_path, extensions, project, module, configuration
         )
 
     @server.tool()
     async def ed_overview(
-        project_id: Annotated[str, Field(description="Snapshot ID from ed_open")],
+        project_id: Annotated[str, Field(description="ED document/snapshot ID")],
     ) -> dict[str, Any]:
         """Return ED counts, coverage, versions and diagnostics. Complete coverage proves static
         declarations/bindings were read, not handler behavior."""
@@ -975,7 +951,7 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def ed_list(
-        project_id: Annotated[str, Field(description="Snapshot ID from ed_open")],
+        project_id: Annotated[str, Field(description="ED document/snapshot ID")],
         kind: Annotated[
             str,
             Field(
@@ -1029,7 +1005,7 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def ed_get(
-        project_id: Annotated[str, Field(description="Snapshot ID from ed_open")],
+        project_id: Annotated[str, Field(description="ED document/snapshot ID")],
         address: Annotated[str, Field(description="ED address from ed_list")],
         children_kind: Annotated[
             str | None,
@@ -1050,9 +1026,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             bool, Field(description="Header-only context (interface 3)")
         ] = False,
     ) -> dict[str, Any]:
-        """Return an ED entity with paged children and diagnostics; text is opt-in and group ПКС
-        need separate reads. Layers use direction/headers_only for effective context, or
-        Слой/<id>/… for a source revision."""
+        """Read ED fields, paged children/diagnostics and optional text. Layers select effective
+        direction/headers_only or source revision Слой/<id>/…."""
         return await call(
             service.ed_get,
             project_id,
@@ -1069,7 +1044,7 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def ed_locate(
-        project_id: Annotated[str, Field(description="Snapshot ID from ed_open")],
+        project_id: Annotated[str, Field(description="ED document/snapshot ID")],
         line: Annotated[int, Field(description="Selected file line, starting at 1", ge=1)],
         offset: Offset = 0,
         limit: Limit = 50,
@@ -1084,7 +1059,7 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def ed_validate(
-        project_id: Annotated[str, Field(description="Snapshot ID from ed_open")],
+        project_id: Annotated[str, Field(description="ED document/snapshot ID")],
         level: Annotated[
             str | None, Field(description="Severity: ошибка or предупреждение")
         ] = None,
@@ -1123,9 +1098,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Matching layer route profile ID")),
         ] = None,
     ) -> dict[str, Any]:
-        """Validate ED links/declarations without executing or compiling BSL. Supply schema_id
-        and structure_id for format/configuration checks, both for type compatibility.
-        Inspect skipped; no issues does not prove runtime behavior."""
+        """Validate ED links; schema_id/structure_id add format/type checks. Manager documents
+        also run ed.writer.*. Inspect skipped; runtime remains unverified."""
         return await call(
             service.ed_validate,
             project_id,
@@ -1144,10 +1118,10 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def ed_close(
-        project_id: Annotated[str, Field(description="Snapshot ID from ed_open")],
+        project_id: Annotated[str, Field(description="ED snapshot or manager project ID")],
     ) -> dict[str, Any]:
-        """Remove an ED snapshot from memory, keeping its source files. Use ed_close followed by
-        ed_open to reread changed sources; rules_close applies to KD 2 projects instead."""
+        """Close an ED snapshot or delete a durable manager project snapshot. Source files and
+        published kits remain. Reopen read-only files with ed_open."""
         return await call(service.ed_close, project_id)
 
     @server.tool()
@@ -1178,9 +1152,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Ordered format extension package paths")),
         ] = None,
     ) -> dict[str, Any]:
-        """Open an XDTO format schema for an explicit version with local imports and selected
-        format extensions. Inspect partial status/diagnostics; XSD and URI downloads are
-        unsupported."""
+        """Open XDTO for a version, local imports and explicit extensions. Inspect diagnostics;
+        XSD and downloads are unsupported."""
         return await call(
             service.ed_schema_open,
             format_version,
@@ -1224,8 +1197,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description="Include provenance graph"),
         ] = False,
     ) -> dict[str, Any]:
-        """Return type properties, enumeration values or facets. Short names can be ambiguous;
-        use Clark notation or a local type ID, and include_origin for provenance."""
+        """Read type properties, values or facets. Ambiguous names need Clark notation/type ID;
+        include_origin adds provenance."""
         return await call(
             service.ed_schema_type, schema_id, qname, section, offset, limit, include_origin
         )
@@ -1234,8 +1207,8 @@ def create_server(service: Kd2Service) -> MCPServer:
     async def ed_schema_close(
         schema_id: Annotated[str, Field(description="Snapshot ID from ed_schema_open")],
     ) -> dict[str, Any]:
-        """Remove a format schema snapshot from memory, keeping its files; repeated close
-        returns closed=false. Close and reopen the schema to reread changed packages."""
+        """Close a schema snapshot, preserving files; repeat returns closed=false. Reopen to
+        reread changed packages."""
         return await call(service.ed_schema_close, schema_id)
 
     # --- Маршруты EnterpriseData -------------------------------------------------------------
@@ -1277,9 +1250,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Ordered roots; null = settings, [] = none")),
         ] = None,
     ) -> dict[str, Any]:
-        """Read format version routes from one project, XML dump path or existing profile_id.
-        Snapshots stay in memory; unchanged sources are reused, and changed sources require
-        force to reread. Node versions and live settings remain unknown."""
+        """Read version routes from project/dump/profile_id. Reuse unchanged snapshots; changed
+        sources require force. Node versions and live settings are unknown."""
         return await call(
             service.ed_routes,
             project,
@@ -1325,9 +1297,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         offset: Offset = 0,
         limit: Limit = 50,
     ) -> dict[str, Any]:
-        """Compare route snapshots statically; select plans when several exist.
-        ed_open/ed_schema_open opening arguments are ready to use, or null with a reason.
-        Live exchange compatibility is unverified."""
+        """Compare route snapshots; select plans if needed. Ready ed_open/ed_schema_open
+        arguments or null with reason. Live compatibility is unverified."""
         return await call(
             service.ed_route_compare,
             left_profile_id,
@@ -1343,19 +1314,118 @@ def create_server(service: Kd2Service) -> MCPServer:
         )
 
     @server.tool()
+    async def ed_create(
+        project_id: Annotated[str, Field(description="Explicit durable manager project ID")],
+        mode: Annotated[
+            str, Field(description="new, import, or rebind existing model to fresh inputs")
+        ] = "new",
+        project: Annotated[str | None, Field(description="Host from project_list")] = None,
+        configuration: Annotated[str, Field(description="Host configuration")] = "full",
+        configuration_path: Annotated[
+            str | None, Field(description="Host dump instead of project")
+        ] = None,
+        extensions: Annotated[
+            list[str] | None,
+            Field(description="Ordered host extensions; null uses project settings"),
+        ] = None,
+        plan: Annotated[str | None, Field(description="Exchange plan name")] = None,
+        format_version: Annotated[
+            str | None, Field(description="One exact route version key")
+        ] = None,
+        interface_version: Annotated[int, Field(description="W1 supports 2 only")] = 2,
+        identity: Annotated[
+            dict[str, Any] | None,
+            Field(
+                description="name, prefix, module_name; optional synonym, version, "
+                "compatibility_mode. Default name includes project_id"
+            ),
+        ] = None,
+        document_id: Annotated[str | None, Field(description="ed_open snapshot to import")] = None,
+        schema_id: Annotated[str | None, Field(description="Optional open XDTO schema")] = None,
+        structure_id: Annotated[
+            str | None, Field(description="Optional loaded host structure")
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 20,
+    ) -> dict[str, Any]:
+        """Create/reopen a durable interface-2 manager; import preserves source text. Returns
+        revision, counts, executor/import report and document_id. Different arguments refuse;
+        changed fingerprints warn. Atomic rebind keeps rules/receipts and validates fresh inputs;
+        interrupted rebind recovers with a notice."""
+        return await call(
+            service.ed_create,
+            project_id,
+            mode,
+            project,
+            configuration,
+            configuration_path,
+            extensions,
+            plan,
+            format_version,
+            interface_version,
+            identity,
+            document_id,
+            schema_id,
+            structure_id,
+            offset,
+            limit,
+        )
+
+    @server.tool()
+    async def ed_apply(
+        project_id: Annotated[str, Field(description="Manager project from ed_create")],
+        expected_revision: Annotated[str, Field(description="Current project revision")],
+        operations: Annotated[
+            list[dict[str, Any]],
+            Field(
+                description="Up to 100: client_id, kind, action, target_id/address, owner_id, "
+                "container_id, after_id, patch, clear. Manager patch: manager_name, title, "
+                "generated_at, text_style only; bindings require ed_create mode=rebind"
+            ),
+        ],
+        mode: Annotated[str, Field(description="preview or apply")] = "preview",
+        expected_preview_hash: Annotated[
+            str | None, Field(description="Current preview_hash for apply")
+        ] = None,
+        confirmations: Annotated[
+            list[dict[str, Any]] | None, Field(description="Preview notices: code, notice_hash")
+        ] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+        section: Annotated[
+            str, Field(description="summary, operations, changes, notices")
+        ] = "summary",
+    ) -> dict[str, Any]:
+        """Preview/apply an atomic manager packet: canonical operations, changes, notices,
+        preview_hash; apply adds document_id. Empty/already applied packets keep revision.
+        Replays return replayed=true, current revision and live document_id."""
+        return await call(
+            service.ed_apply,
+            project_id,
+            expected_revision,
+            operations,
+            mode,
+            expected_preview_hash,
+            confirmations,
+            offset,
+            limit,
+            section,
+        )
+
+    @server.tool()
     async def ed_authoring_candidates(
         target: Annotated[
             dict[str, Any],
             Field(
                 description=(
-                    "Target: project, configuration, plan, variant (or null), format_version, "
-                    "direction (send/receive), pko_address; open snapshot IDs: "
-                    "project_id (ed_open), schema_id (ed_schema_open), "
-                    "structure_id (structure loader). Details: docs/tools.md"
+                    "Overlay target: docs/tools.md. Manager: schema_id, structure_id, direction; "
+                    "properties: configuration_object, format_type; reference: optional project_id"
                 )
             ),
         ],
-        kind: Annotated[str, Field(description="Candidate side: format or configuration")],
+        kind: Annotated[
+            str, Field(description="Overlay: format/configuration; manager: objects/properties")
+        ],
         text: Annotated[str, Field(description="Name/path substring, case-insensitive")] = "",
         offset: Offset = 0,
         limit: Limit = 50,
@@ -1367,10 +1437,14 @@ def create_server(service: Kd2Service) -> MCPServer:
             str | None,
             Field(description="Selected format property"),
         ] = None,
+        scope: Annotated[str | None, Field(description="overlay (default) or manager")] = None,
+        reference_document_id: Annotated[
+            str | None,
+            Field(description="Typical manager snapshot from the same host; objects only"),
+        ] = None,
     ) -> dict[str, Any]:
-        """List unused format properties or ПКО attributes for a selected authoring target.
-        Candidates have auto=false: the agent chooses the mapping before ed_authoring_build;
-        no rules are written here."""
+        """List overlay properties or manager object/property pairs. All candidates have
+        auto=false; the agent chooses mappings. A typical manager adds reference pairs."""
         return await call(
             service.ed_authoring_candidates,
             target,
@@ -1380,36 +1454,35 @@ def create_server(service: Kd2Service) -> MCPServer:
             limit,
             configuration_attribute,
             format_property,
+            scope,
+            reference_document_id,
         )
 
     @server.tool()
     async def ed_authoring_build(
-        project: Annotated[str, Field(description="Project from project_list")],
-        configuration: Annotated[str, Field(description="Explicit project configuration")],
+        project: Annotated[str | None, Field(description="Overlay host from project_list")] = None,
+        configuration: Annotated[
+            str | None, Field(description="Overlay host configuration")
+        ] = None,
         extension: Annotated[
-            dict[str, Any],
+            dict[str, Any] | None,
             Field(
                 description=(
                     "Kit identity: name, prefix, synonym, version, compatibility_mode; "
                     "details: docs/tools.md"
                 )
             ),
-        ],
+        ] = None,
         operations: Annotated[
-            list[dict[str, Any]],
+            list[dict[str, Any]] | None,
             Field(
                 description=(
-                    "Up to 100 operations with target (plan, variant, format_version, direction, "
-                    "pko_address, project_id, schema_id, structure_id). kind: add_header_property "
-                    "(default; configuration_attribute, format_property, optional new_attribute), "
-                    "set_object_handler (event, body, expected_previous, chain), "
-                    "preserve_missing_header_property (property_operation_id), "
-                    "add_algorithmic_header_property (configuration_attribute, format_property, "
-                    "handler_operation_id, optional conversion_rule). "
-                    "new_attribute: name, synonym, primitive, qualifiers. Details: docs/tools.md"
+                    "Up to 100 overlay operations: add_header_property, set_object_handler, "
+                    "preserve_missing_header_property, add_algorithmic_header_property. "
+                    "Targets/fields: docs/tools.md. Forbidden with scope=manager"
                 )
             ),
-        ],
+        ] = None,
         version_scope: Annotated[
             str | None,
             Field(description="Explicit manager scope consent"),
@@ -1436,7 +1509,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             str,
             Field(
                 description=(
-                    "Section: summary, operations, issues_before, issues_after, scopes, skipped"
+                    "summary, operations, issues_before, issues_after, scopes, skipped; "
+                    "manager also notices, files"
                 )
             ),
         ] = "summary",
@@ -1454,10 +1528,20 @@ def create_server(service: Kd2Service) -> MCPServer:
             list[str] | None,
             Field(description=("Previous operation IDs to remove")),
         ] = None,
+        scope: Annotated[str | None, Field(description="overlay (default) or manager")] = None,
+        project_id: Annotated[
+            str | None, Field(description="Manager project from ed_create")
+        ] = None,
+        expected_revision: Annotated[
+            str | None, Field(description="Current manager revision")
+        ] = None,
+        route: Annotated[
+            dict[str, Any] | None,
+            Field(description="Manager route: plan, format_version; defaults to project"),
+        ] = None,
     ) -> dict[str, Any]:
-        """Preview header ПКС, object handlers and preserve-missing presets in an ED kit. Write
-        to workspace only with the current preview hash and required acknowledgement IDs. A
-        human installs the kit and verifies runtime behavior."""
+        """Preview/write overlay or manager kits in workspace with current hash and required
+        acknowledgements. Manager refuses legacy operations. Install/verify runtime separately."""
         return await call(
             service.ed_authoring_build,
             project,
@@ -1477,6 +1561,10 @@ def create_server(service: Kd2Service) -> MCPServer:
             check_prefix,
             address_prefix,
             drop_operations,
+            scope,
+            project_id,
+            expected_revision,
+            route,
         )
 
     return server
