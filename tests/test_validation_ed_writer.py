@@ -157,6 +157,11 @@ def test_optional_deletion_hook_is_checked_only_when_present():
     name = "ПередОбработкойУдаляемогоОбъекта"
     assert not report_for(model, base).issues
     correct = base + f"\nПроцедура {name}(КомпонентыОбмена, Объект) Экспорт\nКонецПроцедуры\n"
+    model = import_manager(
+        read_manager_text(correct),
+        project_id=model.project_id,
+        manager_name=model.header.manager_name,
+    )[0]
     assert not report_for(model, correct).issues
     report = report_for(
         model, correct.replace(f"{name}(КомпонентыОбмена, Объект)", f"{name}(Объект)")
@@ -168,6 +173,11 @@ def test_entrypoint_formal_names_and_unused_defaults_do_not_change_positional_co
     model = new_manager(interface_version=3)
     source = render(model).text.replace("(ПараметрыКонвертации) Экспорт", "(Параметры) Экспорт")
     source = source.replace("ТолькоЗаголовки = Ложь", "ТолькоЗаголовки")
+    model = import_manager(
+        read_manager_text(source),
+        project_id=model.project_id,
+        manager_name=model.header.manager_name,
+    )[0]
     assert not report_for(model, source).issues
 
 
@@ -185,8 +195,16 @@ def test_orphan_send_pko_and_missing_receive_type_are_named():
     model = pilot_model()
     changed = replace(model, pod=())
     report = report_for(changed, render(model).data)
-    assert {i.check for i in report.issues} == {"ed.writer.send_pod", "ed.writer.receive_pod"}
-    assert all(i.address == model_addresses(model)[model.pko[0].logical_id] for i in report.issues)
+    assert {i.check for i in report.issues} == {
+        "ed.writer.read",
+        "ed.writer.send_pod",
+        "ed.writer.receive_pod",
+    }
+    assert all(
+        i.address == model_addresses(model)[model.pko[0].logical_id]
+        for i in report.issues
+        if i.check != "ed.writer.read"
+    )
 
 
 def test_unknown_send_reference_is_not_silently_treated_as_absence():
@@ -550,7 +568,10 @@ def test_table_part_operation_of_interface_one_is_a_profile_error():
 def test_interface_three_guard_must_precede_properties():
     model = pilot_model(3)
     text = render(model).text.replace("Если ТолькоЗаголовки Тогда", "Если Ложь Тогда")
-    assert [i.check for i in report_for(model, text).issues] == ["ed.writer.headers_only"]
+    assert [i.check for i in report_for(model, text).issues] == [
+        "ed.writer.read",
+        "ed.writer.headers_only",
+    ]
     text = render(model).text.replace("\r\n", "\n")
     text = text.replace(
         "Если ТолькоЗаголовки Тогда\n\t\tВозврат;\n\tКонецЕсли;",
@@ -570,7 +591,7 @@ def test_dispatcher_link_checks_are_reused_and_strict_fallback_is_rejected():
         '\tИначе\n\t\tВызватьИсключение "Unknown";\n\tКонецЕсли;\n',
     )
     checks = {i.check for i in report_for(model, text).issues}
-    assert checks == {"ed.writer.dispatcher", "ed.dispatcher.target_missing"}
+    assert checks == {"ed.writer.read", "ed.writer.dispatcher", "ed.dispatcher.target_missing"}
     bound = render(model).text.replace("\r\n", "\n")
     source = read_manager_text(bound)
     routine = next(r for r in source.routines if r.name == model.pko[0].procedure_name)
@@ -650,6 +671,7 @@ def test_duplicate_methods_are_reported_without_case_sensitive_aliasing():
         + "\nПроцедура передконвертацией(КомпонентыОбмена) Экспорт\nКонецПроцедуры\n"
     )
     assert {i.check for i in report_for(model, text).errors} == {
+        "ed.writer.read",
         "ed.writer.entrypoint",
         "ed.writer.name_collision",
     }

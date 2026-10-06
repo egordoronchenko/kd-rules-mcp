@@ -156,15 +156,43 @@ def test_migration_reference_properties_report_all_kinds_without_code():
         reference_document=document,
         reference_document_id="typical",
     )
-    rows = [r for r in result["properties"]["items"] if r["class"] == "reference_module"]
+    rows = next(
+        r["references"]
+        for r in result["properties"]["items"]
+        if r["configuration"] == prop.configuration_property and "references" in r
+    )
     assert {r["property_kind"]: r["rule_name"] for r in rows} == {
         "direct": None,
         "reference": rule.declared_name,
         "pkpd": "ВидыЛиц",
         "algorithm": None,
     }
-    assert all(not r["auto"] and r["origin"]["address"] for r in rows)
+    assert all(r["origin"]["address"] for r in rows)
+    assert all(not r["auto"] for r in result["properties"]["items"])
     assert "ТЕЛО НЕ ПОКАЗЫВАТЬ" not in str(result)
+
+
+def test_batch3_identical_property_pair_merges_name_and_reference_evidence():
+    result = property_candidates(
+        structure(),
+        schema(),
+        "Справочник.Должности",
+        "Справочник.Должности",
+        direction="send",
+        reference_document=read_manager(DATA / "pilot.bsl"),
+        reference_document_id="typical",
+    )
+    rows = [
+        r
+        for r in result["properties"]["items"]
+        if r["configuration"] == "Наименование" and r["format_name"] == "Наименование"
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["class"] == "direct" and not row["auto"]
+    assert row["references"][0]["property_kind"] == "direct"
+    assert row["references"][0]["origin"]["document_id"] == "typical"
+    check_candidate(row["candidate_id"], structure(), schema())
 
 
 def structure() -> sqlite3.Connection:

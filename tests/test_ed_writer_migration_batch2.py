@@ -155,7 +155,7 @@ def test_address_owner_from_previous_packet_accepts_handler_and_property():
 
 
 def test_snapshot_schema_is_pinned_to_version_and_rejects_unknown_schema():
-    known = {4: "ecfb5f2da1648d8ab72be2f0e0b26863bcbc062c5830bab76d366b1f038e3759"}
+    known = {5: "ecfb5f2da1648d8ab72be2f0e0b26863bcbc062c5830bab76d366b1f038e3759"}
     assert (
         snapshot_schema_fingerprint() == SNAPSHOT_SCHEMA_SHA256 == known[SNAPSHOT_STORAGE_VERSION]
     )
@@ -175,7 +175,7 @@ def test_legacy_revision_is_verified_before_migration():
         load_model(json.dumps(payload))
 
 
-@pytest.mark.parametrize("version", [0, 5])
+@pytest.mark.parametrize("version", [0, 6])
 def test_unknown_snapshot_version_is_rejected(version):
     payload = json.loads((DATA / "snapshot-w1.ed.json").read_bytes())
     payload["storage_version"] = version

@@ -1,7 +1,9 @@
-"""Миграция собственных рамок W1/W2 после проверки хеша старого снимка."""
+"""Миграция импортов и собственных рамок после проверки хеша старого снимка."""
 
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
+from typing import Any
 
+from .canonical import model_addresses
 from .forms import DISPATCHERS, helper_forms
 from .lexer import tokenize
 from .writer_model import (
@@ -9,6 +11,7 @@ from .writer_model import (
     LayoutElement,
     ManagerModel,
     RetainedBlock,
+    leaf_fingerprint,
     logical_id,
     text_hash,
 )
@@ -17,6 +20,184 @@ from .writer_model import (
 def _tokens(text):
     # Комментарии тоже сравниваются: миграция не должна терять чужой текст.
     return tuple((t.kind, t.value if t.kind == "string" else t.folded) for t in tokenize(text))
+
+
+def migrate_imported(model: ManagerModel) -> ManagerModel:
+    """Перечитывает прежнюю классификацию, сохраняя текст, ID и историю решений."""
+    from .reader import read_manager_text
+    from .writer import render
+    from .writer_import import import_manager
+
+    action = (
+        "Проект создан прежней версией сервера: миграция снимка невозможна. "
+        'Используйте ed_create(mode="rebind") после проверки входов; '
+        "повторный импорт создаст новый проект и потеряет прежние решения. Причина: "
+    )
+    try:
+        rendered = render(model, "preserve")
+        back, _ = import_manager(
+            read_manager_text(
+                rendered.data.decode("utf-8"), path=model.source_files[0].source_name
+            ),
+            project_id=model.project_id,
+            manager_name=model.header.manager_name,
+            host=model.host,
+            format_bindings=model.format_bindings,
+            executor_profile=model.executor_profile,
+        )
+        old_addresses, new_addresses = model_addresses(model), model_addresses(back)
+        remap = {}
+        used = set()
+
+        def pair(old_nodes, new_nodes, tag):
+            previous = {(tag(n), old_addresses.get(n.logical_id)): n.logical_id for n in old_nodes}
+            for node in new_nodes:
+                old_id = previous.get((tag(node), new_addresses.get(node.logical_id)))
+                if old_id is not None and node.logical_id not in remap and old_id not in used:
+                    remap[node.logical_id] = old_id
+                    used.add(old_id)
+
+        pair(model.members(), back.members(), type)
+        pair(model.layouts, back.layouts, lambda c: c.kind)
+        pair(
+            (e for c in model.layouts for e in c.elements),
+            (e for c in back.layouts for e in c.elements),
+            lambda e: (e.kind, e.field),
+        )
+        # У шапки нет Member; её исходные идентификаторы тоже используются в раскладке.
+        old_by_address = {}
+        for key, address in old_addresses.items():
+            old_by_address.setdefault(address, []).append(key)
+        for key, address in new_addresses.items():
+            candidates = old_by_address.get(address, ())
+            if key not in remap and len(candidates) == 1 and candidates[0] not in used:
+                remap[key] = candidates[0]
+                used.add(candidates[0])
+        old_members = {m.logical_id for m in model.members()}
+        referenced = {key for d in model.decisions for key in d.result_ids}
+        if (referenced & old_members) - used:
+            raise ValueError("Не найдено однозначное соответствие сущности из истории решений")
+        # Позиционный ID свежего листа мог совпасть со старым ID другой сущности.
+        for key in new_addresses:
+            if key not in remap and key in used:
+                remap[key] = logical_id(model.project_id, "migration/new/" + key)
+        scalar_ids = {
+            "logical_id",
+            "target_id",
+            "owner_id",
+            "parent_id",
+            "inside_leaf_id",
+            "entity_id",
+            "block_id",
+            "container_id",
+        }
+
+        def rewrite(value: Any, field: str = "") -> Any:
+            if is_dataclass(value) and not isinstance(value, type):
+                return replace(
+                    value,
+                    **{
+                        f.name: rewrite(getattr(value, f.name), f.name)
+                        for f in fields(value)
+                        if f.init and not f.name.startswith("_")
+                    },
+                )
+            if isinstance(value, tuple):
+                return tuple(
+                    rewrite(v, "target_id" if field in ("guards", "root_layouts") else "")
+                    for v in value
+                )
+            if isinstance(value, str) and field in scalar_ids:
+                return remap.get(value, value)
+            return value
+
+        back = rewrite(back)
+        back = replace(back, decisions=model.decisions, confirmations=model.confirmations)
+        members = {m.logical_id: m for m in back.members()}
+
+        def stamped(source, item):
+            return (
+                replace(source, fingerprint=leaf_fingerprint(back, item, members))
+                if source
+                else None
+            )
+
+        back = replace(
+            back,
+            layouts=tuple(
+                replace(
+                    c,
+                    opening=stamped(c.opening, c),
+                    closing=stamped(c.closing, c),
+                    elements=tuple(replace(e, source=stamped(e.source, e)) for e in c.elements),
+                )
+                for c in back.layouts
+            ),
+        ).with_revision()
+        if render(back, "preserve").data != rendered.data:
+            raise ValueError("Перенос идентификаторов изменил текст модуля")
+        return back
+    except Exception as error:
+        raise ValueError(action + str(error)) from error
+
+
+def reconcile_authored(model: ManagerModel) -> ManagerModel:
+    """Восстанавливает производные поля опубликованных собственных снимков W2/W3."""
+    if model.source_files or not any(u.origin == "authored" for u in model.code_units):
+        return model
+    from .writer_import import refresh_code_dependencies
+
+    # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:2690–2692.
+    expected = (
+        'Если ПравилаОбработкиДанных.Колонки.Найти("ОчисткаДанных") = Неопределено Тогда\n'
+        '\tПравилаОбработкиДанных.Колонки.Добавить("ОчисткаДанных");\nКонецЕсли;'
+    )
+    blocks = {b.logical_id: b for b in model.retained_blocks}
+    containers = {c.logical_id: c for c in model.layouts}
+    removed = set()
+
+    def entry(container):
+        while container.kind == "conditional" and container.owner_id in containers:
+            container = containers[container.owner_id]
+        return container.name.casefold() == "заполнитьправилаобработкиданных"
+
+    for key, container in tuple(containers.items()):
+        elements = []
+        for element in container.elements:
+            child = containers.get(element.container_id or "")
+            if child is not None and child.kind in ("code", "dispatcher"):
+                # Старый мигратор давал рамке отдельный ID; импорт использует ID метода.
+                element = replace(element, logical_id=child.logical_id)
+            block = blocks.get(element.block_id or "")
+            if (
+                entry(container)
+                and block is not None
+                and block.kind == "scaffold"
+                and block.reason == "outside_w1"
+                and _tokens(block.text) == _tokens(expected)
+            ):
+                removed.add(block.logical_id)
+                element = replace(
+                    element,
+                    kind="entity",
+                    entity_id=logical_id(model.project_id, "header"),
+                    block_id=None,
+                    field="header.clear_data_column",
+                )
+            elements.append(element)
+        containers[key] = replace(container, elements=tuple(elements))
+    result = replace(
+        model,
+        header=replace(model.header, clear_data_column=True) if removed else model.header,
+        layouts=tuple(containers.values()),
+        retained_blocks=tuple(b for b in model.retained_blocks if b.logical_id not in removed),
+        pkpd=tuple(
+            replace(r, directions=("both",)) if set(r.directions) == {"send", "receive"} else r
+            for r in model.pkpd
+        ),
+    )
+    result = refresh_code_dependencies(replace(result, code_units=()), result)
+    return result.with_revision() if result != model else model
 
 
 def migrate_v3(model: ManagerModel) -> ManagerModel:

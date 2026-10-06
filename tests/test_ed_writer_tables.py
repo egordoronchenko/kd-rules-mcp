@@ -7,6 +7,7 @@ import pytest
 
 from kd2_rules_mcp.authoring.ed.manager_operations import (
     ManagerOperation,
+    ManagerOperationError,
     PkoPatch,
     PropertyPatch,
     TablePartPatch,
@@ -72,7 +73,7 @@ def test_table_part_and_property_round_trip(sides):
     round_trip(model)
 
 
-def test_group_create_notice_does_not_require_confirmation():
+def test_group_create_notice_requires_confirmation_and_names_group():
     model = table_model()
     operation = ManagerOperation(
         "table",
@@ -84,14 +85,61 @@ def test_group_create_notice_does_not_require_confirmation():
     plan = preview(model, (operation,), expected_revision=model.revision)
     assert not plan.failures
     assert [(n.code, n.requires_confirmation) for n in plan.notices] == [
-        ("table_part_replace", False)
+        ("table_part_replace", True)
     ]
+    assert plan.notices[0].address == "ПКО/Item/ПКТЧ/Rows"
+    with pytest.raises(ManagerOperationError) as error:
+        apply(
+            model,
+            (operation,),
+            expected_revision=model.revision,
+            expected_preview_hash=plan.preview_hash,
+        )
+    assert error.value.failures[0].reason == "confirmation_required"
     assert (
         apply(
             model,
             (operation,),
             expected_revision=model.revision,
             expected_preview_hash=plan.preview_hash,
+            confirmations=tuple((n.code, n.notice_hash) for n in plan.notices),
+        )
+        == plan.model
+    )
+
+
+def test_two_group_create_notices_have_distinct_addresses_and_both_need_ack():
+    model = table_model()
+    operations = tuple(
+        ManagerOperation(
+            name,
+            "table_part",
+            "create",
+            owner_id=model.pko[0].logical_id,
+            patch=TablePartPatch(configuration_property=name, format_property=name),
+        )
+        for name in ("Rows", "Lines")
+    )
+    plan = preview(model, operations, expected_revision=model.revision)
+    assert not plan.failures
+    notices = [n for n in plan.notices if n.code == "table_part_replace"]
+    assert [n.address for n in notices] == ["ПКО/Item/ПКТЧ/Rows", "ПКО/Item/ПКТЧ/Lines"]
+    assert all(n.requires_confirmation for n in notices)
+    with pytest.raises(ManagerOperationError):
+        apply(
+            model,
+            operations,
+            expected_revision=model.revision,
+            expected_preview_hash=plan.preview_hash,
+            confirmations=((notices[0].code, notices[0].notice_hash),),
+        )
+    assert (
+        apply(
+            model,
+            operations,
+            expected_revision=model.revision,
+            expected_preview_hash=plan.preview_hash,
+            confirmations=tuple((n.code, n.notice_hash) for n in notices),
         )
         == plan.model
     )
@@ -535,7 +583,11 @@ def test_move_with_client_container_and_no_anchor_appends():
     plan = preview(model, packet, expected_revision=model.revision)
     assert not plan.failures
     model = apply(
-        model, packet, expected_revision=model.revision, expected_preview_hash=plan.preview_hash
+        model,
+        packet,
+        expected_revision=model.revision,
+        expected_preview_hash=plan.preview_hash,
+        confirmations=tuple((n.code, n.notice_hash) for n in plan.notices),
     )
     names = [e.address.rsplit("/", 1)[-1] for e in render(model).report.entries if e.kind == "pks"]
     assert names == ["B", "A"]

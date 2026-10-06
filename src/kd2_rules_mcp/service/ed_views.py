@@ -361,6 +361,7 @@ def validation_view(
         if explain_skipped:
             for row in rows:
                 hint = {
+                    "empty_format_side": "Сторона формата не задана — проверять нечего",
                     "non_atomic_type": "Тип не подтверждён как одиночный примитив; "
                     "задайте ПКО ссылки или алгоритм преобразования",
                     "qualifiers_unavailable": "Квалификаторы типа неизвестны; проверьте структуру "

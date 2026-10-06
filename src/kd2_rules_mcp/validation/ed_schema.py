@@ -225,12 +225,12 @@ def validate_schema(
                 if group:
                     check = "ed.schema.table_missing"
                     if checking.start(check, group, direction, rule):
-                        if group_type is None or group_type_status != "resolved":
-                            checking.skip(check, "owner_type_unavailable", group)
-                            group_status = "owner_type_unavailable"
-                        elif not group.format_property:
+                        if not group.format_property:
                             checking.skip(check, "empty_format_side", group)
                             group_status = "empty_format_side"
+                        elif group_type is None or group_type_status != "resolved":
+                            checking.skip(check, "owner_type_unavailable", group)
+                            group_status = "owner_type_unavailable"
                         else:
                             resolved = profile.resolve(group_type, group.format_property)
                             group_status = resolved.status
@@ -272,7 +272,9 @@ def validate_schema(
                         if possible.status == "resolved":
                             possible_supplied.update(possible.property_ids)
                     if checking.start(check, prop, direction, group or rule):
-                        if (
+                        if group and group_status == "empty_format_side":
+                            checking.skip(check, "empty_format_side", prop)
+                        elif (
                             property_owner is None
                             or property_owner_status != "resolved"
                             or group_status != "resolved"
@@ -334,7 +336,13 @@ def validate_schema(
                         and checking.start(check, prop, direction, group or rule)
                     ):
                         if resolved_prop is None:
-                            checking.skip(check, "owner_type_unavailable", prop)
+                            checking.skip(
+                                check,
+                                "empty_format_side"
+                                if group and group_status == "empty_format_side"
+                                else "owner_type_unavailable",
+                                prop,
+                            )
                             continue
                         key, _ = metadata_key(rule.configuration_object.value)
                         obj = snapshot.objects.get(key) if key else None
@@ -361,10 +369,8 @@ def validate_schema(
                         )
                         if not actual or len(actual) != 1 or actual[0].unresolved:
                             checking.skip(check, "unresolved_configuration_type", prop)
-                        elif has_handler(rule, direction, checking.applicability):
-                            checking.skip(check, "handler_may_supply", prop)
                         elif legacy_atomic_only:
-                            # Overlay хранит эти отчёты в комплекте: прежний протокол побайтно.
+                            # В overlay сохраняется прежняя граница Число/Дата/Булево.
                             expected = atomic_family(schema, resolved_prop)
                             types = set(actual[0].types)
                             if (
@@ -432,7 +438,13 @@ def validate_schema(
                 if not checking.start(check, owner, direction, rule if group else None):
                     continue
                 if row_type is None or group_status != "resolved":
-                    checking.skip(check, "owner_type_unavailable", owner)
+                    checking.skip(
+                        check,
+                        "empty_format_side"
+                        if group_status == "empty_format_side"
+                        else "owner_type_unavailable",
+                        owner,
+                    )
                     continue
                 if not group:
                     for child_group in rule.groups:
@@ -450,7 +462,25 @@ def validate_schema(
                     if required.id in possible_supplied:
                         checking.skip(check, "opaque_condition", owner)
                     elif has_handler(rule, "send", checking.applicability):
-                        checking.skip(check, "handler_may_supply", owner)
+                        checking.checked()
+                        # XDTO:1346,1363–1371: повторная сборка алгоритмической ТЧ
+                        # после обработчика оставляет только колонки с ПКС.
+                        algorithmic_group = group is not None and any(
+                            prop.algorithm_flag
+                            and checking.applicability.evaluate(prop, direction, group) is not False
+                            for prop in properties
+                        )
+                        checking.report.warning(
+                            check,
+                            checking.address(owner),
+                            f"Обязательное свойство «{path}» без правила; "
+                            + (
+                                "колонка без ПКС будет удалена при повторной сборке "
+                                "табличной части после обработчика (XDTO:1346,1363–1371)."
+                                if algorithmic_group
+                                else "обработчик отправки может его заполнить — убедитесь."
+                            ),
+                        )
                     elif not full_send or (group is not None and not properties):
                         checking.skip(check, "full_object_not_proven", owner)
                     else:

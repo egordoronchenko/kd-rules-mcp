@@ -76,6 +76,97 @@ def test_string_family_mismatch_is_checked():
     )
 
 
+@pytest.mark.parametrize("event", ["ПриОтправкеДанных", "ПриКонвертацииДанныхXDTO"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_batch3_direct_types_are_checked_with_owner_handler(event, legacy):
+    text = BASE.replace(
+        "// <properties>",
+        f'ПравилоКонвертации.{event} = "Отменить";\nДобавитьПКС(СвойстваШапки, "Флаг", "Дата", 0);',
+    )
+    doc = document(text)
+    schema = load_schema(DATA / "validation.bin")
+    report = validate_schema(
+        doc,
+        schema,
+        build_addresses(doc),
+        ValidationProfile.build(schema, "1.2"),
+        snapshot(),
+        legacy_atomic_only=legacy,
+    )
+    assert any(
+        i.check == "ed.schema.type_incompatible" and i.address.endswith("/Дата")
+        for i in report.issues
+    )
+    assert not any(
+        s.check == "ed.schema.type_incompatible" and s.reason.startswith("handler_may_supply:")
+        for s in report.skipped
+    )
+
+
+def test_batch3_required_property_with_send_handler_stays_warning():
+    text = BASE.replace('ДобавитьПКС(СвойстваШапки, "Код", "Код", 0);', "").replace(
+        "// <properties>",
+        'ПравилоКонвертации.ПриОтправкеДанных = "Отменить";',
+    )
+    report = check(text, "send")
+    issue = next(i for i in report.issues if i.check == "ed.schema.required_source")
+    assert issue.level.value == "предупреждение"
+    assert "КлючевыеСвойства.Код" in issue.message
+    assert "обработчик отправки может" in issue.message.casefold()
+    assert not any(
+        s.check == issue.check and "handler_may_supply" in s.reason for s in report.skipped
+    )
+
+
+@pytest.mark.parametrize("algorithm", [False, True])
+def test_roundtrip_review_required_table_column_with_handler(algorithm, tmp_path):
+    text = table_text().replace(
+        "СвойстваТЧ =", 'ПравилоКонвертации.ПриОтправкеДанных = "Fill";\nСвойстваТЧ ='
+    )
+    # Количество обязательно в схеме; описана только другая колонка.
+    text = text.replace(
+        '"Количество", "Количество", 0', '"Код", "Строка", 1' if algorithm else '"Код", "Строка", 0'
+    )
+    path = tmp_path / "required-row.bin"
+    path.write_text(
+        (DATA / "validation.bin")
+        .read_text("utf-8")
+        .replace(
+            'name="Количество" type="xs:decimal" lowerBound="0"',
+            'name="Количество" type="xs:decimal" lowerBound="1"',
+        ),
+        encoding="utf-8",
+    )
+    issue = next(
+        i
+        for i in check(text, "send", load_schema(path)).issues
+        if i.check == "ed.schema.required_source" and "/ПКТЧ/" in i.address
+    )
+    assert issue.level.value == "предупреждение"
+    assert ("обработчик отправки может" in issue.message.casefold()) is not algorithm
+
+
+def test_batch3_empty_format_table_explains_children_skip():
+    text = table_text("КонтактнаяИнформация").replace(
+        '"КонтактнаяИнформация", "Товары"',
+        '"КонтактнаяИнформация", ""',
+    )
+    report = check(text, "receive")
+    child = [
+        s
+        for s in report.skipped
+        if s.check in {"ed.schema.property_missing", "ed.schema.type_incompatible"}
+    ]
+    assert child and all(s.reason.startswith("empty_format_side:") for s in child)
+    from kd2_rules_mcp.service.ed_views import validation_view
+
+    view = validation_view(report, None, None, None, "skipped", 0, 200, explain_skipped=True)
+    for row in view["skipped"]["items"]:
+        if row["check"].startswith("ed.schema."):
+            assert "откройте схему" not in row.get("hint", "").casefold()
+            assert "сторона формата не задана" in row["hint"].casefold()
+
+
 @pytest.mark.parametrize(
     "old,new,check_id,address,message",
     [
@@ -236,24 +327,17 @@ def test_pko_unavailable_only_existing_target_with_nonempty_type():
 
 def test_required_handler_and_full_object_proof():
     text = BASE.replace('ДобавитьПКС(СвойстваШапки, "Код", "Код", 0);', "")
-    for event, skipped in [
-        ("ПриОтправкеДанных", True),
-        ("ПриКонвертацииДанныхXDTO", False),
-        ("ПослеЗагрузкиВсехДанных", False),
-    ]:
+    for event in ("ПриОтправкеДанных", "ПриКонвертацииДанныхXDTO", "ПослеЗагрузкиВсехДанных"):
         report = check(
             text.replace("// <properties>", f'ПравилоКонвертации.{event} = "Заполнить";'), "send"
         )
-        assert (
-            bool([i for i in report.issues if i.check == "ed.schema.required_source"])
-            is not skipped
+        issues = [i for i in report.issues if i.check == "ed.schema.required_source"]
+        assert len(issues) == 1
+        assert ("обработчик отправки" in issues[0].message) == (event == "ПриОтправкеДанных")
+        assert not any(
+            s.check == "ed.schema.required_source" and s.reason.startswith("handler_may_supply:")
+            for s in report.skipped
         )
-        if skipped:
-            assert any(
-                s.check == "ed.schema.required_source"
-                and s.reason.startswith("handler_may_supply:")
-                for s in report.skipped
-            )
     report = check(text.replace('ПравилоОбработки.ИспользуемыеПКО.Добавить("Тест");', ""))
     assert not [i for i in report.issues if i.check == "ed.schema.required_source"]
     assert any(s.reason.startswith("full_object_not_proven:") for s in report.skipped)

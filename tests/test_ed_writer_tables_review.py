@@ -111,6 +111,36 @@ def test_table_and_column_trailing_comments_survive_edit(mode):
     round_trip(model)
 
 
+@pytest.mark.parametrize("separator", ["", "\n\n", "  \t \n", "\t\n", " \n\n\t \n"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_group_update_preserves_exact_original_separator(separator, newline):
+    model = two_groups()
+    text = render(model, "canonical").text
+    declaration = next(
+        line for line in text.split("\n") if "ДобавитьПКТЧ" in line and '"Lines"' in line
+    )
+    text = text.replace("\t\n" + declaration, separator + declaration, 1).replace("\n", newline)
+    model = imported(text, model)
+    group = next(g for g in model.pko[0].groups if g.format_property == "Lines")
+    changed = execute(
+        model,
+        ManagerOperation(
+            "group-separator",
+            "table_part",
+            "update",
+            target_id=group.logical_id,
+            patch=TablePartPatch(format_property="Lines2"),
+        ),
+    )
+    expected = text.replace(declaration, declaration.replace(', "Lines");', ', "Lines2");'), 1)
+    assert render(changed, "preserve").text == expected
+    assert (
+        "\t" + newline + declaration.replace(', "Lines");', ', "Lines2");')
+        in render(changed, "canonical").text
+    )
+    round_trip(changed)
+
+
 @pytest.mark.parametrize("direction", ["send", "receive"])
 @pytest.mark.parametrize("action", ["create", "update", "move", "direction"])
 def test_case_insensitive_duplicate_tables_all_operations(direction, action):

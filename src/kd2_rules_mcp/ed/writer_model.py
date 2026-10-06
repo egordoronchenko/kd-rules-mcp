@@ -953,7 +953,7 @@ def snapshot_parts(model: ManagerModel) -> tuple[dict[str, Any], dict[str, bytes
     return value, blobs
 
 
-SNAPSHOT_STORAGE_VERSION = 4
+SNAPSHOT_STORAGE_VERSION = 5
 # Отпечаток закрытых DTO фиксируется тестом; изменение требует версии и миграции.
 SNAPSHOT_SCHEMA_SHA256 = "ecfb5f2da1648d8ab72be2f0e0b26863bcbc062c5830bab76d366b1f038e3759"
 
@@ -1076,7 +1076,7 @@ def load_model(
     value = json.loads(data)
     storage_version = value.get("storage_version", 3)
     if "storage_version" in value:
-        if storage_version not in (3, SNAPSHOT_STORAGE_VERSION) or set(value) - {
+        if storage_version not in (3, 4, SNAPSHOT_STORAGE_VERSION) or set(value) - {
             "storage_version",
             "model",
             "blobs",
@@ -1085,7 +1085,7 @@ def load_model(
         }:
             raise ValueError("Неизвестный формат снимка ED")
         if (
-            storage_version == SNAPSHOT_STORAGE_VERSION
+            storage_version in (4, SNAPSHOT_STORAGE_VERSION)
             and value.get("schema_sha256") != SNAPSHOT_SCHEMA_SHA256
         ):
             raise ValueError("Неизвестная схема снимка ED")
@@ -1163,6 +1163,13 @@ def load_model(
 
         model = migrate_v3(model)
         validate_model(model)
+    from .writer_snapshot import migrate_imported, reconcile_authored
+
+    if storage_version < SNAPSHOT_STORAGE_VERSION and model.source_files:
+        model = migrate_imported(model)
+    else:
+        model = reconcile_authored(model)
+    validate_model(model)
     return model
 
 

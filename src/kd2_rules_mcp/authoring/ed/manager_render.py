@@ -19,7 +19,6 @@ from kd2_rules_mcp.ed.lexer import tokenize
 from kd2_rules_mcp.ed.model import EdDocument
 from kd2_rules_mcp.ed.reader import read_manager_text
 from kd2_rules_mcp.ed.writer import RenderResult, render
-from kd2_rules_mcp.ed.writer_import import import_manager
 from kd2_rules_mcp.ed.writer_model import (
     CodeUnit,
     ManagerModel,
@@ -28,6 +27,7 @@ from kd2_rules_mcp.ed.writer_model import (
     dump_model,
     validate_model,
 )
+from kd2_rules_mcp.ed.writer_readback import check_readback
 
 from .artifacts import validate_manager_files
 from .hook import bsl_string, valid_identifier
@@ -338,18 +338,9 @@ def _reread(model: ManagerModel, rendered: RenderResult) -> EdDocument:
         if document.parse_status != "complete":
             address = document.unknown[0].name if document.unknown else "Конвертация"
             refuse("model_invalid", "Порождённый модуль прочитан не полностью", address=address)
-        back, _ = import_manager(
-            document,
-            project_id=model.project_id,
-            manager_name=model.header.manager_name,
-            host=model.host,
-            format_bindings=model.format_bindings,
-            executor_profile=model.executor_profile,
-        )
-        if canonicalize(back) != canonicalize(model):
-            refuse(
-                "model_invalid", "Модель повторного чтения не равна исходной", address="Конвертация"
-            )
+        mismatch = check_readback(model, document)
+        if mismatch is not None:
+            refuse("model_invalid", mismatch.message, address=mismatch.address)
         expected = render(
             model, rendered.report.mode, use_source_style=rendered.report.use_source_style
         )

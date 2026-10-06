@@ -197,7 +197,7 @@ def property_candidates(
             reference_document_id,
             reference_index or build_addresses(reference_document),
         )
-        properties.extend(reference_rows)
+        _merge_reference_properties(binding, properties, reference_rows)
         used_attr.update(reference_attrs)
         used_fmt.update(reference_props)
     table_rows, used_tables, used_tabular = _match_tables(
@@ -1052,6 +1052,38 @@ def _reference_properties(
                     }
                 )
     return rows, used_attr, used_fmt
+
+
+def _merge_reference_properties(binding: str, rows: list[dict], references: list[dict]) -> None:
+    """Равенство пары не зависит от вида ПКС: способы типового сохраняются как свидетельства.
+
+    Имя реквизита сравнивается без регистра, физический путь XDTO и URI — точно.
+    При разных путях обе пары остаются видны. Несколько деклараций не теряются.
+    """
+
+    def pair(row):
+        return (_fold(row["configuration"]), row["format_path"], row["namespace"])
+
+    def evidence(row):
+        return {k: row[k] for k in ("property_kind", "rule_name", "origin", "applicability")}
+
+    by_pair = {pair(row): row for row in rows}
+    for reference in references:
+        key = pair(reference)
+        row = by_pair.get(key)
+        if row is None:
+            rows.append(reference)
+            by_pair[key] = reference
+            continue
+        sources = row.setdefault(
+            "references", [evidence(row)] if row["class"] == "reference_module" else []
+        )
+        source = evidence(reference)
+        if source not in sources:
+            sources.append(source)
+            row["candidate_id"] = _candidate_id(
+                binding, "property_evidence", row["candidate_id"], reference["candidate_id"]
+            )
 
 
 def _is_key_properties_type(typ: SchemaType) -> bool:

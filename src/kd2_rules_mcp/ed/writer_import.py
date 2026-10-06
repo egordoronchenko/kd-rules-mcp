@@ -168,6 +168,88 @@ def parameter_dependencies(body: str, parameters: tuple[Parameter, ...]) -> tupl
     )
 
 
+def refresh_code_dependencies(before: ManagerModel, model: ManagerModel) -> ManagerModel:
+    """Повторно индексирует тела при изменении кода или пространства имён целей."""
+    from .reader import read_manager_text
+    from .writer_forms import code_open, empty_module, routine_close
+
+    old = {u.logical_id: u for u in before.code_units}
+    changed_names = {
+        name.casefold()
+        for catalog in ("pko", "pkpd", "parameters")
+        for _, name in (
+            {(r.logical_id, r.name) for r in getattr(before, catalog)}
+            ^ {(r.logical_id, r.name) for r in getattr(model, catalog)}
+        )
+    }
+    selected = [
+        u
+        for u in model.code_units
+        if "dispatcher" not in u.roles
+        and (
+            u.logical_id not in old
+            or u.body != old[u.logical_id].body
+            or any(name in u.body.casefold() for name in changed_names)
+        )
+    ]
+    if not selected:
+        return model
+    text = (
+        empty_module()
+        + "#Область Алгоритмы\n"
+        + "\n".join(code_open(u) + u.body + routine_close(u.signature) + "\n" for u in selected)
+        + "#КонецОбласти\n"
+    )
+    document = read_manager_text(text)
+    index = build_references(document)
+    deps = {}
+    if len(document.routines) != 12 + len(selected):
+        raise ValueError("Тело изменило границы метода")
+    # Первые 12 методов принадлежат пустому каркасу; дальше определения идут
+    # в порядке selected. Имя не различает сохранённые копии под #Если/#Иначе.
+    for unit, routine in zip(selected, document.routines[12:], strict=True):
+        if routine.name.casefold() != unit.name.casefold():
+            raise ValueError("Тело изменило границы метода: " + unit.name)
+        rows = []
+        for ref in index.entries:
+            if ref.owner_id != routine.entity_id or ref.kind == "parameter":
+                continue
+            targets = (
+                [r for r in model.pko if ref.name and r.name.casefold() == ref.name.casefold()]
+                if ref.kind in ("pko_lookup", "instruction_rule", "pod_use")
+                else []
+            )
+            rows.append(
+                Reference(
+                    "pko" if targets else ref.kind,
+                    targets[0].logical_id if len(targets) == 1 else None,
+                    ref.name or "",
+                    "resolved"
+                    if len(targets) == 1
+                    else "computed"
+                    if ref.name is None
+                    else "ambiguous"
+                    if targets
+                    else "missing",
+                )
+            )
+        for token in tokenize(unit.body):
+            if token.kind == "string":
+                rule = next(
+                    (r for r in model.pkpd if r.name.casefold() == token.value.casefold()), None
+                )
+                if rule:
+                    rows.append(Reference("pkpd", rule.logical_id, rule.name, "resolved"))
+        deps[unit.logical_id] = tuple(rows) + parameter_dependencies(unit.body, model.parameters)
+    return replace(
+        model,
+        code_units=tuple(
+            replace(u, dependencies=deps[u.logical_id]) if u.logical_id in deps else u
+            for u in model.code_units
+        ),
+    )
+
+
 @lru_cache(maxsize=4096)
 def direction_contexts(body: str) -> tuple[tuple[int, int, frozenset[str]], ...]:
     """Только точная охрана НаправлениеОбмена; произвольные условия не вычисляются."""

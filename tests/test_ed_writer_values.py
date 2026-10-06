@@ -490,7 +490,14 @@ def test_pkpd_literal_in_code_requires_confirmation_and_is_not_replaced():
             model, (op,), expected_revision=model.revision, expected_preview_hash=plan.preview_hash
         )
     changed = commit_batch(model, [op])
-    assert changed.code_units == model.code_units
+    assert (
+        tuple(
+            replace(u, dependencies=old.dependencies)
+            for u, old in zip(changed.code_units, model.code_units, strict=True)
+        )
+        == model.code_units
+    )
+    check_circle(changed)
     assert 'Сообщить("Colors")' in render(changed).text
 
 

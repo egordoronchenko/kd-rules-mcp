@@ -3747,85 +3747,12 @@ def _rename_algorithm_calls(
 
 
 def _refresh_code_dependencies(before: ManagerModel, model: ManagerModel) -> ManagerModel:
-    from kd2_rules_mcp.ed.reader import read_manager_text
-    from kd2_rules_mcp.ed.refs import build_references
-    from kd2_rules_mcp.ed.writer_forms import code_open, empty_module, routine_close
+    from kd2_rules_mcp.ed.writer_import import refresh_code_dependencies
 
-    old = {u.logical_id: u for u in before.code_units}
-    renamed = {
-        r.logical_id
-        for r in (*before.pko, *before.pkpd)
-        if not any(
-            n.logical_id == r.logical_id and n.name == r.name for n in (*model.pko, *model.pkpd)
-        )
-    }
-    selected = [
-        u
-        for u in model.code_units
-        if "dispatcher" not in u.roles
-        and (
-            u.logical_id not in old
-            or u.body != old[u.logical_id].body
-            or any(r.target_id in renamed for r in u.dependencies)
-        )
-    ]
-    if not selected:
-        return model
-    text = (
-        empty_module()
-        + "#Область Алгоритмы\n"
-        + "\n".join(code_open(u) + u.body + routine_close(u.signature) + "\n" for u in selected)
-        + "#КонецОбласти\n"
-    )
     try:
-        document = read_manager_text(text)
-    except Exception as error:
-        _fail("model_invalid", "Код", "Нарушена лексическая рамка тела: " + type(error).__name__)
-    methods = {r.name.casefold(): r for r in document.routines}
-    index = build_references(document)
-    deps = {}
-    for unit in selected:
-        routine = methods.get(unit.name.casefold())
-        if routine is None or len(document.routines) != 12 + len(selected):
-            _fail("model_invalid", "Код/" + unit.name, "Тело изменило границы метода")
-        rows = []
-        for ref in index.entries:
-            if ref.owner_id != routine.entity_id or ref.kind == "parameter":
-                continue
-            targets = (
-                [r for r in model.pko if ref.name and r.name.casefold() == ref.name.casefold()]
-                if ref.kind in ("pko_lookup", "instruction_rule", "pod_use")
-                else []
-            )
-            rows.append(
-                Reference(
-                    "pko" if targets else ref.kind,
-                    targets[0].logical_id if len(targets) == 1 else None,
-                    ref.name or "",
-                    "resolved"
-                    if len(targets) == 1
-                    else "computed"
-                    if ref.name is None
-                    else "ambiguous"
-                    if targets
-                    else "missing",
-                )
-            )
-        for token in tokenize(unit.body):
-            if token.kind == "string":
-                rule = next(
-                    (r for r in model.pkpd if r.name.casefold() == token.value.casefold()), None
-                )
-                if rule:
-                    rows.append(Reference("pkpd", rule.logical_id, rule.name, "resolved"))
-        deps[unit.logical_id] = tuple(rows) + parameter_dependencies(unit.body, model.parameters)
-    return replace(
-        model,
-        code_units=tuple(
-            replace(u, dependencies=deps[u.logical_id]) if u.logical_id in deps else u
-            for u in model.code_units
-        ),
-    )
+        return refresh_code_dependencies(before, model)
+    except (ValueError, EdFormatError) as error:
+        _fail("model_invalid", "???", str(error))
 
 
 def _declarative_entry(model: ManagerModel, kind: str) -> LayoutContainer:
@@ -4190,6 +4117,9 @@ def _apply_declarative(model: ManagerModel, op: ManagerOperation) -> tuple[Manag
     address = addresses.get(op.target_id or "", "Конвертация")
     updates = _updates(op.patch)
     _validate_patch(op.kind, updates, address)
+    if op.kind == "pkpd" and set(updates.get("directions", ())) == {"send", "receive"}:
+        # Одна декларация вне охраны направления читается как both.
+        updates["directions"] = ("both",)
     if op.kind in ("pkpd", "parameter") and op.action == "move":
         _fail("unsupported_form", address, "Для этого вида поддержаны create/update/delete")
     if set(op.clear) - ({"default"} if op.kind == "parameter" else set()) or set(op.clear) & set(
@@ -4331,6 +4261,7 @@ def _apply_declarative(model: ManagerModel, op: ManagerOperation) -> tuple[Manag
                 for r in changed.pkpd
             ),
         )
+    changed = _refresh_code_dependencies(model, changed)
     return changed, key
 
 
@@ -4505,7 +4436,14 @@ def _table_duplicate_notices(before: ManagerModel, model: ManagerModel) -> list[
     return notices
 
 
-def _resolve_properties(before: ManagerModel, model: ManagerModel) -> ManagerModel:
+def _resolve_properties(
+    before: ManagerModel, model: ManagerModel, operations: tuple[CanonicalOperation, ...] = ()
+) -> ManagerModel:
+    explicit_targets = {}
+    for change in operations:
+        op = change.operation
+        if op.kind == "property" and isinstance(op.patch, PropertyPatch) and op.patch.conversion:
+            explicit_targets[change.result_id] = op.patch.conversion.target_id
     """Ссылки по имени разрешаются отдельно в каждом направлении итогового пакета."""
 
     def properties(rule):
@@ -4585,6 +4523,20 @@ def _resolve_properties(before: ManagerModel, model: ManagerModel) -> ManagerMod
         name = ref.name or (known[ref.target_id].name if ref.target_id in known else "")
         matches = names.get(name, [])
         required = property_directions(rule, prop, guards, group_guards)
+        explicit = known.get(explicit_targets.get(prop.logical_id) or "")
+        if isinstance(explicit, ObjectRule) and any(
+            not available(explicit, direction) for direction in required
+        ):
+            _fail(
+                "dangling_reference",
+                addresses[prop.logical_id],
+                f"Выбран адрес ПКО «{explicit.name}» направления "
+                f"{', '.join(explicit.directions)}; ПКС исполняется в "
+                f"{', '.join(sorted(required))}. В тексте сохраняется только имя: "
+                "исполнитель выбирает одноимённое правило по направлению ПКС. "
+                "Выберите соответствующий адрес или задайте ссылку по имени",
+                (addresses[prop.logical_id], addresses[explicit.logical_id]),
+            )
         if (
             previous is not None
             and ref == previous.conversion
@@ -4782,6 +4734,19 @@ def _matches_decision(decision: Decision, op: ManagerOperation, fingerprint: str
     if decision.position_container is not None:
         return False
     legacy = json_value(op)
+    if isinstance(op.patch, PropertyPatch) and all(
+        getattr(op.patch, name) is None
+        for name in ("property_kind", "algorithm_flag", "conversion")
+    ):
+        # В W1 эти три поля ещё не входили в DTO операции; история сохраняет старый хеш.
+        older = {**legacy, "patch": dict(legacy["patch"])}
+        for name in ("property_kind", "algorithm_flag", "conversion"):
+            older["patch"].pop(name)
+        if decision.operation_hash == digest(older):
+            return True
+        older.pop("position_mode")
+        if decision.operation_hash == digest(older):
+            return True
     legacy.pop("position_mode")
     return decision.operation_hash == digest(legacy)
 
@@ -5391,11 +5356,12 @@ def preview(
                 notices.append(
                     ManagerNotice(
                         "table_part_replace",
-                        "ПКТЧ",
-                        "Исполнитель заменяет табличную часть целиком (XDTO:7051–7062)",
+                        model_addresses(changed)[key],
+                        "При получении исполнитель заменяет табличную часть целиком "
+                        "(XDTO:7051–7062)",
                         (),
                         digest((op, "table_part_replace")),
-                        False,
+                        True,
                     )
                 )
             if op.kind == "parameter" and op.action in ("delete", "update"):
@@ -5442,7 +5408,7 @@ def preview(
                 op, (ManagerFailure("model_invalid", op.address or "Конвертация", str(error)),)
             )
     try:
-        result = _resolve_properties(model, result)
+        result = _resolve_properties(model, result, tuple(canonical))
         notices.extend(_table_duplicate_notices(model, result))
         result = _validate_parameter_changes(model, result, parameter_history)
         _validate_predefined_changes(model, result)

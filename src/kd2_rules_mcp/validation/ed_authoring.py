@@ -291,7 +291,7 @@ def compare_reports(
                 or (address == "<неперечисленные>" and count <= len(proven_type_addresses))
             )
             and check == "ed.schema.type_incompatible"
-            and reason in ("non_atomic_type", "handler_may_supply")
+            and reason == "non_atomic_type"
         )
         if relevant and not proven:
             canonical = next(

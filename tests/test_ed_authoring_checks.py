@@ -251,9 +251,11 @@ def test_handler_notice_lists_methods_and_keeps_runtime_unknown():
     assert notice.methods == ("Обработчик/ПКО_Товар_ПередЗаписьюПолученныхДанных",)
     assert notice.address == "ПКО/Товар"
     assert not prepared.runtime_verified
-    assert any(
-        "handler_may_supply" in s.reason for s in prepared.selected_profiles[0].after.skipped
+    assert not any(
+        s.check == "ed.schema.type_incompatible" and "handler_may_supply" in s.reason
+        for s in prepared.selected_profiles[0].after.skipped
     )
+    assert any("non_atomic_type" in s.reason for s in prepared.selected_profiles[0].after.skipped)
 
 
 def test_new_unknown_not_allowed_even_with_unchanged_baseline():

@@ -608,10 +608,18 @@ def render(
                 if container.kind in ("code", "dispatcher") and not close and text is not source:
                     text = frame(container, close, span)
                 if container.kind == "table_part" and text is not source:
-                    text = (
-                        "\t"
-                        + newline
-                        + generated(frame(container, close, span).split("\n", 1)[1], depth)
+                    separator = "\t" + newline
+                    if mode == "preserve" and source is not None:
+                        # Нестандартные разделители вне рамки уже выводятся своими
+                        # листьями. Из самой рамки берём только её исходный префикс.
+                        length = 0
+                        for line in source.splitlines(keepends=True):
+                            if line.strip():
+                                break
+                            length += len(line)
+                        separator = source[:length]
+                    text = separator + generated(
+                        frame(container, close, span).split("\n", 1)[1], depth
                     )
                 if container.kind == "predefined" and text is not source:
                     text += indent * max(depth - 1, 0) + newline

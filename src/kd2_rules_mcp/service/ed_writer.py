@@ -55,7 +55,7 @@ from kd2_rules_mcp.errors import (
 from kd2_rules_mcp.projects import resolve
 from kd2_rules_mcp.service.ed import EdProject
 from kd2_rules_mcp.service.ed_authoring import EdAuthoringMixin, _failure, _mapping, _text
-from kd2_rules_mcp.service.ed_authoring_views import compact_page, validate_options
+from kd2_rules_mcp.service.ed_authoring_views import compact_page, json_size, validate_options
 from kd2_rules_mcp.service.ed_layers import checked_extensions, extension_paths, select_views
 from kd2_rules_mcp.service.ed_views import address_of, validate_page
 from kd2_rules_mcp.service.paths import Settings
@@ -68,6 +68,35 @@ from kd2_rules_mcp.validation.ed_writer import validate_writer
 from kd2_rules_mcp.validation.report import Level, ValidationReport
 
 MAX_PREVIEW_PACKETS = 8
+MANAGER_CANDIDATES_BYTES = 8192
+
+
+def _compact_property_candidates(result: dict) -> dict:
+    """Общее окно четырёх разделов: уменьшение по размеру не теряет соседние страницы."""
+    sections = ("properties", "table_parts", "unmatched_format", "unmatched_configuration")
+    offset = result["properties"]["offset"]
+    limit = result["properties"]["limit"]
+    while True:
+        for section in sections:
+            page = result[section]
+            page["limit"] = limit
+            page["items"] = page["items"][:limit]
+            page["next_offset"] = offset + len(page["items"])
+            page["has_more"] = page["next_offset"] < page["total"]
+        result["next_offset"] = offset + limit
+        result["has_more"] = any(result[s]["has_more"] for s in sections)
+        if json_size(result) <= MANAGER_CANDIDATES_BYTES:
+            return result
+        if limit == 1:
+            _refuse(
+                "candidate_row_too_large",
+                "Одна запись кандидатов превышает бюджет ответа; "
+                "проверьте длины имён и число деклараций типового модуля",
+                response_bytes=json_size(result),
+                budget_bytes=MANAGER_CANDIDATES_BYTES,
+            )
+        limit -= 1
+        result["truncated_by"] = "size"
 
 
 def _refuse(reason: str, message: str, **details) -> NoReturn:
@@ -448,8 +477,8 @@ class EdWriterMixin(EdAuthoringMixin):
         )
         return metadata, host, bindings
 
-    def _manager_value_ranges(self, model, metadata: dict) -> ValidationReport:
-        """Проверяет ограничения привязанных типов и после перезапуска сервиса."""
+    def _manager_schema_checks(self, model, metadata: dict) -> ValidationReport:
+        """Проверяет прямые типы, границы и обязательные источники перед сборкой."""
         args = metadata["arguments"]
         if not args["schema_id"] or not args["structure_id"]:
             return ValidationReport()
@@ -461,7 +490,7 @@ class EdWriterMixin(EdAuthoringMixin):
             if not packages:
                 _refuse(
                     "schema_snapshot_unavailable",
-                    "Откройте привязанную schema_id заново для проверки ограничений сборки",
+                    "Откройте привязанную schema_id заново для проверок схемы перед сборкой",
                     schema_id=args["schema_id"],
                 )
             paths = [(p, self._read_path(p["path"])) for p in packages]
@@ -483,7 +512,16 @@ class EdWriterMixin(EdAuthoringMixin):
             legacy_atomic_only=False,
         )
         return ValidationReport(
-            issues=[i for i in report.issues if i.check == "ed.schema.value_range"]
+            issues=[
+                i
+                for i in report.issues
+                if i.check
+                in {
+                    "ed.schema.value_range",
+                    "ed.schema.type_incompatible",
+                    "ed.schema.required_source",
+                }
+            ]
         )
 
     def _manager_rebind_report(self, model, metadata: dict, detection: ProfileDetection):
@@ -1426,14 +1464,16 @@ class EdWriterMixin(EdAuthoringMixin):
                         else None
                     )
                 if kind == "properties" and reference_document_id is None:
-                    return property_candidates(
-                        connection,
-                        schema.schema,
-                        _text(value.get("configuration_object"), "configuration_object"),
-                        _text(value.get("format_type"), "format_type"),
-                        direction=direction,
-                        offset=offset,
-                        limit=limit,
+                    return _compact_property_candidates(
+                        property_candidates(
+                            connection,
+                            schema.schema,
+                            _text(value.get("configuration_object"), "configuration_object"),
+                            _text(value.get("format_type"), "format_type"),
+                            direction=direction,
+                            offset=offset,
+                            limit=limit,
+                        )
                     )
                 if reference_document_id is None:
                     page = object_candidates(
@@ -1556,17 +1596,19 @@ class EdWriterMixin(EdAuthoringMixin):
                     else reference_document.files[0].sha256
                 )
                 if kind == "properties":
-                    return property_candidates(
-                        connection,
-                        schema.schema,
-                        _text(value.get("configuration_object"), "configuration_object"),
-                        _text(value.get("format_type"), "format_type"),
-                        direction=direction,
-                        offset=offset,
-                        limit=limit,
-                        reference_document=reference_document,
-                        reference_document_id=reference_document_id,
-                        reference_index=reference_index,
+                    return _compact_property_candidates(
+                        property_candidates(
+                            connection,
+                            schema.schema,
+                            _text(value.get("configuration_object"), "configuration_object"),
+                            _text(value.get("format_type"), "format_type"),
+                            direction=direction,
+                            offset=offset,
+                            limit=limit,
+                            reference_document=reference_document,
+                            reference_document_id=reference_document_id,
+                            reference_index=reference_index,
+                        )
                     )
                 # Собираем все страницы перед объединением: offset применяется к общему списку.
                 result = object_candidates(
@@ -1756,7 +1798,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 detection = self._manager_detection(metadata, model.executor_profile.profile_id)
                 rendered = render(model, "preserve" if model.source_files else "canonical")
                 report = validate_writer(model, rendered.data, detection=detection)
-                report.extend(self._manager_value_ranges(model, metadata))
+                report.extend(self._manager_schema_checks(model, metadata))
                 errors = [
                     {"id": i.check, **i.to_dict()}
                     for i in report.issues

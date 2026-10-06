@@ -1463,8 +1463,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description="Typical manager snapshot or auto (both kinds)"),
         ] = None,
     ) -> dict[str, Any]:
-        """List overlay properties or manager pairs; auto=false. Enums: needs_pkpd/value_pairs.
-        Typical ПКС: reference_module, property_kind/rule_name, no code."""
+        """Overlay/manager pairs; auto=false. Enums: needs_pkpd/value_pairs.
+        Typical ПКС: merged references or reference_module conflicts, no code. Use next_offset."""
         return await call(
             service.ed_authoring_candidates,
             target,

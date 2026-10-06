@@ -33,7 +33,7 @@ from kd2_rules_mcp.errors import (
 )
 from kd2_rules_mcp.server import INSTRUCTIONS, create_server, error_payload
 from kd2_rules_mcp.service import Kd2Service, Settings
-from tests.test_ed_writer_candidates import structure
+from tests.test_ed_writer_candidates import add_prop, structure
 from tests.test_ed_writer_model import SYNTHETIC
 from tests.test_ed_writer_profiles import verified_detection
 from tests.test_service_ed_authoring import make_dump
@@ -317,7 +317,7 @@ def test_migration_property_reference_keeps_name_pair_and_rename(writer_setup, r
         encoding="utf-8",
     )
     document_id = "auto" if reference == "auto" else service.ed_open(str(module))["project_id"]
-    result = service.ed_authoring_candidates(
+    request = dict(
         scope="manager",
         kind="properties",
         reference_document_id=document_id,
@@ -330,7 +330,14 @@ def test_migration_property_reference_keeps_name_pair_and_rename(writer_setup, r
             "format_type": "Справочник.Должности",
         },
     )
-    rows = [r for r in result["properties"]["items"] if r["configuration"] == "Код"]
+    all_rows, offset = [], 0
+    while True:
+        result = service.ed_authoring_candidates(**request, offset=offset)
+        all_rows.extend(result["properties"]["items"])
+        if not result["has_more"]:
+            break
+        offset = result["next_offset"]
+    rows = [r for r in all_rows if r["configuration"] == "Код"]
     assert {r["format_name"] for r in rows} == {"Код", "Наименование"}
     typical = next(r for r in rows if r["class"] == "reference_module")
     assert typical["property_kind"] == "direct" and typical["rule_name"] is None
@@ -407,6 +414,211 @@ def test_send_string_overflow_r4_needs_build_ack_after_restart(writer_setup, len
         acknowledged_notices=preview["required_acknowledgements"],
     )
     assert written["written"]
+
+
+def test_batch3_send_handler_keeps_account_range_and_missing_required_build_ack(writer_setup):
+    service, args, root = writer_setup
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute(
+            "UPDATE properties SET name=?,path=?,string_length=70 WHERE name=?",
+            ("НомерСчета", "НомерСчета", "Наименование"),
+        )
+        connection.execute("UPDATE meta SET value='batch3' WHERE key='input_hash'")
+    schema_path = root / "Schemas/format.bin"
+    tree = etree.parse(str(schema_path))
+    for node in tree.iter("{http://v8.1c.ru/8.1/xdto}property"):
+        if node.get("name") == "Наименование":
+            node.set("name", "НомерСчета")
+    for typ in tree.iter("{http://v8.1c.ru/8.1/xdto}valueType"):
+        if typ.get("name") == "Наименование10":
+            typ.set("maxLength", "34")
+    owner = next(
+        n
+        for n in tree.iter("{http://v8.1c.ru/8.1/xdto}objectType")
+        if n.get("name") == "Справочник.Должности"
+    )
+    etree.SubElement(
+        owner,
+        "{http://v8.1c.ru/8.1/xdto}property",
+        name="ЮридическоеФизическоеЛицо",
+        type="xs:string",
+    )
+    tree.write(str(schema_path), encoding="utf-8")
+    service.ed_schema_close(args["schema_id"])
+    args["schema_id"] = reopen_writer_schema(service, root)["schema_id"]
+    created = service.ed_create(**args)
+    operations = manager_operations(split=True)
+    for op in operations:
+        if op["kind"] == "property" and op["patch"]["configuration_property"] == "Наименование":
+            op["patch"].update(configuration_property="НомерСчета", format_property="НомерСчета")
+        elif op["kind"] == "identification":
+            op["patch"]["search_sets"] = [["НомерСчета"]]
+    operations.append(
+        {
+            "client_id": "cancel-send",
+            "kind": "handler",
+            "action": "create",
+            "owner_id": {"client_id": "pko-send"},
+            "patch": {"event": "ПриОтправкеДанных", "body": "ДанныеXDTO = Неопределено;"},
+        }
+    )
+    _, _, applied = apply_packet(service, created, operations)
+    report = service.ed_validate(
+        applied["document_id"], schema_id=args["schema_id"], structure_id="host", limit=200
+    )
+    assert any(
+        i["check"] == "ed.schema.value_range"
+        and i["address"].endswith("/НомерСчета")
+        and "70" in i["message"]
+        and "34" in i["message"]
+        and i["level"] == "предупреждение"
+        for i in report["issues"]["items"]
+    )
+    assert any(
+        i["check"] == "ed.schema.required_source"
+        and "ЮридическоеФизическоеЛицо" in i["message"]
+        and "обработчик отправки" in i["message"]
+        for i in report["issues"]["items"]
+    )
+    preview = build(Kd2Service(service.settings), applied)
+    assert any(
+        n.startswith("ed.schema.required_source:") for n in preview["required_acknowledgements"]
+    )
+    with pytest.raises(EdAuthoringAckRequiredError):
+        build(service, applied, mode="write", expected_preview_hash=preview["build_hash"])
+    assert build(
+        service,
+        applied,
+        mode="write",
+        expected_preview_hash=preview["build_hash"],
+        acknowledged_notices=preview["required_acknowledgements"],
+    )["written"]
+
+
+def test_batch3_large_reference_property_pages_merge_and_keep_budget(writer_setup):
+    service, args, root = writer_setup
+    names = [f"Поле_{n}" for n in range(40)]
+    with sqlite3.connect(service.store.path("host")) as connection:
+        for name in names:
+            add_prop(connection, "Справочник", "Должности", "Реквизит", name, ("Строка",))
+        connection.execute("UPDATE meta SET value='many-properties' WHERE key='input_hash'")
+    schema_path = root / "Schemas/format.bin"
+    tree = etree.parse(str(schema_path))
+    owner = next(
+        n
+        for n in tree.iter("{http://v8.1c.ru/8.1/xdto}objectType")
+        if n.get("name") == "Справочник.Должности"
+    )
+    for name in names:
+        etree.SubElement(
+            owner, "{http://v8.1c.ru/8.1/xdto}property", name=name, type="xs:string", lowerBound="0"
+        )
+    tree.write(str(schema_path), encoding="utf-8")
+    service.ed_schema_close(args["schema_id"])
+    schema_id = reopen_writer_schema(service, root)["schema_id"]
+    module = root / "CommonModules/Менеджер2/Ext/Module.bsl"
+    text = (DATA / "pilot.bsl").read_text("utf-8")
+    line = 'ДобавитьПКС(СвойстваШапки, "Наименование",        "Наименование");'
+    text = text.replace(
+        line,
+        line
+        + "\n"
+        + "\n".join(f'ДобавитьПКС(СвойстваШапки, "{name}", "{name}");' for name in names),
+    )
+    module.write_text(text, encoding="utf-8")
+    rows, offset = [], 0
+    while True:
+        page = service.ed_authoring_candidates(
+            scope="manager",
+            kind="properties",
+            reference_document_id="auto",
+            limit=50,
+            offset=offset,
+            target={
+                "schema_id": schema_id,
+                "structure_id": "host",
+                "direction": "send",
+                "configuration_object": "Справочник.Должности",
+                "format_type": "Справочник.Должности",
+            },
+        )
+        assert size(page) <= 8192
+        rows.extend(r for r in page["properties"]["items"] if r["configuration"] in names)
+        if not page["has_more"]:
+            break
+        assert page["next_offset"] > offset
+        assert page["truncated_by"] == "size"
+        offset = page["next_offset"]
+    assert len(rows) == 40 and {r["configuration"] for r in rows} == set(names)
+    assert all(r["class"] == "direct" and len(r["references"]) == 1 for r in rows)
+
+
+def test_batch3_receiving_contact_table_empty_format_keeps_structure_checks(writer_setup):
+    service, args, _ = writer_setup
+    with sqlite3.connect(service.store.path("host")) as connection:
+        parent = add_prop(
+            connection, "Справочник", "Должности", "ТабличнаяЧасть", "КонтактнаяИнформация", ()
+        )
+        add_prop(
+            connection, "Справочник", "Должности", "Реквизит", "Тип", ("Строка",), parent=parent
+        )
+        connection.execute("UPDATE meta SET value='contacts' WHERE key='input_hash'")
+    created = service.ed_create(**args)
+    packet = [
+        {
+            "client_id": "receiver",
+            "kind": "pko",
+            "action": "create",
+            "patch": {
+                "name": "ПолучениеКИ",
+                "directions": ["receive"],
+                "configuration_object": {
+                    "state": "reference",
+                    "reference_parts": ["Метаданные", "Справочники", "Должности"],
+                },
+                "format_object": string_value("Справочник.Должности"),
+            },
+        },
+        {
+            "client_id": "contacts",
+            "kind": "table_part",
+            "action": "create",
+            "owner_id": {"client_id": "receiver"},
+            "patch": {"configuration_property": "КонтактнаяИнформация", "format_property": ""},
+        },
+        {
+            "client_id": "column",
+            "kind": "property",
+            "action": "create",
+            "owner_id": {"client_id": "contacts"},
+            "patch": {"configuration_property": "НеизвестнаяКолонка", "format_property": "Тип"},
+        },
+    ]
+    preview = service.ed_apply("positions", created["revision"], packet)
+    assert not preview["failures"]["total"], preview
+    applied = service.ed_apply(
+        "positions",
+        created["revision"],
+        mode="apply",
+        expected_preview_hash=preview["preview_hash"],
+        confirmations=preview["required_confirmations"],
+    )
+    request = dict(
+        project_id=applied["document_id"],
+        schema_id=args["schema_id"],
+        structure_id="host",
+        limit=200,
+    )
+    issues = service.ed_validate(**request)
+    assert any(
+        i["check"] == "ed.structure.property_missing"
+        and "КонтактнаяИнформация.НеизвестнаяКолонка" in i["message"]
+        for i in issues["issues"]["items"]
+    )
+    skipped = service.ed_validate(**request, section="skipped")
+    rows = [r for r in skipped["skipped"]["items"] if r["check"].startswith("ed.schema.")]
+    assert rows and all(r["reason"].startswith("empty_format_side:") for r in rows)
+    assert all("Сторона формата не задана" in r["hint"] for r in rows)
 
 
 def test_auto_r4_extension_names_request_project_instead_of_read_error(writer_setup):
@@ -1246,6 +1458,28 @@ def documented_writer_packets():
     return [(name, json.loads(text)) for name, text in blocks]
 
 
+def test_manager_build_with_all_batch4_forms(writer_setup):
+    from tests.test_ed_writer_kit_roundtrip import packet
+
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    operations = tuple(packet("all"))
+    plan = service.manager_workspace.preview(
+        created["project_id"], operations, expected_revision=created["revision"]
+    )
+    assert not plan.failures, plan.failures
+    changed = service.manager_workspace.apply(
+        created["project_id"],
+        operations,
+        expected_revision=created["revision"],
+        expected_preview_hash=plan.preview_hash,
+        confirmations=tuple((n.code, n.notice_hash) for n in plan.notices),
+    )
+    result = build(service, {**created, "revision": changed.model.revision})
+    assert result["status"] == "ready"
+    assert not result["written"]
+
+
 @pytest.mark.parametrize("name,packet", documented_writer_packets())
 def test_documented_two_property_example_uses_service_ids(writer_setup, name, packet):
     """Каждый опубликованный пакет проходит сервисный preview и apply на тестовом проекте."""
@@ -1256,6 +1490,16 @@ def test_documented_two_property_example_uses_service_ids(writer_setup, name, pa
     assert preview["failures"]["total"] == 0, preview
     assert preview["operation_count"] == len(packet)
     assert preview["skipped"]["total"] == 0
+    if name == "table_part":
+        assert any(n["code"] == "table_part_replace" for n in preview["required_confirmations"])
+        with pytest.raises(EdAuthoringAckRequiredError):
+            service.ed_apply(
+                "positions",
+                created["revision"],
+                mode="apply",
+                expected_preview_hash=preview["preview_hash"],
+            )
+        assert service.manager_workspace.get("positions").model.revision == created["revision"]
     applied = service.ed_apply(
         "positions",
         created["revision"],

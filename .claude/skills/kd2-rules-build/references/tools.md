@@ -726,8 +726,8 @@ current revision and live document_id.
 
 ### `ed_authoring_candidates`
 
-List overlay properties or manager pairs; auto=false. Enums: needs_pkpd/value_pairs.
-Typical ПКС: reference_module, property_kind/rule_name, no code.
+Overlay/manager pairs; auto=false. Enums: needs_pkpd/value_pairs.
+Typical ПКС: merged references or reference_module conflicts, no code. Use next_offset.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -1788,7 +1788,7 @@ Directions: `["send"]`, `["receive"]`, `["send","receive"]`, `["both"]`; no dupl
 | `pko` | `name`!: Identifier; `directions`!; `configuration_object`: R/V?; `format_object`: S/V?; `group_flag`: B/V?; `identification`: IdentificationPatch, create only; `events`: Event DTO array, default `[]`, unchanged-only (edit via `handler`). Values default unset. | `configuration_object`, `format_object`, `group_flag` |
 | `pod` | `name`!: Identifier; `directions`!; `configuration_selection`: R/V?; `format_selection`: S/V?; `clear_data`: B/V?; `used_pko`: references, default `[]`; `events`: unchanged-only as ПКО. Values default unset. | `configuration_selection`, `format_selection`, `clear_data` |
 | `property` | `configuration_property`!, `format_property`!: strings, one may be empty; `property_kind`: `direct` (default)/`reference`/`pkpd`/`algorithm`; `algorithm_flag`: integer 0 (default)/1; `conversion`: reference, default empty; `namespace`: string `""`, direct only; `argument_presence`: 3–7 booleans, first three true (default), helper-limited, empty tail trimmed. | None |
-| `table_part` | `configuration_property`!, `format_property`!: identifiers (one may be empty); `argument_presence`: `[true,true,true]` only, default. Namespace/condition and interface 1 unsupported. Create reports full replacement without requiring confirmation. Duplicate names ignore case: send format refuses, receive configuration requires confirmation, including rename/move and owner direction changes. Existing imported duplicates stay diagnosed. Invalid imported names stay retained with a reason. Imported groups keep order; new groups use generator keys; preserve never realigns neighbours. | None |
+| `table_part` | `configuration_property`!, `format_property`!: identifiers (one may be empty); `argument_presence`: `[true,true,true]` only, default. Namespace/condition and interface 1 unsupported. Create requires confirmation of `table_part_replace`: receiving replaces the entire table part. Each notice names its full `ПКО/<owner>/ПКТЧ/<group>` address; confirm every group in the packet. Duplicate names ignore case: send format refuses, receive configuration requires confirmation, including rename/move and owner direction changes. Existing imported duplicates stay diagnosed. Invalid imported names stay retained with a reason. Imported groups keep order; new groups use generator keys; preserve never realigns neighbours or adds an imported group's missing separator. | None |
 | `identification` | `mode`: S/V?, one of `ПоУникальномуИдентификатору`, `ПоПолямПоиска`, `СначалаПоУникальномуИдентификаторуПотомПоПолямПоиска`; `search_sets`: nonempty string arrays, default `[]`; `not_found_policy`: V? only. Receive required; field-search modes need search sets. No "no search" enum. | `mode`, `search_sets`, `not_found_policy` |
 | `pkpd` | `name`!: Identifier; `directions`!; `configuration_type`!: R; `format_type`!: S; `data_kind`: `enumeration` (default)/`predefined`. R path: `["Метаданные","Перечисления",name]` / `["Метаданные","Справочники",name]` respectively. | None |
 | `value_mapping` | `direction`!: `send`/`receive`, allowed by owner; `configuration_value`!: R `["Перечисления" or "Справочники",ownerType,value]`; `format_value`!: S. Unique send key = configuration value; receive key = format string. | None |
@@ -1808,6 +1808,10 @@ Directions: `["send"]`, `["receive"]`, `["send","receive"]`, `["both"]`; no dupl
 Kind changes require explicit flag **and** conversion (`{"kind":"conversion"}` clears).
 Targets must exist per owner/guard direction, including retained references. ПКО/ПКПД names
 share a space; same-name send/receive targets used in both directions require joint rename.
+ПКО conversion is always interpreted by the property's owner/guard direction. An explicit
+address or ID must cover every such direction; selecting `ПКО/Twin~send` for a receive
+or bidirectional property refuses. Use the matching address, or a name reference to let
+each direction select its same-name ПКО. The generated call stores the name only.
 Case mismatches stay diagnosed (`ed.writer.reference_case_mismatch`).
 `dangling_reference` reports the target kind/name and missing direction; create that target
 earlier or in the same packet. Table separators accept blank or whitespace-only lines;
@@ -1837,7 +1841,7 @@ preserve retains them exactly. Table/column trailing comments survive edits and 
 | Update/clear body | Exact heading-to-closing text including first LF/CRLF and final newline/indent, e.g. `"\n\tX=1;\n"`. Clear keeps frame; semantics not parsed/executed. |
 | Body restrictions | Lone CR/VT/FF/U+0085/U+2028/U+2029/U+001C–U+001E rejected with position; balanced regions, intact method boundaries. |
 | Dispatcher | Only changed bindings affect branches; imported defects/aliases remain. Identifiers: case-insensitive; literals: exact. |
-| Old projects | Snapshot format 4 migrates W1/W2 format-3 projects on read. Own retained empty dispatchers are restored only after provenance/signature/template checks; missing standard table helper is added to confirmed authored managers. Rule/decision IDs and opaque bodies remain. Read is disk-neutral; next successful apply writes format 4. |
+| Old projects | Snapshot format 5 reads published formats 3/4. Imported W1/W2/W3 snapshots are reread from preserve text including applied edits, with entity IDs and decision history transferred. Own empty dispatchers/helpers retain their provenance checks. Text and opaque bodies remain; reads do not write disk. Next successful apply writes format 5. Unsafe migration refuses on load with a reason and recovery guidance; importing a new project loses prior decisions. |
 | Unsupported event | `handler create` returns `unsupported_form` and names the unsupported event. Generator extension fields are retained without guessing executor behavior. |
 | Restore | `handler update` + `restore_dispatcher:true`, confirm execution change. Occupied literal calling another method refuses with callee/line; retained branch cannot change. |
 | Conversion events | Update/clear existing `ПередКонвертацией`, `ПослеКонвертации`, `ПередОтложеннымЗаполнением`, `ПередОбработкойУдаляемогоОбъекта`; event/code ID or `Событие/<name>`. No create. |
@@ -1865,6 +1869,7 @@ Outer codes: `invalid_argument`, `ed_authoring_precondition`, `ed_authoring_stal
 | `algorithm_signature_calls` | Notice: signature changes with calls/branches |
 | `handler_execution_changed` | Notice: restored branch changes execution |
 | `orphan_handler` | Notice: rebinding/rule deletion leaves unbound methods/branches |
+| `table_part_replace` | Required confirmation on group create: receiving replaces the whole table part; full owner/group address identifies each notice. |
 
 Confirm every notice with `confirmations:[{"code":"…","notice_hash":"<exact-hash>"}]`.
 Read `section="notices"` for locations. Validation `ed.writer.*` IDs: [checks.md](checks.md).
@@ -2015,11 +2020,18 @@ Manager projects require XML structures; a foreign structure refuses with `ed.au
 The reference snapshot must be inside that host's `CommonModules`. Pairs already suggested by names stay single rows;
 rules definitely inapplicable to the selected version/direction are excluded.
 For property candidates, the same parameter adds separate `class="reference_module"` rows
-for this object/type pair with `confidence="reference"`, the same reason/origin and `auto=false`.
+only for pairs not already suggested by names, with `confidence="reference"`, the same
+reason/origin and `auto=false`. Equal configuration names (case-insensitive), physical XDTO
+paths and namespaces merge into one name-based row with `references`:
+`[{property_kind,rule_name,origin:{document_id,address},applicability}]`.
+Multiple typical declarations remain separate entries in this evidence list.
 `property_kind` is `direct`, `reference`, `pkpd`, `algorithm` (or `unresolved` for a missing target);
 `rule_name` is the conversion target's name or null. Handler bodies are excluded.
 Name-based pairs remain visible beside different pairs declared by the typical manager.
-The four property pages retain their ordinary pagination fields.
+Manager property responses fit 8 KB by reducing the common window of all four sections.
+Follow the response's top-level `next_offset` while `has_more=true`; `limit` is an upper bound,
+and `truncated_by="size"` explains reduction. Each section also gives its total and continuation.
+An indivisible oversized response refuses with `candidate_row_too_large`.
 Use `reference_document_id="auto"` with `target.project_id` to resolve the exact plan/version
 map and open its typical manager automatically; the returned `origin.document_id` is an
 ordinary reader snapshot. Without a project, auto requires XML provenance and a unique ED
@@ -2035,7 +2047,10 @@ is expanded, including `ДанныеКлассификатораБанков`; g
 Groups that are references or another object's key-properties type stop expansion of their
 whole subtree. Fields outside the own-key subtree retain the reference/classifier filter.
 Manager-project primitive ПКС validation uses candidate compatibility, including string facets.
-Ordinary snapshots and overlay reports retain their previous type-check boundary and bytes.
+Ordinary snapshots and overlay reports retain their previous atomic type-check boundary.
+Owner handlers no longer suppress declared direct ПКС type/range checks in either direction.
+An obligatory format property without a rule remains a warning with a sending handler:
+the handler may fill it, so verify its code. Manager builds require acknowledging this warning.
 For manager-project snapshots, `ed.schema.value_range` warns when a sending string attribute
 can exceed the format's `maxLength` (including unlimited strings) or cannot guarantee `minLength`:
 the value will not export (XDTO:6103–6109). Build requires acknowledging these warnings.
@@ -2043,10 +2058,14 @@ Sending numeric limits remain `level="info"`, specifying which values will not e
 Receiving wider format values gives `info` about truncation, precision loss or failed writes;
 fixed-length/date-part risks remain `info`. Messages name direction, both limits and the ПКС address.
 `summary.info` counts information; filter by `level="info"`. Incompatible primitive types remain
-warnings. Build checks bound limits again, including after restart. Review values or supply an algorithm.
+warnings. Build checks bound types, ranges and required sources again, including after restart.
+Review values or supply an algorithm.
 Manager skipped pages retain machine-readable reasons and add a `hint` with the next action:
 `non_atomic_type` requires a reference ПКО or algorithm, `qualifiers_unavailable` requires
 updated structure/schema qualifiers, and `handler_may_supply` requires reviewing handler code.
+For a table part with no format side, children report `empty_format_side`:
+there is no format side to check. Configuration columns are still checked against the structure;
+reopening the schema does not resolve this case.
 
 ```json
 {
@@ -2070,6 +2089,11 @@ Input hashes, current profile, host XML, model revision and previous kit enter t
 are checked again before atomic publication. Owned files/UUIDs follow `render_manager_kit`;
 foreign or edited kit contents block overwriting. Writes stay under `workspace/ed-authoring`.
 Manager manifest schema v1 includes `project_id` and `creation_fingerprint`.
+`ed_validate` and manager build share the semantic readback check: `ed.writer.read`
+reports the first differing entity address and field. Delivery additionally uses
+`ed.author.model_invalid` for readback and required-frame/report preconditions.
+Opaque bodies are compared as exact text. Existing authored snapshots recover generated
+frames and derived dependency indexes on load; rule IDs and body text remain intact.
 A kit owned by another project refuses with `kit_owned_by_other_project`, naming both owners
 and suggesting `identity.name`; acknowledgements cannot bypass ownership. An unreadable
 manifest also refuses. The same project ID with changed creation inputs requires the

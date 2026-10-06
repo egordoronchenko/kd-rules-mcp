@@ -23,6 +23,7 @@ from kd2_rules_mcp.ed.canonical import canonical_model, canonicalize, model_addr
 from kd2_rules_mcp.ed.diff import compare_models
 from kd2_rules_mcp.ed.forms import HELPER_PKS
 from kd2_rules_mcp.ed.reader import read_manager_text
+from kd2_rules_mcp.ed.writer import render
 from kd2_rules_mcp.ed.writer_import import import_manager
 from kd2_rules_mcp.ed.writer_model import (
     ExecutorProfile,
@@ -606,7 +607,20 @@ def test_known_and_computed_code_references_require_confirmation():
             confirmations=tuple((n.code, n.notice_hash) for n in plan.notices),
         )
         assert confirmed.pko[0].name == "Renamed"
-        assert confirmed.code_units == model.code_units
+        # Литерал тела остаётся прежним; индекс следует новому пространству имён.
+        assert (
+            tuple(
+                replace(unit, dependencies=old.dependencies)
+                for unit, old in zip(confirmed.code_units, model.code_units, strict=True)
+            )
+            == model.code_units
+        )
+        if '"Item"' in text:
+            business = next(unit for unit in confirmed.code_units if unit.name == "Business")
+            previous = next(unit for unit in model.code_units if unit.name == "Business")
+            assert business.dependencies != previous.dependencies
+        back, _ = imported(render(confirmed).data.decode("utf-8"))
+        assert canonicalize(confirmed)["code_units"] == canonicalize(back)["code_units"]
     model, _ = imported(
         SYNTHETIC
         + code.replace(

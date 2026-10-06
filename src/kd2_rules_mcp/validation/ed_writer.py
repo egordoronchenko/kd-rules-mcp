@@ -29,6 +29,7 @@ from kd2_rules_mcp.ed.writer_import import (
     property_directions,
 )
 from kd2_rules_mcp.ed.writer_model import ManagerModel
+from kd2_rules_mcp.ed.writer_readback import check_readback
 from kd2_rules_mcp.validation.ed_links import validate_links
 from kd2_rules_mcp.validation.report import Issue, ValidationReport
 
@@ -683,13 +684,16 @@ def validate_writer(
                 "\ufeff" if model.header.text_style.bom and not text.startswith("\ufeff") else ""
             ) + text
         document = read_manager_text(source)
-    except (UnicodeError, EdFormatError, EdReadError, EdResourceLimitError) as error:
+        mismatch = check_readback(model, document)
+    except (ValueError, UnicodeError, EdFormatError, EdReadError, EdResourceLimitError) as error:
         report.error(
             "ed.writer.read",
             "Конвертация",
             f"Повторное чтение результата невозможно: {type(error).__name__}; §6.1",
         )
         return report
+    if mismatch is not None:
+        report.error("ed.writer.read", mismatch.address, mismatch.message)
     routines = {}
     for routine in _server_routines(document):
         routines.setdefault(routine.name.casefold(), []).append(routine)
