@@ -758,10 +758,17 @@ def render_registration_kit(
     output["registration/RegistrationRules.xml"] = content
     template = Template(_registration_template(deletion_mark_filter=result.deletion_mark_filter))
     incomplete = ""
-    if result.code_mentions or remarks:
+    # Замечания и их хеши остаются входами комплекта; сокращаем только инструкцию.
+    grouped = {
+        n.message
+        for n in result.notices
+        if n.check in ("registration.deletion_mode", "registration.deletion_missing_rule")
+    }
+    instruction_remarks = tuple(r for r in remarks if r not in grouped)
+    if result.code_mentions or instruction_remarks:
         incomplete = (
             "## Перенос неполон\n\n"
-            + "\n".join("- " + r for r in remarks)
+            + "\n".join("- " + r for r in instruction_remarks)
             + "\n\nПроверьте замечания до загрузки правил.\n"
         )
     details = retarget_instruction_details(result)
@@ -840,6 +847,20 @@ def deletion_mark_instruction(result: RetargetResult) -> str:
     block = template.split("<!-- deletion_mark:start -->", 1)[1].split(
         "<!-- deletion_mark:end -->", 1
     )[0]
+    missing = sorted(
+        {n.reference for n in result.notices if n.check == "registration.deletion_missing_rule"}
+    )
+    if missing:
+        block = block.replace(
+            "Проверка в тестовой базе:",
+            "Объекты состава плана без действующего правила регистрации:\n\n"
+            "Каждый из этих объектов входит в состав плана, но действующего правила "
+            "регистрации нет. Он выгружается всегда; пометка удаления этим отбором "
+            "не передастся.\n\n"
+            + table(("Объект",), ((name,) for name in missing))
+            + "\n\nПроверка в тестовой базе:",
+            1,
+        )
     return Template(block.strip()).substitute(
         added=summary["added"],
         skipped=summary["skipped"],

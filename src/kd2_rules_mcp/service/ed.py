@@ -428,6 +428,7 @@ class EdMixin(ServiceBase):
         headers_only: bool = False,
         layer: str | None = None,
         entity_id: str | None = None,
+        name_filter: str | None = None,
     ) -> dict[str, Any]:
         views.validate_page(offset, limit)
         layer_views.validate_context(direction, headers_only)
@@ -437,6 +438,8 @@ class EdMixin(ServiceBase):
             raise ValueError(f"Неизвестный вид ED: {kind}")
         with self._lock:
             project = self._ed_project(project_id)
+            if name_filter is not None and not isinstance(name_filter, str):
+                raise ValueError("name_filter должен быть строкой")
             if project.layered:
                 if kind == "change":
                     return layer_views.change_page(
@@ -482,6 +485,12 @@ class EdMixin(ServiceBase):
                             for k in ("name", "address", "configuration_object", "format_object")
                         )
                     ]
+                if name_filter is not None:
+                    rows = [
+                        r
+                        for r in rows
+                        if name_filter.casefold() in str(r.get("name", "")).casefold()
+                    ]
                 return views.page(rows, offset, limit)
             if direction is not None or headers_only:
                 raise ValueError("direction и headers_only доступны на снимке с расширениями")
@@ -495,6 +504,8 @@ class EdMixin(ServiceBase):
                 return views.page([], offset, limit)
             found = []
             for entity in project.entities.values():
+                if name_filter is not None and name_filter.casefold() not in entity.name.casefold():
+                    continue
                 if kind in views.ROLES:
                     if not isinstance(entity, ed.Routine) or kind not in entity.roles:
                         continue
@@ -545,18 +556,30 @@ class EdMixin(ServiceBase):
         with self._lock:
             project = self._ed_project(project_id)
             if project.layered:
-                result = layer_views.get_view(
-                    project.layered,
-                    address,
-                    direction,
-                    headers_only,
-                    children_kind,
-                    offset,
-                    limit,
-                    include_text,
-                    text_offset,
-                    text_limit,
-                )
+                addresses = [address]
+                if address.casefold().startswith(("код/", "обработчик/")):
+                    prefix = "Обработчик" if address.casefold().startswith("код/") else "Код"
+                    addresses.append(prefix + "/" + address.split("/", 1)[1])
+                for candidate in addresses:
+                    try:
+                        result = layer_views.get_view(
+                            project.layered,
+                            candidate,
+                            direction,
+                            headers_only,
+                            children_kind,
+                            offset,
+                            limit,
+                            include_text,
+                            text_offset,
+                            text_limit,
+                        )
+                        break
+                    except RuleNotFoundError:
+                        if candidate == addresses[-1]:
+                            raise
+                else:
+                    raise RuleNotFoundError(f"Сущность ED не найдена: {address}")
                 if result.get("kind") == "layer":
                     for source in result["source_files"]["items"]:
                         source["path"] = self._host(Path(source["path"]))
@@ -568,12 +591,21 @@ class EdMixin(ServiceBase):
                 error = AmbiguousAddressError(f"Неоднозначный адрес: {address}", candidates)
                 error.candidate_page = views.page(list(candidates), offset, limit)
                 raise error
-            lookup = (
-                "Алгоритм/" + address.split("/", 1)[1]
-                if address.casefold().startswith("код/")
-                else address
-            )
-            entity = project.by_address.get(lookup.casefold())
+            entity = project.by_address.get(address.casefold())
+            if entity is None and address.casefold().startswith(
+                ("код/", "обработчик/", "алгоритм/")
+            ):
+                suffix = address.split("/", 1)[1]
+                for prefix in ("Код", "Обработчик", "Алгоритм"):
+                    lookup = prefix + "/" + suffix
+                    if lookup.casefold() in project.index.conflicts:
+                        raise AmbiguousAddressError(
+                            f"Неоднозначный адрес: {address}",
+                            project.index.conflicts[lookup.casefold()],
+                        )
+                    entity = project.by_address.get(lookup.casefold())
+                    if entity is not None:
+                        break
             if entity is None:
                 raise RuleNotFoundError(f"Сущность ED не найдена: {address}")
             if children_kind == "reference" and views.accepts_code_references(entity):
@@ -847,7 +879,7 @@ class EdMixin(ServiceBase):
         writer_metadata = {}
         if project.manager_project_id is not None:
             writer_report, writer_metadata = cast("EdWriterMixin", self)._manager_validation(
-                project.manager_project_id, project.document.files[0].text, project_id
+                project.manager_project_id, project.document.files[0].text, project_id, structure_id
             )
             report.extend(writer_report)
 

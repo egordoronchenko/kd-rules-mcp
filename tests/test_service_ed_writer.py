@@ -43,6 +43,66 @@ DATA = Path(__file__).parent / "data/ed/writer"
 PLAN = "ПланФормата"
 
 
+def test_live_receive_pod_unknown_name_refuses_build_and_suggests_parameter(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    operations = [
+        {
+            "client_id": "receive",
+            "kind": "pod",
+            "action": "create",
+            "patch": {
+                "name": "Получение",
+                "directions": ["receive"],
+                "format_selection": string_value("Справочник.Должности"),
+            },
+        },
+        {
+            "client_id": "wrong-name",
+            "kind": "handler",
+            "action": "create",
+            "owner_id": {"client_id": "receive"},
+            "patch": {"event": "ПриОбработке", "body": 'ОбъектОбработки.Свойство("X", Значение);'},
+        },
+    ]
+    _, _, applied = apply_packet(service, created, operations)
+    report = service.ed_validate(applied["document_id"])
+    issue = next(i for i in report["issues"]["items"] if i["check"] == "ed.handler.unknown_name")
+    assert issue["level"] == "ошибка"
+    assert "ОбъектОбработки" in issue["message"] and "Используйте ДанныеXDTO" in issue["message"]
+    assert "ДанныеXDTO, ИспользованиеПКО, КомпонентыОбмена" in issue["message"]
+    assert issue["address"].startswith("Код/") and "строка тела 1" in issue["message"]
+    with pytest.raises(EdAuthoringPreconditionError) as caught:
+        build(service, applied)
+    assert any(f["id"] == "ed.handler.unknown_name" for f in caught.value.details["failures"])
+    name = issue["address"].split("/", 1)[1]
+    canonical = service.ed_get(applied["document_id"], "Обработчик/" + name, include_text=True)
+    assert (
+        service.ed_get(applied["document_id"], issue["address"], include_text=True)["text"]
+        == canonical["text"]
+    )
+    for index, address in enumerate(("Код/" + name, "Обработчик/" + name)):
+        body = '\n\tДанныеXDTO.Свойство("X", Значение);\n'
+        if index:
+            body += '\tСообщить("Исправлено");\n'
+        _, preview, applied = apply_packet(
+            service,
+            applied,
+            [
+                {
+                    "client_id": f"fix-{index}",
+                    "kind": "handler",
+                    "action": "update",
+                    "target_id": {"address": address},
+                    "patch": {"body": body},
+                }
+            ],
+        )
+        assert not preview["failures"]["total"], preview["failures"]["items"]
+        report = service.ed_validate(applied["document_id"])
+        assert not any(i["check"] == "ed.handler.unknown_name" for i in report["issues"]["items"])
+
+
 def size(value):
     return len(json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8"))
 
@@ -268,8 +328,8 @@ def test_migration_reopen_missing_inputs_refuses_before_loading(
             "tool": "structure_load_xml",
             "arguments": {
                 "structure_id": "host",
-                "path": args["configuration_path"],
-                "extensions": [],
+                "configuration_path": args["configuration_path"],
+                "extension_paths": [],
             },
         }
 
@@ -280,6 +340,7 @@ def test_migration_missing_project_inputs_return_catalog_reopen_calls(writer_set
     folder = service.manager_workspace.directory / args["project_id"]
     metadata = json.loads((folder / "creation.json").read_bytes())
     metadata["arguments"].update(project="УчебныйПроект", configuration="full")
+    metadata["schema_packages"][0]["name"] = "Формат120"
     (folder / "creation.json").write_text(json.dumps(metadata), encoding="utf-8")
     restarted = Kd2Service(service.settings)
     monkeypatch.setattr(restarted.store, "exists", lambda _: False)
@@ -292,6 +353,7 @@ def test_migration_missing_project_inputs_return_catalog_reopen_calls(writer_set
                 "format_version": "1.20",
                 "project": "УчебныйПроект",
                 "configuration": "full",
+                "package": "Формат120",
             },
         },
         {

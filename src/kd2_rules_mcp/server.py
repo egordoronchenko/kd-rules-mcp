@@ -1001,9 +1001,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             str | None,
             Field(description="History logical_id; kind=change only"),
         ] = None,
+        name_filter: Annotated[str | None, Field(description="Name substring")] = None,
     ) -> dict[str, Any]:
-        """List ED entities in source order, or effective layer entities. Text and side filters
-        combine with AND; use addresses for ed_get or kind=change for history."""
+        """List ED source/effective entities with AND filters. kind=change gives history."""
         return await call(
             service.ed_list,
             project_id,
@@ -1017,13 +1017,14 @@ def create_server(service: Kd2Service) -> MCPServer:
             headers_only,
             layer,
             entity_id,
+            name_filter,
         )
 
     @server.tool()
     async def ed_get(
         project_id: Annotated[str, Field(description="ED document/snapshot ID")],
         address: Annotated[
-            str, Field(description="ED address; Код/algorithm or Алгоритм/algorithm")
+            str, Field(description="ED address; Код/name also accepts handler methods")
         ],
         children_kind: Annotated[
             str | None,
@@ -1071,8 +1072,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description="Source file ID; null = base"),
         ] = None,
     ) -> dict[str, Any]:
-        """Map a source line to the innermost ED entity, ancestors and associated rules. file_id
-        selects extension files; line numbers belong to that file."""
+        """Locate a source line: entity, ancestors, associated rules. file_id selects the file."""
         return await call(service.ed_locate, project_id, line, offset, limit, file_id)
 
     @server.tool()
@@ -1116,9 +1116,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Matching layer route profile ID")),
         ] = None,
     ) -> dict[str, Any]:
-        """Validate ED links; schema_id/structure_id add format/type checks. Manager documents
-        also run ed.writer.* and include value-range info. Inspect skipped;
-        runtime remains unverified."""
+        """Validate ED links; schema_id/structure_id add types. Managers add ed.writer.* and
+        ed.handler.unknown_name. Inspect skipped; runtime unverified."""
         return await call(
             service.ed_validate,
             project_id,

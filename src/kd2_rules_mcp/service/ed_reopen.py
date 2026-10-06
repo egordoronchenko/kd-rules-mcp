@@ -2,6 +2,7 @@
 
 from functools import wraps
 from inspect import signature
+from pathlib import PurePosixPath
 from typing import Any, cast
 
 from kd2_rules_mcp.errors import (
@@ -15,13 +16,28 @@ def reopen_details(arguments, metadata, *, schema=False, structure=False):
     calls, missing = [], []
     if schema:
         params = {"format_version": arguments.get("format_version")}
+        packages = metadata.get("schema_packages", [])
+        sources = metadata.get("schema_sources", [])
         if arguments.get("project"):
+            # Старые снимки хранят имя лишь в пути выгрузки; путь хоста бывает Windows.
+            package = packages[0].get("name") if packages else None
+            source = packages[0]["path"] if packages else sources[0][0] if sources else None
+            source_path = PurePosixPath(source.replace("\\", "/")) if source else None
+            if not package and source_path and source_path.suffix.casefold() == ".xml":
+                package = source_path.stem
+            elif (
+                not package
+                and source_path
+                and source_path.name.casefold() == "package.bin"
+                and source_path.parent.name.casefold() == "ext"
+            ):
+                package = source_path.parent.parent.name
             params.update(
-                project=arguments["project"], configuration=arguments.get("configuration", "full")
+                project=arguments["project"],
+                configuration=arguments.get("configuration", "full"),
+                package=package,
             )
         else:
-            packages = metadata.get("schema_packages", [])
-            sources = metadata.get("schema_sources", [])
             if packages:
                 params.update(
                     path=packages[0]["path"],
@@ -35,6 +51,8 @@ def reopen_details(arguments, metadata, *, schema=False, structure=False):
         absent = []
         if not params["format_version"]:
             absent.append("format_version")
+        if "project" in params and not params["package"]:
+            absent.append("package")
         if "project" not in params and "path" not in params:
             absent.append("project/package or path")
         if absent:
@@ -51,10 +69,13 @@ def reopen_details(arguments, metadata, *, schema=False, structure=False):
             tool = "structure_load_project"
         else:
             params.update(
-                path=arguments.get("configuration_path"), extensions=arguments.get("extensions", [])
+                configuration_path=arguments.get("configuration_path"),
+                extension_paths=arguments.get("extensions", []),
             )
             tool = "structure_load_xml"
-        if not params["structure_id"] or (tool == "structure_load_xml" and not params.get("path")):
+        if not params["structure_id"] or (
+            tool == "structure_load_xml" and not params.get("configuration_path")
+        ):
             missing.append(
                 {"tool": tool, "fields": ["structure_id", "project/configuration or path"]}
             )

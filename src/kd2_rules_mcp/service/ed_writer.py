@@ -57,6 +57,7 @@ from kd2_rules_mcp.service.ed import EdProject
 from kd2_rules_mcp.service.ed_authoring import EdAuthoringMixin, _failure, _mapping, _text
 from kd2_rules_mcp.service.ed_authoring_views import compact_page, json_size, validate_options
 from kd2_rules_mcp.service.ed_layers import checked_extensions, extension_paths, select_views
+from kd2_rules_mcp.service.ed_names import common_module_names
 from kd2_rules_mcp.service.ed_reopen import with_reopen_hints
 from kd2_rules_mcp.service.ed_views import address_of, validate_page
 from kd2_rules_mcp.service.paths import Settings
@@ -70,6 +71,21 @@ from kd2_rules_mcp.validation.ed_writer import validate_writer
 from kd2_rules_mcp.validation.report import Level, ValidationReport
 
 MAX_PREVIEW_PACKETS = 8
+
+
+def _manager_address_aliases(value: Any) -> Any:
+    """Адрес читателя Обработчик и адрес писателя Код обозначают один метод."""
+    if isinstance(value, list):
+        return [_manager_address_aliases(item) for item in value]
+    if isinstance(value, dict):
+        result = {key: _manager_address_aliases(item) for key, item in value.items()}
+        address = result.get("address")
+        if isinstance(address, str) and address.casefold().startswith("обработчик/"):
+            result["address"] = "Код/" + address.split("/", 1)[1]
+        return result
+    return value
+
+
 MANAGER_CANDIDATES_BYTES = 8192
 
 
@@ -201,6 +217,18 @@ def _atomic_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
 
 class EdWriterMixin(EdAuthoringMixin):
     """Авторские проекты отделены от read-only снимков и overlay-авторинга."""
+
+    def _manager_name_scope(self, metadata: dict, structure_id: str | None = None) -> dict:
+        """Общая область берётся из выбранной структуры и явно выбранных расширений."""
+        args = metadata["arguments"]
+        structure_id = structure_id or args.get("structure_id")
+        if not structure_id or not self.store.exists(structure_id):
+            return {}
+        sources = self.store.meta(structure_id)
+        context = common_module_names(
+            sources, self._read_path, extensions=tuple(args["extensions"])
+        )
+        return {"common_modules": context[0], "global_methods": context[1]} if context else {}
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
@@ -452,6 +480,7 @@ class EdWriterMixin(EdAuthoringMixin):
             metadata["schema_sources"] = sources
             metadata["schema_packages"] = [
                 {
+                    "name": p.metadata_name,
                     "path": self._host_text(p.sources[0].path),
                     "namespace": p.namespace,
                     "role": p.origin_role,
@@ -547,7 +576,12 @@ class EdWriterMixin(EdAuthoringMixin):
     def _manager_rebind_report(self, model, metadata: dict, detection: ProfileDetection):
         """Новые привязки проверяются и по форме писателя, и по схеме/структуре."""
         _, snapshot = self._manager_snapshot(model, publish=False)
-        report = validate_writer(model, snapshot.document.files[0].text, detection=detection)
+        report = validate_writer(
+            model,
+            snapshot.document.files[0].text,
+            detection=detection,
+            **self._manager_name_scope(metadata),
+        )
         report.extend(
             validate_links(snapshot.document, snapshot.index, build_references(snapshot.document))
         )
@@ -630,6 +664,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 **details,
             )
 
+    @with_reopen_hints
     def ed_create(
         self,
         project_id: str,
@@ -1127,7 +1162,7 @@ class EdWriterMixin(EdAuthoringMixin):
                         'Входы проекта меняются только через ed_create с mode="rebind"',
                         fields=sorted(forbidden),
                     )
-        parsed = tuple(parse_operation(op) for op in operations)
+        parsed = tuple(parse_operation(_manager_address_aliases(op)) for op in operations)
         acknowledgements = tuple(
             (
                 _text(_mapping(c, "confirmation", {"code", "notice_hash"}).get("code"), "code"),
@@ -1364,7 +1399,9 @@ class EdWriterMixin(EdAuthoringMixin):
                 limit,
             )
 
-    def _manager_validation(self, project_id: str, text: str, document_id: str):
+    def _manager_validation(
+        self, project_id: str, text: str, document_id: str, structure_id: str | None = None
+    ):
         with self._lock:
             model = self._manager_project(project_id).model
             current_id = "ed-manager-" + digest((project_id, model.revision))[:24]
@@ -1376,7 +1413,12 @@ class EdWriterMixin(EdAuthoringMixin):
             detection = self._manager_detection(
                 self._manager_metadata(project_id), model.executor_profile.profile_id
             )
-            report = validate_writer(model, text, detection=detection)
+            report = validate_writer(
+                model,
+                text,
+                detection=detection,
+                **self._manager_name_scope(self._manager_metadata(project_id), structure_id),
+            )
             report.extend(self._manager_plan_content(model, self._manager_metadata(project_id))[0])
             return report, {
                 "writer": {
@@ -1799,7 +1841,9 @@ class EdWriterMixin(EdAuthoringMixin):
                 inputs = self._manager_inputs(model, metadata)
                 detection = self._manager_detection(metadata, model.executor_profile.profile_id)
                 rendered = render(model, "preserve" if model.source_files else "canonical")
-                report = validate_writer(model, rendered.data, detection=detection)
+                report = validate_writer(
+                    model, rendered.data, detection=detection, **self._manager_name_scope(metadata)
+                )
                 report.extend(self._manager_schema_checks(model, metadata))
                 content_report, missing_content = self._manager_plan_content(model, metadata)
                 report.extend(content_report)
@@ -1943,7 +1987,16 @@ class EdWriterMixin(EdAuthoringMixin):
                     )
                 ]
                 rows = {
-                    "notices": notices,
+                    "notices": [
+                        n
+                        for n in notices
+                        if (not level or n.get("level") == level)
+                        and (not check_prefix or n.get("check", "").startswith(check_prefix))
+                        and (
+                            not address_prefix
+                            or n.get("address", "").casefold().startswith(address_prefix.casefold())
+                        )
+                    ],
                     "files": file_rows,
                     "operations": [
                         {
@@ -1960,7 +2013,7 @@ class EdWriterMixin(EdAuthoringMixin):
                     base,
                     rows[section]
                     if section != "summary"
-                    else [{"kind": "notice", **n} for n in notices]
+                    else [{"kind": "notice", **n} for n in rows["notices"]]
                     + [{"kind": "file", **f} for f in file_rows],
                     offset,
                     limit,

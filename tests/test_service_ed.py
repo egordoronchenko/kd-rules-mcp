@@ -27,6 +27,21 @@ from kd2_rules_mcp.service.ed_views import short
 DATA = Path(__file__).parent / "data/ed"
 
 
+def test_live_handler_name_filter_and_code_alias(service):
+    project_id = opened(service)
+    rows = service.ed_list(project_id, "handler")["items"]
+    assert len(rows) > 1
+    name = rows[0]["name"]
+    filtered = service.ed_list(project_id, "handler", name_filter=name)
+    assert filtered["total"] == 1 and filtered["items"][0]["name"] == name
+    address = rows[0]["address"]
+    alias = "Код/" + address.split("/", 1)[1]
+    assert (
+        service.ed_get(project_id, alias, include_text=True)["text"]
+        == service.ed_get(project_id, address, include_text=True)["text"]
+    )
+
+
 @pytest.mark.parametrize("version", [2, 3])
 def test_plain_snapshot_responses_byte_identical_with_explicit_empty_extensions(service, version):
     from tests.test_service_ed_layers import encoded, legacy_validate

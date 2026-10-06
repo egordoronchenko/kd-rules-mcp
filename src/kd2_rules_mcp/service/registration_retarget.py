@@ -129,8 +129,19 @@ def _manual_files(
         else notices
     )
     incomplete = (
-        ("## Перенос неполон\n\n" + "\n".join("- " + n["message"] for n in required))
-        if required
+        (
+            "## Перенос неполон\n\n"
+            + "\n".join(
+                "- " + n["message"]
+                for n in required
+                if n["check"]
+                not in ("registration.deletion_mode", "registration.deletion_missing_rule")
+            )
+        )
+        if any(
+            n["check"] not in ("registration.deletion_mode", "registration.deletion_missing_rule")
+            for n in required
+        )
         else ""
     )
     details = retarget_instruction_details(result)

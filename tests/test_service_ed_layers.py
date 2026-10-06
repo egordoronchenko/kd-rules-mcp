@@ -42,6 +42,22 @@ def open_layer(service, name="b", root=ROOT):
     )
 
 
+def test_live_layer_handler_name_filter_and_code_alias(service):
+    project = open_layer(service)["project_id"]
+    rows = service.ed_list(project, "handler")["items"]
+    assert len(rows) > 1
+    row = rows[0]
+    filtered = service.ed_list(project, "handler", name_filter=row["name"])
+    assert filtered["total"] == 1
+    assert filtered["items"][0]["name"] == row["name"]
+    address = "Обработчик/" + row["name"]
+    alias = "Код/" + row["name"]
+    assert (
+        service.ed_get(project, address, include_text=True)["text"]
+        == service.ed_get(project, alias, include_text=True)["text"]
+    )
+
+
 def legacy_validate(service, project_id):
     """Оракул прежнего сервиса без профилей; фиксирует весь JSON до добавления слоёв."""
     project = service._ed_project(project_id)

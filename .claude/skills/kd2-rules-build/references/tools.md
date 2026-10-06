@@ -507,8 +507,7 @@ declarations/bindings were read, not handler behavior.
 
 ### `ed_list`
 
-List ED entities in source order, or effective layer entities. Text and side filters
-combine with AND; use addresses for ed_get or kind=change for history.
+List ED source/effective entities with AND filters. kind=change gives history.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -523,6 +522,7 @@ combine with AND; use addresses for ed_get or kind=change for history.
 | `headers_only` | boolean | `false` | Header-only context (interface 3) |
 | `layer` | string \| null | `null` | Layer ID |
 | `entity_id` | string \| null | `null` | History logical_id; kind=change only |
+| `name_filter` | string \| null | `null` | Name substring |
 
 ### `ed_get`
 
@@ -532,7 +532,7 @@ direction/headers_only or source revision Слой/<id>/….
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | ED document/snapshot ID |
-| `address` | string | required | ED address; Код/algorithm or Алгоритм/algorithm |
+| `address` | string | required | ED address; Код/name also accepts handler methods |
 | `children_kind` | string \| null | `null` | Child kind; null = all, reference = code links |
 | `offset` | integer ≥ 0 | `0` | Page offset |
 | `limit` | integer 1…200 | `50` | Page size |
@@ -544,8 +544,7 @@ direction/headers_only or source revision Слой/<id>/….
 
 ### `ed_locate`
 
-Map a source line to the innermost ED entity, ancestors and associated rules. file_id
-selects extension files; line numbers belong to that file.
+Locate a source line: entity, ancestors, associated rules. file_id selects the file.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -557,9 +556,8 @@ selects extension files; line numbers belong to that file.
 
 ### `ed_validate`
 
-Validate ED links; schema_id/structure_id add format/type checks. Manager documents
-also run ed.writer.* and include value-range info. Inspect skipped;
-runtime remains unverified.
+Validate ED links; schema_id/structure_id add types. Managers add ed.writer.* and
+ed.handler.unknown_name. Inspect skipped; runtime unverified.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -1059,6 +1057,8 @@ rule address and field name. Only `Валидное="true"` rules are active; fa
 like disabled rules (BSP ЗПРО:289–292,1065–1085).
 The manifest records `deletion_mark_filter: true` only when enabled. When false, kit bytes and hashes
 match the version before this option; the manual kit preserves all notices in its incomplete block.
+Instructions explain modes once and list rules/fields; missing-rule objects share one explanation
+and object list. Tool notices and acknowledgement IDs remain per rule/object.
 
 Deletion notices are paginated with the other notices. These require acknowledgement before write:
 `registration.deletion_missing_rule` (plan member without an enabled rule),
@@ -1335,12 +1335,14 @@ remaining types) or `imports_hint` when the status is `partial` because of unres
 
 Base list kinds: `pko,pks,pktch,pod,pkpd,parameter,algorithm,handler,dispatcher,support,unknown,
 version,diagnostic`. `text` is a casefold substring in names, addresses and sides, not BSL bodies.
+`name_filter` selects entity names by casefold substring, including handlers; entity filters use AND.
 `format_object`/`metadata_object` combine with AND and compare exact names after trimming and
 casefold. `Метаданные.Справочники.Имя` normalizes to `Справочник.Имя`; other metadata kinds
 follow the same pattern. ПКС/ПКТЧ inherit ПКО sides. Unknown sides do not match; algorithms
 without rule sides do not pass side filters.
 
 `ed_get` fields are short scalars and children are immediate only.
+Handler methods accept both `Код/<name>` and `Обработчик/<name>` in `ed_get` and manager `ed_apply`.
 Compact child rows contain `address,kind,name`; use a separate get for their fields and for a
 group's ПКС. Child kinds: ПКО `pks,pktch,search,binding,extension`; ПКТЧ `pks`;
 ПОД `binding,used_pko`; ПКПД `value`; conversion `binding,entrypoint,version`;
@@ -1650,12 +1652,25 @@ No BSL executes during authoring; installation and live exchange are separate st
 4. Preview `ed_apply` with the current revision. Read canonical operations, changes and
    notices through pages; apply with its `preview_hash` and confirmations, omitting `operations`.
 5. Navigate the returned `document_id` with `ed_overview`, `ed_list`, `ed_get`, `ed_locate`.
-   `ed_validate` adds `ed.writer.*` issues and `writer` metadata to the ordinary report.
+   `ed_validate` adds `ed.writer.*`, `ed.handler.unknown_name` and `writer` metadata.
    Pass open schema/structure IDs for the existing schema and metadata checks.
 6. Preview `ed_authoring_build(scope="manager")`, review notices/files, then write with
    its `build_hash` and all required acknowledgement IDs.
 7. `ed_close(project_id)` deletes the durable manager snapshot and its current read-only
    document; written kits remain. Closing just `document_id` closes only that reader snapshot.
+
+`ed.handler.unknown_name` is an error in editable handler/algorithm/conversion-event bodies:
+it reports the code address, body line, unknown name and actual formal parameters.
+On a receive ПОД, use `ДанныеXDTO`; `ОбъектОбработки` is an executor-wrapper key, not a local name.
+Scope includes parameters, declared/assigned locals, loop variables, module methods, configuration
+common modules and platform globals; strings/comments do not count. Assignment introduces a name
+after its right-hand side. Without an XML structure's common-module inventory, the check skips with
+`structure_required`. Only `authored/editable` bodies are checked; `imported_opaque` and `retained`
+bodies are exempt. This lexical check does not execute code
+or prove assignment in every control-flow branch. Errors block build and cannot be acknowledged.
+
+The kit instruction's ПКС total and runtime probe both count header properties plus all table-part
+properties, including the initialized reference property on each send ПКО.
 
 ### Creation, import and recovery
 
@@ -1715,9 +1730,10 @@ Difference pages use `section="differences",offset,limit` and expose `difference
 After restart, reopen bound inputs before repeating `ed_create`. Missing schema/structure
 snapshots refuse quickly with `ed_authoring_precondition`, failure `manager_inputs_not_open`,
 `missing_inputs[{kind,id}]` and executable `reopen_calls[{tool,arguments}]`.
-For catalog projects these are `ed_schema_open(project,configuration,format_version)` and
+For catalog projects these are `ed_schema_open(project,configuration,package,format_version)` and
 `structure_load_project(project_id,configuration_id,structure_id)`; dump projects receive
-stored package/import paths and `structure_load_xml(path,extensions,structure_id)`.
+stored package/import paths and `structure_load_xml(configuration_path,extension_paths,structure_id)`.
+Rebind refusals include the same calls; missing saved parameters are named explicitly.
 No inputs are loaded implicitly. If restored IDs differ, use `ed_create(mode="rebind")`.
 Once inputs are open, `ed_create` restores navigation.
 The project retains schema source hashes, the host structure fingerprint and the configuration
@@ -2104,6 +2120,7 @@ The response contains `scope,project_id,revision,document_id,build_hash,status,w
 counts,runtime_verified=false,validation,required_acknowledgements,acknowledgement_count` and a page.
 Sections: `summary,operations,notices,files,issues_after,skipped`. No section contains module text.
 Summary shows notices and file sizes/hashes; operation pages show recorded decision IDs/hashes.
+`level,check_prefix,address_prefix` filter notices and issues; acknowledgement IDs stay complete.
 The header exposes up to twenty acknowledgement IDs; notice pages contain the remaining IDs.
 Writer errors and delivery failures refuse. Profile mismatch and writer warnings require
 acknowledgements before writing. With `mode="write"`, pass current `expected_preview_hash=build_hash`

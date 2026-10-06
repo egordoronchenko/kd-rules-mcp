@@ -29,6 +29,64 @@ def report_for(model, text=None, **kwargs):
     )
 
 
+def test_live_unknown_names_cover_algorithms_events_and_preserve_boundary():
+    from kd2_rules_mcp.authoring.ed.manager_operations import AlgorithmPatch, ConversionEventPatch
+    from kd2_rules_mcp.validation.ed_names import validate_handler_names
+
+    model = execute(
+        new_manager(),
+        ManagerOperation(
+            "unknown-algorithm",
+            "algorithm",
+            "create",
+            patch=AlgorithmPatch(
+                name="ОшибкаАлгоритма", routine_kind="function", body="Возврат НетИмени;"
+            ),
+        ),
+    )
+    model = execute(
+        model,
+        ManagerOperation(
+            "unknown-event",
+            "conversion_event",
+            "update",
+            target_id=model.conversion_events[0].logical_id,
+            patch=ConversionEventPatch(body="\n\tНетОбъекта.Метод();\n"),
+        ),
+    )
+    report = report_for(model, common_modules=())
+    issues = [i for i in report.issues if i.check == "ed.handler.unknown_name"]
+    assert len(issues) == 2
+    assert any("НетИмени" in i.message for i in issues)
+    assert any("НетОбъекта" in i.message for i in issues)
+    skipped = report_for(model)
+    assert not any(i.check == "ed.handler.unknown_name" for i in skipped.issues)
+    assert any(
+        s.check == "ed.handler.unknown_name" and s.reason.startswith("structure_required")
+        for s in skipped.skipped
+    )
+    units = tuple(replace(u, state="retained") for u in model.code_units)
+    preserved = replace(model, code_units=units)
+    assert not any(
+        i.check == "ed.handler.unknown_name"
+        for i in report_for(preserved, common_modules=()).issues
+    )
+    imported_preserved = replace(
+        model, code_units=tuple(replace(u, origin="imported_opaque") for u in model.code_units)
+    )
+    assert not any(
+        i.check == "ed.handler.unknown_name"
+        for i in report_for(imported_preserved, common_modules=()).issues
+    )
+    calibration = validate_handler_names(
+        imported_preserved,
+        read_manager_text(render(model).text),
+        common_modules=(),
+        include_preserved=True,
+    )
+    assert len(calibration.errors) == 2
+
+
 def test_address_reuse_does_not_leak_mutation_or_survive_rule_change():
     model = pilot_model()
     before = dump_model(model)

@@ -530,6 +530,38 @@ def test_instruction_counts_evidence_and_profile_hash():
     assert "| Получение | 0 | 0 | 0 | 0 |" in empty.instruction
 
 
+def test_live_instruction_counts_table_properties_in_the_same_total():
+    model = pilot_model()
+    from kd2_rules_mcp.authoring.ed.manager_operations import parse_operation
+
+    group = {
+        "client_id": "rows",
+        "kind": "table_part",
+        "action": "create",
+        "owner_id": model.pko[0].logical_id,
+        "patch": {"configuration_property": "Строки", "format_property": "Rows"},
+    }
+    model = execute(model, parse_operation(group))
+    model = execute(
+        model,
+        parse_operation(
+            {
+                "client_id": "row-property",
+                "kind": "property",
+                "action": "create",
+                "owner_id": model.pko[0].groups[0].logical_id,
+                "patch": {"configuration_property": "Количество", "format_property": "Quantity"},
+            }
+        ),
+    )
+    instruction = build_kit(model).instruction
+    assert "| Отправка | 1 | 1 | 3 | 4 |" in instruction
+    assert "| Получение | 1 | 1 | 3 | 3 |" in instruction
+    assert "Для Каждого ПКТЧ Из ПКО.СвойстваТабличныхЧастей Цикл" in instruction
+    assert "ЧислоПКС = ЧислоПКС + ПКТЧ.Свойства.Количество();" in instruction
+    assert "ПКС шапки и всех описанных табличных частей" in instruction
+
+
 def test_host_and_delivery_template_are_decision_inputs(monkeypatch):
     from kd2_rules_mcp.authoring.ed import manager_render
 

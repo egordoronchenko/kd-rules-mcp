@@ -31,6 +31,7 @@ from kd2_rules_mcp.ed.writer_import import (
 from kd2_rules_mcp.ed.writer_model import ManagerModel
 from kd2_rules_mcp.ed.writer_readback import check_readback
 from kd2_rules_mcp.validation.ed_links import validate_links
+from kd2_rules_mcp.validation.ed_names import validate_handler_names
 from kd2_rules_mcp.validation.report import Issue, ValidationReport
 
 
@@ -631,6 +632,8 @@ def validate_writer(
     profile: ExecutorCapabilities | None = None,
     receive_path: ReceivePath | None = None,
     operations: Sequence[ManagerOperation] = (),
+    common_modules: Sequence[str] | None = None,
+    global_methods: Sequence[str] = (),
 ) -> ValidationReport:
     """Возвращает ValidationReport; зелёный статический отчёт не удостоверяет живой обмен.
 
@@ -694,6 +697,11 @@ def validate_writer(
         return report
     if mismatch is not None:
         report.error("ed.writer.read", mismatch.address, mismatch.message)
+    report.extend(
+        validate_handler_names(
+            model, document, common_modules=common_modules, global_methods=global_methods
+        )
+    )
     routines = {}
     for routine in _server_routines(document):
         routines.setdefault(routine.name.casefold(), []).append(routine)

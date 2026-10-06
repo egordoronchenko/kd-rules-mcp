@@ -247,6 +247,17 @@ async def test_ed_tools(service: Kd2Service) -> None:
         assert overview["counts"]["pks"] == 4
         listed = await _call(client, "ed_list", project_id=project, kind="pks", limit=1)
         assert listed["total"] == 4 and len(listed["items"]) == 1
+        handlers = await _call(client, "ed_list", project_id=project, kind="handler")
+        name = handlers["items"][0]["name"]
+        filtered = await _call(
+            client, "ed_list", project_id=project, kind="handler", name_filter=name
+        )
+        assert filtered["total"] == 1 and filtered["items"][0]["name"] == name
+        assert await _call(
+            client, "ed_get", project_id=project, address="Код/" + name, include_text=True
+        ) == await _call(
+            client, "ed_get", project_id=project, address="Обработчик/" + name, include_text=True
+        )
         result = await _call(client, "ed_get", project_id=project, address="ПКО/Товар")
         assert result["kind"] == "pko" and "text" not in result
         located = await _call(client, "ed_locate", project_id=project, line=1)
