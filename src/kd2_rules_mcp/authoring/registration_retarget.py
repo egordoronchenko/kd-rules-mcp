@@ -27,13 +27,18 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from lxml import etree
 
-from kd2_rules_mcp.authoring.registration import snapshot_registration
+from kd2_rules_mcp.authoring.registration import (
+    FilterProperty,
+    ObjectFilter,
+    _object_filter,
+    snapshot_registration,
+)
 from kd2_rules_mcp.errors import (
     DuplicateTargetPropertyError,
     InvalidRegistrationNameError,
@@ -65,6 +70,18 @@ _HANDLERS = (
     "ПослеОбработки",
 )
 _UNLOAD_MODE = "РеквизитРежимаВыгрузки"
+# ОбменДаннымиСобытия:3021–3027: только эти виды проверяются перед выгрузкой.
+_DELETION_OBJECT_KINDS = frozenset(
+    {
+        "Справочник",
+        "Документ",
+        "ПланВидовХарактеристик",
+        "ПланСчетов",
+        "ПланВидовРасчета",
+        "БизнесПроцесс",
+        "Задача",
+    }
+)
 _ALLOWED_DIFF = frozenset({"ПланОбмена.Имя", "ПланОбмена", _PLAN_FILTER, _UNLOAD_MODE})
 
 
@@ -141,6 +158,8 @@ class RetargetResult:
     mentions: tuple[CodeMention, ...]
     source_rules_hash: str = ""
     notices: tuple[RetargetNotice, ...] = ()
+    deletion_mark_filter: bool = False
+    deletion_filters: tuple[tuple[str, str], ...] = ()
 
 
 def retarget_registration(
@@ -150,6 +169,8 @@ def retarget_registration(
     node_properties: Mapping[str, str],
     target_plan: ObjectCard | None = None,
     target_properties: frozenset[str] | None = None,
+    deletion_mark_filter: bool = False,
+    target_objects: Sequence[ObjectCard] | None = None,
 ) -> RetargetResult:
     """Копия правил регистрации с новым именем плана и реквизитами узла.
 
@@ -204,7 +225,216 @@ def retarget_registration(
         notices=case_notices + registration_type_notices(cloned, target_plan),
     )
     _assert_only_expected(document, result.document, name, effective)
+    if deletion_mark_filter:
+        if target_objects is None:
+            raise RegistrationRetargetError(
+                "Для отбора по пометке нужны карточки объектов конфигурации"
+            )
+        statuses, notices = _deletion_filters(cloned, target_plan, target_objects)
+        result = replace(
+            result,
+            deletion_mark_filter=True,
+            deletion_filters=statuses,
+            notices=result.notices + notices,
+        )
     return result
+
+
+def deletion_filter_summary(result: RetargetResult) -> dict:
+    """Счётчики добавления и причин пропуска; адреса замечаний выдаются постранично."""
+    reasons: dict[str, int] = {}
+    added = 0
+    for _, status in result.deletion_filters:
+        if status == "added":
+            added += 1
+        else:
+            reasons[status] = reasons.get(status, 0) + 1
+    summary = {
+        "enabled": result.deletion_mark_filter,
+        "added": added,
+        "skipped": sum(reasons.values()),
+        "skipped_by_reason": reasons,
+    }
+    if result.deletion_mark_filter:
+        summary["mode_rules"] = sum(n.check == "registration.deletion_mode" for n in result.notices)
+    return summary
+
+
+def registration_rule_active(rule: Node) -> bool:
+    """БСП загружает только Валидное=true (ЗПРО:282–292,1065–1085), как rules_validate."""
+    return rule.attrs.get("Отключить") is not True and rule.attrs.get("Валидное", False) is True
+
+
+def _has_deletion_mark(card: ObjectCard) -> bool:
+    return any(
+        p.path.casefold() == "пометкаудаления"
+        and not p.is_group
+        and p.kind in {"Свойство", "СтандартныйРеквизит"}
+        for p in card.properties
+    )
+
+
+def _deletion_filters(
+    rules: RegistrationRules, plan: ObjectCard | None, objects: Sequence[ObjectCard]
+) -> tuple[tuple[tuple[str, str], ...], tuple[RetargetNotice, ...]]:
+    """Добавляет лист в корень «И», сохраняя группы и обработчики.
+
+    Форма: reference/kd2-cfg/DataProcessors/ВыгрузкаРегистрации/Ext/ObjectModule.bsl:
+    362–385,402–420;
+    ЗагрузкаПравилРегистрацииОбъектов:514–574 читает тип перед константой.
+    ОбменДаннымиСобытия:1833–1847 — ПРОБ И ПРОП,2598–2641 — корень И;
+    :1874–1897,2671–2686 — перед отбором код может менять ПРО;
+    :2113,2700–2737 — ПриОбработке меняет запрос узлов после ПРОБ;
+    :1888–1900,2782–2796 — ПослеОбработки может добавлять получателей.
+    :1833,2446–2474 — алгоритм значения исполняется с доступом к ПРО до отбора.
+    """
+    cards = {alias.casefold(): card for card in objects for alias in (card.name, card.type_name)}
+    statuses, notices = [], []
+    enabled: dict[str, list[tuple[str, str, bool]]] = {}
+
+    def notice(check: str, address: str, reference: str, message: str, ack: bool = True) -> None:
+        notices.append(
+            RetargetNotice(
+                check, address, _OBJECT_FILTER, reference, message, requires_acknowledgement=ack
+            )
+        )
+
+    for address, rule in zip(pro_addresses(rules.rules()), rules.rules(), strict=True):
+        raw = str(rule.get("ОбъектМетаданныхИмя"))
+        card = cards.get(raw.casefold())
+        if rule.attrs.get("Отключить") is True:
+            status = "disabled"
+        elif not registration_rule_active(rule):
+            status = "invalid"
+        elif card is None:
+            status = "object_unchecked"
+            notice(
+                "registration.deletion_unchecked",
+                address,
+                raw,
+                f"{address}: объект «{raw}» не найден в структуре; наличие пометки не проверено.",
+            )
+        elif not _has_deletion_mark(card):
+            status = "no_deletion_mark"
+        elif card.kind not in _DELETION_OBJECT_KINDS:
+            status = "unsupported_kind"
+        else:
+            existing = any(
+                str(item.get("СвойствоОбъекта")).split(".", 1)[0].casefold() == "пометкаудаления"
+                for tag in (_OBJECT_FILTER, _PLAN_FILTER)
+                for _, item in _leaves(rule, tag)
+            )
+            status = "existing_filter" if existing else "added"
+            guarded = not existing
+            if existing:
+                guarded = any(
+                    len(path) == 1
+                    and str(item.get("СвойствоОбъекта")).casefold() == "пометкаудаления"
+                    and item.get("ТипСвойстваОбъекта") == "Булево"
+                    and item.get("ВидСравнения") == "Равно"
+                    and item.get("Вид") in ("", "ЗначениеКонстанты")
+                    and str(item.get("ЗначениеКонстанты")).strip() in {"false", "0"}
+                    for path, item in _leaves(rule, _OBJECT_FILTER)
+                )
+                notice(
+                    "registration.deletion_existing",
+                    address,
+                    raw,
+                    f"{address}: отбор по пометке уже есть и сохранён без изменений; "
+                    "проверьте, что помеченный объект не проходит правило.",
+                    ack=not guarded,
+                )
+            else:
+                container = rule.child(_OBJECT_FILTER)
+                if container is None:
+                    container = Node.new("object_filter", _OBJECT_FILTER)
+                    rule.children[_OBJECT_FILTER] = container
+                container.items.append(
+                    _object_filter(
+                        ObjectFilter(
+                            object_property="ПометкаУдаления",
+                            property_type="Булево",
+                            comparison="Равно",
+                            element_kind="ЗначениеКонстанты",
+                            constant_value="false",
+                            object_properties=(
+                                FilterProperty("ПометкаУдаления", "Булево", "Свойство"),
+                            ),
+                        )
+                    )
+                )
+            enabled.setdefault(card.name.casefold(), []).append((address, status, guarded))
+            code_sources = [(event, str(rule.get(event))) for event in _HANDLERS]
+            code_sources.extend(
+                (f"АлгоритмЗначения {_leaf_label(tag, path)}", str(item.get("ЗначениеКонстанты")))
+                for tag in (_OBJECT_FILTER, _PLAN_FILTER)
+                for path, item in _leaves(rule, tag)
+                if item.get("Вид") == "АлгоритмЗначения"
+            )
+            for event, code in code_sources:
+                if any(line.strip() for line in _code_without_comments(code)):
+                    notice(
+                        "registration.deletion_handler",
+                        address,
+                        event,
+                        f"{address}, {event}: код сохранён. "
+                        "Он может менять правило или получателей; "
+                        "сервер его не исполняет. Проверьте, что отбор по пометке не обходится.",
+                    )
+            mode = str(rule.get(_UNLOAD_MODE)).strip()
+            if mode:
+                notice(
+                    "registration.deletion_mode",
+                    address,
+                    mode,
+                    f"{address}: проверьте режим узла в «{mode}». «По условию» или пустой: "
+                    "пометка и её снятие передаются с отбором. «При необходимости»: "
+                    "пометка уходит удалением и без нашего отбора; "
+                    "снятие пометки не регистрируется "
+                    "до следующего изменения объекта. После снятия нужно перезаписать объект "
+                    "или зарегистрировать его к отправке. "
+                    "«Выгружать всегда»: отбор не проверяется. "
+                    "«Вручную» и «Не выгружать»: помеченный объект снимается с регистрации "
+                    "без отправки удаления. "
+                    "При начальной выгрузке помеченные объекты не отправляются, "
+                    "кроме узлов с режимом «Выгружать всегда».",
+                )
+        statuses.append((address, status))
+    for name, rows in enabled.items():
+        if (
+            len(rows) > 1
+            and any(s == "added" for _, s, _ in rows)
+            and not all(g for _, _, g in rows)
+        ):
+            notice(
+                "registration.deletion_partial",
+                rows[0][0],
+                name,
+                "Отбор добавлен не во все правила объекта: часть уже содержит свой отбор. "
+                "Помеченный объект должен не проходить каждое правило: "
+                + "; ".join(a for a, _, _ in rows),
+            )
+    if plan is not None:
+        for prop in plan.properties:
+            if prop.kind != "ЭлементСоставаПланаОбмена":
+                continue
+            for type_name in prop.types + prop.unresolved:
+                card = cards.get(type_name.casefold())
+                if (
+                    card is not None
+                    and _has_deletion_mark(card)
+                    and card.kind in _DELETION_OBJECT_KINDS
+                    and card.name.casefold() not in enabled
+                ):
+                    notice(
+                        "registration.deletion_missing_rule",
+                        f"ПланОбмена.{rules.exchange_plan}",
+                        card.name,
+                        f"Объект «{card.name}» входит в состав плана, "
+                        "но действующего правила регистрации нет. "
+                        "Он выгружается всегда; пометка удаления этим отбором не передастся.",
+                    )
+    return tuple(statuses), tuple(notices)
 
 
 def applicable_node_keys(rules: RegistrationRules, mapping: Mapping[str, str]) -> bool:

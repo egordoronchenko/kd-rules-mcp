@@ -17,14 +17,17 @@ from kd2_rules_mcp.authoring.ed.manifest import json_bytes, sha256
 from kd2_rules_mcp.authoring.ed.registration_delivery import (
     NodeValueHint,
     OwnNodeAttribute,
+    deletion_mark_instruction,
     read_plan_host,
     render_registration_kit,
 )
 from kd2_rules_mcp.authoring.ed.xml_dump import M, parse_xml
 from kd2_rules_mcp.authoring.registration_retarget import (
     RetargetResult,
+    deletion_filter_summary,
     own_attribute_covers,
     own_attribute_remarks,
+    registration_rule_active,
     retarget_registration,
 )
 from kd2_rules_mcp.authoring.workspace import _source_changed
@@ -100,7 +103,11 @@ def _notices(result: RetargetResult, own: set[str]) -> list[dict[str, Any]]:
 
 
 def _manual_files(
-    result: RetargetResult, plan: str, hints: list[NodeValueHint], notices: list[dict[str, Any]]
+    result: RetargetResult,
+    plan: str,
+    hints: list[NodeValueHint],
+    notices: list[dict[str, Any]],
+    source_file_hash: str | None = None,
 ) -> dict[str, bytes]:
     """Использует принятую инструкцию доставки, убирая шаги установки расширения."""
     text = (
@@ -114,15 +121,21 @@ def _manual_files(
     load = text.split("## 4. Загрузите файл правил регистрации", 1)[1].split(
         "Расширение отключайте только", 1
     )[0]
+    required = (
+        [n for n in notices if n["requires_acknowledgement"] or n["blocking"]]
+        if result.deletion_mark_filter
+        else notices
+    )
     incomplete = (
-        ("## Перенос неполон\n\n" + "\n".join("- " + n["message"] for n in notices))
-        if notices
+        ("## Перенос неполон\n\n" + "\n".join("- " + n["message"] for n in required))
+        if required
         else ""
     )
     manual = (
         f"# Перенос правил регистрации\n\nПлан обмена: `{plan}`.\n\n{incomplete}\n\n"
         "Файл заменяет правила регистрации всего плана. Проверьте все обмены этого плана.\n\n"
-        "## 1. Сохраните текущее состояние"
+        + (deletion_mark_instruction(result) + "\n\n" if result.deletion_mark_filter else "")
+        + "## 1. Сохраните текущее состояние"
         + saved
         + "## 2. Перенесите настройки узлов\n\n"
         + table(
@@ -140,10 +153,22 @@ def _manual_files(
         + "\nВ комплекте: `registration/RegistrationRules.xml` и `ИНСТРУКЦИЯ.md`.\n"
         "Этот комплект в базу не ставился. Регистрацию и обмен проверьте в тестовой базе.\n"
     )
-    return {
+    output = {
         "registration/RegistrationRules.xml": dump_rules(result.document),
         "ИНСТРУКЦИЯ.md": manual.encode("utf-8"),
     }
+    if result.deletion_mark_filter:
+        output["manifest.json"] = json_bytes(
+            {
+                "schema": _SCHEMA,
+                "deletion_mark_filter": True,
+                "source_rules": result.source_rules_hash,
+                "source_file": source_file_hash,
+                "deletion_filters": deletion_filter_summary(result),
+                "file_hashes": {p: sha256(b) for p, b in sorted(output.items())},
+            }
+        )
+    return output
 
 
 class RegistrationRetargetMixin(EdAuthoringMixin):
@@ -335,8 +360,11 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
         acknowledged_notices: list[str] | None = None,
         offset: int = 0,
         limit: int = 50,
+        deletion_mark_filter: bool = False,
     ) -> dict[str, Any]:
         validate_page(offset, limit)
+        if not isinstance(deletion_mark_filter, bool):
+            raise ValueError("deletion_mark_filter: нужно булево значение")
         if mode not in ("preview", "write"):
             raise ValueError("mode: preview или write")
         if structure_id is not None and (not isinstance(structure_id, str) or not structure_id):
@@ -388,10 +416,10 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                 # Сначала нижний слой проверяет вид документа и имена, до построения путей XML.
                 if isinstance(document, RegistrationRules) and (
                     not document.rules()
-                    or all(r.attrs.get("Отключить") is True for r in document.rules())
+                    or not any(registration_rule_active(r) for r in document.rules())
                 ):
                     raise RegistrationToolError(
-                        "Правила пусты или все правила отключены: файл заменил бы "
+                        "Правила пусты или все правила отключены/невалидны: файл заменил бы "
                         "регистрацию всего плана и прекратил регистрировать объекты; "
                         "перенос запрещён.",
                         code="registration.empty_rules",
@@ -403,6 +431,7 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                     and document.exchange_plan.casefold() == exchange_plan.casefold()
                     and isinstance(node_properties, dict)
                     and not node_properties
+                    and not deletion_mark_filter
                 ):
                     raise RegistrationToolError(
                         "Правила уже предназначены для целевого плана, "
@@ -413,15 +442,35 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                     document, plan_name=exchange_plan, node_properties=node_properties
                 )
                 root, extensions = self._registration_source(source)
-                host = read_plan_host(root, exchange_plan, extensions=extensions)
+                object_names = (
+                    tuple(str(r.get("ОбъектМетаданныхИмя")) for r in result.document.rules())
+                    if deletion_mark_filter
+                    else None
+                )
+                host = read_plan_host(
+                    root, exchange_plan, extensions=extensions, object_names=object_names
+                )
                 card, structure_hash = self._registration_card(
                     structure_id, root, extensions, exchange_plan
                 )
+                objects = host.objects
+                if deletion_mark_filter and structure_id is not None:
+                    with self.store.open(structure_id) as connection:
+                        # Константы представлены свойствами НаборКонстант, а не объектами
+                        # структуры (xmlbuild:build). Для них используем карточку той же выгрузки.
+                        objects = tuple(
+                            actual if actual is not None else obj
+                            for obj in host.objects
+                            if (actual := read_object_card(connection, obj.name)) is not None
+                            or obj.kind == "Константа"
+                        )
                 result = retarget_registration(
                     document,
                     plan_name=exchange_plan,
                     node_properties=node_properties,
                     target_plan=card or host.card,
+                    deletion_mark_filter=deletion_mark_filter,
+                    target_objects=objects,
                 )
                 own = {a.name.casefold() for a in attributes}
                 notices = _notices(result, own)
@@ -464,7 +513,7 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                         # Нижний слой отказал по полному отчёту; опасный комплект не порождаем.
                         files = {}
                 else:
-                    files = _manual_files(result, exchange_plan, hints, notices)
+                    files = _manual_files(result, exchange_plan, hints, notices, source_hash)
                 inputs = {
                     "document": sha256(dump_rules(document)),
                     "source_file": source_hash,
@@ -479,6 +528,8 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                     },
                     "notices": notices,
                 }
+                if deletion_mark_filter:
+                    inputs["decisions"]["deletion_mark_filter"] = True
                 owner = sha256(
                     json_bytes(
                         {
@@ -515,7 +566,9 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                 status = "blocked" if blockers else "ready"
 
                 def verify():
-                    current_host = read_plan_host(root, exchange_plan, extensions=extensions)
+                    current_host = read_plan_host(
+                        root, exchange_plan, extensions=extensions, object_names=object_names
+                    )
                     _, current_structure = self._registration_card(
                         structure_id, root, extensions, exchange_plan
                     )
@@ -566,6 +619,7 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                         "code_mentions": result.code_mentions,
                     },
                     "unused_keys": list(result.unused),
+                    "deletion_mark_filter": deletion_filter_summary(result),
                     "notices": slice_rows(notices, offset, limit),
                     "required_acknowledgements": required,
                     "blocking_notices": len(blockers),

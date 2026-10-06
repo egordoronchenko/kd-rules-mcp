@@ -444,23 +444,24 @@ selected filters only. Inspect warnings/losses for missing attributes or handler
 
 ### `registration_retarget`
 
-Retarget registration into a workspace kit. Details: docs/tools.md.
+Copy registration rules.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `project_id` | string | required | Registration project |
-| `exchange_plan` | string | required | Target plan |
-| `node_properties` | object | required | Old→new: Name/[T]/[T].Name |
-| `source` | object | required | project/configuration_path |
+| `project_id` | string | required | Project |
+| `exchange_plan` | string | required | Plan |
+| `node_properties` | object | required | Mapping |
+| `source` | object | required | Dump |
 | `structure_id` | any | `null` | Structure ID |
 | `own_attributes` | any | `null` | name,type,synonym |
 | `node_values` | any | `null` | source,target,instruction |
-| `extension` | any | `null` | Name and prefix |
+| `extension` | any | `null` | name,prefix |
 | `mode` | string | `"preview"` | preview/write |
-| `expected_preview_hash` | any | `null` | Write hash |
-| `acknowledged_notices` | any | `null` | Notice IDs |
-| `offset` | integer | `0` | Offset |
-| `limit` | integer | `50` | Limit |
+| `expected_preview_hash` | any | `null` | Hash |
+| `acknowledged_notices` | any | `null` | Notices |
+| `offset` | integer | `0` | Skip |
+| `limit` | integer | `50` | Size |
+| `deletion_mark_filter` | boolean | `false` | Exclude marked |
 
 ### `correspondent_draft`
 
@@ -1008,13 +1009,51 @@ or unknown value types block writing. A KD2 constant with no `ТипСвойст
 boolean comparison even if its text is `true` or `false`; a missing constant type blocks writing
 also for an existing field because BSP cannot load it. `node_values` is an optional instruction table:
 `{source, target, instruction?}`. Without own attributes and extension the kit contains exactly the
-rules XML and instruction, with no generated extension or kit manifest.
-Empty rules or rules with every rule disabled refuse with `registration.empty_rules`: this file
+rules XML and instruction, with no generated extension. Enabling `deletion_mark_filter` also adds
+a kit manifest; extension kits always include one.
+Empty rules or rules with every rule disabled or invalid refuse with `registration.empty_rules`: this file
 replaces registration for the whole plan.
 A project without a source file refuses with `registration.source_required`; save it with `rules_save`
 and reopen the file with `rules_open`. `registration.already_targeted` refuses only when the plan
-is already targeted and the mapping is empty; old fields on the same plan may still be retargeted,
+is already targeted, the mapping is empty and `deletion_mark_filter` is false; old fields may be retargeted,
 and explicitly supplied absent keys remain unused.
+
+`deletion_mark_filter: true` adds an object filter `ПометкаУдаления = false`, ANDed with existing
+filters, to each enabled rule whose object has that standard property in the target configuration.
+The default is false. The standard property is read from metadata. BSP checks the filter at unload
+only for catalogs, documents, characteristic/account/calculation charts, business processes and tasks.
+Other kinds with the property (such as exchange plans) are skipped as `unsupported_kind`.
+With no `structure_id`, the same metadata reader supplies standard properties from the selected dump;
+read object files and plan content participate in the preview hash. Disabled rules and objects without
+the property are skipped silently. Any existing filter on the property is preserved and reported.
+The `deletion_mark_filter` response contains `enabled`, `added`, `skipped` and `skipped_by_reason`
+(`disabled`, `invalid`, `unsupported_kind`, `no_deletion_mark`, `existing_filter`, `object_unchecked`).
+Enabled previews also return `mode_rules`: the number of active eligible rules with a node unload-mode
+field. Each has a paginated `registration.deletion_mode` notice and an instruction-table row with its
+rule address and field name. Only `Валидное="true"` rules are active; false or absent is inactive,
+like disabled rules (BSP ЗПРО:289–292,1065–1085).
+The manifest records `deletion_mark_filter: true` only when enabled. When false, kit bytes and hashes
+match the version before this option; the manual kit preserves all notices in its incomplete block.
+
+Deletion notices are paginated with the other notices. These require acknowledgement before write:
+`registration.deletion_missing_rule` (plan member without an enabled rule),
+`registration.deletion_partial` (some rules gained the filter, another active rule lacks a proven guard),
+`registration.deletion_handler` (preserved handlers or value algorithms may alter filters or recipients),
+`registration.deletion_mode` (node unload mode cannot be checked statically),
+`registration.deletion_unchecked` (object metadata is missing), and `registration.deletion_existing`
+when the existing filter cannot be proven to be a root boolean equality to false. A clear existing
+root equality only emits an informational notice. The instruction starts with required notices and
+explains conditional unload modes, receiver UID matching, initial unload and closed-period limits.
+Static checks do not prove deletion delivery; verify an ordinary catalog item and a posted document
+in a test exchange.
+
+Node modes have different deletion behaviour. `По условию` or an empty mode uses the filter.
+`Выгружать всегда` bypasses it. `При необходимости` sends the mark as deletion even without this
+filter, but unmarking does not register the object until its next change: rewrite it or register it
+for sending after unmarking. `Вручную` and `Не выгружать` remove marked objects from registration
+without sending deletion; initial unload skips marked objects except for nodes with `Выгружать всегда`
+(BSP ОДСоб:2958–2972). Mode notices, the instruction
+table and test step 2 explicitly explain the additional rewrite for on-demand catalogs.
 
 Example with fictional names (first open the source using `rules_open`):
 
@@ -1025,6 +1064,7 @@ Example with fictional names (first open the source using `rules_open`):
   "node_properties": {"OldDate": "DateStart", "OldFlag": "reg_Flag"},
   "source": {"project": "demo", "configuration": "full"},
   "structure_id": "demo-full",
+  "deletion_mark_filter": true,
   "own_attributes": [{"name": "reg_Flag", "type": "Булево", "synonym": "Флаг узла"}],
   "extension": {"name": "reg_Registration", "prefix": "reg_"},
   "node_values": [{"source": "OldFlag", "target": "reg_Flag", "instruction": "Перенести значение"}],
@@ -1712,12 +1752,13 @@ delete/move accept neither. Client IDs cannot change content.
 
 | Target/position | Contract |
 |---|---|
-| IDs / addresses | Writer IDs (`result_id`/navigation). Resolve after preceding operations; direction qualifiers work; positional `~N`/`#N` refuse. |
+| IDs / addresses | Writer IDs (`result_id`/navigation). Resolve after preceding operations; direction qualifiers work. Legacy top-level `address` refuses positional `~N`/`#N`; address-reference objects accept exact listed addresses against the current revision. |
 | Create result | No target/address; client-derived ID. Handler result = binding. |
 | `after_id` on create | Omitted: append (import: generator key); null: first. Explicit placement also needs container. |
 | `move` | Destination required: `container_id` or explicit `after_id`; omitting both refuses. Container alone: append; null: first. Direction changes recheck references. |
 | Position IDs | Layout container; anchor element/entity/container inside. No crossing retained context or owner/direction boundaries. |
 | Packet references | `{"client_id":"earlier"}` in `owner_id,container_id,after_id,target_id`, `conversion`, `used_pko[]`, handler `target` or their `target_id`. Unknown/forward/deleted refuses; strings = IDs. |
+| Address references | `{"address":"ПКО/Name"}` in the same fields, including `conversion`, `used_pko[]`, handler `target` and nested `target_id`. Resolves against the model after preceding operations. Same-name rules require `ПКО/Name~send` / `~receive`; ambiguity refuses with candidate addresses in `references`. Missing/forward/deleted addresses refuse the packet. Exact listed child/container addresses also work. |
 
 ПКО ID = header container, not module. Handler target references an earlier algorithm or handler's method.
 
@@ -1770,9 +1811,9 @@ preserve retains them exactly. Table/column trailing comments survive edits and 
 
 | Reference field | Accepted shape |
 |---|---|
-| `conversion` | `{"kind":"pko","target_id":"<id>","resolution":"resolved"}` (or kind `pkpd`); alternatively `{ "kind":"pko", "name":"ExactName" }`, resolved by direction. Name defaults empty/inferred. Also `{"client_id":"earlier-rule"}` or nested target-ID reference. Empty: `{"kind":"conversion"}`. |
-| `used_pko` | Array of `{"kind":"pko","target_id":"<id>","resolution":"resolved"}` or client references; kind defaults `pko`, name empty/inferred. Name alone insufficient; `[]` removes all. |
-| Handler `target` | `{"kind":"code_unit","target_id":"<method-id>","resolution":"resolved"}`; optional name. Also `{"client_id":"earlier-method"}` or nested target-ID reference. |
+| `conversion` | `{"kind":"pko","target_id":"<id>","resolution":"resolved"}` (or kind `pkpd`); alternatively `{ "kind":"pko", "name":"ExactName" }`, resolved by direction. Name defaults empty/inferred. Also client/address references (e.g. `{"address":"ПКО/Target"}`) or nested target-ID reference. Empty: `{"kind":"conversion"}`. |
+| `used_pko` | Array of `{"kind":"pko","target_id":"<id>","resolution":"resolved"}`, client or address references; kind defaults `pko`, name empty/inferred. Name alone insufficient; `[]` removes all. |
+| Handler `target` | `{"kind":"code_unit","target_id":"<method-id>","resolution":"resolved"}`; optional name. Also client/address references (e.g. `{"address":"Код/Search"}`) or nested target-ID reference; a binding address selects its method. |
 
 ### Code frames, bodies and dependencies
 
@@ -1782,6 +1823,7 @@ preserve retains them exactly. Table/column trailing comments survive edits and 
 | `ВыборкаДанных` | ПОД send function: КомпонентыОбмена |
 | `ПриОтправкеДанных` | ПКО send: ДанныеИБ, ДанныеXDTO, КомпонентыОбмена, СтекВыгрузки |
 | `ПриКонвертацииДанныхXDTO` | ПКО receive: ДанныеXDTO, ПолученныеДанные, КомпонентыОбмена |
+| `АлгоритмПоиска` | ПКО receive procedure: ДанныеИБ, ПолученныеДанные, КомпонентыОбмена; dispatcher uses these same parameter keys. Runs after field search; ДанныеXDTO is not passed (XDTO:1911–1916,8697–8730). |
 | `ПередЗаписьюПолученныхДанных` | ПКО receive: ПолученныеДанные, ДанныеИБ, КонвертацияСвойств, КомпонентыОбмена |
 | `ПослеЗагрузкиВсехДанных` | ПКО: existing procedure algorithm target, no new frame/body |
 
@@ -1791,6 +1833,8 @@ preserve retains them exactly. Table/column trailing comments survive edits and 
 | Update/clear body | Exact heading-to-closing text including first LF/CRLF and final newline/indent, e.g. `"\n\tX=1;\n"`. Clear keeps frame; semantics not parsed/executed. |
 | Body restrictions | Lone CR/VT/FF/U+0085/U+2028/U+2029/U+001C–U+001E rejected with position; balanced regions, intact method boundaries. |
 | Dispatcher | Only changed bindings affect branches; imported defects/aliases remain. Identifiers: case-insensitive; literals: exact. |
+| Old projects | Snapshot format 4 migrates W1/W2 format-3 projects on read. Own retained empty dispatchers are restored only after provenance/signature/template checks; missing standard table helper is added to confirmed authored managers. Rule/decision IDs and opaque bodies remain. Read is disk-neutral; next successful apply writes format 4. |
+| Unsupported event | `handler create` returns `unsupported_form` and names the unsupported event. Generator extension fields are retained without guessing executor behavior. |
 | Restore | `handler update` + `restore_dispatcher:true`, confirm execution change. Occupied literal calling another method refuses with callee/line; retained branch cannot change. |
 | Conversion events | Update/clear existing `ПередКонвертацией`, `ПослеКонвертации`, `ПередОтложеннымЗаполнением`, `ПередОбработкойУдаляемогоОбъекта`; event/code ID or `Событие/<name>`. No create. |
 | Algorithm update | Rename updates local direct calls/bindings/branches, not strings. Signature change with calls needs review of locations/visible mismatches; deferred algorithms remain procedures. |
@@ -1896,6 +1940,18 @@ Table-part group and a direct row property (the property owner is the group):
   {"client_id":"row-owner","kind":"pko","action":"create","patch":{"name":"RowOwner","directions":["send","receive"]}},
   {"client_id":"rows","kind":"table_part","action":"create","owner_id":{"client_id":"row-owner"},"patch":{"configuration_property":"Строки","format_property":"Rows"}},
   {"client_id":"quantity","kind":"property","action":"create","owner_id":{"client_id":"rows"},"patch":{"configuration_property":"Количество","format_property":"Quantity"}}
+]
+```
+
+Search handler attached by address to a rule from the preceding operation (the same form
+works for rules from earlier packets):
+
+<!-- ed-writer-example: search_address -->
+```json
+[
+  {"client_id":"address-bank","kind":"pko","action":"create","patch":{"name":"Bank","directions":["receive"]}},
+  {"client_id":"address-search","kind":"handler","action":"create","owner_id":{"address":"ПКО/Bank"},"patch":{"event":"АлгоритмПоиска","body":"ДанныеИБ = Неопределено;"}},
+  {"client_id":"address-code","kind":"property","action":"create","owner_id":{"address":"ПКО/Bank"},"patch":{"configuration_property":"Code","format_property":"Code"}}
 ]
 ```
 

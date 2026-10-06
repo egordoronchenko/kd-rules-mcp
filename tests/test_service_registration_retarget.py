@@ -11,7 +11,7 @@ import pytest
 
 from kd2_rules_mcp.authoring.ed.manifest import json_bytes, sha256
 from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.kd2.model import RegistrationRules
+from kd2_rules_mcp.kd2.model import Node, RegistrationRules
 from kd2_rules_mcp.kd2.rules_io import dump_rules, load_registration_rules
 from kd2_rules_mcp.server import error_payload
 from kd2_rules_mcp.service import Kd2Service, Settings
@@ -98,7 +98,7 @@ def test_preview_write_repeat_and_original_unchanged(tmp_path: Path) -> None:
     assert snapshot(target) == {f["path"]: f["sha256"] for f in preview["files"]}
     restored = load_registration_rules(target / "registration/RegistrationRules.xml")
     assert sha256((target / "registration/RegistrationRules.xml").read_bytes()) == (
-        "5c9c7422582eeb79b0c656009a9dabbf97193d8e57f238a7085143fb749dbb75"
+        "fcb4374e0135debaeccbc6abb1ff7b2dde6235d181fd63fee81010d77e35e1df"
     )
     assert restored.exchange_plan == "TargetPlan"
     filters = restored.rules()[0].child("ОтборПоСвойствамПланаОбмена")
@@ -1156,3 +1156,430 @@ def test_composite_object_property_type_matches_by_intersection_in_both_sources(
             leaf = restored.rules()[0].child("ОтборПоСвойствамПланаОбмена")
             assert leaf is not None
             assert leaf.items[0].get("ТипСвойстваОбъекта") == types
+
+
+def deletion_setup(tmp_path: Path) -> tuple[Kd2Service, dict[str, Any]]:
+    """Выгрузка с пометкой, обычными регистрами и объектами без действующих ПРО."""
+    service, args = setup(tmp_path)
+    dump = tmp_path / "dump"
+    objects = [
+        ("Catalog", "Catalogs", "Marked"),
+        ("Document", "Documents", "Invoice"),
+        ("InformationRegister", "InformationRegisters", "State"),
+        ("Catalog", "Catalogs", "Missing"),
+        ("Catalog", "Catalogs", "Disabled"),
+    ]
+    config = dump / "Configuration.xml"
+    config.write_text(
+        config.read_text("utf-8").replace(
+            "</ChildObjects>",
+            "".join(f"<{tag}>{name}</{tag}>" for tag, _, name in objects) + "</ChildObjects>",
+        ),
+        "utf-8",
+    )
+    for index, (tag, directory, name) in enumerate(objects):
+        folder = dump / directory
+        folder.mkdir(exist_ok=True)
+        props = "<BasedOn/>" if tag != "InformationRegister" else ""
+        props += "<DescriptionLength>50</DescriptionLength>" if tag == "Catalog" else ""
+        (folder / f"{name}.xml").write_text(
+            '<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">'
+            f'<{tag} uuid="00000000-0000-4000-8000-{index + 1:012d}"><Properties>'
+            f"<Name>{name}</Name>{props}</Properties><ChildObjects/></{tag}></MetaDataObject>",
+            "utf-8",
+        )
+    content = dump / "ExchangePlans/TargetPlan/Ext/Content.xml"
+    content.parent.mkdir(parents=True)
+    content.write_text(
+        '<Content xmlns="http://v8.1c.ru/8.3/xcf/extrnprops">'
+        + "".join(
+            f"<Item><Metadata>{tag}.{name}</Metadata><AutoRecord>Deny</AutoRecord></Item>"
+            for tag, _, name in objects
+        )
+        + "</Content>",
+        "utf-8",
+    )
+    service.structure_load_xml("target", str(dump), force=True)
+    specs = [
+        {
+            "metadata_name": "Справочник.Marked",
+            "object_filters": [
+                {
+                    "operator": "ИЛИ",
+                    "items": [
+                        {
+                            "object_property": "Наименование",
+                            "property_type": "Строка",
+                            "comparison": "Равно",
+                            "constant_value": "Example",
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "metadata_name": "Справочник.Marked",
+            "object_filters": [
+                {
+                    "object_property": "ПометкаУдаления",
+                    "property_type": "Булево",
+                    "comparison": "Равно",
+                    "constant_value": "true",
+                }
+            ],
+        },
+        {"metadata_name": "Документ.Invoice"},
+        {"metadata_name": "РегистрСведений.State"},
+        {"metadata_name": "Справочник.Disabled"},
+    ]
+    built = service.registration_build("target", "TargetPlan", None, [specs[0], *specs[2:]])
+    document = service.workspace.get(built["project_id"]).document
+    assert isinstance(document, RegistrationRules)
+    existing = deepcopy(document.rules()[0])
+    existing.values["Код"] = "000000006"
+    tree = Node.new("object_filter", "ОтборПоСвойствамОбъекта")
+    leaf = Node.new("object_filter_item", "ЭлементОтбора")
+    leaf.values.update(
+        СвойствоОбъекта="ПометкаУдаления",
+        ТипСвойстваОбъекта="Булево",
+        ВидСравнения="Равно",
+        Вид="ЗначениеКонстанты",
+        ЗначениеКонстанты="true",
+    )
+    tree.items.append(leaf)
+    existing.children[tree.tag] = tree
+    document.section("ПравилаРегистрацииОбъектов").items.insert(1, existing)
+    document.rules()[-1].attrs["Отключить"] = True
+    document.rules()[0].values["ПередОбработкой"] = "Отказ = Ложь;"
+    plan = document.root.child("ПланОбмена")
+    assert plan is not None
+    plan.attrs["Имя"] = "OldPlan"
+    plan.text = "OldPlan"
+    source = tmp_path / "DeletionRules.xml"
+    source.write_bytes(dump_rules(document))
+    service.rules_close(built["project_id"])
+    opened = service.rules_open(str(source))
+    args.update(
+        project_id=opened["project_id"],
+        node_properties={},
+        own_attributes=None,
+        extension=None,
+        deletion_mark_filter=True,
+    )
+    return service, args
+
+
+@pytest.mark.parametrize("with_extension", [False, True])
+def test_deletion_filter_preview_write_validation_and_repeat(
+    tmp_path: Path, with_extension: bool
+) -> None:
+    service, args = deletion_setup(tmp_path)
+    if with_extension:
+        args.update(own_attributes=ATTRIBUTES, extension=EXTENSION)
+    before = snapshot(tmp_path)
+    document = service._document(args["project_id"])
+    source = sha256(dump_rules(document))
+    preview, dumped = both_previews(service, args)
+    assert (
+        preview["deletion_mark_filter"]
+        == dumped["deletion_mark_filter"]
+        == {
+            "enabled": True,
+            "added": 2,
+            "skipped": 3,
+            "skipped_by_reason": {"existing_filter": 1, "no_deletion_mark": 1, "disabled": 1},
+            "mode_rules": 0,
+        }
+    )
+    assert snapshot(tmp_path) == before
+    checks = {n["check"] for n in preview["notices"]["items"]}
+    assert {
+        "registration.deletion_missing_rule",
+        "registration.deletion_handler",
+        "registration.deletion_partial",
+        "registration.deletion_existing",
+    } <= checks
+    assert (
+        sum(n["check"] == "registration.deletion_missing_rule" for n in preview["notices"]["items"])
+        == 2
+    )
+    assert all(n["address"] for n in preview["notices"]["items"])
+    plain_args: dict[str, Any] = args | {"deletion_mark_filter": False}
+    plain = service.registration_retarget(**plain_args)
+    assert plain["preview_hash"] != preview["preview_hash"]
+    failure(
+        service,
+        args | {"mode": "write", "expected_preview_hash": plain["preview_hash"]},
+        "registration.stale",
+    )
+    failure(
+        service,
+        args | {"mode": "write", "expected_preview_hash": preview["preview_hash"]},
+        "registration.ack_required",
+    )
+    written = write(service, args, preview)
+    root = Path(written["output_path"])
+    manifest = json.loads((root / "manifest.json").read_bytes())
+    assert manifest["deletion_mark_filter"] is True
+    instruction = (root / "ИНСТРУКЦИЯ.md").read_text("utf-8")
+    for text in (
+        "Как передаётся пометка удаления",
+        "начальной выгрузке",
+        "закрытом периоде",
+        "отменяет проведение",
+        "снятия пометки",
+        "Перенос неполон",
+    ):
+        assert text in instruction
+    assert "${" not in instruction and "<!-- deletion_mark:" not in instruction
+    reopened = service.rules_open(str(root / "registration/RegistrationRules.xml"))
+    report = service.rules_validate(reopened["project_id"], "target", None, None, None, 0, 200)
+    assert report["summary"]["errors"] == 0
+    repeated = service.registration_retarget(**(args | {"project_id": reopened["project_id"]}))
+    assert repeated["deletion_mark_filter"]["added"] == 0
+    repeated_write = write(service, args | {"project_id": reopened["project_id"]}, repeated)
+    assert (
+        Path(repeated_write["output_path"]) / "registration/RegistrationRules.xml"
+    ).read_bytes() == (root / "registration/RegistrationRules.xml").read_bytes()
+    assert write(service, args, preview)["status"] == "unchanged"
+    assert sha256(dump_rules(document)) == source
+
+
+@pytest.mark.parametrize("value", [None, 1, "true"])
+def test_deletion_filter_flag_is_boolean(tmp_path: Path, value: Any) -> None:
+    service, args = setup(tmp_path)
+    with pytest.raises(ValueError, match="deletion_mark_filter"):
+        service.registration_retarget(**(args | {"deletion_mark_filter": value}))
+
+
+def review_object(
+    service: Kd2Service,
+    tmp_path: Path,
+    tag: str,
+    directory: str,
+    name: str,
+    *,
+    in_plan: bool = False,
+) -> None:
+    """Объекты Invalid, Const и OtherPlan из синтетической пробы r4_synth."""
+    dump = tmp_path / "dump"
+    config = dump / "Configuration.xml"
+    config.write_text(
+        config.read_text("utf-8").replace(
+            "</ChildObjects>", f"<{tag}>{name}</{tag}></ChildObjects>"
+        ),
+        "utf-8",
+    )
+    folder = dump / directory
+    folder.mkdir(exist_ok=True)
+    props = "" if tag == "Constant" else "<BasedOn/>"
+    (folder / f"{name}.xml").write_text(
+        '<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">'
+        f'<{tag} uuid="10000000-0000-4000-8000-000000000001"><Properties>'
+        f"<Name>{name}</Name>{props}</Properties><ChildObjects/></{tag}></MetaDataObject>",
+        "utf-8",
+    )
+    if in_plan:
+        content = dump / "ExchangePlans/TargetPlan/Ext/Content.xml"
+        content.write_text(
+            content.read_text("utf-8").replace(
+                "</Content>",
+                f"<Item><Metadata>{tag}.{name}</Metadata><AutoRecord>Deny</AutoRecord></Item></Content>",
+            ),
+            "utf-8",
+        )
+    service.structure_load_xml("target", str(dump), force=True)
+
+
+@pytest.mark.parametrize("missing_valid", [False, True])
+def test_review_invalid_rule_is_not_active(tmp_path: Path, missing_valid: bool) -> None:
+    service, args = deletion_setup(tmp_path)
+    review_object(service, tmp_path, "Catalog", "Catalogs", "Invalid", in_plan=True)
+    original = service._document(args["project_id"])
+    assert isinstance(original, RegistrationRules)
+    rule = original.rules()[0]
+    rule.values["ОбъектМетаданныхИмя"] = "Справочник.Invalid"
+    if missing_valid:
+        rule.attrs.pop("Валидное", None)
+    else:
+        rule.attrs["Валидное"] = False
+    preview, _ = both_previews(service, args)
+    assert preview["deletion_mark_filter"]["skipped_by_reason"]["invalid"] == 1
+    assert any(
+        n["check"] == "registration.deletion_missing_rule"
+        and n["reference"] == "Справочник.Invalid"
+        for n in preview["notices"]["items"]
+    )
+    written = write(service, args, preview)
+    doc = load_registration_rules(
+        Path(written["output_path"]) / "registration/RegistrationRules.xml"
+    )
+    tree = doc.rules()[0].child("ОтборПоСвойствамОбъекта")
+    assert tree is not None and len(tree.items) == 1
+    for rule in original.rules():
+        if missing_valid:
+            rule.attrs.pop("Валидное", None)
+        else:
+            rule.attrs["Валидное"] = False
+    for enabled in (False, True):
+        failure(service, args | {"deletion_mark_filter": enabled}, "registration.empty_rules")
+
+
+def test_review_constant_has_identical_checks(tmp_path: Path) -> None:
+    service, args = deletion_setup(tmp_path)
+    review_object(service, tmp_path, "Constant", "Constants", "Const")
+    doc = service._document(args["project_id"])
+    rule = Node.new("pro", "Правило")
+    rule.attrs["Валидное"] = True
+    rule.values.update(Код="000000021", ОбъектМетаданныхИмя="Константа.Const")
+    doc.section("ПравилаРегистрацииОбъектов").items.append(rule)
+    preview, _ = both_previews(service, args)
+    assert preview["deletion_mark_filter"]["skipped_by_reason"]["no_deletion_mark"] == 2
+    assert not any(
+        n["check"] == "registration.deletion_unchecked" and n["reference"] == "Константа.Const"
+        for n in preview["notices"]["items"]
+    )
+
+
+def test_review_other_plan_is_not_filtered_at_unload(tmp_path: Path) -> None:
+    service, args = deletion_setup(tmp_path)
+    review_object(service, tmp_path, "ExchangePlan", "ExchangePlans", "OtherPlan")
+    doc = service._document(args["project_id"])
+    rule = Node.new("pro", "Правило")
+    rule.attrs["Валидное"] = True
+    rule.values.update(Код="000000018", ОбъектМетаданныхИмя="ПланОбмена.OtherPlan")
+    doc.section("ПравилаРегистрацииОбъектов").items.append(rule)
+    preview, _ = both_previews(service, args)
+    assert preview["deletion_mark_filter"]["added"] == 2
+    assert preview["deletion_mark_filter"]["skipped_by_reason"]["unsupported_kind"] == 1
+    written = write(service, args, preview)
+    restored = load_registration_rules(
+        Path(written["output_path"]) / "registration/RegistrationRules.xml"
+    )
+    tree = restored.rules()[-1].child("ОтборПоСвойствамОбъекта")
+    assert tree is None or not tree.items
+
+
+def test_review_all_active_rules_protected_no_partial_notice(tmp_path: Path) -> None:
+    service, args = deletion_setup(tmp_path)
+    doc = service._document(args["project_id"])
+    assert isinstance(doc, RegistrationRules)
+    tree = doc.rules()[1].child("ОтборПоСвойствамОбъекта")
+    assert tree is not None
+    tree.items[0].values["ЗначениеКонстанты"] = "false"
+    preview, _ = both_previews(service, args)
+    assert not any(
+        n["check"] == "registration.deletion_partial" for n in preview["notices"]["items"]
+    )
+
+
+def test_review_manual_disabled_parameter_preserves_all_notices(tmp_path: Path) -> None:
+    from dataclasses import asdict
+
+    from kd2_rules_mcp.authoring.ed.registration_delivery import read_plan_host
+
+    service, args = setup(tmp_path)
+    doc = service._document(args["project_id"])
+    assert isinstance(doc, RegistrationRules)
+    filters = doc.rules()[0].child("ОтборПоСвойствамПланаОбмена")
+    assert filters is not None
+    filters.items.pop(0)
+    transferred = module.retarget_registration(
+        doc,
+        plan_name="TargetPlan",
+        node_properties={"OldDate": "datestart"},
+        target_plan=read_plan_host(tmp_path / "dump", "TargetPlan").card,
+    )
+    notices = [asdict(n) for n in transferred.notices]
+    files = module._manual_files(transferred, "TargetPlan", [], notices)
+    root = DATA / "golden/manual-before-deletion"
+    assert files == {
+        p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
+
+
+def test_review_published_kit_rewrite_is_unchanged(tmp_path: Path) -> None:
+    from kd2_rules_mcp.authoring.ed.registration_delivery import read_plan_host
+
+    service, args = setup(tmp_path)
+    args.update(
+        own_attributes=[
+            {"name": "reg_Flag", "type": "Булево", "synonym": "Не выгружать персональные данные"}
+        ],
+        node_values=[
+            {
+                "source": "OldFlag",
+                "target": "reg_Flag",
+                "instruction": "Перенести значение старого узла",
+            }
+        ],
+    )
+    preview = service.registration_retarget(**args)
+    golden_root = DATA / "golden/before-deletion"
+    golden = {
+        p.relative_to(golden_root).as_posix(): p.read_bytes()
+        for p in golden_root.rglob("*")
+        if p.is_file()
+    }
+    root = tmp_path / "dump"
+    source = tmp_path / "RegistrationRules.xml"
+    doc = service._document(args["project_id"])
+    host = read_plan_host(root, "TargetPlan")
+    card, structure_hash = service._registration_card("target", root, (), "TargetPlan")
+    result = module.retarget_registration(
+        doc, plan_name="TargetPlan", node_properties=args["node_properties"], target_plan=card
+    )
+    owner = sha256(
+        json_bytes(
+            {
+                "project_id": args["project_id"],
+                "root": str(root),
+                "source_file": str(source.resolve()),
+                "extensions": [],
+                "plan": "TargetPlan",
+                "extension": EXTENSION,
+            }
+        )
+    )
+    inputs = {
+        "document": sha256(dump_rules(doc)),
+        "source_file": sha256(source.read_bytes()),
+        "host": dict(host.input_hashes),
+        "structure": structure_hash,
+        "source": {"root": str(root), "extensions": []},
+        "decisions": {
+            "mapping": args["node_properties"],
+            "attributes": args["own_attributes"],
+            "hints": args["node_values"],
+            "extension": args["extension"],
+        },
+        "notices": module._notices(result, {"reg_flag"}),
+    }
+    legacy_hash = sha256(
+        json_bytes(
+            {
+                "schema": module._SCHEMA,
+                "inputs": inputs,
+                "files": {p: sha256(b) for p, b in sorted(golden.items())},
+                "owner": owner,
+            }
+        )
+    )
+    receipt = {
+        "schema": module._SCHEMA,
+        "owner": owner,
+        "preview_hash": legacy_hash,
+        "file_hashes": {"kit/" + p: sha256(b) for p, b in golden.items()},
+    }
+    kit = Path(preview["output_path"])
+    for name, content in golden.items():
+        path = kit / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (kit.parent / module._OWNER).write_bytes(
+        json_bytes(receipt | {"receipt_hash": sha256(json_bytes(receipt))})
+    )
+    assert preview["preview_hash"] == legacy_hash
+    before = {p: p.stat().st_mtime_ns for p in kit.rglob("*") if p.is_file()}
+    assert write(service, args, preview)["status"] == "unchanged"
+    assert {p: p.stat().st_mtime_ns for p in before} == before

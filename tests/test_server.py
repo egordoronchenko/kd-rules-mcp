@@ -16,6 +16,7 @@ from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
 from tests.test_ed_authoring_handlers import HANDLERS
 from tests.test_service_ed_authoring import handler_setup
 from tests.test_service_ed_authoring import setup as setup
+from tests.test_service_registration_retarget import deletion_setup
 from tests.test_service_registration_retarget import setup as registration_setup
 
 DATA = Path(__file__).parent / "data"
@@ -77,6 +78,38 @@ async def test_registration_retarget_tool(tmp_path: Path) -> None:
         )
         assert rejected["code"] == "registration.missing_attribute"
         assert rejected["failures"][0]["address"]
+
+
+async def test_registration_retarget_deletion_filter_tool(tmp_path: Path) -> None:
+    service, arguments = deletion_setup(tmp_path)
+    async with Client(create_server(service)) as client:
+        preview = await _call(client, "registration_retarget", **arguments)
+        assert preview["deletion_mark_filter"]["added"] == 2
+        error = await _error(
+            client,
+            "registration_retarget",
+            **(
+                arguments
+                | {
+                    "mode": "write",
+                    "expected_preview_hash": preview["preview_hash"],
+                }
+            ),
+        )
+        assert error["code"] == "registration.ack_required"
+        written = await _call(
+            client,
+            "registration_retarget",
+            **(
+                arguments
+                | {
+                    "mode": "write",
+                    "expected_preview_hash": preview["preview_hash"],
+                    "acknowledged_notices": preview["required_acknowledgements"],
+                }
+            ),
+        )
+        assert written["status"] == "written"
 
 
 EXPECTED_TOOLS = {

@@ -14,6 +14,8 @@ from pathlib import Path
 from threading import RLock
 
 from kd2_rules_mcp.ed.writer_model import (
+    SNAPSHOT_SCHEMA_SHA256,
+    SNAPSHOT_STORAGE_VERSION,
     ImportReport,
     ManagerModel,
     decode_dto,
@@ -226,7 +228,12 @@ class ManagerWorkspace:
         model = model.with_revision()
         value, blobs = snapshot_parts(model)
         data = json_bytes(
-            {"storage_version": 3, "model": pack_json(value), "blob_hashes": sorted(blobs)}
+            {
+                "storage_version": SNAPSHOT_STORAGE_VERSION,
+                "schema_sha256": SNAPSHOT_SCHEMA_SHA256,
+                "model": pack_json(value),
+                "blob_hashes": sorted(blobs),
+            }
         )
         # Исходник (с BOM), тела и manifest адресуются хешами; тексты блоков
         # восстанавливаются из диапазонов единственного исходника.

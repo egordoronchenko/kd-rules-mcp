@@ -1,0 +1,37 @@
+{
+  "build_hash": "4f8141e61253657af25c850483c152eab66afcb96e62250c7a791f5f76ca2b6d",
+  "compatibility_mode": "Version8_3_24",
+  "counters": {
+    "code_mentions": 0,
+    "remarks": 1,
+    "renamed_leaves": 2,
+    "rules": 1,
+    "untouched_leaves": 0
+  },
+  "extension_name": "reg_Registration",
+  "extension_version": "4f8141e61253",
+  "file_hashes": {
+    "extension/Configuration.xml": "fbfa878891a9519c7b885409e5ead6eded5447bb5e4800244131a59844db5cdf",
+    "extension/ExchangePlans/TargetPlan.xml": "c53b38cbafdcafe33c3c742ee19e1f11f4a5f7ee5a36f5eee0727a43009b34a9",
+    "extension/Languages/Russian.xml": "f97917afe5aad2c226cf40a6b4502abf7bf8459e42960192ff393183e05d5e00",
+    "registration/RegistrationRules.xml": "fcb4374e0135debaeccbc6abb1ff7b2dde6235d181fd63fee81010d77e35e1df",
+    "ИНСТРУКЦИЯ.md": "e9c63a6803494b91266c5655f48aa44920645356e735d2e8d25519daef829faf"
+  },
+  "input_hashes": {
+    "Configuration.xml": "31021f2abc40b7d2b440859d5908c14ef41fb4ea683c627430da2b3f84c4701d",
+    "ExchangePlans/TargetPlan.xml": "98f7c575794cf5dce68f2e9350713607aa937a526d1ed5f2e5e9cb8cdf784c00",
+    "Languages/Russian.xml": "8114031dd1e3fed07e7c31727168bc30864bc6687df3fdcbfc36517336430def",
+    "decisions": "23007d39f2922149cbd56952ac8ea5ed9fd717bfc4952528dafa27d77b176678",
+    "instruction_template": "2ea278164d880864ad77984aa9ab198244ffcd7a4b46fe83abc358337eea0c71",
+    "retargeted_rules": "fcb4374e0135debaeccbc6abb1ff7b2dde6235d181fd63fee81010d77e35e1df",
+    "source_file": "8eea3f6df9fb2c7b25acfb9cc4ae0f51bbdeecc857ff4ceac38b6c916d3e7357",
+    "source_rules": "60164c8bee5f51d93274ec7bc18a33b680fd5e9a09617d9cf3aa5835ed305864",
+    "xml_profile": "026fd4161e8d15feef3ad40b215d0b2672b4e31b4f407a3d8e5e8423ee6cc025"
+  },
+  "interface_compatibility_mode": "TaxiEnableVersion8_2",
+  "prefix": "reg_",
+  "runtime_verified": false,
+  "schema_version": "ed-registration/1",
+  "unverified": [],
+  "xml_form_verified": true
+}

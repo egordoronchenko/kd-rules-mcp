@@ -953,12 +953,45 @@ def snapshot_parts(model: ManagerModel) -> tuple[dict[str, Any], dict[str, bytes
     return value, blobs
 
 
+SNAPSHOT_STORAGE_VERSION = 4
+# Отпечаток закрытых DTO фиксируется тестом; изменение требует версии и миграции.
+SNAPSHOT_SCHEMA_SHA256 = "ecfb5f2da1648d8ab72be2f0e0b26863bcbc062c5830bab76d366b1f038e3759"
+
+
+def snapshot_schema_fingerprint() -> str:
+    seen = {}
+
+    def walk(kind):
+        origin, arguments = _shape(kind)
+        if origin:
+            for argument in arguments:
+                walk(argument)
+        elif isinstance(kind, type) and is_dataclass(kind) and kind.__name__ not in seen:
+            hints = _hints(kind)
+            seen[kind.__name__] = [
+                (
+                    f.name,
+                    str(hints[f.name]),
+                    "required" if f.default is MISSING else repr(f.default),
+                )
+                for f in fields(kind)
+                if f.init and not f.name.startswith("_")
+            ]
+            for f in fields(kind):
+                if f.init and not f.name.startswith("_"):
+                    walk(hints[f.name])
+
+    walk(ManagerModel)
+    return hashlib.sha256(json_bytes(seen)).hexdigest()
+
+
 def dump_model(model: ManagerModel) -> bytes:
     validate_model(model)
     value, blobs = snapshot_parts(model)
     result = json_bytes(
         {
-            "storage_version": 3,
+            "storage_version": SNAPSHOT_STORAGE_VERSION,
+            "schema_sha256": SNAPSHOT_SCHEMA_SHA256,
             "model": pack_json(value),
             "blobs": {k: base64.b64encode(v).decode("ascii") for k, v in blobs.items()},
             "import_report": pack_json(_compact(model.import_report)),
@@ -1041,14 +1074,21 @@ def load_model(
     if len(data if isinstance(data, bytes) else data.encode("utf-8")) > MAX_MODEL_BYTES:
         raise EdAuthoringResourceLimitError("Превышен лимит модели ED")
     value = json.loads(data)
+    storage_version = value.get("storage_version", 3)
     if "storage_version" in value:
-        if value["storage_version"] != 3 or set(value) - {
+        if storage_version not in (3, SNAPSHOT_STORAGE_VERSION) or set(value) - {
             "storage_version",
             "model",
             "blobs",
             "import_report",
+            "schema_sha256",
         }:
             raise ValueError("Неизвестный формат снимка ED")
+        if (
+            storage_version == SNAPSHOT_STORAGE_VERSION
+            and value.get("schema_sha256") != SNAPSHOT_SCHEMA_SHA256
+        ):
+            raise ValueError("Неизвестная схема снимка ED")
         available = (
             blobs
             if blobs is not None
@@ -1118,6 +1158,11 @@ def load_model(
         if model.revision != _legacy_profile_revision(model, previous_profile):
             raise ValueError("Ревизия модели не совпадает с содержимым")
         model = model.with_revision()
+    if storage_version == 3:
+        from .writer_snapshot import migrate_v3
+
+        model = migrate_v3(model)
+        validate_model(model)
     return model
 
 

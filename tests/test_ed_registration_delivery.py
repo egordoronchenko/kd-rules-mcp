@@ -156,6 +156,7 @@ def test_repeatable_files_manifest_and_previous() -> None:
     assert manifest["xml_form_verified"] is True
     assert manifest["unverified"] == []
     assert manifest["runtime_verified"] is False
+    assert "deletion_mark_filter" not in manifest
     assert manifest["counters"] == {
         "rules": 1,
         "renamed_leaves": 2,
@@ -169,6 +170,18 @@ def test_repeatable_files_manifest_and_previous() -> None:
         load_registration_rules(first.files["registration/RegistrationRules.xml"]).exchange_plan
         == "TargetPlan"
     )
+
+
+def test_review_disabled_parameter_preserves_published_kit_bytes() -> None:
+    """Эталон снят кодом main (64e2a56), до параметра пометки, на входе Валидное=true."""
+    root = DATA / "golden/before-deletion"
+    golden = {
+        p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
+    assert len(golden) == 6
+    assert dict(kit().files) == golden
+    previous = RegistrationManifest.from_bytes(golden["manifest.json"])
+    assert kit(previous_manifest=previous).files == golden
 
 
 def test_minimal_extension_and_own_boolean() -> None:

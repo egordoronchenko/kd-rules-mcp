@@ -1480,21 +1480,22 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def registration_retarget(
-        project_id: Annotated[str, Field(description="Registration project")],
-        exchange_plan: Annotated[str, Field(description="Target plan")],
-        node_properties: Annotated[dict, Field(description="Old→new: Name/[T]/[T].Name")],
-        source: Annotated[dict, Field(description="project/configuration_path")],
+        project_id: Annotated[str, Field(description="Project")],
+        exchange_plan: Annotated[str, Field(description="Plan")],
+        node_properties: Annotated[dict, Field(description="Mapping")],
+        source: Annotated[dict, Field(description="Dump")],
         structure_id: Annotated[Any, Field(description="Structure ID")] = None,
         own_attributes: Annotated[Any, Field(description="name,type,synonym")] = None,
         node_values: Annotated[Any, Field(description="source,target,instruction")] = None,
-        extension: Annotated[Any, Field(description="Name and prefix")] = None,
+        extension: Annotated[Any, Field(description="name,prefix")] = None,
         mode: Annotated[str, Field(description="preview/write")] = "preview",
-        expected_preview_hash: Annotated[Any, Field(description="Write hash")] = None,
-        acknowledged_notices: Annotated[Any, Field(description="Notice IDs")] = None,
-        offset: Annotated[int, Field(description="Offset")] = 0,
-        limit: Annotated[int, Field(description="Limit")] = 50,
+        expected_preview_hash: Annotated[Any, Field(description="Hash")] = None,
+        acknowledged_notices: Annotated[Any, Field(description="Notices")] = None,
+        offset: Annotated[int, Field(description="Skip")] = 0,
+        limit: Annotated[int, Field(description="Size")] = 50,
+        deletion_mark_filter: Annotated[bool, Field(description="Exclude marked")] = False,
     ) -> dict[str, Any]:
-        """Retarget registration into a workspace kit. Details: docs/tools.md."""
+        """Copy registration rules."""
         return await call(
             service.registration_retarget,
             project_id,
@@ -1510,6 +1511,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             acknowledged_notices,
             offset,
             limit,
+            deletion_mark_filter,
         )
 
     @server.tool()

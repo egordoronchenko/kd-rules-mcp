@@ -20,6 +20,7 @@ from lxml import etree
 
 from kd2_rules_mcp.authoring.registration_retarget import (
     RetargetResult,
+    deletion_filter_summary,
     own_attribute_covers,
     own_attribute_remarks,
     registration_node_remarks,
@@ -37,7 +38,14 @@ from kd2_rules_mcp.errors import (
 from kd2_rules_mcp.kd2.rules_io import dump_rules
 from kd2_rules_mcp.structures.queries import ObjectCard, ObjectProperty
 from kd2_rules_mcp.structures.xmlbuild import STUBS, Builder, Metadata, Prop
-from kd2_rules_mcp.structures.xmldump import AUX_KINDS, KINDS, ConfigDump, MetaObject, read_object
+from kd2_rules_mcp.structures.xmldump import (
+    AUX_KINDS,
+    KINDS,
+    RU_KIND,
+    ConfigDump,
+    MetaObject,
+    read_object,
+)
 
 from .hook import valid_identifier
 from .identity import IdentityMap, logical_path, make_identity_map
@@ -95,6 +103,7 @@ class PlanHost:
     extension_attributes: frozenset[str]
     input_hashes: Mapping[str, str]
     card: ObjectCard
+    objects: tuple[ObjectCard, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_hashes", MappingProxyType(dict(self.input_hashes)))
@@ -139,7 +148,12 @@ def _properties(obj: etree._Element) -> set[str]:
 
 
 def _plan_metadata(
-    root: Path, config: bytes, plan_name: str, hashes: dict[str, str], prefix: str = ""
+    root: Path,
+    config: bytes,
+    plan_name: str,
+    hashes: dict[str, str],
+    prefix: str = "",
+    object_names: frozenset[str] = frozenset(),
 ) -> ConfigDump:
     """Общий читатель структуры: план, наборы типов, общие реквизиты и имена ссылок.
 
@@ -155,8 +169,17 @@ def _plan_metadata(
         directory = KINDS[tag][0] if tag in KINDS else AUX_KINDS.get(tag)
         if not directory or not name:
             continue
-        if tag in {"DefinedType", "CommonAttribute", "ChartOfCharacteristicTypes"} or (
-            tag == "ExchangePlan" and name == plan_name
+        requested = any(
+            alias.casefold() in object_names
+            for alias in (
+                f"{RU_KIND.get(tag, tag)}.{name}",
+                (KINDS[tag][4] + name) if tag in KINDS else name,
+            )
+        )
+        if (
+            requested
+            or tag in {"DefinedType", "CommonAttribute", "ChartOfCharacteristicTypes"}
+            or (tag == "ExchangePlan" and name == plan_name)
         ):
             path = f"{directory}/{name}.xml"
             raw = _read(root / path)
@@ -182,18 +205,33 @@ def _plan_card(metadata: Metadata, name: str) -> ObjectCard:
     obj = metadata.get(f"ПланОбмена.{name}")
     if obj is None:
         raise RegistrationPlanNotFoundError("План обмена не найден в выгрузке")
+    return _object_card(metadata, obj)
+
+
+def _object_card(
+    metadata: Metadata,
+    obj: MetaObject,
+    *,
+    builder: Builder | None = None,
+    standard_only: bool = False,
+) -> ObjectCard:
+    """Стандартные свойства определяет общий Builder, а не список видов объектов."""
     known = (
         {name for name, _, _ in STUBS}
-        | {
-            KINDS[tag][4] + item.name
-            for tag, objects in metadata.objects.items()
-            if tag in KINDS
-            for item in objects
-        }
-        | {
-            f"ТочкаМаршрутаБизнесПроцессаСсылка.{obj.name}"
-            for obj in metadata.of("BusinessProcess")
-        }
+        if standard_only
+        else (
+            {name for name, _, _ in STUBS}
+            | {
+                KINDS[tag][4] + item.name
+                for tag, objects in metadata.objects.items()
+                if tag in KINDS
+                for item in objects
+            }
+            | {
+                f"ТочкаМаршрутаБизнесПроцессаСсылка.{obj.name}"
+                for obj in metadata.of("BusinessProcess")
+            }
+        )
     )
     rows = []
 
@@ -212,11 +250,25 @@ def _plan_card(metadata: Metadata, name: str) -> ObjectCard:
             )
             flatten(prop.children, path)
 
-    flatten(Builder(metadata).object_properties(obj))
-    return ObjectCard(f"ПланОбмена.{name}", f"ПланОбменаСсылка.{name}", "ПланОбмена", tuple(rows))
+    builder = builder or Builder(metadata)
+    props = (
+        [p for p in builder.main_properties(obj) if p.name == "ПометкаУдаления"]
+        if standard_only
+        else builder.object_properties(obj)
+    )
+    flatten(props)
+    kind = RU_KIND[obj.tag]
+    type_name = KINDS[obj.tag][4] + obj.name if obj.tag in KINDS else f"{kind}.{obj.name}"
+    return ObjectCard(f"{kind}.{obj.name}", type_name, kind, tuple(rows))
 
 
-def read_plan_host(dump: Path, plan_name: str, *, extensions: Sequence[Path] = ()) -> PlanHost:
+def read_plan_host(
+    dump: Path,
+    plan_name: str,
+    *,
+    extensions: Sequence[Path] = (),
+    object_names: Sequence[str] | None = None,
+) -> PlanHost:
     """Читает профиль комплекта и типизированную карточку выбранного плана."""
     if not valid_identifier(plan_name):
         raise RegistrationDeliveryProfileError("Недопустимое имя плана обмена")
@@ -251,7 +303,27 @@ def read_plan_host(dump: Path, plan_name: str, *, extensions: Sequence[Path] = (
             plan_path: sha256(plan_raw),
         }
         properties = _properties(obj)
-        main = _plan_metadata(dump, config_raw, plan_name, hashes)
+        requested = {name.casefold() for name in object_names or ()}
+        if object_names is not None:
+            for index, root in enumerate((dump, *extensions)):
+                path = root / plan_path
+                if not path.is_file():
+                    continue
+                content = path.with_suffix("") / "Ext/Content.xml"
+                before = _read(content) if content.is_file() else None
+                requested.update(
+                    name.casefold() for name, _ in read_object(path, "ExchangePlan").content
+                )
+                if before is not None:
+                    if _read(content) != before:
+                        raise RegistrationDeliveryProfileError(
+                            "Состав плана изменился во время чтения"
+                        )
+                    label = "" if index == 0 else f"extensions/{index - 1}/"
+                    hashes[label + f"ExchangePlans/{plan_name}/Ext/Content.xml"] = sha256(before)
+        main = _plan_metadata(
+            dump, config_raw, plan_name, hashes, object_names=frozenset(requested)
+        )
         overlays = []
         own: set[str] = set()
         for index, extension in enumerate(extensions):
@@ -260,7 +332,14 @@ def read_plan_host(dump: Path, plan_name: str, *, extensions: Sequence[Path] = (
             parse_xml("Configuration.xml", ext_config.decode("utf-8-sig"))
             hashes[f"extensions/{index}/Configuration.xml"] = sha256(ext_config)
             overlays.append(
-                _plan_metadata(extension, ext_config, plan_name, hashes, f"extensions/{index}/")
+                _plan_metadata(
+                    extension,
+                    ext_config,
+                    plan_name,
+                    hashes,
+                    f"extensions/{index}/",
+                    frozenset(requested),
+                )
             )
             path = extension / plan_path
             if not path.is_file():
@@ -280,6 +359,16 @@ def read_plan_host(dump: Path, plan_name: str, *, extensions: Sequence[Path] = (
                 if attr.findtext(f"{{{M}}}Properties/{{{M}}}ObjectBelonging") != "Adopted":
                     own.add(attr.findtext(f"{{{M}}}Properties/{{{M}}}Name", "").casefold())
             hashes[f"extensions/{index}/{plan_path}"] = sha256(raw)
+        metadata = Metadata(main, overlays)
+        builder = Builder(metadata)
+        objects = tuple(
+            _object_card(metadata, item, builder=builder, standard_only=True)
+            for tag, items in metadata.objects.items()
+            if tag in RU_KIND
+            for item in items
+            if f"{RU_KIND[tag]}.{item.name}".casefold() in requested
+            or ((KINDS[tag][4] + item.name).casefold() in requested if tag in KINDS else False)
+        )
         return PlanHost(
             config.uuid,
             language,
@@ -289,7 +378,8 @@ def read_plan_host(dump: Path, plan_name: str, *, extensions: Sequence[Path] = (
             frozenset(p.casefold() for p in properties),
             frozenset(own),
             hashes,
-            _plan_card(Metadata(main, overlays), plan_name),
+            _plan_card(metadata, plan_name),
+            objects,
         )
     except (
         AuthoringPreconditionError,
@@ -313,13 +403,14 @@ class RegistrationManifest:
     extension_name: str
     prefix: str
     build_hash: str
+    deletion_mark_filter: bool = False
 
     def __post_init__(self) -> None:
         for field in ("input_hashes", "file_hashes", "counters"):
             object.__setattr__(self, field, MappingProxyType(dict(getattr(self, field))))
 
     def to_dict(self) -> dict:
-        return {
+        value = {
             "schema_version": SCHEMA_VERSION,
             "input_hashes": dict(self.input_hashes),
             "file_hashes": dict(self.file_hashes),
@@ -337,6 +428,9 @@ class RegistrationManifest:
             "xml_form_verified": True,
             "unverified": [],
         }
+        if self.deletion_mark_filter:
+            value["deletion_mark_filter"] = True
+        return value
 
     def to_bytes(self) -> bytes:
         return json_bytes(self.to_dict())
@@ -347,7 +441,8 @@ class RegistrationManifest:
             value = json.loads(content)
             if value["schema_version"] != SCHEMA_VERSION or value["runtime_verified"] is not False:
                 raise ValueError("Неизвестный формат")
-            result = cls(**{k: value[k] for k in cls.__dataclass_fields__})
+            fields = {k: value[k] for k in cls.__dataclass_fields__ if k != "deletion_mark_filter"}
+            result = cls(**fields, deletion_mark_filter=value.get("deletion_mark_filter", False))
             if result.to_bytes() != content:
                 raise ValueError("Неканонический манифест")
             return result
@@ -530,31 +625,40 @@ def render_registration_kit(
             for r in result.remarks
         )
         + tuple(m.message for m in result.mentions)
-        + tuple(dict.fromkeys((*notices, *(n.message for n in type_notices))))
+        + tuple(
+            dict.fromkeys(
+                (
+                    *notices,
+                    *(n.message for n in result.notices if n.requires_acknowledgement),
+                    *(n.message for n in type_notices),
+                )
+            )
+        )
     )
     if result.code_mentions and not result.mentions:
         remarks += (f"В коде остались старые имена: {result.code_mentions} упоминаний.",)
     content = dump_rules(result.document)
+    decisions = {
+        "attributes": [asdict(a) for a in attrs],
+        "node_values": [asdict(v) for v in node_values],
+        "extension_name": extension_name,
+        "prefix": prefix,
+        "remarks": remarks,
+    }
+    if result.deletion_mark_filter:
+        decisions["deletion_mark_filter"] = True
     hashes = {
         **host.input_hashes,
         "source_rules": result.source_rules_hash,
         "source_file": source_file_hash or sha256(result.document.origin),
         "retargeted_rules": sha256(content),
-        "decisions": sha256(
-            json_bytes(
-                {
-                    "attributes": [asdict(a) for a in attrs],
-                    "node_values": [asdict(v) for v in node_values],
-                    "extension_name": extension_name,
-                    "prefix": prefix,
-                    "remarks": remarks,
-                }
-            )
-        ),
+        "decisions": sha256(json_bytes(decisions)),
         "instruction_template": sha256(
             files("kd2_rules_mcp.authoring.ed")
             .joinpath("templates/registration_instruction.md")
             .read_bytes()
+            if result.deletion_mark_filter
+            else _registration_template().encode("utf-8")
         ),
         "xml_profile": sha256(
             files("kd2_rules_mcp.authoring.ed")
@@ -569,16 +673,17 @@ def render_registration_kit(
         "code_mentions": result.code_mentions,
         "remarks": len(result.remarks),
     }
+    if result.deletion_mark_filter:
+        summary = deletion_filter_summary(result)
+        counters.update(
+            deletion_filter_added=summary["added"], deletion_filter_skipped=summary["skipped"]
+        )
     build_hash = sha256(
         json_bytes({"inputs": hashes, "counters": counters, "schema": SCHEMA_VERSION})
     )
     output = _extension_files(host, attrs, extension_name, prefix, build_hash[:12])
     output["registration/RegistrationRules.xml"] = content
-    template = Template(
-        files("kd2_rules_mcp.authoring.ed")
-        .joinpath("templates/registration_instruction.md")
-        .read_text("utf-8")
-    )
+    template = Template(_registration_template(deletion_mark_filter=result.deletion_mark_filter))
     incomplete = ""
     if result.code_mentions or remarks:
         incomplete = (
@@ -599,6 +704,7 @@ def render_registration_kit(
         own_attributes=table(
             ("Реквизит", "Тип", "Подпись"), ((a.name, a.type_name, a.synonym) for a in attrs)
         ),
+        deletion_mark=deletion_mark_instruction(result),
     )
     output["ИНСТРУКЦИЯ.md"] = instruction.encode("utf-8")
     manifest = RegistrationManifest(
@@ -610,6 +716,7 @@ def render_registration_kit(
         extension_name,
         prefix,
         build_hash,
+        result.deletion_mark_filter,
     )
     if (
         previous_manifest
@@ -619,3 +726,42 @@ def render_registration_kit(
         raise RegistrationDeliveryError("Прежняя сборка с теми же входами не совпадает")
     output["manifest.json"] = manifest.to_bytes()
     return RegistrationKit(output, manifest, remarks)
+
+
+def deletion_mark_instruction(result: RetargetResult) -> str:
+    """Общий блок инструкции для комплектов с расширением и без него."""
+    if not result.deletion_mark_filter:
+        return ""
+    summary = deletion_filter_summary(result)
+    template = (
+        files("kd2_rules_mcp.authoring.ed")
+        .joinpath("templates/registration_instruction.md")
+        .read_text("utf-8")
+    )
+    block = template.split("<!-- deletion_mark:start -->", 1)[1].split(
+        "<!-- deletion_mark:end -->", 1
+    )[0]
+    return Template(block.strip()).substitute(
+        added=summary["added"],
+        skipped=summary["skipped"],
+        mode_rules=table(
+            ("Правило регистрации", "Реквизит режима выгрузки"),
+            (
+                (n.address, n.reference)
+                for n in result.notices
+                if n.check == "registration.deletion_mode"
+            ),
+        ),
+    )
+
+
+def _registration_template(*, deletion_mark_filter: bool = False) -> str:
+    text = (
+        files("kd2_rules_mcp.authoring.ed")
+        .joinpath("templates/registration_instruction.md")
+        .read_text("utf-8")
+    )
+    before, _, block = text.partition("<!-- deletion_mark:start -->")
+    if not deletion_mark_filter:
+        return before.replace("${deletion_mark}\n", "").rstrip("\n") + "\n"
+    return before + block.partition("<!-- deletion_mark:end -->")[2]

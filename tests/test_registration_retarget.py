@@ -586,3 +586,247 @@ def test_target_plan_must_be_an_exchange_plan() -> None:
     rules = _tiny(_rule("Документ.А", "Дата"))
     with pytest.raises(RegistrationRetargetError):
         retarget_registration(rules, plan_name=PLAN, node_properties={}, target_plan=card)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "Справочник",
+        "Документ",
+        "ПланВидовХарактеристик",
+        "ПланСчетов",
+        "ПланВидовРасчета",
+        "БизнесПроцесс",
+        "Задача",
+    ],
+)
+def test_deletion_filter_uses_standard_property_not_object_kind(kind: str) -> None:
+    rules = _tiny(_rule(f"{kind}.Sample", "DateA"))
+    card = ObjectCard(
+        f"{kind}.Sample",
+        f"{kind}Ссылка.Sample",
+        kind,
+        (ObjectProperty("ПометкаУдаления", "Свойство", False, ("Булево",), ()),),
+    )
+    result = retarget_registration(
+        rules,
+        plan_name=PLAN,
+        node_properties={},
+        deletion_mark_filter=True,
+        target_objects=(card,),
+    )
+    filters = result.document.rules()[0].child("ОтборПоСвойствамОбъекта")
+    assert filters is not None and len(filters.items) == 1
+    assert filters.items[0].values == {
+        "ТипСвойстваОбъекта": "Булево",
+        "ВидСравнения": "Равно",
+        "СвойствоОбъекта": "ПометкаУдаления",
+        "Вид": "ЗначениеКонстанты",
+        "ЗначениеКонстанты": "false",
+    }
+    row = filters.items[0].child("ТаблицаСвойствОбъекта")
+    assert row is not None and row.items[0].get("Вид") == "Свойство"
+
+
+def test_deletion_filter_preserves_filters_handlers_disabled_and_repeats() -> None:
+    rules = _tiny(
+        _rule("Справочник.Sample", "DateA")
+        + _rule("Справочник.Sample", "DateA")
+        + _rule("РегистрСведений.Other", "DateA")
+        + _rule("Справочник.Disabled", "DateA")
+    )
+    first, existing, _, disabled = rules.rules()
+    disabled.attrs["Отключить"] = True
+    tree = Node.new("object_filter", "ОтборПоСвойствамОбъекта")
+    group = Node.new("object_filter_group", "Группа")
+    group.values["БулевоЗначениеГруппы"] = "ИЛИ"
+    leaf = Node.new("object_filter_item", "ЭлементОтбора")
+    leaf.values.update(СвойствоОбъекта="Code", ВидСравнения="Равно", ЗначениеКонстанты="1")
+    group.items.append(leaf)
+    tree.items.append(group)
+    first.children[tree.tag] = tree
+    for event in ("ПередОбработкой", "ПриОбработке", "ПослеОбработки"):
+        first.values[event] = "Отказ = Ложь;"
+    existing_tree = Node.new("object_filter", "ОтборПоСвойствамОбъекта")
+    existing_leaf = Node.new("object_filter_item", "ЭлементОтбора")
+    existing_leaf.values.update(
+        СвойствоОбъекта="ПометкаУдаления", ВидСравнения="Равно", ЗначениеКонстанты="true"
+    )
+    existing_tree.items.append(existing_leaf)
+    existing.children[existing_tree.tag] = existing_tree
+    source = dump_rules(rules)
+    card = ObjectCard(
+        "Справочник.Sample",
+        "СправочникСсылка.Sample",
+        "Справочник",
+        (ObjectProperty("ПометкаУдаления", "Свойство", False, ("Булево",), ()),),
+    )
+    other = ObjectCard(
+        "РегистрСведений.Other", "РегистрСведенийЗапись.Other", "РегистрСведений", ()
+    )
+    result = retarget_registration(
+        rules,
+        plan_name=PLAN,
+        node_properties={},
+        deletion_mark_filter=True,
+        target_objects=(card, other),
+    )
+    assert [s for _, s in result.deletion_filters] == [
+        "added",
+        "existing_filter",
+        "no_deletion_mark",
+        "disabled",
+    ]
+    assert dump_rules(rules) == source
+    restored_first, restored_existing, *_ = result.document.rules()
+    filters = restored_first.child("ОтборПоСвойствамОбъекта")
+    assert filters is not None and len(filters.items) == 2
+    assert filters.items[0].values == group.values
+    assert filters.items[0].items[0].values == leaf.values
+    restored_tree = restored_existing.child("ОтборПоСвойствамОбъекта")
+    assert restored_tree is not None
+    assert restored_tree.items[0].values == existing_leaf.values
+    for event in ("ПередОбработкой", "ПриОбработке", "ПослеОбработки"):
+        assert restored_first.get(event) == first.get(event)
+    checks = {n.check for n in result.notices if n.requires_acknowledgement}
+    assert {
+        "registration.deletion_handler",
+        "registration.deletion_partial",
+        "registration.deletion_existing",
+    } <= checks
+    assert all(n.address for n in result.notices)
+    repeated = retarget_registration(
+        load_registration_rules(dump_rules(result.document)),
+        plan_name=PLAN,
+        node_properties={},
+        deletion_mark_filter=True,
+        target_objects=(card, other),
+    )
+    assert dump_rules(repeated.document) == dump_rules(result.document)
+    assert not any(status == "added" for _, status in repeated.deletion_filters)
+
+
+def test_deletion_filter_reports_unknown_object_and_unchecked_unload_mode() -> None:
+    rules = _tiny(
+        _rule("Справочник.Sample", "DateA", unload="ModeA") + _rule("Документ.Absent", "DateA")
+    )
+    card = ObjectCard(
+        "Справочник.Sample",
+        "СправочникСсылка.Sample",
+        "Справочник",
+        (ObjectProperty("ПометкаУдаления", "Свойство", False, ("Булево",), ()),),
+    )
+    result = retarget_registration(
+        rules,
+        plan_name=PLAN,
+        node_properties={},
+        deletion_mark_filter=True,
+        target_objects=(card,),
+    )
+    assert [status for _, status in result.deletion_filters] == ["added", "object_unchecked"]
+    checks = {n.check for n in result.notices if n.requires_acknowledgement}
+    assert {"registration.deletion_mode", "registration.deletion_unchecked"} <= checks
+    assert result.document.rules()[0].get("РеквизитРежимаВыгрузки") == "ModeA"
+
+
+def test_deletion_filter_requires_ack_for_algorithm_that_can_change_rule() -> None:
+    rules = _tiny(_rule("Справочник.Sample", "DateA"))
+    rule = rules.rules()[0]
+    filters = Node.new("object_filter", "ОтборПоСвойствамОбъекта")
+    leaf = Node.new("object_filter_item", "ЭлементОтбора")
+    code = "ПРО.ПравилоПоСвойствамОбъектаПустое = Истина; Значение = Ложь;"
+    leaf.values.update(СвойствоОбъекта="OtherFlag", Вид="АлгоритмЗначения", ЗначениеКонстанты=code)
+    filters.items.append(leaf)
+    rule.children[filters.tag] = filters
+    card = ObjectCard(
+        "Справочник.Sample",
+        "СправочникСсылка.Sample",
+        "Справочник",
+        (ObjectProperty("ПометкаУдаления", "Свойство", False, ("Булево",), ()),),
+    )
+    result = retarget_registration(
+        rules,
+        plan_name=PLAN,
+        node_properties={},
+        deletion_mark_filter=True,
+        target_objects=(card,),
+    )
+    warning = next(n for n in result.notices if n.check == "registration.deletion_handler")
+    assert warning.requires_acknowledgement and warning.address
+    assert "АлгоритмЗначения" in warning.reference
+    restored = result.document.rules()[0].child(filters.tag)
+    assert restored is not None and restored.items[0].get("ЗначениеКонстанты") == code
+
+
+def test_review_missing_valid_attribute_skips_rule() -> None:
+    rules = _tiny(
+        (_rule("Справочник.Multi", "DateA") + _rule("Справочник.Marked", "DateA")).replace(
+            ' Валидное="true"', ""
+        )
+    )
+    objects = tuple(
+        ObjectCard(
+            f"Справочник.{name}",
+            f"СправочникСсылка.{name}",
+            "Справочник",
+            (ObjectProperty("ПометкаУдаления", "Свойство", False, ("Булево",), ()),),
+        )
+        for name in ("Multi", "Marked")
+    )
+    plan = ObjectCard(
+        f"ПланОбмена.{PLAN}",
+        f"ПланОбменаСсылка.{PLAN}",
+        "ПланОбмена",
+        tuple(
+            ObjectProperty(card.name, "ЭлементСоставаПланаОбмена", False, (card.type_name,), ())
+            for card in objects
+        ),
+    )
+    result = retarget_registration(
+        rules,
+        plan_name=PLAN,
+        node_properties={},
+        target_plan=plan,
+        deletion_mark_filter=True,
+        target_objects=objects,
+    )
+    assert [status for _, status in result.deletion_filters] == ["invalid", "invalid"]
+    assert all(r.child("ОтборПоСвойствамОбъекта") is None for r in result.document.rules())
+    missing = [n for n in result.notices if n.check == "registration.deletion_missing_rule"]
+    assert {n.reference for n in missing} == {card.name for card in objects}
+    assert all(n.requires_acknowledgement for n in missing)
+
+
+def test_review_on_demand_mode_explained_and_counted() -> None:
+    from kd2_rules_mcp.authoring.ed.registration_delivery import deletion_mark_instruction
+    from kd2_rules_mcp.authoring.registration_retarget import deletion_filter_summary
+
+    rules = _tiny(_rule("Справочник.Sample", "DateA", unload="РежимВыгрузкиПриНеобходимости"))
+    card = ObjectCard(
+        "Справочник.Sample",
+        "СправочникСсылка.Sample",
+        "Справочник",
+        (ObjectProperty("ПометкаУдаления", "Свойство", False, ("Булево",), ()),),
+    )
+    result = retarget_registration(
+        rules, plan_name=PLAN, node_properties={}, deletion_mark_filter=True, target_objects=(card,)
+    )
+    notice = next(n for n in result.notices if n.check == "registration.deletion_mode")
+    assert notice.requires_acknowledgement and notice.address
+    for text in (
+        "При необходимости",
+        "По условию",
+        "Выгружать всегда",
+        "Вручную",
+        "Не выгружать",
+        "перезаписать",
+        "снятие пометки",
+    ):
+        assert text in notice.message
+    assert deletion_filter_summary(result)["mode_rules"] == 1
+    instruction = deletion_mark_instruction(result)
+    assert notice.address in instruction and notice.reference in instruction
+    assert "При необходимости" in instruction and "перезапишите" in instruction
+    exception = "не отправляются, кроме узлов с режимом «Выгружать всегда»"
+    assert exception in notice.message
+    assert instruction.count(exception) == 2

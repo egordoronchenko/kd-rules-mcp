@@ -1274,6 +1274,10 @@ def test_documented_two_property_example_uses_service_ids(writer_setup, name, pa
             applied["document_id"], schema_id=args["schema_id"], structure_id="host"
         )
         assert checked["summary"]["errors"] == checked["summary"]["warnings"] == 0, checked
+    if name == "search_address":
+        model = service.manager_workspace.get("positions").model
+        assert model.pko[0].events[0].event == "АлгоритмПоиска"
+        assert model.pko[0].properties[0].configuration_property == "Code"
     if name == "table_part":
         model = service.manager_workspace.get("positions").model
         rule = model.pko[0]

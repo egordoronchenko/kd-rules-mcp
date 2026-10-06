@@ -260,6 +260,7 @@ class ManagerOperation:
     unsupported_payload: str = ""
     position_mode: Literal["explicit", "default"] = "explicit"
     _packet_refs: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    _address_refs: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if self.action == "move" and self.after_id == "" and self.container_id is None:
@@ -309,10 +310,14 @@ def parse_operation(data: dict[str, Any]) -> ManagerOperation:
     payload = dict(data)
     patch = payload.pop("patch", None)
     packet_refs = []
+    address_refs = []
 
     def client_reference(value, path):
         if not isinstance(value, dict):
             return value
+        if set(value) == {"address"} and isinstance(value["address"], str) and value["address"]:
+            address_refs.append((path, value["address"]))
+            return "address:" + value["address"] if path == "container_id" else None
         if (
             set(value) != {"client_id"}
             or not isinstance(value["client_id"], str)
@@ -338,7 +343,7 @@ def parse_operation(data: dict[str, Any]) -> ManagerOperation:
                 path = f"patch.{name}" + (f".{n}" if name == "used_pko" else "")
                 if isinstance(value, dict):
                     value = dict(value)
-                    if set(value) == {"client_id"}:
+                    if set(value) in ({"client_id"}, {"address"}):
                         value = {
                             "kind": "code_unit"
                             if name == "target"
@@ -369,7 +374,7 @@ def parse_operation(data: dict[str, Any]) -> ManagerOperation:
                 raise ValueError("Ожидался объект полей операции")
             return replace(dto, unsupported_payload=json_bytes(patch).decode("utf-8"))
         dto = replace(dto, patch=decode_dto(kind, patch))
-    return replace(dto, _packet_refs=tuple(packet_refs))
+    return replace(dto, _packet_refs=tuple(packet_refs), _address_refs=tuple(address_refs))
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,26 +537,63 @@ def _order_uses(model: ManagerModel, kind: str, key: str, before: ManagerModel) 
     return replace(model, rule_uses=tuple(uses))
 
 
+def _address_target(model: ManagerModel, address: str) -> str:
+    addresses = model_addresses(model)
+    matches = [key for key, value in addresses.items() if value.casefold() == address.casefold()]
+    if not matches:
+
+        def base(value):
+            return re.sub(
+                r"~(?:\d+|(?:send|receive|both)(?:\+(?:send|receive|both))*)(?:#\d+)?(?=/|$)",
+                "",
+                value.casefold(),
+            )
+
+        matches = [key for key, value in addresses.items() if base(value) == address.casefold()]
+    if len(matches) != 1:
+        options = tuple(addresses[key] for key in matches)
+        _fail(
+            "model_invalid",
+            address,
+            "Адрес отсутствует"
+            if not matches
+            else "Адрес неоднозначен; уточните направление или вариант: " + ", ".join(options),
+            options,
+        )
+    return matches[0]
+
+
 def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOperation:
-    if op._packet_refs:
+    if op._packet_refs or op._address_refs:
         updates = {}
         patch = op.patch
-        for path, client in op._packet_refs:
-            decision = next((d for d in model.decisions if d.client_id == client), None)
-            if decision is None:
-                _fail(
-                    "model_invalid",
-                    f"Операция/{op.client_id}",
-                    f"Операция {op.client_id}: неизвестный или последующий "
-                    f"client_id «{client}» ({path})",
-                )
-            key = decision.result_ids[0]
+        for path, client, is_address in (
+            *((path, value, False) for path, value in op._packet_refs),
+            *((path, value, True) for path, value in op._address_refs),
+        ):
+            if is_address:
+                key = _address_target(model, client)
+                if not path.startswith("patch."):
+                    updates[path] = key
+                    continue
+            else:
+                decision = next((d for d in model.decisions if d.client_id == client), None)
+                if decision is None:
+                    _fail(
+                        "model_invalid",
+                        f"Операция/{op.client_id}",
+                        f"Операция {op.client_id}: неизвестный или последующий "
+                        f"client_id «{client}» ({path})",
+                    )
+                key = decision.result_ids[0]
             member = next((m for m in model.members() if m.logical_id == key), None)
             if member is None:
                 _fail(
                     "model_invalid",
                     f"Операция/{op.client_id}",
-                    f"Операция {op.client_id}: сущность client_id «{client}» уже удалена",
+                    f"Операция {op.client_id}: адрес «{client}» не указывает на сущность"
+                    if is_address
+                    else f"Операция {op.client_id}: сущность client_id «{client}» уже удалена",
                 )
             if not path.startswith("patch."):
                 updates[path] = key
@@ -573,7 +615,7 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                     _fail(
                         "model_invalid",
                         f"Операция/{op.client_id}",
-                        f"client_id «{client}» не является методом",
+                        f"{'Адрес' if is_address else 'client_id'} «{client}» не является методом",
                     )
                 reference = replace(
                     reference,
@@ -586,7 +628,8 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                 _fail(
                     "model_invalid",
                     f"Операция/{op.client_id}",
-                    f"Операция {op.client_id}: client_id «{client}» не является ПКО или ПКПД",
+                    f"Операция {op.client_id}: {'адрес' if is_address else 'client_id'} "
+                    f"«{client}» не является ПКО или ПКПД",
                 )
             else:
                 reference = replace(
@@ -602,7 +645,7 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                 values = list(getattr(patch, parts[1]))
                 values[int(parts[2])] = reference
                 patch = replace(patch, **{parts[1]: tuple(values)})
-        op = replace(op, patch=patch, _packet_refs=(), **updates)
+        op = replace(op, patch=patch, _packet_refs=(), _address_refs=(), **updates)
     if op.address:
         if re.search(r"(?:~|#)\d+(?:/|$)", op.address):
             _fail(
@@ -2486,6 +2529,7 @@ _EVENT_ORDER = (
     "ВыборкаДанных",
     "ПриОтправкеДанных",
     "ПриКонвертацииДанныхXDTO",
+    "АлгоритмПоиска",
     "ПередЗаписьюПолученныхДанных",
     "ПослеЗагрузкиВсехДанных",
 )
@@ -2494,7 +2538,7 @@ _DEFERRED = "ПослеЗагрузкиВсехДанных"
 
 def _handler_signature(owner, event: str) -> Signature:
     if event not in _EVENT_ORDER or event == _DEFERRED:
-        _fail("unsupported_form", owner.name, "Событие не входит в подтверждённые формы W2")
+        _fail("unsupported_form", owner.name, f"Событие «{event}» писателем не поддержано")
     pod = isinstance(owner, ProcessingRule)
     if (event in ("ПриОбработке", "ВыборкаДанных")) != pod:
         _fail("model_invalid", owner.name, "Событие не соответствует виду правила")
@@ -3314,10 +3358,10 @@ def _apply_code(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel
             _fail("opaque_context_changed", address, "Требуется редактируемый владелец ПКО или ПОД")
         if op.action == "create":
             name = updates.get("event")
-            if name not in _EVENT_ORDER or any(e.event == name for e in owner.events):
-                _fail(
-                    "model_invalid", address, "Событие отсутствует, не поддержано или уже привязано"
-                )
+            if isinstance(name, str) and name not in _EVENT_ORDER:
+                _fail("unsupported_form", address, f"Событие «{name}» писателем не поддержано")
+            if name is None or any(e.event == name for e in owner.events):
+                _fail("model_invalid", address, "Событие отсутствует или уже привязано")
             key = logical_id(model.project_id, op.client_id)
             if name == _DEFERRED or "target" in updates:
                 reference = updates.get("target")

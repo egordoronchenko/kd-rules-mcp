@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:cmi="http://v8.1c.ru/8.2/managed-application/cmi" xmlns:ent="http://v8.1c.ru/8.1/data/enterprise" xmlns:lf="http://v8.1c.ru/8.2/managed-application/logform" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows" xmlns:xen="http://v8.1c.ru/8.3/xcf/enums" xmlns:xpr="http://v8.1c.ru/8.3/xcf/predef" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<ExchangePlan uuid="a32ed128-447b-5296-a617-708ad7e8f897">
+		<InternalInfo>
+			<xr:ThisNode>ce0ad027-62fe-52ff-88ef-b03628ef334d</xr:ThisNode>
+			<xr:GeneratedType name="ExchangePlanObject.TargetPlan" category="Object">
+				<xr:TypeId>1ae530b9-754a-5ef9-896e-cc4cec2326e6</xr:TypeId>
+				<xr:ValueId>a9276144-9159-54b0-8173-bc15d386d207</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExchangePlanRef.TargetPlan" category="Ref">
+				<xr:TypeId>48cb3e0a-7c26-55b5-ab91-a0d6edeb52e8</xr:TypeId>
+				<xr:ValueId>beefac16-55ab-5e12-947a-a55200d2ff3e</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExchangePlanSelection.TargetPlan" category="Selection">
+				<xr:TypeId>9d510412-49ca-5d3a-b5dc-24f1c26ea972</xr:TypeId>
+				<xr:ValueId>1bd7bffe-cd35-53ba-ba5d-e6a22279e3d6</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExchangePlanList.TargetPlan" category="List">
+				<xr:TypeId>94ee9fd3-9cd2-5f45-8b0d-b68544dee744</xr:TypeId>
+				<xr:ValueId>7ee751fc-29dc-5eb0-9ddf-0c88db49176b</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExchangePlanManager.TargetPlan" category="Manager">
+				<xr:TypeId>c24246f5-9cd4-5db1-8d48-6ad8c8bb1a27</xr:TypeId>
+				<xr:ValueId>c2481886-5e8f-5f94-9d76-acb0b1d9cbb7</xr:ValueId>
+			</xr:GeneratedType>
+		</InternalInfo>
+		<Properties>
+			<ObjectBelonging>Adopted</ObjectBelonging>
+			<Name>TargetPlan</Name>
+			<Comment/>
+			<ExtendedConfigurationObject>b3b52d69-eb65-40fc-9bbc-2a5a356a45c5</ExtendedConfigurationObject>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="4ff91551-d903-5af1-8f18-6b8fdb222c79">
+				<Properties>
+					<Name>reg_Flag</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Не выгружать персональные данные</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:boolean</v8:Type>
+					</Type>
+					<PasswordMode>false</PasswordMode>
+					<Format/>
+					<EditFormat/>
+					<ToolTip/>
+					<MarkNegatives>false</MarkNegatives>
+					<Mask/>
+					<MultiLine>false</MultiLine>
+					<ExtendedEdit>false</ExtendedEdit>
+					<MinValue xsi:nil="true"/>
+					<MaxValue xsi:nil="true"/>
+					<FillFromFillingValue>false</FillFromFillingValue>
+					<FillValue xsi:type="xs:boolean">false</FillValue>
+					<FillChecking>DontCheck</FillChecking>
+					<ChoiceFoldersAndItems>Items</ChoiceFoldersAndItems>
+					<ChoiceParameterLinks/>
+					<ChoiceParameters/>
+					<QuickChoice>Auto</QuickChoice>
+					<CreateOnInput>Auto</CreateOnInput>
+					<ChoiceForm/>
+					<LinkByType/>
+					<ChoiceHistoryOnInput>Auto</ChoiceHistoryOnInput>
+					<Indexing>DontIndex</Indexing>
+					<FullTextSearch>Use</FullTextSearch>
+					<DataHistory>Use</DataHistory>
+				</Properties>
+			</Attribute>
+		</ChildObjects>
+	</ExchangePlan>
+</MetaDataObject>
