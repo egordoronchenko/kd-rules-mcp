@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 from typing import Literal
 
@@ -20,6 +20,8 @@ from .model import (
     ExtensionIdentity,
     Operation,
     PreparedAuthoring,
+    ProfileComparison,
+    ProfileReport,
     SourceSet,
 )
 
@@ -302,7 +304,47 @@ def validate_previous(manifest: ArtifactManifest, files: Mapping[str, bytes]) ->
             refuse("owned_content_changed", "Карта UUID manifest не совпадает с прежними XML")
 
 
+def overlay_report_view(prepared: PreparedAuthoring) -> PreparedAuthoring:
+    """Комплект наложения описывает код; общие исходные проверки остаются полными.
+
+    Проверка данных required_unfilled входит в check_profile и послойный валидатор,
+    но блок запросов проверки данных доставляется только комплектом менеджера.
+    """
+    check = "ed.schema.required_unfilled"
+
+    def profile(value: ProfileReport) -> ProfileReport:
+        return replace(
+            value,
+            issues=tuple(i for i in value.issues if i.check != check),
+            skipped=tuple(s for s in value.skipped if s.check != check),
+        )
+
+    def comparison(value: ProfileComparison) -> ProfileComparison:
+        return replace(
+            value,
+            before=profile(value.before),
+            after=profile(value.after),
+            delta=replace(
+                value.delta,
+                new=tuple(i for i in value.delta.new if i.check != check),
+                disappeared=tuple(i for i in value.delta.disappeared if i.check != check),
+                new_relevant_skipped=tuple(
+                    s for s in value.delta.new_relevant_skipped if s.check != check
+                ),
+            ),
+        )
+
+    return replace(
+        prepared,
+        selected_profiles=tuple(comparison(c) for c in prepared.selected_profiles),
+        other_profiles=tuple(comparison(c) for c in prepared.other_profiles),
+        skipped=tuple(s for s in prepared.skipped if s.check != check),
+    )
+
+
 def validation_dict(prepared: PreparedAuthoring) -> dict:
+    prepared = overlay_report_view(prepared)
+
     def profiles(comparisons):
         return [
             {

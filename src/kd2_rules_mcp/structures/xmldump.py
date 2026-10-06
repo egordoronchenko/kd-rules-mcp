@@ -238,6 +238,7 @@ class Field:
     indexing: str = ""  # Indexing: Index / IndexWithAdditionalOrder / DontIndex
     balance: bool = True  # Balance у измерений и ресурсов регистра бухгалтерии
     adopted: bool = False  # заимствован расширением
+    fill_checking: str = ""  # FillChecking; пусто — сведения отсутствуют
 
 
 @dataclass(slots=True)
@@ -305,6 +306,7 @@ def _field(element: etree._Element) -> Field:
         indexing=text(props, "Indexing"),
         balance=text(props, "Balance", "true") != "false",
         adopted=text(props, "ObjectBelonging") == "Adopted",
+        fill_checking=text(props, "FillChecking", "DontCheck"),
     )
 
 
@@ -342,6 +344,11 @@ def read_object(path: Path, tag: str) -> MetaObject:
             result.lists[name] = [_md_ref((i.text or "").strip()) for i in item if i.text]
         elif name == "Type":
             result.type = read_type(item)
+        elif name == "StandardAttributes":
+            for attribute in children(item, "StandardAttribute"):
+                result.props[f"FillChecking.{attribute.get('name', '')}"] = text(
+                    attribute, "FillChecking", "DontCheck"
+                )
         elif name == "Content" and tag == "CommonAttribute":
             result.common_content = [
                 (_md_ref(text(i, "Metadata")), text(i, "Use")) for i in children(item, "Item")

@@ -9,10 +9,11 @@ from kd2_rules_mcp.ed.address import build_addresses
 from kd2_rules_mcp.ed.model import ObjectRule
 from kd2_rules_mcp.ed.schema.model import EdSchema
 from kd2_rules_mcp.ed.writer_model import ManagerModel
+from kd2_rules_mcp.validation.ed_required import RequiredUnfilled
 
 from .handlers import HandlerBindingPlan, HandlerOperationsPlan, operation_kind
-from .hook import bsl_string
-from .manifest import Delivery
+from .hook import bsl_string, valid_identifier
+from .manifest import Delivery, overlay_report_view
 from .model import (
     FILLER,
     AddAlgorithmicHeaderProperty,
@@ -39,6 +40,90 @@ def table(headers: tuple[str, ...], rows: Iterable[tuple[object, ...]]) -> str:
 
 def direction_label(direction: str) -> str:
     return "Отправка" if direction == "send" else "Получение"
+
+
+def render_data_preflight(risks: Iterable[RequiredUnfilled]) -> str:
+    """Запросы только отрисовываются; подтверждение не означает проверку данных базы."""
+    groups: dict[tuple[str, str, str, tuple[str, ...]], list[RequiredUnfilled]] = {}
+    for risk in risks:
+        groups.setdefault(
+            (risk.object_kind, risk.object_name, risk.property_path, risk.source_types), []
+        ).append(risk)
+    if not groups:
+        return ""
+    blocks = []
+    for (kind, name, path, types), items in sorted(groups.items()):
+        addresses = ", ".join(sorted({r.address for r in items}))
+        blocks.append(f"### {kind}.{name}.{path}\n\nПКС: {addresses}.")
+        if any(r.reference_key for r in items):
+            blocks.append(
+                "Ключ ссылки: пустое значение остановит также выгрузку документов, "
+                "ссылающихся на объект."
+            )
+        if not all(valid_identifier(part) for part in (kind, name, *path.split("."))):
+            blocks.append(
+                "Путь нельзя безопасно подставить в запрос: проверьте его вручную в конфигураторе."
+            )
+            continue
+        parent, _, attribute = path.rpartition(".")
+        source = f"{kind}.{name}" + (f".{parent}" if parent else "")
+        field_name = "Объект." + (attribute if parent else path)
+        empty, parameters = [], []
+        for type_name in types:
+            if "Ссылка." in type_name:
+                ref_kind, _, ref_name = type_name.partition("Ссылка.")
+                if not all(valid_identifier(p) for p in (ref_kind, ref_name)):
+                    continue
+                if ref_kind == "Перечисление":
+                    parameter = "Пусто" if len(types) == 1 else f"Пусто{len(parameters) + 1}"
+                    parameters.append(f"`&{parameter}` = `Перечисления.{ref_name}.ПустаяСсылка()`.")
+                    empty.append(f"{field_name} = &{parameter}")
+                else:
+                    empty.append(f"{field_name} = ЗНАЧЕНИЕ({ref_kind}.{ref_name}.ПустаяСсылка)")
+            elif type_name in {"Строка", "Число", "Дата"}:
+                parameter = "Пусто" if len(types) == 1 else f"Пусто{len(parameters) + 1}"
+                value = {"Строка": '""', "Число": "0", "Дата": "Дата(1, 1, 1)"}[type_name]
+                parameters.append(f"`&{parameter}` = `{value}` ({type_name}).")
+                empty.append(f"{field_name} = &{parameter}")
+        if len(types) > 1:
+            parameters.append("`&Неопределено` = `Неопределено` (пустое значение составного типа).")
+            empty.append(f"{field_name} = &Неопределено")
+        if not empty:
+            blocks.append("Тип пустого значения не разрешён: проверьте данные вручную.")
+            continue
+        deleted = "Объект.Ссылка.ПометкаУдаления" if parent else "Объект.ПометкаУдаления"
+        prefix = (
+            f"НЕ {deleted} И "
+            if kind
+            in {
+                "Справочник",
+                "Документ",
+                "ПланСчетов",
+                "ПланВидовХарактеристик",
+                "ПланВидовРасчета",
+                "ПланОбмена",
+                "БизнесПроцесс",
+                "Задача",
+            }
+            else ""
+        )
+        query = (
+            "ВЫБРАТЬ КОЛИЧЕСТВО(*) КАК Количество\n"
+            f"ИЗ {source} КАК Объект\nГДЕ {prefix}(" + " ИЛИ ".join(empty) + ")"
+        )
+        blocks.append("```sql\n" + query + "\n```")
+        if parameters:
+            blocks.append("Параметры запроса: " + " ".join(parameters))
+        blocks.append(
+            "Если количество больше нуля — заполните реквизит у найденных объектов "
+            "до первого обмена и повторите запрос."
+        )
+    template = (
+        files("kd2_rules_mcp.authoring.ed")
+        .joinpath("templates/manager_data_preflight.md")
+        .read_text("utf-8")
+    )
+    return "\n\n" + Template(template).substitute(checks="\n\n".join(blocks))
 
 
 def manager_instruction_substitutions(
@@ -261,6 +346,7 @@ def runtime_probes(prepared: PreparedAuthoring, meta: DumpMetadata) -> str:
 def render_instruction(
     prepared: PreparedAuthoring, meta: DumpMetadata, delivery: Delivery, paths: tuple[str, ...]
 ) -> str:
+    prepared = overlay_report_view(prepared)
     template = (
         files("kd2_rules_mcp.authoring.ed").joinpath("templates/instruction.md").read_text("utf-8")
     )

@@ -213,12 +213,17 @@ def describe_object(
     row = _find_object(conn, name)
     if row is None:
         return _not_found(conn, name)
+    fill_checking = (
+        "p.fill_checking"
+        if any(r[1] == "fill_checking" for r in conn.execute("PRAGMA table_info(properties)"))
+        else "''"
+    )
     total, rows = _select_page(
         conn,
         "SELECT COUNT(*) FROM properties WHERE object_id = ?",
         "SELECT p.path, p.kind, p.synonym, p.is_group, p.number_length, p.number_precision, "
         "p.number_nonnegative, p.string_length, p.string_fixed, p.date_parts, p.unresolved, "
-        "ts.types AS types FROM properties AS p "
+        f"{fill_checking} AS fill_checking, ts.types AS types FROM properties AS p "
         "LEFT JOIN type_sets AS ts ON ts.id = p.type_set_id "
         "WHERE p.object_id = ? ORDER BY p.id LIMIT ? OFFSET ?",
         (row["id"],),
@@ -410,9 +415,7 @@ def _not_found(conn: sqlite3.Connection, name: str) -> NotFound:
             return NotFound(
                 name=name,
                 suggestions=full,
-                message=(
-                    f"Объект «{name}» не найден: несколько объектов с таким именем: {listed}"
-                ),
+                message=(f"Объект «{name}» не найден: несколько объектов с таким именем: {listed}"),
             )
         suggestions = _bare_suggestions(conn, name)
         similar = ", ".join(suggestions) if suggestions else "нет"
@@ -520,6 +523,8 @@ def _property_item(row: sqlite3.Row) -> dict[str, Any]:
         "qualifiers": qualifiers,
     }
     unresolved = _lines(row["unresolved"])
+    if row["fill_checking"]:
+        item["fill_checking"] = row["fill_checking"]
     if unresolved:
         item["unresolved"] = unresolved
     return item

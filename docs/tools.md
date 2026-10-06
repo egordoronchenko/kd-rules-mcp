@@ -843,7 +843,7 @@ Each list contains up to 200 rows; larger lists add `<key>_total`.
 | `structure_list` | `structures`: `structure_id`, `configuration`, `synonym`, `version`, `source`, `source_path` in agent paths, `extensions` as a path list (not a JSON string), `loaded_at` |
 | `structure_load_xml`, `structure_load_md83exp` | `structure_id`, `reused`, `counts`, `elapsed_s`, `message`; unresolved types add `unresolved_total` and `unresolved_top` (up to 20) |
 | `structure_objects` | List page: `name` (`Вид.Имя`), `type_name`, `synonym` |
-| `structure_object` | `name`, `type_name`, `kind`, `synonym`, `attrs`, `properties` page. A bare name (`ФизическиеЛица`) returns its unique match; multiple matches give `object_not_found` with full names. Similarity search uses the bare name. Property qualifier `date_parts` occurs only for `Дата` |
+| `structure_object` | `name`, `type_name`, `kind`, `synonym`, `attrs`, `properties` page. A bare name (`ФизическиеЛица`) returns its unique match; multiple matches give `object_not_found` with full names. Similarity search uses the bare name. Property qualifier `date_parts` occurs only for `Дата`; `fill_checking` is present when known from XML (`ShowError`/`DontCheck`) |
 | `structure_values`, `structure_plan_content` | List page; plan items contain object types and automatic registration flags |
 | `structure_compare` | `counts`, `limit`, `added_objects`, `removed_objects`, `added_properties`, `removed_properties`, `changed_properties`, `added_values`, `removed_values`; each list is limited to `limit` |
 | `match_objects` | List page: `confidence`, `auto`, `source`, `target` (`Вид.Имя`), `synonym`, `note` |
@@ -1267,6 +1267,9 @@ a `/` boundary: `ПКО/Товар` matches `ПКО/Товар/ПКС/Код`, n
 Empty prefixes disable filtering. Default `section=issues` includes `skipped` counts
 (`total`/`by_check`) without reason text. `section=skipped` returns a page of unchecked records,
 without `issues`; address filtering applies when a skip reason contains an address.
+Without filters, repeated `ed.schema.required_unfilled` warnings occupy one row with `count`.
+Use `section="issues",check_prefix="ed.schema.required_unfilled"` for all individual details.
+Paging totals count displayed rows; `summary.by_check` always counts individual issues.
 
 Code references are available through `ed_get(children_kind=reference)`.
 Computed names count as unparsed, not errors. `ed_overview` diagnostics describe parse completeness;
@@ -1633,6 +1636,20 @@ the overlay contracts above. Operations cover ПКО, ПОД, direct/reference/a
 identification/search, ПКПД/value pairs, parameters, handlers, conversion events and algorithms.
 Reserved kinds refuse with `unsupported_form`.
 No BSL executes during authoring; installation and live exchange are separate steps.
+
+Manager validation/build also report two live-exchange risks. `ed.schema.reference_type_partial`
+warns when a direct send reference ПКС targets a ПКО covering only part of the configuration
+attribute's composite type; key properties are identified explicitly. Use an algorithmic ПКС
+to choose the ПКО by the value's type. ПКПД and algorithmic properties are excluded.
+`ed.handler.format_enum_as_string` warns when editable receive code compares an XDTO enumeration
+structure with a string or passes it to `СтрНайти`/`ВРег` without extracting `.Значение`.
+It follows direct reads, literal subscripts, `ДанныеXDTO.Свойство` output variables and arguments
+passed to local algorithms. Imported preserved bodies are exempt; without a schema it skips with
+`schema_required`. Both warnings require build acknowledgement. See pitfalls 22–23.
+
+The kit's “Проверьте данные перед первым обменом” block provides read-only queries for declared
+sources of mandatory reference-type keys, including attributes with `ShowError`: data-exchange
+loading mode can bypass fill checking. Unmapped algorithmic sources cannot be inferred.
 
 1. Load the host structure and open its XDTO schema with `ed_schema_open`.
 2. Call `ed_create` with an explicit `project_id`, host (`project,configuration` from
@@ -2131,6 +2148,14 @@ the adopted plan's `Ext/Content.xml` with `AutoRecord=Deny` and adopts the objec
 `plan_content_additions` lists additions in the manifest; the instruction asks to check
 the extension mark in the Configurator plan content. Registration remains the ПРО's job.
 No additions preserve previous kit bytes. Unavailable content yields `ed.plan.content_unchecked`.
+`ed.schema.required_unfilled` warns when a mandatory send property (including reference keys)
+has a non-algorithmic source without `FillChecking=ShowError`; declarative ПКПД/ПКО conversion
+does not protect empty values. Writing requires acknowledgement. The instruction includes
+source-data count queries to run before exchange; the server does not execute them. Missing
+structure/FillChecking yields an explicit skip; reload old XML structures, then rebind affected
+manager projects to refresh input fingerprints. MD83Exp lacks this field.
+Common validators retain data preflight on direct, cached and layered paths.
+Overlay delivery reports omit it; the data-check instruction belongs to manager kits.
 Schema/structure absence returns `reopen_calls` with saved source parameters, as with
 `manager_inputs_not_open`; missing source parameters appear in `missing_reopen_parameters`.
 `ed_validate` and manager build share the semantic readback check: `ed.writer.read`

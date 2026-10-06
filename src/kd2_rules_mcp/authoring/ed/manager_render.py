@@ -475,6 +475,7 @@ def render_manager_kit(
     executor_profile_id: str,
     form_evidence: Mapping[str, bool] | None = None,
     content_objects: tuple[Description, ...] = (),
+    data_preflight: str = "",
     previous_manifest: ManagerManifest | None = None,
     previous_files: Mapping[str, bytes] | None = None,
     keep_version: bool = False,
@@ -614,6 +615,8 @@ def render_manager_kit(
             }
             for obj in content_objects
         ]
+    if data_preflight:
+        inputs["data_preflight_sha256"] = sha256(data_preflight.encode("utf-8"))
     decision_hash = manager_decision_hash(inputs)
     if keep_version and previous_manifest and previous_manifest.decision_hash != decision_hash:
         refuse(
@@ -654,6 +657,7 @@ def render_manager_kit(
         interface_compatibility_mode=host.interface_compatibility_mode,
         plan_content_additions=tuple(obj.kind + "." + obj.name for obj in content_objects),
     )
+    instruction += data_preflight
     result["instruction.md"] = instruction.encode("utf-8")
     changes = manager_changes(
         entity_hashes,

@@ -112,6 +112,8 @@ def test_render_golden_and_repeat(case):
         if p.is_file()
     }
     assert bundle.files == expected
+    assert "Проверьте данные перед первым обменом" not in bundle.instruction
+    assert b"ed.schema.required_unfilled" not in bundle.files["validation.json"]
     assert bundle.files == render_authoring(value, descriptions()).files
     count = 4 if case == "existing" else 5
     assert len([p for p in bundle.files if p.startswith("extension/")]) == count

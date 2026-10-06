@@ -67,6 +67,7 @@ class StructureProperty:
     types: tuple[str, ...]
     unresolved: tuple[str, ...]
     qualifiers: Mapping[str, str | int]
+    fill_checking: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +123,7 @@ class StructureSnapshot:
                 sets.get(prop["type_set_id"], ()),
                 tuple((prop["unresolved"] or "").splitlines()),
                 MappingProxyType({k: prop[k] for k in qualifier_names}),
+                prop.get("fill_checking", ""),
             )
             grouped.setdefault(prop["object_id"], {}).setdefault(
                 (prop["path"].casefold(), parent_kind), []

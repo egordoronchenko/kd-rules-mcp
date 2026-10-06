@@ -9,11 +9,13 @@ import json
 import shutil
 import sqlite3
 from collections.abc import Iterator
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
 from kd2_rules_mcp.errors import Kd2Error
+from kd2_rules_mcp.structures import db
 from kd2_rules_mcp.structures.queries import (
     NotFound,
     Page,
@@ -22,6 +24,7 @@ from kd2_rules_mcp.structures.queries import (
     object_values,
 )
 from kd2_rules_mcp.structures.store import LoadResult, StructureStore
+from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 
 DUMP = Path(__file__).parent / "data" / "xmldump"
 MAIN = DUMP / "main"
@@ -86,6 +89,56 @@ CALCULATION_PLANS = sorted(
     ]
 )
 RECORDERS = sorted(["ДокументСсылка.Приход", "ДокументСсылка.Расход"])
+
+
+def test_fill_checking_xml_cache_snapshot_and_old_cache_reload(tmp_path):
+    from lxml import etree
+
+    main = tmp_path / "main"
+    shutil.copytree(MAIN, main)
+    path = main / "Catalogs/Номенклатура.xml"
+    tree = etree.parse(str(path))
+    ns = "http://v8.1c.ru/8.3/MDClasses"
+    xr = "http://v8.1c.ru/8.3/xcf/readable"
+    props = tree.find(f".//{{{ns}}}Catalog/{{{ns}}}Properties")
+    assert props is not None
+    standards = etree.SubElement(props, f"{{{ns}}}StandardAttributes")
+    standard = etree.SubElement(standards, f"{{{xr}}}StandardAttribute", name="Description")
+    etree.SubElement(standard, f"{{{xr}}}FillChecking").text = "ShowError"
+    attr = tree.find(f".//{{{ns}}}Attribute/{{{ns}}}Properties")
+    assert attr is not None
+    etree.SubElement(attr, f"{{{ns}}}FillChecking").text = "ShowError"
+    tree.write(str(path), encoding="utf-8")
+    store = StructureStore(tmp_path / "cache")
+    store.load_xml("fill", main)
+    with closing(store.open("fill")) as conn:
+        snap = StructureSnapshot.load(conn)
+        obj = snap.objects[("справочник", "номенклатура")]
+        assert obj.property("Артикул")[0].fill_checking == "ShowError"
+        assert obj.property("Наименование")[0].fill_checking == "ShowError"
+        assert obj.property("Товары.Номенклатура", True)[0].fill_checking == "DontCheck"
+        listed = describe_object(conn, NOMENCLATURE)
+        assert isinstance(listed, dict)
+        assert (
+            next(p for p in listed["properties"].items if p["path"] == "Артикул")["fill_checking"]
+            == "ShowError"
+        )
+    with sqlite3.connect(store.path("fill")) as conn:
+        conn.execute("ALTER TABLE properties DROP COLUMN fill_checking")
+        conn.execute("UPDATE meta SET value='1' WHERE key='schema_version'")
+        conn.execute("UPDATE meta SET value='previous-reader' WHERE key='loader_version'")
+    with closing(store.open("fill")) as conn:
+        old = StructureSnapshot.load(conn)
+        assert (
+            old.objects[("справочник", "номенклатура")].property("Артикул")[0].fill_checking == ""
+        )
+        assert isinstance(describe_object(conn, NOMENCLATURE), dict)
+    assert not store.load_xml("fill", main).reused
+    assert store.meta("fill")["schema_version"] == db.SCHEMA_VERSION == "2"
+    with closing(store.open("fill")) as conn:
+        reread = StructureSnapshot.load(conn)
+        assert reread == snap
+    assert store.load_xml("fill", main).reused
 
 
 @pytest.fixture(scope="module")

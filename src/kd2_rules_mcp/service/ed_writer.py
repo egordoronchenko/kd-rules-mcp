@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 
 from kd2_rules_mcp.authoring.ed.artifacts import artifact_name, validate_manager_files
 from kd2_rules_mcp.authoring.ed.hook import valid_identifier
+from kd2_rules_mcp.authoring.ed.instruction import render_data_preflight
 from kd2_rules_mcp.authoring.ed.manager_candidates import object_candidates, property_candidates
 from kd2_rules_mcp.authoring.ed.manager_operations import parse_operation
 from kd2_rules_mcp.authoring.ed.manager_render import (
@@ -58,12 +59,16 @@ from kd2_rules_mcp.service.ed_authoring import EdAuthoringMixin, _failure, _mapp
 from kd2_rules_mcp.service.ed_authoring_views import compact_page, json_size, validate_options
 from kd2_rules_mcp.service.ed_layers import checked_extensions, extension_paths, select_views
 from kd2_rules_mcp.service.ed_names import common_module_names
+from kd2_rules_mcp.service.ed_preflight import key_data_instruction, with_key_data_instruction
 from kd2_rules_mcp.service.ed_reopen import with_reopen_hints
 from kd2_rules_mcp.service.ed_views import address_of, validate_page
 from kd2_rules_mcp.service.paths import Settings
 from kd2_rules_mcp.structures.store import dump_fingerprint
+from kd2_rules_mcp.validation.ed_handler_enum import validate_enum_handlers
 from kd2_rules_mcp.validation.ed_links import validate_links
 from kd2_rules_mcp.validation.ed_plan import validate_plan_content
+from kd2_rules_mcp.validation.ed_required import CHECK as REQUIRED_UNFILLED
+from kd2_rules_mcp.validation.ed_required import RequiredUnfilled
 from kd2_rules_mcp.validation.ed_schema import validate_schema
 from kd2_rules_mcp.validation.ed_structure import validate_structure
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
@@ -526,11 +531,11 @@ class EdWriterMixin(EdAuthoringMixin):
             )
         return tuple(result)
 
-    def _manager_schema_checks(self, model, metadata: dict) -> ValidationReport:
-        """Проверяет прямые типы, границы и обязательные источники перед сборкой."""
+    def _manager_bound_schema(self, metadata: dict):
+        """Привязанная схема из открытого снимка или сохранённых путей пакетов."""
         args = metadata["arguments"]
-        if not args["schema_id"] or not args["structure_id"]:
-            return ValidationReport()
+        if not args["schema_id"]:
+            return None
         opened = self._ed_schemas.get(args["schema_id"])
         if opened is not None:
             schema = opened.schema
@@ -549,18 +554,34 @@ class EdWriterMixin(EdAuthoringMixin):
                 extensions=tuple(path for p, path in paths if p["role"] == "extension"),
                 locate_import=imports.get,
             )
+        return schema
+
+    def _manager_schema_checks(
+        self, model, metadata: dict, *, required_unfilled: list[RequiredUnfilled] | None = None
+    ) -> ValidationReport:
+        """Проверяет прямые типы, границы и обязательные источники перед сборкой."""
+        args = metadata["arguments"]
         _, snapshot = self._manager_snapshot(model, publish=False)
-        structure = self._ed_structure_snapshot(args["structure_id"])[0]
+        schema = self._manager_bound_schema(metadata)
+        if schema is None:
+            return validate_enum_handlers(
+                model, snapshot.document, ValidationProfile.build(None, args["format_version"])
+            )
+        structure = (
+            self._ed_structure_snapshot(args["structure_id"])[0] if args["structure_id"] else None
+        )
+        profile = ValidationProfile.build(schema, args["format_version"], "both")
         report = validate_schema(
             snapshot.document,
             schema,
             snapshot.index,
-            ValidationProfile.build(schema, args["format_version"], "both"),
+            profile,
             structure,
             include_value_ranges=True,
             legacy_atomic_only=False,
+            required_unfilled=required_unfilled,
         )
-        return ValidationReport(
+        result = ValidationReport(
             issues=[
                 i
                 for i in report.issues
@@ -569,8 +590,35 @@ class EdWriterMixin(EdAuthoringMixin):
                     "ed.schema.value_range",
                     "ed.schema.type_incompatible",
                     "ed.schema.required_source",
+                    "ed.schema.reference_type_partial",
+                    REQUIRED_UNFILLED,
                 }
-            ]
+            ],
+            skipped=[s for s in report.skipped if s.check == REQUIRED_UNFILLED],
+        )
+        result.extend(validate_enum_handlers(model, snapshot.document, profile))
+        return result
+
+    def _manager_enum_validation(self, project_id, document, profile):
+        metadata = self._manager_metadata(project_id)
+        if profile.schema is None:
+            args = metadata["arguments"]
+            opened = self._ed_schemas.get(args["schema_id"] or "")
+            profile = ValidationProfile.build(
+                opened.schema if opened else None, args["format_version"]
+            )
+        return validate_enum_handlers(self._manager_project(project_id).model, document, profile)
+
+    def _manager_key_instruction(self, model, metadata):
+        args = metadata["arguments"]
+        schema = self._manager_bound_schema(metadata)
+        if schema is None or not args["structure_id"]:
+            return ""
+        _, snapshot = self._manager_snapshot(model, publish=False)
+        return key_data_instruction(
+            snapshot.document,
+            ValidationProfile.build(schema, args["format_version"]),
+            self._ed_structure_snapshot(args["structure_id"])[0],
         )
 
     def _manager_rebind_report(self, model, metadata: dict, detection: ProfileDetection):
@@ -1844,7 +1892,12 @@ class EdWriterMixin(EdAuthoringMixin):
                 report = validate_writer(
                     model, rendered.data, detection=detection, **self._manager_name_scope(metadata)
                 )
-                report.extend(self._manager_schema_checks(model, metadata))
+                required_unfilled: list[RequiredUnfilled] = []
+                report.extend(
+                    self._manager_schema_checks(
+                        model, metadata, required_unfilled=required_unfilled
+                    )
+                )
                 content_report, missing_content = self._manager_plan_content(model, metadata)
                 report.extend(content_report)
                 errors = [
@@ -1884,6 +1937,10 @@ class EdWriterMixin(EdAuthoringMixin):
                     previous_files=previous_files if previous else None,
                     creation_fingerprint=metadata["creation_fingerprint"],
                     content_objects=self._manager_content_descriptions(metadata, missing_content),
+                    data_preflight=render_data_preflight(required_unfilled),
+                )
+                kit = with_key_data_instruction(
+                    kit, self._manager_key_instruction(model, metadata), previous, previous_files
                 )
                 build_hash = digest(
                     (

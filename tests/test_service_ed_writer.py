@@ -1121,6 +1121,11 @@ def test_end_to_end_restart_navigation_delivery_and_close(writer_setup):
         executor_profile_id=model.executor_profile.profile_id,
         creation_fingerprint=metadata["creation_fingerprint"],
     )
+    from kd2_rules_mcp.service.ed_preflight import with_key_data_instruction
+
+    direct = with_key_data_instruction(
+        direct, service._manager_key_instruction(model, metadata), None, {}
+    )
     written = build(service, applied, mode="write", expected_preview_hash=preview["build_hash"])
     assert written["written"] and size(written) <= 8192
     destination = Path(written["output_dir"])
@@ -1263,6 +1268,70 @@ def test_writer_warnings_need_build_acknowledgements(writer_setup):
         acknowledged_notices=required,
     )
     assert written["written"] and not written["runtime_verified"]
+
+
+def test_required_unfilled_validate_build_ack_and_data_queries(writer_setup):
+    service, args, _ = writer_setup
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute("UPDATE properties SET fill_checking='ShowError'")
+        connection.execute(
+            "UPDATE properties SET fill_checking='DontCheck' WHERE name='Наименование'"
+        )
+        connection.execute("UPDATE meta SET value='required-unfilled' WHERE key='input_hash'")
+    created = service.ed_create(**args)
+    _, _, applied = apply_packet(service, created, manager_operations())
+    validated = service.ed_validate(
+        applied["document_id"],
+        schema_id=args["schema_id"],
+        structure_id="host",
+        check_prefix="ed.schema.required_unfilled",
+    )
+    issues = validated["issues"]["items"]
+    assert len(issues) == 1
+    assert issues[0]["address"] == "ПКО/Должности/ПКС/Наименование"
+    assert "включая документы" in issues[0]["message"]
+    # Та же проверка при сборке после перезапуска (схема — из привязки проекта).
+    service = Kd2Service(service.settings)
+    preview = build(service, applied, section="notices", check_prefix="ed.schema.required_unfilled")
+    assert len(preview["items"]) == 1
+    assert preview["items"][0]["message"] == issues[0]["message"]
+    assert any(
+        n.startswith("ed.schema.required_unfilled:") for n in preview["required_acknowledgements"]
+    )
+    with pytest.raises(EdAuthoringAckRequiredError):
+        build(service, applied, mode="write", expected_preview_hash=preview["build_hash"])
+    written = build(
+        service,
+        applied,
+        mode="write",
+        expected_preview_hash=preview["build_hash"],
+        acknowledged_notices=preview["required_acknowledgements"],
+    )
+    instruction = (Path(written["output_dir"]) / "instruction.md").read_text(encoding="utf-8")
+    assert "## Проверьте данные перед первым обменом" in instruction
+    assert "ИЗ Справочник.Должности КАК Объект" in instruction
+    assert "НЕ Объект.ПометкаУдаления И (Объект.Наименование = &Пусто)" in instruction
+    assert '`&Пусто` = `""`' in instruction
+    assert "заполните реквизит" in instruction
+    repeated = build(service, applied)
+    assert repeated["status"] == "unchanged"
+
+
+def test_no_unfilled_risk_leaves_manager_kit_bytes_unchanged(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    _, _, applied = apply_packet(service, created, manager_operations())
+    preview = build(service, applied)
+    written = build(service, applied, mode="write", expected_preview_hash=preview["build_hash"])
+    before = files_at(Path(written["output_dir"]))
+    assert "Проверьте данные перед первым обменом" not in before["instruction.md"].decode("utf-8")
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute("UPDATE properties SET fill_checking='ShowError'")
+    # Не меняется вход конфигурации; новое метаполе не меняет комплект без риска.
+    service = Kd2Service(service.settings)
+    again = build(service, applied)
+    assert again["status"] == "unchanged" and again["build_hash"]
+    assert files_at(Path(written["output_dir"])) == before
 
 
 def test_profile_is_rechecked_for_validate_build_and_publication(writer_setup, monkeypatch):

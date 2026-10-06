@@ -131,6 +131,8 @@ class StructureStore:
         if not self.exists(structure_id):
             return None
         meta = self.meta(structure_id)
+        if meta.get("schema_version") != db.SCHEMA_VERSION:
+            return None
         if any(meta.get(key) != value for key, value in expected.items()):
             return None
         return LoadResult(
@@ -221,7 +223,8 @@ class StructureStore:
         """Собирает структуру из XML-выгрузки конфигурации и явно перечисленных расширений.
 
         Расширения накладываются в заданном порядке; выгрузки, которых нет в списке, не читаются.
-        Изменение выгрузки определяется по `dump_fingerprint`; `force` — собрать заново в любом случае.
+        Изменение выгрузки определяется по `dump_fingerprint`;
+        `force` — собрать заново в любом случае.
         """
         self.path(structure_id)
         roots = [main, *extensions]

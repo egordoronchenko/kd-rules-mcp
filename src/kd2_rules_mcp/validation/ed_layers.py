@@ -1335,12 +1335,20 @@ def validate_effective_schema(
     profile: ValidationProfile,
     snapshot: StructureSnapshot | None = None,
     coverage: Counter[str] | None = None,
+    *,
+    include_required_unfilled: bool = True,
 ) -> ValidationReport:
     from .ed_schema import validate_schema
 
     document = effective_document(layered, context)
     report = validate_schema(
-        document, schema, build_addresses(document), profile, snapshot, coverage
+        document,
+        schema,
+        build_addresses(document),
+        profile,
+        snapshot,
+        coverage,
+        include_required_unfilled=include_required_unfilled,
     )
     _uncertain_report(layered, context, report, "schema")
     return report

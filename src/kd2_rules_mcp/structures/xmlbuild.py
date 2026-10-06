@@ -287,6 +287,7 @@ class Prop:
     indexing: bool = False
     autoregistration: bool = False
     children: list["Prop"] = field(default_factory=list)
+    fill_checking: str = ""
 
 
 def _field_props(item: Field, kind: str, resolver: TypeResolver) -> Iterator[Prop]:
@@ -299,7 +300,16 @@ def _field_props(item: Field, kind: str, resolver: TypeResolver) -> Iterator[Pro
     usage = ENUM_TEXT.get(item.usage) or item.usage
     names = [item.name] if item.balance else [f"{item.name}Дт", f"{item.name}Кт"]
     for name in names:
-        yield Prop(name, kind, resolved, item.synonym, item.comment, usage=usage, indexing=indexing)
+        yield Prop(
+            name,
+            kind,
+            resolved,
+            item.synonym,
+            item.comment,
+            usage=usage,
+            indexing=indexing,
+            fill_checking=item.fill_checking,
+        )
 
 
 AddProp = Callable[..., None]
@@ -323,6 +333,7 @@ class Builder:
             auto = attr.props.get("AutoUse") == "Use"
             item = Field(attr.name, attr.synonym, attr.comment, attr.type or TypeDesc())
             item.indexing = attr.props.get("Indexing", "")
+            item.fill_checking = attr.props.get("FillChecking", "DontCheck")
             for full_name, use in attr.common_content:
                 if use == "Use" or (use == "Auto" and auto):
                     result.setdefault(full_name, []).append(item)
@@ -347,7 +358,24 @@ class Builder:
         prefix = KINDS[obj.tag][4] if obj.tag in KINDS else ""
 
         def add(name: str, resolved: Resolved, kind: str = "Свойство", synonym: str = "") -> None:
-            out.append(Prop(name, kind, resolved, synonym or name, synonym or name))
+            standard_name = {
+                "Код": "Code",
+                "Наименование": "Description",
+                "Номер": "Number",
+                "Дата": "Date",
+                "Владелец": "Owner",
+                "Родитель": "Parent",
+            }.get(name, "")
+            out.append(
+                Prop(
+                    name,
+                    kind,
+                    resolved,
+                    synonym or name,
+                    synonym or name,
+                    fill_checking=props.get(f"FillChecking.{standard_name}", ""),
+                )
+            )
 
         if "BasedOn" in props:
             add("ПометкаУдаления", simple_type("Булево"), synonym="Пометка удаления")
@@ -640,8 +668,9 @@ class _Writer:
             cursor = self.connection.execute(
                 "INSERT INTO properties (object_id, parent_id, kind, name, path, synonym, comment,"
                 " is_group, code, number_length, number_precision, number_nonnegative,"
-                " string_length, string_fixed, date_parts, usage, indexing, autoregistration)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " string_length, string_fixed, date_parts, usage, indexing, autoregistration,"
+                " fill_checking)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     object_id,
                     parent_id,
@@ -660,6 +689,7 @@ class _Writer:
                     prop.usage,
                     int(prop.indexing),
                     int(prop.autoregistration),
+                    prop.fill_checking,
                 ),
             )
             row_id = int(cursor.lastrowid or 0)

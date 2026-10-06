@@ -14,6 +14,8 @@ from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
 from kd2_rules_mcp.ed.schema.resolver import is_reference, property_type, table_row
 from kd2_rules_mcp.ed.schema.xdto import XS
 from kd2_rules_mcp.validation.ed_compatibility import compatibility, primitive_limits
+from kd2_rules_mcp.validation.ed_reference_types import check_reference_types
+from kd2_rules_mcp.validation.ed_required import RequiredUnfilled, check_required_unfilled
 from kd2_rules_mcp.validation.ed_structure_snapshot import (
     CheckContext,
     StructureSnapshot,
@@ -159,6 +161,8 @@ def validate_schema(
     context: EffectiveContext | None = None,
     include_value_ranges: bool = False,
     legacy_atomic_only: bool = True,
+    required_unfilled: list[RequiredUnfilled] | None = None,
+    include_required_unfilled: bool = True,
 ) -> ValidationReport:
     """Проверяет выбранную схему и прямые типы при наличии структуры."""
     if isinstance(document, LayeredManager):
@@ -166,7 +170,15 @@ def validate_schema(
 
         if context is None:
             raise ValueError("Для действующего представления нужен контекст направления")
-        return validate_effective_schema(document, context, schema, profile, snapshot, coverage)
+        return validate_effective_schema(
+            document,
+            context,
+            schema,
+            profile,
+            snapshot,
+            coverage,
+            include_required_unfilled=include_required_unfilled,
+        )
     checking = CheckContext(document, index, profile)
     by_name: dict[str, list[ed.ObjectRule]] = {}
     for rule in document.pko:
@@ -254,6 +266,25 @@ def validate_schema(
                 supplied: set[str] = set()
                 possible_supplied: set[str] = set()
                 for prop in properties:
+                    if (
+                        direction == "send"
+                        and prop.configuration_property
+                        and not prop.algorithm_flag
+                        and prop.conversion_rule
+                        and not any(
+                            p.name.casefold() == prop.conversion_rule.casefold()
+                            for p in document.pkpd
+                        )
+                    ):
+                        check_reference_types(
+                            checking,
+                            profile,
+                            snapshot,
+                            rule,
+                            group,
+                            prop,
+                            by_name.get(prop.conversion_rule.casefold(), []),
+                        )
                     property_owner = group_type
                     property_owner_status = group_type_status
                     if type_status == "resolved" and prop.namespace and rule.format_object.value:
@@ -303,6 +334,20 @@ def validate_schema(
                                 supplied.update(resolved.property_ids)
                             else:
                                 checking.skip(check, resolved.reason or resolved.status, prop)
+                    if direction == "send" and include_required_unfilled:
+                        risk = check_required_unfilled(
+                            checking,
+                            profile,
+                            schema,
+                            snapshot,
+                            rule,
+                            group,
+                            prop,
+                            property_owner,
+                            resolved_prop,
+                        )
+                        if risk is not None and required_unfilled is not None:
+                            required_unfilled.append(risk)
                     check = "ed.schema.pko_unavailable"
                     if prop.conversion_rule and checking.start(
                         check, prop, direction, group or rule

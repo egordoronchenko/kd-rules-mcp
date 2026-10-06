@@ -380,7 +380,31 @@ def validation_view(
                     row["hint"] = hint
         view["skipped"] = slice_rows(rows, offset, limit)
         return view
-    issues = [issue.to_dict() for issue in report.issues]
+    issues: list[dict[str, Any]] = [issue.to_dict() for issue in report.issues]
+    if not any((level, check_prefix, address_prefix)):
+        # Потенциальные проблемы данных однотипны и многочисленны. Общая страница
+        # показывает счётчик; отбор по проверке возвращает все исходные адреса и тексты.
+        check = "ed.schema.required_unfilled"
+        count = sum(i["check"] == check and i["level"] == Level.WARNING.value for i in issues)
+        if count > 1:
+            grouped: list[dict[str, Any]] = []
+            seen = False
+            for item in issues:
+                if item["check"] != check or item["level"] != Level.WARNING.value:
+                    grouped.append(item)
+                elif not seen:
+                    seen = True
+                    grouped.append(
+                        {
+                            "level": Level.WARNING.value,
+                            "check": check,
+                            "address": "Конвертация",
+                            "count": count,
+                            "message": 'Подробности: ed_validate(section="issues", '
+                            f'check_prefix="{check}").',
+                        }
+                    )
+            issues = grouped
     if level:
         issues = [issue for issue in issues if issue["level"] == Level(level).value]
     if check_prefix:

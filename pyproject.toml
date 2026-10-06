@@ -1,6 +1,6 @@
 [project]
 name = "kd2-rules-mcp"
-version = "0.1.0"
+version = "1.0.0"
 description = "MCP-сервер правил обмена «Конвертации данных 2» (1С): разбор, сопоставление, правка и проверка"
 readme = "README.md"
 license = "MIT"

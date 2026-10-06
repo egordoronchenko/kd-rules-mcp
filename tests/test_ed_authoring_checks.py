@@ -949,3 +949,28 @@ def test_cached_checkers_equal_original_reports_and_keep_global_dependencies(mon
             )
     assert validate_schema.__globals__["CheckContext"] is CheckContext
     assert validate_structure.__globals__["CheckContext"] is CheckContext
+
+
+def test_overlay_delivery_view_does_not_change_common_data_checks():
+    from kd2_rules_mcp.authoring.ed.manifest import overlay_report_view, validation_dict
+
+    prepared = prepare_authoring(inputs(), (OPERATION,), IDENTITY, version_scope="manager")
+    raw_profiles = prepared.selected_profiles + prepared.other_profiles
+    data_checks = [
+        item
+        for comparison in raw_profiles
+        for report in (comparison.before, comparison.after)
+        for item in (*report.issues, *report.skipped)
+        if item.check == "ed.schema.required_unfilled"
+    ]
+    assert data_checks
+    shown = overlay_report_view(prepared)
+    assert all(
+        item.check != "ed.schema.required_unfilled"
+        for comparison in (*shown.selected_profiles, *shown.other_profiles)
+        for report in (comparison.before, comparison.after)
+        for item in (*report.issues, *report.skipped)
+    )
+    assert prepared.selected_profiles + prepared.other_profiles == raw_profiles
+    assert shown.build_hash == prepared.build_hash
+    assert validation_dict(prepared) == validation_dict(shown)

@@ -9,7 +9,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 SCHEMA = """
 CREATE TABLE meta (
@@ -67,6 +67,7 @@ CREATE TABLE properties (
     usage TEXT NOT NULL DEFAULT '',
     indexing INTEGER NOT NULL DEFAULT 0,
     autoregistration INTEGER NOT NULL DEFAULT 0,
+    fill_checking TEXT NOT NULL DEFAULT '', -- '' — нет сведений (MD83Exp / старый кэш)
     unresolved TEXT                  -- неразрешённые типы по строкам; NULL — все разрешены
 );
 CREATE INDEX properties_object ON properties(object_id, parent_id);

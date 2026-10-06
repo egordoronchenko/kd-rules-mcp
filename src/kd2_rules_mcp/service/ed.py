@@ -882,6 +882,11 @@ class EdMixin(ServiceBase):
                 project.manager_project_id, project.document.files[0].text, project_id, structure_id
             )
             report.extend(writer_report)
+            report.extend(
+                cast("EdWriterMixin", self)._manager_enum_validation(
+                    project.manager_project_id, project.document, profile
+                )
+            )
 
         def issue_key(issue: Issue) -> tuple[str, int, str, str]:
             entity = project.index.by_address.get(issue.address)
