@@ -77,6 +77,7 @@ from kd2_rules_mcp.errors import (
 from kd2_rules_mcp.projects import resolve
 from kd2_rules_mcp.service import ed_authoring_views as views
 from kd2_rules_mcp.service.ed import EdMixin
+from kd2_rules_mcp.service.ed_reopen import with_reopen_hints
 from kd2_rules_mcp.service.ed_routes import (
     EdRoutesMixin,
     _file_stamp,
@@ -718,6 +719,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 {"resource": name, "limit": maximum, "actual": count},
             )
 
+    @with_reopen_hints
     def ed_authoring_candidates(
         self,
         target: dict,
@@ -1694,6 +1696,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         return result
 
     @_timed_build
+    @with_reopen_hints
     def ed_authoring_build(
         self,
         project: str | None = None,

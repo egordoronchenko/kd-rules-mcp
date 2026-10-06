@@ -6,7 +6,7 @@ import shutil
 import tempfile
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from importlib.resources import files as resources
 from pathlib import Path
 from string import Template
@@ -20,6 +20,7 @@ from kd2_rules_mcp.authoring.ed.registration_delivery import (
     deletion_mark_instruction,
     read_plan_host,
     render_registration_kit,
+    retarget_instruction_details,
 )
 from kd2_rules_mcp.authoring.ed.xml_dump import M, parse_xml
 from kd2_rules_mcp.authoring.registration_retarget import (
@@ -27,6 +28,7 @@ from kd2_rules_mcp.authoring.registration_retarget import (
     deletion_filter_summary,
     own_attribute_covers,
     own_attribute_remarks,
+    registration_plan_notices,
     registration_rule_active,
     retarget_registration,
 )
@@ -131,6 +133,9 @@ def _manual_files(
         if required
         else ""
     )
+    details = retarget_instruction_details(result)
+    if details:
+        incomplete += "\n\n" + details
     manual = (
         f"# Перенос правил регистрации\n\nПлан обмена: `{plan}`.\n\n{incomplete}\n\n"
         "Файл заменяет правила регистрации всего плана. Проверьте все обмены этого плана.\n\n"
@@ -349,7 +354,7 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
         self,
         project_id: str,
         exchange_plan: str,
-        node_properties: dict[str, str],
+        node_properties: dict[str, Any],
         source: dict,
         structure_id: str | None = None,
         own_attributes: list[dict] | None = None,
@@ -448,7 +453,11 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                     else None
                 )
                 host = read_plan_host(
-                    root, exchange_plan, extensions=extensions, object_names=object_names
+                    root,
+                    exchange_plan,
+                    extensions=extensions,
+                    object_names=object_names,
+                    check_plan_content=True,
                 )
                 card, structure_hash = self._registration_card(
                     structure_id, root, extensions, exchange_plan
@@ -471,6 +480,11 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                     target_plan=card or host.card,
                     deletion_mark_filter=deletion_mark_filter,
                     target_objects=objects,
+                )
+                result = replace(
+                    result,
+                    notices=result.notices
+                    + registration_plan_notices(result.document, exchange_plan, host.plan_content),
                 )
                 own = {a.name.casefold() for a in attributes}
                 notices = _notices(result, own)
@@ -567,7 +581,11 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
 
                 def verify():
                     current_host = read_plan_host(
-                        root, exchange_plan, extensions=extensions, object_names=object_names
+                        root,
+                        exchange_plan,
+                        extensions=extensions,
+                        object_names=object_names,
+                        check_plan_content=True,
                     )
                     _, current_structure = self._registration_card(
                         structure_id, root, extensions, exchange_plan
@@ -617,8 +635,11 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                         "untouched_leaves": sum(r.untouched for r in result.rules),
                         "unused_keys": len(result.unused),
                         "code_mentions": result.code_mentions,
+                        "replaced_leaves": sum(r.replaced for r in result.rules),
+                        "removed_leaves": sum(r.removed for r in result.rules),
                     },
                     "unused_keys": list(result.unused),
+                    "changes": slice_rows([asdict(c) for c in result.changes], offset, limit),
                     "deletion_mark_filter": deletion_filter_summary(result),
                     "notices": slice_rows(notices, offset, limit),
                     "required_acknowledgements": required,

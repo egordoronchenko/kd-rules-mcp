@@ -855,7 +855,8 @@ def test_manager_primitive_validation_and_ranges_preserve_reader_contract(writer
     ranges = [i for i in report["issues"]["items"] if i["check"] == "ed.schema.value_range"]
     assert len(ranges) == 1 and "20" in ranges[0]["message"] and "10" in ranges[0]["message"]
     assert ranges[0]["level"] == "предупреждение"
-    assert report["summary"].get("info", 0) == 0 and report["summary"]["warnings"] == 1
+    assert report["summary"].get("info", 0) == 1 and report["summary"]["warnings"] == 1
+    assert any(i["check"] == "ed.plan.content_unchecked" for i in report["issues"]["items"])
     assert (
         service.ed_validate(applied["document_id"], **inputs, level="предупреждение")["issues"][
             "items"

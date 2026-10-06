@@ -475,7 +475,7 @@ def read_manager_host(
 
 
 def manager_identity_roles(
-    host: ManagerHost, module_name: str
+    host: ManagerHost, module_name: str, content_objects: tuple[Description, ...] = ()
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     """Роли UUID по составу пилота: конфигурация, язык, свой модуль и план."""
     plan_key = "ExchangePlan/" + host.exchange_plan.name
@@ -493,11 +493,26 @@ def manager_identity_roles(
             for role in ("TypeId", "ValueId")
         ),
     ]
-    return tuple(paths), {language_key: host.language.uuid, plan_key: host.exchange_plan.uuid}
+    borrowed = {language_key: host.language.uuid, plan_key: host.exchange_plan.uuid}
+    for obj in content_objects:
+        key = obj.kind + "/" + obj.name
+        paths.append(key)
+        borrowed[key] = obj.uuid
+        paths.extend(
+            key + "/GeneratedType/" + category + "/" + role
+            for _, category in obj.generated_types
+            for role in ("TypeId", "ValueId")
+        )
+    return tuple(paths), borrowed
 
 
 def dump_manager_extension(
-    host: ManagerHost, module_name: str, identity: IdentityMap, *, version: str
+    host: ManagerHost,
+    module_name: str,
+    identity: IdentityMap,
+    *,
+    version: str,
+    content_objects: tuple[Description, ...] = (),
 ) -> Mapping[str, bytes]:
     """XML собственного модуля и заимствованного плана: состав (в) пилота маршрута.
 
@@ -535,6 +550,7 @@ def dump_manager_extension(
         ("Language", host.language.name),
         ("CommonModule", module_name),
         ("ExchangePlan", host.exchange_plan.name),
+        *((obj.kind, obj.name) for obj in content_objects),
     ):
         node(children, kind, name)
     result = {"Configuration.xml": serialize(root)}
@@ -579,6 +595,10 @@ def dump_manager_extension(
     state = node(info, "xr:PropertyState")
     node(state, "xr:Property", "ManagerModule")
     node(state, "xr:State", "Extended")
+    if content_objects:
+        state = node(info, "xr:PropertyState")
+        node(state, "xr:Property", "Content")
+        node(state, "xr:State", "Extended")
     props = node(obj, "Properties")
     node(props, "ObjectBelonging", "Adopted")
     node(props, "Name", host.exchange_plan.name)
@@ -586,4 +606,30 @@ def dump_manager_extension(
     node(props, "ExtendedConfigurationObject", host.exchange_plan.uuid)
     node(obj, "ChildObjects")
     result["ExchangePlans/" + host.exchange_plan.name + ".xml"] = serialize(root)
+    if content_objects:
+        # Эталон выгрузки расширенного заимствованного плана и строки —
+        # docs/plans/ed-writer-plan-content-2026-10.md.
+        namespace = "http://v8.1c.ru/8.3/xcf/extrnprops"
+        content = etree.Element(
+            "{" + namespace + "}ExchangePlanContent",
+            nsmap=cast(
+                Any,
+                {None: namespace, "xr": XR, "xs": "http://www.w3.org/2001/XMLSchema", "xsi": XSI},
+            ),
+            version="2.20",
+        )
+        extension = etree.Element("{" + namespace + "}ExtensionProperty")
+        for description in content_objects:
+            metadata = description.kind + "." + description.name
+            item = etree.SubElement(content, "{" + namespace + "}Item")
+            etree.SubElement(item, "{" + namespace + "}Metadata").text = metadata
+            etree.SubElement(item, "{" + namespace + "}AutoRecord").text = "Deny"
+            item = etree.SubElement(extension, "{" + namespace + "}Item")
+            etree.SubElement(item, "{" + namespace + "}Metadata").text = metadata
+            etree.SubElement(item, "{" + namespace + "}State").text = "Modify"
+            root, obj = adopted_xml(description, identity)
+            node(obj, "ChildObjects")
+            result[description.path] = serialize(root)
+        content.append(extension)
+        result["ExchangePlans/" + host.exchange_plan.name + "/Ext/Content.xml"] = serialize(content)
     return MappingProxyType(result)

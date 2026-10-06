@@ -29,6 +29,7 @@ from kd2_rules_mcp.projects import resolve
 from kd2_rules_mcp.service import ed_layers as layer_views
 from kd2_rules_mcp.service import ed_views as views
 from kd2_rules_mcp.service.base import ServiceBase
+from kd2_rules_mcp.service.ed_reopen import with_reopen_hints
 from kd2_rules_mcp.service.ed_routes import EdRoutesMixin
 from kd2_rules_mcp.service.ed_schema import SchemaProject
 from kd2_rules_mcp.service.paths import Settings
@@ -567,7 +568,12 @@ class EdMixin(ServiceBase):
                 error = AmbiguousAddressError(f"Неоднозначный адрес: {address}", candidates)
                 error.candidate_page = views.page(list(candidates), offset, limit)
                 raise error
-            entity = project.by_address.get(address.casefold())
+            lookup = (
+                "Алгоритм/" + address.split("/", 1)[1]
+                if address.casefold().startswith("код/")
+                else address
+            )
+            entity = project.by_address.get(lookup.casefold())
             if entity is None:
                 raise RuleNotFoundError(f"Сущность ED не найдена: {address}")
             if children_kind == "reference" and views.accepts_code_references(entity):
@@ -594,7 +600,9 @@ class EdMixin(ServiceBase):
                 ]
             doc = project.document
             result = {
-                "address": next(
+                "address": views.address_of(entity, project.index)
+                if isinstance(entity, ed.Routine) and "algorithm" in entity.roles
+                else next(
                     (
                         a
                         for a in project.index.by_id.get(entity.entity_id, ())
@@ -726,6 +734,7 @@ class EdMixin(ServiceBase):
                 "matches": views.page(matches, offset, limit),
             }
 
+    @with_reopen_hints
     def ed_validate(
         self,
         project_id: str,

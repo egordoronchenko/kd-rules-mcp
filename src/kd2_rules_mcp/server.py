@@ -207,6 +207,8 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
         payload.update(error.details)
     if isinstance(error, EdAuthoringPreconditionError):
         payload.update(error.details)
+    if isinstance(error, (EdSchemaNotFoundError, StructureNotFoundError)):
+        payload.update(getattr(error, "reopen_details", {}))
     if isinstance(error, StructureNotFoundError) and service is not None:
         payload["structures"] = service.store.ids()
     if isinstance(error, ObjectNotFoundError):
@@ -1020,7 +1022,9 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def ed_get(
         project_id: Annotated[str, Field(description="ED document/snapshot ID")],
-        address: Annotated[str, Field(description="ED address from ed_list")],
+        address: Annotated[
+            str, Field(description="ED address; Код/algorithm or Алгоритм/algorithm")
+        ],
         children_kind: Annotated[
             str | None,
             Field(description=("Child kind; null = all, reference = code links")),
@@ -1396,10 +1400,10 @@ def create_server(service: Kd2Service) -> MCPServer:
         operations: Annotated[
             list[dict[str, Any]] | None,
             Field(
-                description="Up to 100 W2 operations; forms: docs/tools.md. "
-                "client_id refs; on create after_id omitted=append, null=first. "
-                "Omit on apply to use saved preview_hash. Manager patch: manager_name, "
-                "title, generated_at, text_style only; bindings via ed_create mode=rebind"
+                description="Up to 100 manager ops; forms: docs/tools.md. "
+                "Algorithm address: Код/ or Алгоритм/. client_id refs; "
+                "after_id omitted=append, null=first. Omit for saved preview. "
+                "Manager: manager_name,title,generated_at,text_style; rebind bindings"
             ),
         ] = None,
         mode: Annotated[str, Field(description="preview or apply")] = "preview",
@@ -1482,7 +1486,7 @@ def create_server(service: Kd2Service) -> MCPServer:
     async def registration_retarget(
         project_id: Annotated[str, Field(description="Project")],
         exchange_plan: Annotated[str, Field(description="Plan")],
-        node_properties: Annotated[dict, Field(description="Mapping")],
+        node_properties: Annotated[dict, Field(description="Rename/null/{name,value}/list")],
         source: Annotated[dict, Field(description="Dump")],
         structure_id: Annotated[Any, Field(description="Structure ID")] = None,
         own_attributes: Annotated[Any, Field(description="name,type,synonym")] = None,

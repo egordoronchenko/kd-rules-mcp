@@ -22,6 +22,211 @@ ATTRIBUTES = [{"name": "reg_Flag", "type": "Булево", "synonym": "Не вы
 EXTENSION = {"name": "reg_Registration", "prefix": "reg_"}
 
 
+def plan_content(tmp_path: Path, *names: str) -> Path:
+    path = tmp_path / "dump/ExchangePlans/TargetPlan/Ext/Content.xml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '<Content xmlns="http://v8.1c.ru/8.3/xcf/extrnprops">'
+        + "".join(
+            f"<Item><Metadata>{name}</Metadata><AutoRecord>Deny</AutoRecord></Item>"
+            for name in names
+        )
+        + "</Content>",
+        "utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize("known", [False, True])
+def test_review_plan_membership_requires_acknowledgement(tmp_path: Path, known: bool) -> None:
+    service, args = setup(tmp_path)
+    if known:
+        plan_content(tmp_path, "Catalog.AnotherObject")
+        service.structure_load_xml("target", str(tmp_path / "dump"), force=True)
+    preview, _ = both_previews(service, args)
+    check = "registration.plan_membership" if known else "registration.plan_content_unchecked"
+    notice = next(n for n in preview["notices"]["items"] if n["check"] == check)
+    assert notice["requires_acknowledgement"] and not notice["blocking"]
+    assert "TargetPlan" in notice["message"]
+    if known:
+        assert "правило не исполнится" in notice["message"]
+    failure(
+        service,
+        args | {"mode": "write", "expected_preview_hash": preview["preview_hash"]},
+        "registration.ack_required",
+    )
+    written = write(service, args, preview)
+    instruction = (Path(written["output_path"]) / "ИНСТРУКЦИЯ.md").read_text("utf-8")
+    assert notice["message"] in instruction
+    if known:
+        assert "Правила для объектов вне состава плана" in instruction
+    if known:
+        plan_content(tmp_path, "catalog.testobjects")
+        service.structure_load_xml("target", str(tmp_path / "dump"), force=True)
+        changed, _ = both_previews(service, args)
+        assert changed["preview_hash"] != preview["preview_hash"]
+        assert not any(n["check"] == check for n in changed["notices"]["items"])
+
+
+def test_review_malformed_content_requires_ack_and_keeps_plan_types(tmp_path: Path) -> None:
+    service, args = setup(tmp_path)
+    path = plan_content(tmp_path, "Catalog.TestObjects")
+    path.write_bytes(b"<ExchangePlanContent>broken")
+    args["structure_id"] = None
+    preview = service.registration_retarget(**args)
+    assert preview["status"] == "ready"
+    notice = next(
+        n
+        for n in preview["notices"]["items"]
+        if n["check"] == "registration.plan_content_unchecked"
+    )
+    assert notice["requires_acknowledgement"]
+    write(service, args, preview)
+
+
+@pytest.mark.parametrize(
+    "decision,replaced,removed",
+    [
+        (None, 0, 1),
+        ({"name": "FlagB", "value": True}, 1, 0),
+        ([{"name": "FlagB", "value": True}, {"name": "reg_Flag", "value": False}], 1, 0),
+    ],
+)
+def test_review_boolean_replacement_write(
+    tmp_path: Path, decision: object, replaced: int, removed: int
+) -> None:
+    service, args = setup(tmp_path)
+    add_boolean_field(service, tmp_path)
+    single_leaf(service, args, "OldFlag", "Булево")
+    document = service._document(args["project_id"])
+    assert isinstance(document, RegistrationRules)
+    _filters = document.rules()[0].child("ОтборПоСвойствамПланаОбмена")
+    assert _filters is not None
+    _filters.items[0].values["СвойствоОбъекта"] = "false"
+    # Второй булевый реквизит уже есть в конфигурации, а не предполагается расширением.
+    xml = tmp_path / "dump/ExchangePlans/TargetPlan.xml"
+    xml.write_text(
+        xml.read_text("utf-8").replace("<Name>FlagB</Name>", "<Name>reg_Flag</Name>"), "utf-8"
+    )
+    add_boolean_field(service, tmp_path)
+    plan_content(tmp_path, "Catalog.TestObjects")
+    service.structure_load_xml("target", str(tmp_path / "dump"), force=True)
+    args["node_properties"] = {"OldFlag": decision}
+    before = sha256(dump_rules(document))
+    preview, _ = both_previews(service, args)
+    assert preview["status"] == "ready"
+    assert preview["counts"]["replaced_leaves"] == replaced
+    assert preview["counts"]["removed_leaves"] == removed
+    assert preview["changes"]["total"] == 1
+    written = write(service, args, preview)
+    root = Path(written["output_path"])
+    tree = (
+        load_registration_rules(root / "registration/RegistrationRules.xml")
+        .rules()[0]
+        .child("ОтборПоСвойствамПланаОбмена")
+    )
+    assert tree is not None
+    expected = decision if isinstance(decision, list) else ([decision] if decision else [])
+    expected_pairs = []
+    for row in expected:
+        assert isinstance(row, dict)
+        expected_pairs.append((row["name"], "true" if row["value"] else "false"))
+    assert [
+        (n.get("СвойствоПланаОбмена"), n.get("СвойствоОбъекта")) for n in tree.items
+    ] == expected_pairs
+    assert "Что заменено" in (root / "ИНСТРУКЦИЯ.md").read_text("utf-8")
+    assert sha256(dump_rules(document)) == before
+    assert write(service, args, preview)["status"] == "unchanged"
+
+
+@pytest.mark.parametrize(
+    "invalid", ["source_type", "property", "target_type", "unknown_target", "mode"]
+)
+def test_review_boolean_replacement_blocks_unverified_types(tmp_path: Path, invalid: str) -> None:
+    service, args = setup(tmp_path)
+    add_boolean_field(service, tmp_path)
+    single_leaf(service, args, "OldFlag", "Строка" if invalid == "source_type" else "Булево")
+    document = service._document(args["project_id"])
+    assert isinstance(document, RegistrationRules)
+    tree = document.rules()[0].child("ОтборПоСвойствамПланаОбмена")
+    assert tree is not None
+    if invalid == "property":
+        tree.items[0].values["ЭтоСтрокаКонстанты"] = False
+    if invalid == "mode":
+        document.rules()[0].values["РеквизитРежимаВыгрузки"] = "OldFlag"
+    target = (
+        "DateStart"
+        if invalid == "target_type"
+        else "Absent"
+        if invalid == "unknown_target"
+        else "FlagB"
+    )
+    args["node_properties"] = {"OldFlag": {"name": target, "value": True}}
+    preview, _ = both_previews(service, args)
+    assert preview["status"] == "blocked"
+    assert any(
+        n["check"] == "registration.attribute_type" and n["blocking"]
+        for n in preview["notices"]["items"]
+    )
+    failure(
+        service,
+        args
+        | {
+            "mode": "write",
+            "expected_preview_hash": preview["preview_hash"],
+            "acknowledged_notices": preview["required_acknowledgements"],
+        },
+        "registration.missing_attribute",
+    )
+
+
+def test_review_replacements_page_hash_and_same_target_plan(tmp_path: Path) -> None:
+    service, args = setup(tmp_path)
+    add_boolean_field(service, tmp_path)
+    single_leaf(service, args, "OldFlag", "Булево")
+    document = service._document(args["project_id"])
+    assert isinstance(document, RegistrationRules)
+    original = document.rules()[0]
+    document.section("ПравилаРегистрацииОбъектов").items.extend(
+        [deepcopy(original), deepcopy(original)]
+    )
+    plan = document.root.child("ПланОбмена")
+    assert plan is not None
+    plan.attrs["Имя"] = "TargetPlan"
+    args["node_properties"] = {"OldFlag": {"name": "FlagB", "value": True}}
+    preview = service.registration_retarget(**args)
+    assert preview["counts"]["replaced_leaves"] == 3
+    rows = []
+    for n in range(3):
+        page_args: dict[str, Any] = args | {"offset": n, "limit": 1}
+        rows.append(service.registration_retarget(**page_args)["changes"]["items"][0])
+    assert rows == preview["changes"]["items"]
+    assert len({(r["address"], r["leaf"]) for r in rows}) == 3
+    changed: dict[str, Any] = args | {
+        "node_properties": {"OldFlag": {"name": "FlagB", "value": False}}
+    }
+    other = service.registration_retarget(**changed)
+    assert other["preview_hash"] != preview["preview_hash"]
+    failure(
+        service,
+        changed | {"mode": "write", "expected_preview_hash": preview["preview_hash"]},
+        "registration.stale",
+    )
+    unused_args: dict[str, Any] = args | {"node_properties": {"Absent": None}}
+    unused = service.registration_retarget(**unused_args)
+    assert unused["unused_keys"] == ["Absent"] and unused["changes"]["total"] == 0
+
+
+def test_review_boolean_target_case_has_notice(tmp_path: Path) -> None:
+    service, args = setup(tmp_path)
+    add_boolean_field(service, tmp_path)
+    single_leaf(service, args, "OldFlag", "Булево")
+    args["node_properties"] = {"OldFlag": {"name": "flagb", "value": False}}
+    preview, _ = both_previews(service, args)
+    assert any(n["check"] == "registration.property_case" for n in preview["notices"]["items"])
+    assert "FlagB" in preview["changes"]["items"][0]["after"]
+
+
 def setup(tmp_path: Path) -> tuple[Kd2Service, dict[str, Any]]:
     dump = tmp_path / "dump"
     shutil.copytree(DATA / "dump", dump)
@@ -85,11 +290,16 @@ def test_preview_write_repeat_and_original_unchanged(tmp_path: Path) -> None:
         "untouched_leaves": 0,
         "unused_keys": 0,
         "code_mentions": 0,
+        "replaced_leaves": 0,
+        "removed_leaves": 0,
     }
     assert preview["status"] == "ready"
     assert preview["notices"]["items"][0]["blocking"] is False
     assert preview["notices"]["items"][0]["address"]
-    assert preview["required_acknowledgements"] == []
+    assert len(preview["required_acknowledgements"]) == 1
+    assert any(
+        n["check"] == "registration.plan_content_unchecked" for n in preview["notices"]["items"]
+    )
     assert len(preview["files"]) == 6
     written = write(service, args, preview)
     assert written["status"] == "written"
@@ -156,7 +366,7 @@ def test_code_mentions_need_acknowledgement_and_pages_are_complete(tmp_path: Pat
             break
         offset += len(page["notices"]["items"])
     assert rows == preview["notices"]["items"]
-    assert len({row["id"] for row in rows}) == len(rows) == 4
+    assert len({row["id"] for row in rows}) == len(rows) == 5
     mentions = [n for n in rows if n["check"] == "registration.code_mention"]
     assert [n["line"] for n in mentions] == [1, 2]
     assert all(n["address"] and n["event"] == "ПриОбработке" for n in mentions)
@@ -272,7 +482,10 @@ def test_manual_kit_with_verified_plan_fields(tmp_path: Path) -> None:
     args.update({"own_attributes": None, "extension": None})
     before = sha256(dump_rules(document))
     preview = service.registration_retarget(**args)
-    assert [n["check"] for n in preview["notices"]["items"]] == ["registration.unsaved_changes"]
+    assert [n["check"] for n in preview["notices"]["items"]] == [
+        "registration.plan_content_unchecked",
+        "registration.unsaved_changes",
+    ]
     assert preview["status"] == "ready"
     assert preview["counts"]["unused_keys"] == 1
     written = write(service, args, preview)
@@ -381,7 +594,12 @@ def test_failed_publication_restores_previous_kit(
     monkeypatch.setattr(module.os, "replace", fail_publish)
     failure(
         service,
-        changed | {"mode": "write", "expected_preview_hash": updated["preview_hash"]},
+        changed
+        | {
+            "mode": "write",
+            "expected_preview_hash": updated["preview_hash"],
+            "acknowledged_notices": updated["required_acknowledgements"],
+        },
         "registration.io",
     )
     assert snapshot(target) == before
@@ -415,11 +633,27 @@ def test_project_source_and_explicit_extension_selection(tmp_path: Path) -> None
     result = service.registration_retarget(**arguments)
     assert result["counts"]["renamed_leaves"] == 2
     assert result["blocking_notices"] == 0
+    plan_content(tmp_path, "Catalog.Other")
+    content = tmp_path / "selected/ExchangePlans/TargetPlan/Ext/Content.xml"
+    content.parent.mkdir(parents=True, exist_ok=True)
+    content.write_text(
+        "<ExchangePlanContent><Item><Metadata>Catalog.TestObjects</Metadata>"
+        "</Item></ExchangePlanContent>",
+        "utf-8",
+    )
+    checked = service.registration_retarget(**arguments)
+    assert checked["preview_hash"] != result["preview_hash"]
+    assert not any(
+        n["check"] in {"registration.plan_membership", "registration.plan_content_unchecked"}
+        for n in checked["notices"]["items"]
+    )
+    result = checked
     first = write(service, arguments, result)
     before = snapshot(Path(first["output_path"]))
     explicit: dict[str, Any] = arguments | {"source": {"project": "demo", "extensions": []}}
     omitted = service.registration_retarget(**explicit)
     assert omitted["blocking_notices"] == 1
+    assert any(n["check"] == "registration.plan_membership" for n in omitted["notices"]["items"])
     assert omitted["output_path"] != result["output_path"]
     failure(
         service,
@@ -1498,7 +1732,7 @@ def test_review_manual_disabled_parameter_preserves_all_notices(tmp_path: Path) 
     }
 
 
-def test_review_published_kit_rewrite_is_unchanged(tmp_path: Path) -> None:
+def test_review_published_kit_needs_ack_when_plan_content_is_unchecked(tmp_path: Path) -> None:
     from kd2_rules_mcp.authoring.ed.registration_delivery import read_plan_host
 
     service, args = setup(tmp_path)
@@ -1579,7 +1813,23 @@ def test_review_published_kit_rewrite_is_unchanged(tmp_path: Path) -> None:
     (kit.parent / module._OWNER).write_bytes(
         json_bytes(receipt | {"receipt_hash": sha256(json_bytes(receipt))})
     )
-    assert preview["preview_hash"] == legacy_hash
+    assert preview["preview_hash"] != legacy_hash
+    before = {p: p.stat().st_mtime_ns for p in kit.rglob("*") if p.is_file()}
+    failure(
+        service,
+        args | {"mode": "write", "expected_preview_hash": legacy_hash},
+        "registration.stale",
+    )
+    failure(
+        service,
+        args | {"mode": "write", "expected_preview_hash": preview["preview_hash"]},
+        "registration.ack_required",
+    )
+    assert {p: p.stat().st_mtime_ns for p in before} == before
+    assert write(service, args, preview)["status"] == "written"
+    assert (kit / "registration/RegistrationRules.xml").read_bytes() == golden[
+        "registration/RegistrationRules.xml"
+    ]
     before = {p: p.stat().st_mtime_ns for p in kit.rglob("*") if p.is_file()}
     assert write(service, args, preview)["status"] == "unchanged"
     assert {p: p.stat().st_mtime_ns for p in before} == before

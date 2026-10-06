@@ -92,6 +92,27 @@ class RetargetRule:
     address: str
     renamed: int
     untouched: int
+    replaced: int = 0
+    removed: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class BooleanReplacement:
+    """Явное решение агента о новом булевом условии."""
+
+    name: str
+    value: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FilterChange:
+    """Замена одного исходного листа или его удаление."""
+
+    address: str
+    leaf: str
+    before: str
+    after: str
+    action: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,13 +181,14 @@ class RetargetResult:
     notices: tuple[RetargetNotice, ...] = ()
     deletion_mark_filter: bool = False
     deletion_filters: tuple[tuple[str, str], ...] = ()
+    changes: tuple[FilterChange, ...] = ()
 
 
 def retarget_registration(
     rules: RulesDocument,
     *,
     plan_name: str,
-    node_properties: Mapping[str, str],
+    node_properties: Mapping[str, object],
     target_plan: ObjectCard | None = None,
     target_properties: frozenset[str] | None = None,
     deletion_mark_filter: bool = False,
@@ -178,9 +200,10 @@ def retarget_registration(
     относится к реквизиту шапки, ``[ТЧ]`` — к табличной части, ``[ТЧ].Имя`` —
     к реквизиту табличной части. Заменяется голова ``СвойствоПланаОбмена``,
     строки ``ТаблицаСвойствПланаОбмена`` и ``РеквизитРежимаВыгрузки``.
-    Имена свойств объекта не меняются. Отборы, группы, сравнения, алгоритмы
-    значений, обработчики, отключённые правила и неизвестные узлы остаются
-    как были. Код со старыми именами не переписывается: он попадает в
+    Строка означает переименование, null — удаление листа, {name, value} —
+    замену булевой константы; массив таких решений объединяется по И.
+    Меняется только указанный отбор плана. Отборы объекта, обработчики и
+    неизвестные узлы остаются как были. Код со старыми именами не переписывается: он попадает в
     ``mentions``, а ключ, встретившийся только там, — не в ``unused``.
 
     ``target_plan`` — карточка плана из структуры. Нет реквизита или
@@ -198,33 +221,49 @@ def retarget_registration(
             f"Сведения целевого плана относятся к «{target_plan.kind}», а не к плану обмена"
         )
     filter_names, unload_names = _node_names(document)
-    mapping = _mapping(node_properties)
+    mapping, actions = _decisions(node_properties)
     old_plan = document.exchange_plan
     if target_plan is None and target_properties is not None:
         target_plan = _names_card(name, target_properties)
     effective, case_notices = _canonical_mapping(document, mapping, target_plan)
-    _check_targets(mapping, effective, filter_names | unload_names)
-    _check_clash(effective, filter_names, unload_names)
+    if actions:
+        _check_action_clashes(effective, actions, filter_names | unload_names, target_plan)
+    else:
+        _check_targets(mapping, effective, filter_names | unload_names)
+        _check_clash(effective, filter_names, unload_names)
     cloned = _clone(document)
     _set_plan_name(cloned, name, old_plan)
     stats, applied = _rename_filters(cloned, effective)
     _rename_unload_modes(cloned, effective, applied)
-    mentions = _code_mentions(cloned, old_plan if old_plan != name else "", mapping)
-    seen_in_code = _mapping_keys_in_code(mapping, mentions)
+    _assert_only_expected(document, cloned, name, effective)
+    changes, action_notices, action_applied = _apply_actions(document, cloned, actions, target_plan)
+    applied.update(action_applied)
+    stats = [
+        replace(
+            row,
+            replaced=sum(c.address == row.address and c.action == "replaced" for c in changes),
+            removed=sum(c.address == row.address and c.action == "removed" for c in changes),
+            untouched=row.untouched - sum(c.address == row.address for c in changes),
+        )
+        for row in stats
+    ]
+    keys = {key: key for key in node_properties}
+    mentions = _code_mentions(cloned, old_plan if old_plan != name else "", keys)
+    seen_in_code = _mapping_keys_in_code(keys, mentions)
     result = RetargetResult(
         document=cloned,
         rules=tuple(stats),
         unused=tuple(
-            key for key in mapping if key.casefold() not in applied and key not in seen_in_code
+            key for key in keys if key.casefold() not in applied and key not in seen_in_code
         ),
         remarks=registration_node_remarks(cloned, name, target_plan, target_properties),
         only_expected=True,
         code_mentions=len(mentions),
         mentions=mentions,
         source_rules_hash=hashlib.sha256(dump_rules(document)).hexdigest(),
-        notices=case_notices + registration_type_notices(cloned, target_plan),
+        notices=case_notices + action_notices + registration_type_notices(cloned, target_plan),
+        changes=changes,
     )
-    _assert_only_expected(document, result.document, name, effective)
     if deletion_mark_filter:
         if target_objects is None:
             raise RegistrationRetargetError(
@@ -263,6 +302,39 @@ def deletion_filter_summary(result: RetargetResult) -> dict:
 def registration_rule_active(rule: Node) -> bool:
     """БСП загружает только Валидное=true (ЗПРО:282–292,1065–1085), как rules_validate."""
     return rule.attrs.get("Отключить") is not True and rule.attrs.get("Валидное", False) is True
+
+
+def registration_plan_notices(
+    rules: RegistrationRules, plan_name: str, content: frozenset[str] | None
+) -> tuple[RetargetNotice, ...]:
+    """Состав из той же выгрузки: ОДС:171–188,1389–1414; вне него ПРО не исполняется."""
+    if content is None:
+        return (
+            RetargetNotice(
+                "registration.plan_content_unchecked",
+                f"ПланОбмена.{plan_name}",
+                "СоставПланаОбмена",
+                plan_name,
+                f"Не удалось прочитать состав плана «{plan_name}»; "
+                "проверьте, что объекты правил входят в его состав.",
+                requires_acknowledgement=True,
+            ),
+        )
+    members = {name.casefold() for name in content}
+    return tuple(
+        RetargetNotice(
+            "registration.plan_membership",
+            address,
+            "ОбъектМетаданныхИмя",
+            str(rule.get("ОбъектМетаданныхИмя")),
+            f"{address}: объект «{rule.get('ОбъектМетаданныхИмя')}» вне состава плана "
+            f"«{plan_name}»; правило не исполнится, пока объект не войдёт в состав плана.",
+            requires_acknowledgement=True,
+        )
+        for address, rule in zip(pro_addresses(rules.rules()), rules.rules(), strict=True)
+        if registration_rule_active(rule)
+        and str(rule.get("ОбъектМетаданныхИмя")).casefold() not in members
+    )
 
 
 def _has_deletion_mark(card: ObjectCard) -> bool:
@@ -462,21 +534,208 @@ def _check_identifier(value: object, what: str) -> str:
     )
 
 
-def _mapping(raw: Mapping[str, str]) -> dict[str, str]:
+def _decisions(
+    raw: Mapping[str, object],
+) -> tuple[dict[str, str], dict[str, tuple[BooleanReplacement, ...] | None]]:
+    """Разбирает расширенные решения; опечатки и пустой массив не означают удаление."""
     if not isinstance(raw, Mapping):
         raise InvalidRegistrationNameError("Отображение реквизитов узла должно быть словарём")
-    mapping: dict[str, str] = {}
-    sources: set[str] = set()
+    renames: dict[str, str] = {}
+    actions: dict[str, tuple[BooleanReplacement, ...] | None] = {}
+    seen = set()
     for key, value in raw.items():
-        old = _check_mapping_key(key)
-        new = _check_identifier(value, "реквизита узла")
-        if old.casefold() in sources:
+        key = _check_mapping_key(key)
+        folded = key.casefold()
+        if folded in seen:
             raise InvalidRegistrationNameError(
-                f"Ключ отображения «{old}» повторяется без учёта регистра"
+                f"Ключ отображения «{key}» повторяется без учёта регистра"
             )
-        sources.add(old.casefold())
-        mapping[old] = new
-    return mapping
+        seen.add(folded)
+        if isinstance(value, str):
+            renames[key] = _check_identifier(value, "реквизита узла")
+        elif value is None:
+            actions[folded] = None
+        else:
+            values = value if isinstance(value, list) else [value]
+            if not values:
+                raise InvalidRegistrationNameError(
+                    f"«{key}»: пустой массив замен запрещён; удаление — null"
+                )
+            replacements = []
+            targets = set()
+            for row in values:
+                if (
+                    not isinstance(row, dict)
+                    or set(row) != {"name", "value"}
+                    or not isinstance(row["value"], bool)
+                ):
+                    raise InvalidRegistrationNameError(
+                        f"«{key}»: нужна замена с name и булевым value"
+                    )
+                name = _check_identifier(row["name"], "реквизита узла")
+                if name.casefold() in targets:
+                    raise DuplicateTargetPropertyError(f"«{key}»: цель «{name}» повторяется")
+                targets.add(name.casefold())
+                replacements.append(BooleanReplacement(name, row["value"]))
+            actions[folded] = tuple(replacements)
+    return renames, actions
+
+
+def _action_key(raw: str, actions: Mapping[str, object]) -> str | None:
+    tabular, head = _node_parts(raw)
+    candidates = (f"[{tabular}].{head}", f"[{tabular}]") if tabular else (head,)
+    return next((key.casefold() for key in candidates if key.casefold() in actions), None)
+
+
+def _check_action_clashes(
+    renames: Mapping[str, str],
+    actions: Mapping[str, tuple[BooleanReplacement, ...] | None],
+    occupied: set[str],
+    card: ObjectCard | None,
+) -> None:
+    """Удалённое имя освобождается; новые цели сравниваются до приведения регистра."""
+    final: dict[str, str] = {}
+    for old in sorted(occupied):
+        key = _action_key(old, actions)
+        if key is not None:
+            targets = tuple(r.name for r in actions[key] or ())
+        else:
+            targets = (_rename_plan_property(old, renames),)
+        for target in targets:
+            name = registration_reference(target, card).canonical
+            previous = final.setdefault(name.casefold(), old.casefold())
+            if previous != old.casefold():
+                error = (
+                    DuplicateTargetPropertyError
+                    if (previous in renames or _action_key(previous, actions) is not None)
+                    and (old.casefold() in renames or key is not None)
+                    else PropertyNameClashError
+                )
+                raise error(f"Реквизиты «{previous}» и «{old}» дают одно имя «{name}»")
+
+
+def _apply_actions(
+    source: RegistrationRules,
+    target: RegistrationRules,
+    actions: Mapping[str, tuple[BooleanReplacement, ...] | None],
+    card: ObjectCard | None,
+) -> tuple[tuple[FilterChange, ...], tuple[RetargetNotice, ...], set[str]]:
+    """Решения применяются к исходным листьям, одновременно с переименованиями.
+
+    Константа ПРОП: ВР:332–343; РЕГ:448–484. Корень И: ОДС:2598–2641;
+    массив внутри ИЛИ занимает одну позицию вложенной группой И (ВР:305–320).
+    """
+    changes: list[FilterChange] = []
+    notices: list[RetargetNotice] = []
+    applied: set[str] = set()
+
+    def blocked(address: str, leaf: str, raw: str) -> None:
+        notices.append(
+            RetargetNotice(
+                "registration.attribute_type",
+                address,
+                leaf,
+                raw,
+                f"{address}, {leaf}: замена «{raw}» допустима только для булевой константы "
+                "(ЭтоСтрокаКонстанты=true, ТипСвойстваОбъекта=Булево) "
+                "и проверенного булевого реквизита целевого плана; режим выгрузки заменить нельзя.",
+                blocking=True,
+            )
+        )
+
+    def rewrite(left: Node, right: Node, address: str, path: tuple[int, ...] = ()) -> None:
+        items = []
+        for index, (original, item) in enumerate(zip(left.items, right.items, strict=True)):
+            location = (*path, index)
+            if original.tag == "Группа":
+                rewrite(original, item, address, location)
+                if item.items or not original.items:
+                    items.append(item)
+                continue
+            raw = str(original.get(_PLAN_PROPERTY))
+            key = _action_key(raw, actions) if original.tag == "ЭлементОтбора" else None
+            if key is None:
+                items.append(item)
+                continue
+            applied.add(key)
+            replacements = actions[key]
+            label = _leaf_label(_PLAN_FILTER, location)
+            before = (
+                f"{raw} {original.get('ВидСравнения')} {original.get('СвойствоОбъекта')}".strip()
+            )
+            if replacements is None:
+                changes.append(FilterChange(address, label, before, "Элемент удалён", "removed"))
+                continue
+            refs = [registration_reference(row.name, card) for row in replacements]
+            if (
+                original.get("ЭтоСтрокаКонстанты") is not True
+                or original.get("ТипСвойстваОбъекта") != "Булево"
+                or str(original.get("СвойствоОбъекта")).strip() not in {"true", "false", "1", "0"}
+                or registration_reference(raw).tail
+                or any(
+                    ref.field is None
+                    or ref.missing is not None
+                    or ref.field.types != ("Булево",)
+                    or ref.field.unresolved
+                    for ref in refs
+                )
+            ):
+                blocked(address, label, raw)
+                items.append(item)
+                continue
+            new_items = []
+            for replacement, ref in zip(replacements, refs, strict=True):
+                if replacement.name != ref.canonical:
+                    notices.append(
+                        RetargetNotice(
+                            "registration.property_case",
+                            address,
+                            label,
+                            replacement.name,
+                            f"{address}, {label}: имя «{replacement.name}» приведено "
+                            f"к написанию метаданных «{ref.canonical}».",
+                        )
+                    )
+                new = deepcopy(item)
+                new.values[_PLAN_PROPERTY] = ref.canonical
+                new.values["СвойствоОбъекта"] = "true" if replacement.value else "false"
+                properties = new.child(_PLAN_TABLE)
+                if properties is not None:
+                    # Цель решения — реквизит шапки; разыменования и ТЧ в старой таблице не нужны.
+                    row = (
+                        deepcopy(properties.items[-1])
+                        if properties.items
+                        else Node.new("property_row", "Свойство")
+                    )
+                    row.values["Наименование"] = ref.canonical
+                    row.values["Тип"] = "Булево"
+                    properties.items[:] = [row]
+                new_items.append(new)
+            after = " И ".join(
+                f"{row.get(_PLAN_PROPERTY)} {row.get('ВидСравнения')} {row.get('СвойствоОбъекта')}"
+                for row in new_items
+            )
+            changes.append(FilterChange(address, label, before, after, "replaced"))
+            if len(new_items) > 1 and right.get("БулевоЗначениеГруппы") == "ИЛИ":
+                group = Node.new("plan_filter_group", "Группа")
+                group.values["БулевоЗначениеГруппы"] = "И"
+                group.items.extend(new_items)
+                items.append(group)
+            else:
+                items.extend(new_items)
+        right.items[:] = items
+
+    for address, left, right in zip(
+        pro_addresses(source.rules()), source.rules(), target.rules(), strict=True
+    ):
+        mode = str(left.get(_UNLOAD_MODE)).strip()
+        if mode.casefold() in actions:
+            applied.add(mode.casefold())
+            blocked(address, _UNLOAD_MODE, mode)
+        source_tree, target_tree = left.child(_PLAN_FILTER), right.child(_PLAN_FILTER)
+        if source_tree is not None and target_tree is not None:
+            rewrite(source_tree, target_tree, address)
+    return tuple(changes), tuple(notices), applied
 
 
 def _check_targets(

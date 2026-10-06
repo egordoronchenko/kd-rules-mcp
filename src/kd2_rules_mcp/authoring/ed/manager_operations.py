@@ -538,6 +538,8 @@ def _order_uses(model: ManagerModel, kind: str, key: str, before: ManagerModel) 
 
 
 def _address_target(model: ManagerModel, address: str) -> str:
+    if address.casefold().startswith("алгоритм/"):
+        address = "Код/" + address.split("/", 1)[1]
     addresses = model_addresses(model)
     matches = [key for key, value in addresses.items() if value.casefold() == address.casefold()]
     if not matches:
@@ -564,6 +566,8 @@ def _address_target(model: ManagerModel, address: str) -> str:
 
 
 def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOperation:
+    if op.address and op.address.casefold().startswith("алгоритм/"):
+        op = replace(op, address="Код/" + op.address.split("/", 1)[1])
     if op._packet_refs or op._address_refs:
         updates = {}
         patch = op.patch
@@ -5275,12 +5279,19 @@ def preview(
                         "model_invalid",
                         op.address
                         or model_addresses(result).get(
-                            op.target_id or "",
+                            op.target_id or previous.result_ids[0],
                             previous.address_aliases[-1]
                             if previous.address_aliases
                             else "Конвертация",
                         ),
-                        "Конфликт содержимого client_id",
+                        f"Конфликт client_id «{op.client_id}»: id закреплён за "
+                        + model_addresses(result).get(previous.result_ids[0], "удалённой сущностью")
+                        + "; используйте новый client_id для другого решения",
+                        (
+                            model_addresses(result).get(
+                                previous.result_ids[0], "удалённая сущность"
+                            ),
+                        ),
                     )
                 )
                 canonical.append(CanonicalOperation(op, fingerprint, previous.result_ids[0]))
@@ -5352,7 +5363,16 @@ def preview(
             code_notices = _code_notices(result, op)
             changed, key = _apply_one(result, op)
             notices.extend(_code_change_notices(result, changed, op))
-            if op.kind == "table_part" and op.action == "create":
+            if (
+                op.kind == "table_part"
+                and op.action == "create"
+                and any(
+                    d in ("receive", "both")
+                    for r in changed.pko
+                    if any(g.logical_id == key for g in r.groups)
+                    for d in r.directions
+                )
+            ):
                 notices.append(
                     ManagerNotice(
                         "table_part_replace",

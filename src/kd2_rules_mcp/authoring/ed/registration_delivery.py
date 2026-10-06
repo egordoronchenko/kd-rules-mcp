@@ -44,6 +44,9 @@ from kd2_rules_mcp.structures.xmldump import (
     RU_KIND,
     ConfigDump,
     MetaObject,
+    Tabular,
+    _field,
+    _md_ref,
     read_object,
 )
 
@@ -104,6 +107,7 @@ class PlanHost:
     input_hashes: Mapping[str, str]
     card: ObjectCard
     objects: tuple[ObjectCard, ...] = ()
+    plan_content: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_hashes", MappingProxyType(dict(self.input_hashes)))
@@ -147,6 +151,42 @@ def _properties(obj: etree._Element) -> set[str]:
     return found - {""}
 
 
+def _host_object(path: Path, tag: str) -> MetaObject:
+    """Ошибку состава отделяет от реквизитов плана; типы читает тот же _field."""
+    try:
+        return read_object(path, tag)
+    except (OSError, etree.XMLSyntaxError, ValueError):
+        content = path.with_suffix("") / "Ext/Content.xml"
+        if tag != "ExchangePlan" or not content.exists():
+            raise
+        try:
+            etree.parse(str(content))
+        except (OSError, etree.XMLSyntaxError):
+            pass
+        else:
+            raise
+        obj = parse_xml(path.name, _read(path).decode("utf-8-sig"))[0]
+        props = obj.find(f"{{{M}}}Properties")
+        result = MetaObject(tag, obj.findtext(f"{{{M}}}Properties/{{{M}}}Name", ""))
+        if props is not None:
+            result.props = {etree.QName(p).localname: p.text or "" for p in props}
+        result.adopted = result.props.get("ObjectBelonging") == "Adopted"
+        result.attributes = [
+            _field(p) for p in obj.findall(f"{{{M}}}ChildObjects/{{{M}}}Attribute")
+        ]
+        for tab in obj.findall(f"{{{M}}}ChildObjects/{{{M}}}TabularSection"):
+            result.tabulars.append(
+                Tabular(
+                    name=tab.findtext(f"{{{M}}}Properties/{{{M}}}Name", ""),
+                    adopted=tab.findtext(f"{{{M}}}Properties/{{{M}}}ObjectBelonging") == "Adopted",
+                    fields=[
+                        _field(p) for p in tab.findall(f"{{{M}}}ChildObjects/{{{M}}}Attribute")
+                    ],
+                )
+            )
+        return result
+
+
 def _plan_metadata(
     root: Path,
     config: bytes,
@@ -183,7 +223,7 @@ def _plan_metadata(
         ):
             path = f"{directory}/{name}.xml"
             raw = _read(root / path)
-            obj = read_object(root / path, tag)
+            obj = _host_object(root / path, tag)
             if _read(root / path) != raw:
                 raise RegistrationDeliveryProfileError("Выгрузка изменилась во время чтения")
             hashes[prefix + path] = sha256(raw)
@@ -195,7 +235,7 @@ def _plan_metadata(
         path = f"ExchangePlans/{plan_name}.xml"
         if (root / path).is_file():
             model.objects.setdefault("ExchangePlan", []).append(
-                read_object(root / path, "ExchangePlan")
+                _host_object(root / path, "ExchangePlan")
             )
     return model
 
@@ -268,6 +308,7 @@ def read_plan_host(
     *,
     extensions: Sequence[Path] = (),
     object_names: Sequence[str] | None = None,
+    check_plan_content: bool = False,
 ) -> PlanHost:
     """Читает профиль комплекта и типизированную карточку выбранного плана."""
     if not valid_identifier(plan_name):
@@ -304,22 +345,44 @@ def read_plan_host(
         }
         properties = _properties(obj)
         requested = {name.casefold() for name in object_names or ()}
-        if object_names is not None:
+        members: set[str] = set()
+        content_checked = True
+        if object_names is not None or check_plan_content:
             for index, root in enumerate((dump, *extensions)):
                 path = root / plan_path
                 if not path.is_file():
                     continue
                 content = path.with_suffix("") / "Ext/Content.xml"
-                before = _read(content) if content.is_file() else None
-                requested.update(
-                    name.casefold() for name, _ in read_object(path, "ExchangePlan").content
-                )
+                label = "" if index == 0 else f"extensions/{index - 1}/"
+                before = None
+                try:
+                    before = content.read_bytes()
+                    xml = etree.fromstring(before)
+                    if etree.QName(xml).localname not in {"Content", "ExchangePlanContent"}:
+                        raise ValueError("Неверный корень состава плана")
+                    tags = {tag.casefold(): tag for tag in RU_KIND}
+                    names = set()
+                    for p in xml.findall("{*}Item/{*}Metadata"):
+                        tag, dot, name = (p.text or "").strip().partition(".")
+                        names.add(_md_ref(tags.get(tag.casefold(), tag) + dot + name))
+                    if any(not n or "." not in n for n in names):
+                        raise ValueError("Неверное имя объекта состава плана")
+                    members.update(names)
+                    if object_names is not None:
+                        requested.update(n.casefold() for n in names)
+                except (OSError, etree.XMLSyntaxError, ValueError):
+                    # У расширения без Content.xml нет добавлений к составу основной конфигурации.
+                    if index == 0 or content.exists():
+                        content_checked = False
+                if check_plan_content:
+                    hashes[label + f"ExchangePlans/{plan_name}/Ext/Content.xml"] = sha256(
+                        before or b"<unreadable>"
+                    )
                 if before is not None:
                     if _read(content) != before:
                         raise RegistrationDeliveryProfileError(
                             "Состав плана изменился во время чтения"
                         )
-                    label = "" if index == 0 else f"extensions/{index - 1}/"
                     hashes[label + f"ExchangePlans/{plan_name}/Ext/Content.xml"] = sha256(before)
         main = _plan_metadata(
             dump, config_raw, plan_name, hashes, object_names=frozenset(requested)
@@ -380,6 +443,7 @@ def read_plan_host(
             hashes,
             _plan_card(metadata, plan_name),
             objects,
+            frozenset(members) if check_plan_content and content_checked else None,
         )
     except (
         AuthoringPreconditionError,
@@ -602,6 +666,10 @@ def render_registration_kit(
     invalid = own_attribute_remarks(result.document, names)
     if invalid:
         raise RegistrationMissingAttributeError(invalid[0].message)
+    if any(n.blocking for n in result.notices):
+        raise RegistrationMissingAttributeError(
+            next(n.message for n in result.notices if n.blocking)
+        )
     type_notices = registration_type_notices(result.document, host.card)
     for notice in type_notices:
         if notice.blocking:
@@ -673,6 +741,11 @@ def render_registration_kit(
         "code_mentions": result.code_mentions,
         "remarks": len(result.remarks),
     }
+    if result.changes:
+        counters.update(
+            replaced_leaves=sum(r.replaced for r in result.rules),
+            removed_leaves=sum(r.removed for r in result.rules),
+        )
     if result.deletion_mark_filter:
         summary = deletion_filter_summary(result)
         counters.update(
@@ -691,6 +764,9 @@ def render_registration_kit(
             + "\n".join("- " + r for r in remarks)
             + "\n\nПроверьте замечания до загрузки правил.\n"
         )
+    details = retarget_instruction_details(result)
+    if details:
+        incomplete += "\n\n" + details + "\n"
     instruction = template.substitute(
         incomplete=incomplete,
         plan_name=host.exchange_plan.name,
@@ -726,6 +802,29 @@ def render_registration_kit(
         raise RegistrationDeliveryError("Прежняя сборка с теми же входами не совпадает")
     output["manifest.json"] = manifest.to_bytes()
     return RegistrationKit(output, manifest, remarks)
+
+
+def retarget_instruction_details(result: RetargetResult) -> str:
+    """Дополнительные блоки появляются только при новых сведениях, сохраняя прежние байты."""
+    blocks = []
+    membership = [n for n in result.notices if n.check == "registration.plan_membership"]
+    if membership:
+        blocks.append(
+            "## Правила для объектов вне состава плана\n\n"
+            + table(
+                ("Правило", "Объект", "Что проверить"),
+                ((n.address, n.reference, n.message) for n in membership),
+            )
+        )
+    if result.changes:
+        blocks.append(
+            "## Что заменено\n\n"
+            + table(
+                ("Правило", "Было", "Стало"),
+                ((c.address, c.before, c.after) for c in result.changes),
+            )
+        )
+    return "\n\n".join(blocks)
 
 
 def deletion_mark_instruction(result: RetargetResult) -> str:

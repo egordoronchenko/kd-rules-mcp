@@ -830,3 +830,144 @@ def test_review_on_demand_mode_explained_and_counted() -> None:
     exception = "не отправляются, кроме узлов с режимом «Выгружать всегда»"
     assert exception in notice.message
     assert instruction.count(exception) == 2
+
+
+@pytest.mark.parametrize(
+    "decision,expected,replaced,removed",
+    [
+        (None, [], 0, 1),
+        ({"name": "SendBank", "value": True}, [("SendBank", "true")], 1, 0),
+        (
+            [
+                {"name": "SendStatements", "value": True},
+                {"name": "StatementsAsRequests", "value": False},
+            ],
+            [("SendStatements", "true"), ("StatementsAsRequests", "false")],
+            1,
+            0,
+        ),
+    ],
+)
+def test_review_boolean_filter_decisions(
+    decision: object, expected: list, replaced: int, removed: int
+) -> None:
+    source = _tiny(_rule("Документ.Bank", "OldPersonal"))
+    leaf = _plan_leaf(source.rules()[0], 0)
+    leaf.values.update(
+        ЭтоСтрокаКонстанты=True,
+        ТипСвойстваОбъекта="Булево",
+        СвойствоОбъекта="false",
+        ВидСравнения="Равно",
+    )
+    card = ObjectCard(
+        f"ПланОбмена.{PLAN}",
+        f"ПланОбменаСсылка.{PLAN}",
+        "ПланОбмена",
+        tuple(
+            ObjectProperty(name, "Реквизит", False, ("Булево",), ())
+            for name in ("SendBank", "SendStatements", "StatementsAsRequests")
+        ),
+    )
+    before = dump_rules(source)
+    result = retarget_registration(
+        source, plan_name=PLAN, node_properties={"OldPersonal": decision}, target_plan=card
+    )
+    tree = result.document.rules()[0].child("ОтборПоСвойствамПланаОбмена")
+    assert tree is not None
+    assert [
+        (n.get("СвойствоПланаОбмена"), n.get("СвойствоОбъекта")) for n in tree.items
+    ] == expected
+    assert result.rules[0].replaced == replaced and result.rules[0].removed == removed
+    assert len(result.changes) == 1 and not result.unused
+    assert dump_rules(source) == before
+    assert dump_rules(load_registration_rules(dump_rules(result.document))) == dump_rules(
+        result.document
+    )
+
+
+def test_review_array_is_and_inside_or_group() -> None:
+    source = _tiny(_rule("Документ.Bank", "OldPersonal"))
+    tree = source.rules()[0].child("ОтборПоСвойствамПланаОбмена")
+    assert tree is not None
+    group = Node.new("plan_filter_group", "Группа")
+    group.values["БулевоЗначениеГруппы"] = "ИЛИ"
+    group.items.extend(tree.items)
+    tree.items[:] = [group]
+    leaf = group.items[0]
+    leaf.values.update(
+        ЭтоСтрокаКонстанты=True, ТипСвойстваОбъекта="Булево", СвойствоОбъекта="false"
+    )
+    card = ObjectCard(
+        f"ПланОбмена.{PLAN}",
+        f"ПланОбменаСсылка.{PLAN}",
+        "ПланОбмена",
+        tuple(
+            ObjectProperty(name, "Реквизит", False, ("Булево",), ())
+            for name in ("SendStatements", "StatementsAsRequests")
+        ),
+    )
+    result = retarget_registration(
+        source,
+        plan_name=PLAN,
+        node_properties={
+            "OldPersonal": [
+                {"name": "SendStatements", "value": True},
+                {"name": "StatementsAsRequests", "value": False},
+            ]
+        },
+        target_plan=card,
+    )
+    root = result.document.rules()[0].child("ОтборПоСвойствамПланаОбмена")
+    assert root is not None
+    outer = root.items[0]
+    assert outer.get("БулевоЗначениеГруппы") == "ИЛИ"
+    inner = outer.items[0]
+    assert inner.tag == "Группа" and inner.get("БулевоЗначениеГруппы") == "И"
+    assert len(inner.items) == 2
+
+
+@pytest.mark.parametrize("remove_second", [False, True])
+def test_review_actions_and_renames_are_simultaneous(remove_second: bool) -> None:
+    source = _tiny(_rule("Документ.Bank", "OldA") + _rule("Документ.Other", "FlagB"))
+    for rule in source.rules():
+        _plan_leaf(rule, 0).values.update(
+            ЭтоСтрокаКонстанты=True, ТипСвойстваОбъекта="Булево", СвойствоОбъекта="false"
+        )
+    card = ObjectCard(
+        f"ПланОбмена.{PLAN}",
+        f"ПланОбменаСсылка.{PLAN}",
+        "ПланОбмена",
+        tuple(
+            ObjectProperty(name, "Реквизит", False, ("Булево",), ()) for name in ("FlagB", "FlagC")
+        ),
+    )
+    decisions = (
+        {"OldA": "FlagB", "FlagB": None}
+        if remove_second
+        else {"OldA": {"name": "FlagB", "value": True}, "FlagB": "FlagC"}
+    )
+    result = retarget_registration(
+        source, plan_name=PLAN, node_properties=decisions, target_plan=card
+    )
+    assert _plan_leaf(result.document.rules()[0], 0).get("СвойствоПланаОбмена") == "FlagB"
+    second = result.document.rules()[1].child("ОтборПоСвойствамПланаОбмена")
+    assert second is not None
+    if remove_second:
+        assert second.items == []
+    else:
+        assert second.items[0].get("СвойствоПланаОбмена") == "FlagC"
+
+
+@pytest.mark.parametrize("source_name,occupied", [("OldA", "FlagB"), ("A", "Z"), ("z", "a")])
+@pytest.mark.parametrize("also_mapped", [False, True])
+def test_review_boolean_decision_cannot_merge_attributes(
+    source_name: str, occupied: str, also_mapped: bool
+) -> None:
+    source = _tiny(_rule("Документ.A", source_name) + _rule("Документ.B", occupied))
+    target = "Target" if also_mapped else occupied
+    decisions: dict[str, object] = {source_name: {"name": target.upper(), "value": True}}
+    if also_mapped:
+        decisions[occupied] = target.lower()
+    error = DuplicateTargetPropertyError if also_mapped else PropertyNameClashError
+    with pytest.raises(error):
+        retarget_registration(source, plan_name=PLAN, node_properties=decisions)

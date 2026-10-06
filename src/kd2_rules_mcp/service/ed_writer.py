@@ -57,10 +57,12 @@ from kd2_rules_mcp.service.ed import EdProject
 from kd2_rules_mcp.service.ed_authoring import EdAuthoringMixin, _failure, _mapping, _text
 from kd2_rules_mcp.service.ed_authoring_views import compact_page, json_size, validate_options
 from kd2_rules_mcp.service.ed_layers import checked_extensions, extension_paths, select_views
+from kd2_rules_mcp.service.ed_reopen import with_reopen_hints
 from kd2_rules_mcp.service.ed_views import address_of, validate_page
 from kd2_rules_mcp.service.paths import Settings
 from kd2_rules_mcp.structures.store import dump_fingerprint
 from kd2_rules_mcp.validation.ed_links import validate_links
+from kd2_rules_mcp.validation.ed_plan import validate_plan_content
 from kd2_rules_mcp.validation.ed_schema import validate_schema
 from kd2_rules_mcp.validation.ed_structure import validate_structure
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
@@ -477,6 +479,24 @@ class EdWriterMixin(EdAuthoringMixin):
         )
         return metadata, host, bindings
 
+    def _manager_plan_content(self, model, metadata: dict):
+        structure = (
+            self._ed_structure_snapshot(model.host.structure_id)[0]
+            if model.host.structure_id
+            else None
+        )
+        return validate_plan_content(model, structure, metadata["arguments"]["plan"])
+
+    def _manager_content_descriptions(self, metadata: dict, missing):
+        root = self._read_path(metadata["arguments"]["configuration_path"])
+        result = []
+        for kind, name, folder in missing:
+            relative = folder + "/" + name + ".xml"
+            result.append(
+                read_description(relative, (root / relative).read_text("utf-8-sig"), kind, name)
+            )
+        return tuple(result)
+
     def _manager_schema_checks(self, model, metadata: dict) -> ValidationReport:
         """Проверяет прямые типы, границы и обязательные источники перед сборкой."""
         args = metadata["arguments"]
@@ -588,38 +608,18 @@ class EdWriterMixin(EdAuthoringMixin):
 
     def _manager_require_open_inputs(self, args: dict, metadata: dict) -> None:
         """Отказ до чтения маршрутов/слоёв: повторное создание не восстанавливает входы."""
-        calls, missing = [], []
-        if args.get("schema_id") and args["schema_id"] not in self._ed_schemas:
-            missing.append({"kind": "schema", "id": args["schema_id"]})
-            arguments = {"format_version": args["format_version"]}
-            if args.get("project"):
-                arguments.update(project=args["project"], configuration=args["configuration"])
-            else:
-                packages = metadata.get("schema_packages", [])
-                sources = metadata.get("schema_sources", [])
-                if packages:
-                    arguments.update(
-                        path=packages[0]["path"],
-                        imports={
-                            p["namespace"]: p["path"]
-                            for p in packages[1:]
-                            if p["role"] == "dependency"
-                        },
-                        extensions=[p["path"] for p in packages if p["role"] == "extension"],
-                    )
-                elif sources:
-                    arguments["path"] = sources[0][0]
-            calls.append({"tool": "ed_schema_open", "arguments": arguments})
-        if args.get("structure_id") and not self.store.exists(args["structure_id"]):
-            missing.append({"kind": "structure", "id": args["structure_id"]})
-            arguments = {"structure_id": args["structure_id"]}
-            if args.get("project"):
-                arguments.update(project_id=args["project"], configuration_id=args["configuration"])
-                tool = "structure_load_project"
-            else:
-                arguments.update(path=args["configuration_path"], extensions=args["extensions"])
-                tool = "structure_load_xml"
-            calls.append({"tool": tool, "arguments": arguments})
+        from kd2_rules_mcp.service.ed_reopen import reopen_details
+
+        schema_missing = bool(args.get("schema_id") and args["schema_id"] not in self._ed_schemas)
+        structure_missing = bool(
+            args.get("structure_id") and not self.store.exists(args["structure_id"])
+        )
+        details = reopen_details(args, metadata, schema=schema_missing, structure=structure_missing)
+        missing = [
+            {"kind": kind, "id": args[kind + "_id"]}
+            for kind, absent in (("schema", schema_missing), ("structure", structure_missing))
+            if absent
+        ]
         if missing:
             _refuse(
                 "manager_inputs_not_open",
@@ -627,7 +627,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 "(ed_schema_open, structure_load_project/structure_load_xml). "
                 "При новых идентификаторах используйте ed_create mode=rebind",
                 missing_inputs=missing,
-                reopen_calls=calls,
+                **details,
             )
 
     def ed_create(
@@ -1075,6 +1075,7 @@ class EdWriterMixin(EdAuthoringMixin):
             )
         return hashes
 
+    @with_reopen_hints
     def ed_apply(
         self,
         project_id: str,
@@ -1376,6 +1377,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 self._manager_metadata(project_id), model.executor_profile.profile_id
             )
             report = validate_writer(model, text, detection=detection)
+            report.extend(self._manager_plan_content(model, self._manager_metadata(project_id))[0])
             return report, {
                 "writer": {
                     "project_id": project_id,
@@ -1799,6 +1801,8 @@ class EdWriterMixin(EdAuthoringMixin):
                 rendered = render(model, "preserve" if model.source_files else "canonical")
                 report = validate_writer(model, rendered.data, detection=detection)
                 report.extend(self._manager_schema_checks(model, metadata))
+                content_report, missing_content = self._manager_plan_content(model, metadata)
+                report.extend(content_report)
                 errors = [
                     {"id": i.check, **i.to_dict()}
                     for i in report.issues
@@ -1835,6 +1839,7 @@ class EdWriterMixin(EdAuthoringMixin):
                     previous_manifest=previous,
                     previous_files=previous_files if previous else None,
                     creation_fingerprint=metadata["creation_fingerprint"],
+                    content_objects=self._manager_content_descriptions(metadata, missing_content),
                 )
                 build_hash = digest(
                     (

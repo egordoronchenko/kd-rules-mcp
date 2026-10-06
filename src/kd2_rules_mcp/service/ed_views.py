@@ -110,7 +110,8 @@ def address_of(entity: ed.Entity, index: AddressIndex) -> str:
     """Индекс пакета первичен; служебные сущности получают адрес по стабильному ID."""
     addresses = index.by_id.get(entity.entity_id)
     if addresses:
-        return addresses[0]
+        address = addresses[0]
+        return "Код/" + address.split("/", 1)[1] if address.startswith("Алгоритм/") else address
     prefix = {"version": "Версия", "diagnostic": "Диагностика"}.get(entity.kind, entity.kind)
     return f"{prefix}/{escape_segment(entity.entity_id)}"
 
@@ -176,6 +177,8 @@ def row(
             (a for a in index.by_id.get(entity.entity_id, ()) if a.startswith(prefix + "/")),
             result["address"],
         )
+        if kind == "algorithm" and result["address"].startswith("Алгоритм/"):
+            result["address"] = "Код/" + result["address"].split("/", 1)[1]
     if isinstance(entity, (ed.PropertyRule, ed.PropertyGroup)):
         # Объект правила уже есть в адресе; в строке свойства нужны сами свойства сторон.
         result["configuration_property"] = short(entity.configuration_property)

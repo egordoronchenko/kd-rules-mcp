@@ -90,7 +90,7 @@ class ManagerManifest:
         return False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": 1,
             "project_id": self.project_id,
             "creation_fingerprint": self.creation_fingerprint,
@@ -112,6 +112,11 @@ class ManagerManifest:
             "form_evidence": dict(self.form_evidence),
             "runtime_verified": False,
         }
+        if self.inputs.get("plan_content_additions"):
+            result["plan_content_additions"] = [
+                row["metadata"] for row in self.inputs["plan_content_additions"]
+            ]
+        return result
 
     def to_bytes(self) -> bytes:
         return json_bytes(self.to_dict())
@@ -469,6 +474,7 @@ def render_manager_kit(
     *,
     executor_profile_id: str,
     form_evidence: Mapping[str, bool] | None = None,
+    content_objects: tuple[Description, ...] = (),
     previous_manifest: ManagerManifest | None = None,
     previous_files: Mapping[str, bytes] | None = None,
     keep_version: bool = False,
@@ -567,7 +573,7 @@ def render_manager_kit(
             )
         _check_previous(previous_manifest, previous_files)
     _reread(model, rendered)
-    paths, borrowed = manager_identity_roles(host, module_name)
+    paths, borrowed = manager_identity_roles(host, module_name, content_objects)
     ids = make_identity_map(host.configuration_uuid, host.identity.name, paths, borrowed)
     model_bytes = dump_model(model)
     template = (
@@ -588,6 +594,26 @@ def render_manager_kit(
             "use_source_style": rendered.report.use_source_style,
         },
     }
+    if content_objects:
+        inputs["plan_content_additions"] = [
+            {
+                "metadata": obj.kind + "." + obj.name,
+                "uuid": obj.uuid,
+                "description_sha256": sha256(
+                    json_bytes(
+                        (
+                            obj.path,
+                            obj.kind,
+                            obj.name,
+                            obj.uuid,
+                            dict(obj.props),
+                            obj.generated_types,
+                        )
+                    )
+                ),
+            }
+            for obj in content_objects
+        ]
     decision_hash = manager_decision_hash(inputs)
     if keep_version and previous_manifest and previous_manifest.decision_hash != decision_hash:
         refuse(
@@ -599,7 +625,9 @@ def render_manager_kit(
     source_map = manager_source_map(model, rendered, module_path)
     entity_hashes = _entity_hashes(model, source_map)
     try:
-        xml = dump_manager_extension(host, module_name, ids, version=decision_hash[:12])
+        xml = dump_manager_extension(
+            host, module_name, ids, version=decision_hash[:12], content_objects=content_objects
+        )
     except ValueError:
         refuse(
             "metadata_profile_unsupported",
@@ -624,6 +652,7 @@ def render_manager_kit(
         paths=tuple(sorted((*result, "manifest.json", "instruction.md"))),
         compatibility_mode=host.compatibility_mode,
         interface_compatibility_mode=host.interface_compatibility_mode,
+        plan_content_additions=tuple(obj.kind + "." + obj.name for obj in content_objects),
     )
     result["instruction.md"] = instruction.encode("utf-8")
     changes = manager_changes(

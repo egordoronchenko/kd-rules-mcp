@@ -454,7 +454,7 @@ Copy registration rules.
 |---|---|---|---|
 | `project_id` | string | required | Project |
 | `exchange_plan` | string | required | Plan |
-| `node_properties` | object | required | Mapping |
+| `node_properties` | object | required | Rename/null/{name,value}/list |
 | `source` | object | required | Dump |
 | `structure_id` | any | `null` | Structure ID |
 | `own_attributes` | any | `null` | name,type,synonym |
@@ -532,7 +532,7 @@ direction/headers_only or source revision Слой/<id>/….
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | ED document/snapshot ID |
-| `address` | string | required | ED address from ed_list |
+| `address` | string | required | ED address; Код/algorithm or Алгоритм/algorithm |
 | `children_kind` | string \| null | `null` | Child kind; null = all, reference = code links |
 | `offset` | integer ≥ 0 | `0` | Page offset |
 | `limit` | integer 1…200 | `50` | Page size |
@@ -716,7 +716,7 @@ current revision and live document_id.
 |---|---|---|---|
 | `project_id` | string | required | Manager project from ed_create |
 | `expected_revision` | string | required | Current project revision |
-| `operations` | array of object \| null | `null` | Up to 100 W2 operations; forms: docs/tools.md. client_id refs; on create after_id omitted=append, null=first. Omit on apply to use saved preview_hash. Manager patch: manager_name, title, generated_at, text_style only; bindings via ed_create mode=rebind |
+| `operations` | array of object \| null | `null` | Up to 100 manager ops; forms: docs/tools.md. Algorithm address: Код/ or Алгоритм/. client_id refs; after_id omitted=append, null=first. Omit for saved preview. Manager: manager_name,title,generated_at,text_style; rebind bindings |
 | `mode` | string | `"preview"` | preview or apply |
 | `expected_preview_hash` | string \| null | `null` | Current preview_hash for apply |
 | `confirmations` | array of object \| null | `null` | Preview notices: code, notice_hash |
@@ -1017,6 +1017,27 @@ rules XML and instruction, with no generated extension. Enabling `deletion_mark_
 a kit manifest; extension kits always include one.
 Empty rules or rules with every rule disabled or invalid refuse with `registration.empty_rules`: this file
 replaces registration for the whole plan.
+
+Each `node_properties` value may also be `null` (remove matching plan-filter leaves),
+`{"name": "SendBank", "value": true}` (rename and change the boolean comparison constant), or a
+nonempty list of those objects (replace one leaf by their AND at the same position; inside OR, use
+a nested AND group). Replacements require `ЭтоСтрокаКонстанты=true`, `ТипСвойстваОбъекта=Булево`,
+and a verified boolean target header field. Otherwise `registration.attribute_type` blocks write.
+These values cannot replace `РеквизитРежимаВыгрузки`. Empty groups created by removal are removed;
+an emptied plan filter remains an empty block. String values retain the existing rename behaviour.
+Decisions apply to every matching leaf across rules; different decisions per rule require separate
+projects/calls. This mapping does not delete a whole registration rule.
+Preview `counts` include `replaced_leaves` and `removed_leaves` (per original leaf), and `changes`
+is a paginated list of `{address, leaf, before, after, action}`. The instruction has a “Что заменено”
+table. All supplied decisions participate in the preview hash.
+
+Plan membership is always read from the selected dump's `ExchangePlans/<plan>/Ext/Content.xml`,
+including explicit extension additions. `registration.plan_membership` requires acknowledgement:
+the rule cannot run until its object is added to the target plan. The instruction lists those rules
+under “Правила для объектов вне состава плана”. Missing or unreadable content emits acknowledged
+`registration.plan_content_unchecked`. Content snapshots participate in the hash; checking against
+a structure or directly against the dump produces the same result. Old kits with unchecked content
+now need a fresh preview and acknowledgement; the registration XML is unchanged by this check.
 A project without a source file refuses with `registration.source_required`; save it with `rules_save`
 and reopen the file with `rules_open`. `registration.already_targeted` refuses only when the plan
 is already targeted, the mapping is empty and `deletion_mark_filter` is false; old fields may be retargeted,
@@ -1757,6 +1778,8 @@ delete/move accept neither. Client IDs cannot change content.
 | Target/position | Contract |
 |---|---|
 | IDs / addresses | Writer IDs (`result_id`/navigation). Resolve after preceding operations; direction qualifiers work. Legacy top-level `address` refuses positional `~N`/`#N`; address-reference objects accept exact listed addresses against the current revision. |
+| Algorithm addresses | `Код/<name>` is canonical in list/get replies; `Алгоритм/<name>` is an accepted alias for read and edit address parameters. |
+| Client ID lifetime | IDs persist in the project's decision journal for idempotent apply/restart receipts. Reusing an ID with different content refuses, naming that ID and its entity address; use a new ID for a new decision. Packet reference syntax does not reset this lifetime. |
 | Create result | No target/address; client-derived ID. Handler result = binding. |
 | `after_id` on create | Omitted: append (import: generator key); null: first. Explicit placement also needs container. |
 | `move` | Destination required: `container_id` or explicit `after_id`; omitting both refuses. Container alone: append; null: first. Direction changes recheck references. |
@@ -1788,7 +1811,7 @@ Directions: `["send"]`, `["receive"]`, `["send","receive"]`, `["both"]`; no dupl
 | `pko` | `name`!: Identifier; `directions`!; `configuration_object`: R/V?; `format_object`: S/V?; `group_flag`: B/V?; `identification`: IdentificationPatch, create only; `events`: Event DTO array, default `[]`, unchanged-only (edit via `handler`). Values default unset. | `configuration_object`, `format_object`, `group_flag` |
 | `pod` | `name`!: Identifier; `directions`!; `configuration_selection`: R/V?; `format_selection`: S/V?; `clear_data`: B/V?; `used_pko`: references, default `[]`; `events`: unchanged-only as ПКО. Values default unset. | `configuration_selection`, `format_selection`, `clear_data` |
 | `property` | `configuration_property`!, `format_property`!: strings, one may be empty; `property_kind`: `direct` (default)/`reference`/`pkpd`/`algorithm`; `algorithm_flag`: integer 0 (default)/1; `conversion`: reference, default empty; `namespace`: string `""`, direct only; `argument_presence`: 3–7 booleans, first three true (default), helper-limited, empty tail trimmed. | None |
-| `table_part` | `configuration_property`!, `format_property`!: identifiers (one may be empty); `argument_presence`: `[true,true,true]` only, default. Namespace/condition and interface 1 unsupported. Create requires confirmation of `table_part_replace`: receiving replaces the entire table part. Each notice names its full `ПКО/<owner>/ПКТЧ/<group>` address; confirm every group in the packet. Duplicate names ignore case: send format refuses, receive configuration requires confirmation, including rename/move and owner direction changes. Existing imported duplicates stay diagnosed. Invalid imported names stay retained with a reason. Imported groups keep order; new groups use generator keys; preserve never realigns neighbours or adds an imported group's missing separator. | None |
+| `table_part` | `configuration_property`!, `format_property`!: identifiers (one may be empty); `argument_presence`: `[true,true,true]` only, default. Namespace/condition and interface 1 unsupported. Create for receive/both requires confirmation of `table_part_replace`: receiving replaces the entire table part; send-only creates need none. Each notice names its full `ПКО/<owner>/ПКТЧ/<group>` address; confirm every group in the packet. Duplicate names ignore case: send format refuses, receive configuration requires confirmation, including rename/move and owner direction changes. Existing imported duplicates stay diagnosed. Invalid imported names stay retained with a reason. Imported groups keep order; new groups use generator keys; preserve never realigns neighbours or adds an imported group's missing separator. | None |
 | `identification` | `mode`: S/V?, one of `ПоУникальномуИдентификатору`, `ПоПолямПоиска`, `СначалаПоУникальномуИдентификаторуПотомПоПолямПоиска`; `search_sets`: nonempty string arrays, default `[]`; `not_found_policy`: V? only. Receive required; field-search modes need search sets. No "no search" enum. | `mode`, `search_sets`, `not_found_policy` |
 | `pkpd` | `name`!: Identifier; `directions`!; `configuration_type`!: R; `format_type`!: S; `data_kind`: `enumeration` (default)/`predefined`. R path: `["Метаданные","Перечисления",name]` / `["Метаданные","Справочники",name]` respectively. | None |
 | `value_mapping` | `direction`!: `send`/`receive`, allowed by owner; `configuration_value`!: R `["Перечисления" or "Справочники",ownerType,value]`; `format_value`!: S. Unique send key = configuration value; receive key = format string. | None |
@@ -1869,7 +1892,7 @@ Outer codes: `invalid_argument`, `ed_authoring_precondition`, `ed_authoring_stal
 | `algorithm_signature_calls` | Notice: signature changes with calls/branches |
 | `handler_execution_changed` | Notice: restored branch changes execution |
 | `orphan_handler` | Notice: rebinding/rule deletion leaves unbound methods/branches |
-| `table_part_replace` | Required confirmation on group create: receiving replaces the whole table part; full owner/group address identifies each notice. |
+| `table_part_replace` | Group create for receive/both only: required confirmation that receiving replaces the whole table part; full owner/group address. Send-only groups produce no such notice. |
 
 Confirm every notice with `confirmations:[{"code":"…","notice_hash":"<exact-hash>"}]`.
 Read `section="notices"` for locations. Validation `ed.writer.*` IDs: [checks.md](checks.md).
@@ -2089,6 +2112,14 @@ Input hashes, current profile, host XML, model revision and previous kit enter t
 are checked again before atomic publication. Owned files/UUIDs follow `render_manager_kit`;
 foreign or edited kit contents block overwriting. Writes stay under `workspace/ed-authoring`.
 Manager manifest schema v1 includes `project_id` and `creation_fingerprint`.
+Every ПКО configuration object is checked against the bound exchange-plan content.
+`ed.plan.content_missing` requires acknowledgement: the kit adds each missing object to
+the adopted plan's `Ext/Content.xml` with `AutoRecord=Deny` and adopts the object unchanged.
+`plan_content_additions` lists additions in the manifest; the instruction asks to check
+the extension mark in the Configurator plan content. Registration remains the ПРО's job.
+No additions preserve previous kit bytes. Unavailable content yields `ed.plan.content_unchecked`.
+Schema/structure absence returns `reopen_calls` with saved source parameters, as with
+`manager_inputs_not_open`; missing source parameters appear in `missing_reopen_parameters`.
 `ed_validate` and manager build share the semantic readback check: `ed.writer.read`
 reports the first differing entity address and field. Delivery additionally uses
 `ed.author.model_invalid` for readback and required-frame/report preconditions.

@@ -11,12 +11,13 @@ from mcp import Client
 
 from kd2_rules_mcp.errors import DuplicateRuleError, RuleNotFoundError
 from kd2_rules_mcp.kd2.model import ExchangeRules
+from kd2_rules_mcp.kd2.rules_io import load_registration_rules
 from kd2_rules_mcp.server import create_server
 from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
 from tests.test_ed_authoring_handlers import HANDLERS
 from tests.test_service_ed_authoring import handler_setup
 from tests.test_service_ed_authoring import setup as setup
-from tests.test_service_registration_retarget import deletion_setup
+from tests.test_service_registration_retarget import add_boolean_field, deletion_setup, single_leaf
 from tests.test_service_registration_retarget import setup as registration_setup
 
 DATA = Path(__file__).parent / "data"
@@ -61,7 +62,14 @@ async def test_registration_retarget_tool(tmp_path: Path) -> None:
         written = await _call(
             client,
             "registration_retarget",
-            **(arguments | {"mode": "write", "expected_preview_hash": preview["preview_hash"]}),
+            **(
+                arguments
+                | {
+                    "mode": "write",
+                    "expected_preview_hash": preview["preview_hash"],
+                    "acknowledged_notices": preview["required_acknowledgements"],
+                }
+            ),
         )
         assert written["status"] == "written"
         invalid = await _error(
@@ -78,6 +86,36 @@ async def test_registration_retarget_tool(tmp_path: Path) -> None:
         )
         assert rejected["code"] == "registration.missing_attribute"
         assert rejected["failures"][0]["address"]
+
+
+async def test_registration_retarget_value_decision_tool(tmp_path: Path) -> None:
+    service, arguments = registration_setup(tmp_path)
+    add_boolean_field(service, tmp_path)
+    single_leaf(service, arguments, "OldFlag", "Булево")
+    arguments["node_properties"] = {"OldFlag": {"name": "FlagB", "value": False}}
+    async with Client(create_server(service)) as client:
+        preview = await _call(client, "registration_retarget", **arguments)
+        assert preview["counts"]["replaced_leaves"] == 1
+        assert preview["changes"]["total"] == 1
+        written = await _call(
+            client,
+            "registration_retarget",
+            **(
+                arguments
+                | {
+                    "mode": "write",
+                    "expected_preview_hash": preview["preview_hash"],
+                    "acknowledged_notices": preview["required_acknowledgements"],
+                }
+            ),
+        )
+        document = load_registration_rules(
+            Path(written["output_path"]) / "registration/RegistrationRules.xml"
+        )
+        tree = document.rules()[0].child("ОтборПоСвойствамПланаОбмена")
+        assert tree is not None
+        assert tree.items[0].get("СвойствоПланаОбмена") == "FlagB"
+        assert tree.items[0].get("СвойствоОбъекта") == "false"
 
 
 async def test_registration_retarget_deletion_filter_tool(tmp_path: Path) -> None:

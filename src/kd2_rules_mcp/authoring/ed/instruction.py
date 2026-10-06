@@ -148,6 +148,7 @@ def render_manager_instruction(
     form_evidence: Mapping[str, bool] | None = None,
     compatibility_mode: str = "",
     interface_compatibility_mode: str = "",
+    plan_content_additions: tuple[str, ...] = (),
 ) -> str:
     """Инструкция доставки W1 по (г) пилота; числа деклараций берутся из модели."""
     template = (
@@ -167,7 +168,18 @@ def render_manager_instruction(
         compatibility_mode=compatibility_mode,
         interface_compatibility_mode=interface_compatibility_mode,
     )
-    return Template(template).substitute(values).rstrip() + "\n"
+    result = Template(template).substitute(values).rstrip() + "\n"
+    if plan_content_additions:
+        result += (
+            "\n## Состав плана дополнен\n\n"
+            + "\n".join("- `" + item + "`" for item in plan_content_additions)
+            + "\n\nПосле установки откройте в конфигураторе состав плана `"
+            + plan_name
+            + "`: каждый объект должен быть виден с признаком расширения. "
+            "Авторегистрация — «Запретить»; регистрацию ведут ПРО. "
+            "Проверьте действующие ПРО и регистрацию изменений этих объектов.\n"
+        )
+    return result
 
 
 def runtime_probes(prepared: PreparedAuthoring, meta: DumpMetadata) -> str:
