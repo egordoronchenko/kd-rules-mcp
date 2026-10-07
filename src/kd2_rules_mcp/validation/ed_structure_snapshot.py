@@ -10,7 +10,8 @@ from kd2_rules_mcp.ed import model as ed
 from kd2_rules_mcp.ed.address import AddressIndex
 from kd2_rules_mcp.ed.model import Expr
 from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
-from kd2_rules_mcp.structures.xmldump import KINDS
+from kd2_rules_mcp.structures.db import read_subscriptions
+from kd2_rules_mcp.structures.xmldump import KINDS, EventSubscription
 from kd2_rules_mcp.validation.report import ValidationReport
 
 # Явные коллекции BSL; структура хранит виды в единственном числе.
@@ -87,6 +88,7 @@ class StructureObject:
 class StructureSnapshot:
     objects: Mapping[tuple[str, str], StructureObject]
     by_type: Mapping[str, StructureObject]
+    subscriptions: tuple[EventSubscription, ...] | None = None
 
     @classmethod
     def load(cls, connection: sqlite3.Connection) -> "StructureSnapshot":
@@ -146,6 +148,7 @@ class StructureSnapshot:
         return cls(
             MappingProxyType(objects),
             MappingProxyType({o.type_name.casefold(): o for o in objects.values()}),
+            read_subscriptions(connection),
         )
 
     def search(

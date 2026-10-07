@@ -114,7 +114,11 @@ def test_plan_content_warning_and_delivery(writer_setup, included):
         assert obj.findtext("{*}Catalog/{*}Properties/{*}ObjectBelonging") == "Adopted"
         assert obj.findtext("{*}Catalog/{*}Properties/{*}ExtendedConfigurationObject")
         assert manifest.to_dict()["plan_content_additions"] == ["Catalog.Должности"]
-        assert "Состав плана дополнен" in (root / "instruction.md").read_text("utf-8")
+        instruction = (root / "instruction.md").read_text("utf-8")
+        assert "Состав плана дополнен" in instruction
+        # Д-П2 07.10.2026: переменная цикла затирала версию формата в инструкции.
+        assert "subscription_adopted_objects" not in instruction
+        assert "1.20" in instruction
 
 
 @pytest.mark.parametrize("direction,notice", [("send", False), ("receive", True), ("both", True)])

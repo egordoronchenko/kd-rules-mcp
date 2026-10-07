@@ -38,6 +38,8 @@ from .model import AuthoringPreconditionError, ExtensionIdentity
 from .xml_dump import (
     Description,
     ManagerHost,
+    SubscriptionAddition,
+    check_subscription_sources,
     dump_manager_extension,
     manager_identity_roles,
     profile_template,
@@ -112,10 +114,12 @@ class ManagerManifest:
             "form_evidence": dict(self.form_evidence),
             "runtime_verified": False,
         }
-        if self.inputs.get("plan_content_additions"):
-            result["plan_content_additions"] = [
-                row["metadata"] for row in self.inputs["plan_content_additions"]
-            ]
+        for key in ("plan_content_additions", "subscription_adopted_objects"):
+            if self.inputs.get(key):
+                result[key] = [row["metadata"] for row in self.inputs[key]]
+        for key in ("registration_subscription_additions", "registration_objects"):
+            if self.inputs.get(key):
+                result[key] = self.inputs[key]
         return result
 
     def to_bytes(self) -> bytes:
@@ -466,6 +470,19 @@ def _delivery_changed(
     )
 
 
+def _adopted_input(obj: Description) -> dict[str, str]:
+    """Заимствуемый объект во входах решения: смена описания меняет decision_hash."""
+    return {
+        "metadata": obj.kind + "." + obj.name,
+        "uuid": obj.uuid,
+        "description_sha256": sha256(
+            json_bytes(
+                (obj.path, obj.kind, obj.name, obj.uuid, dict(obj.props), obj.generated_types)
+            )
+        ),
+    }
+
+
 def render_manager_kit(
     model: ManagerModel,
     rendered: RenderResult,
@@ -475,6 +492,9 @@ def render_manager_kit(
     executor_profile_id: str,
     form_evidence: Mapping[str, bool] | None = None,
     content_objects: tuple[Description, ...] = (),
+    subscription_additions: tuple[SubscriptionAddition, ...] = (),
+    subscription_objects: tuple[Description, ...] = (),
+    registration_objects: tuple[str, ...] = (),
     data_preflight: str = "",
     previous_manifest: ManagerManifest | None = None,
     previous_files: Mapping[str, bytes] | None = None,
@@ -483,6 +503,8 @@ def render_manager_kit(
 ) -> ManagerKit:
     """Порождает байты, ничего не записывает. Профильные ed.writer.* проверяет сервис.
 
+    subscription_objects — объекты добавляемых источников подписок вне content_objects:
+    заимствуются без изменения состава плана.
     keep_version сохраняет печать только при тех же решениях; изменённая сборка всегда
     получает decision_hash[:12]. Дельта прежней сборки сохраняется при повторе без правок.
     """
@@ -574,7 +596,10 @@ def render_manager_kit(
             )
         _check_previous(previous_manifest, previous_files)
     _reread(model, rendered)
-    paths, borrowed = manager_identity_roles(host, module_name, content_objects)
+    check_subscription_sources(content_objects, subscription_additions, subscription_objects)
+    paths, borrowed = manager_identity_roles(
+        host, module_name, content_objects, subscription_additions, subscription_objects
+    )
     ids = make_identity_map(host.configuration_uuid, host.identity.name, paths, borrowed)
     model_bytes = dump_model(model)
     template = (
@@ -595,28 +620,26 @@ def render_manager_kit(
             "use_source_style": rendered.report.use_source_style,
         },
     }
-    if content_objects:
-        inputs["plan_content_additions"] = [
-            {
-                "metadata": obj.kind + "." + obj.name,
-                "uuid": obj.uuid,
-                "description_sha256": sha256(
-                    json_bytes(
-                        (
-                            obj.path,
-                            obj.kind,
-                            obj.name,
-                            obj.uuid,
-                            dict(obj.props),
-                            obj.generated_types,
-                        )
-                    )
-                ),
-            }
-            for obj in content_objects
-        ]
+    for input_key, objects in (
+        ("plan_content_additions", content_objects),
+        ("subscription_adopted_objects", subscription_objects),
+    ):
+        if objects:
+            inputs[input_key] = [_adopted_input(obj) for obj in objects]
     if data_preflight:
         inputs["data_preflight_sha256"] = sha256(data_preflight.encode("utf-8"))
+    if subscription_additions:
+        inputs["registration_subscription_additions"] = [
+            {
+                "name": s.description.name,
+                "uuid": s.description.uuid,
+                "event": s.description.props.get("Event", ""),
+                "sources": list(s.sources),
+            }
+            for s in subscription_additions
+        ]
+    if registration_objects:
+        inputs["registration_objects"] = list(registration_objects)
     decision_hash = manager_decision_hash(inputs)
     if keep_version and previous_manifest and previous_manifest.decision_hash != decision_hash:
         refuse(
@@ -629,7 +652,13 @@ def render_manager_kit(
     entity_hashes = _entity_hashes(model, source_map)
     try:
         xml = dump_manager_extension(
-            host, module_name, ids, version=decision_hash[:12], content_objects=content_objects
+            host,
+            module_name,
+            ids,
+            version=decision_hash[:12],
+            content_objects=content_objects,
+            subscription_additions=subscription_additions,
+            subscription_objects=subscription_objects,
         )
     except ValueError:
         refuse(
@@ -656,6 +685,11 @@ def render_manager_kit(
         compatibility_mode=host.compatibility_mode,
         interface_compatibility_mode=host.interface_compatibility_mode,
         plan_content_additions=tuple(obj.kind + "." + obj.name for obj in content_objects),
+        registration_subscriptions=tuple(
+            s.description.name + ": " + ", ".join(s.sources) for s in subscription_additions
+        ),
+        registration_objects=registration_objects,
+        subscription_objects=tuple(obj.kind + "." + obj.name for obj in subscription_objects),
     )
     instruction += data_preflight
     result["instruction.md"] = instruction.encode("utf-8")

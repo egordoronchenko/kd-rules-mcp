@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" version="2.20">
+<InformationRegister uuid="33333333-3333-4333-8333-000000000004"><InternalInfo><xr:GeneratedType name="InformationRegisterRecordSet.История" category="RecordSet"/></InternalInfo><Properties><Name>История</Name></Properties><ChildObjects/></InformationRegister>
+</MetaDataObject>

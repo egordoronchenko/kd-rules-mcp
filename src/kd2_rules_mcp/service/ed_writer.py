@@ -26,7 +26,11 @@ from kd2_rules_mcp.authoring.ed.manager_render import (
 from kd2_rules_mcp.authoring.ed.manifest import sha256
 from kd2_rules_mcp.authoring.ed.model import AuthoringPreconditionError, ExtensionIdentity
 from kd2_rules_mcp.authoring.ed.workspace import ManagerWorkspace
-from kd2_rules_mcp.authoring.ed.xml_dump import read_description, read_manager_host
+from kd2_rules_mcp.authoring.ed.xml_dump import (
+    SubscriptionAddition,
+    read_description,
+    read_manager_host,
+)
 from kd2_rules_mcp.ed import build_references
 from kd2_rules_mcp.ed.address import build_addresses
 from kd2_rules_mcp.ed.executor_profile import ProfileDetection, detect_profile
@@ -64,9 +68,14 @@ from kd2_rules_mcp.service.ed_reopen import with_reopen_hints
 from kd2_rules_mcp.service.ed_views import address_of, validate_page
 from kd2_rules_mcp.service.paths import Settings
 from kd2_rules_mcp.structures.store import dump_fingerprint
+from kd2_rules_mcp.structures.xmldump import registration_events
 from kd2_rules_mcp.validation.ed_handler_enum import validate_enum_handlers
 from kd2_rules_mcp.validation.ed_links import validate_links
-from kd2_rules_mcp.validation.ed_plan import validate_plan_content
+from kd2_rules_mcp.validation.ed_plan import (
+    subscription_source_objects,
+    validate_plan_content,
+    validate_plan_registration,
+)
 from kd2_rules_mcp.validation.ed_required import CHECK as REQUIRED_UNFILLED
 from kd2_rules_mcp.validation.ed_required import RequiredUnfilled
 from kd2_rules_mcp.validation.ed_schema import validate_schema
@@ -514,12 +523,49 @@ class EdWriterMixin(EdAuthoringMixin):
         return metadata, host, bindings
 
     def _manager_plan_content(self, model, metadata: dict):
+        report, content, _, _ = self._manager_plan_delivery(model, metadata)
+        return report, content
+
+    def _manager_plan_delivery(self, model, metadata, registration_objects=(), plan_name=None):
         structure = (
             self._ed_structure_snapshot(model.host.structure_id)[0]
             if model.host.structure_id
             else None
         )
-        return validate_plan_content(model, structure, metadata["arguments"]["plan"])
+        names = []
+        pko_objects = {metadata_key(rule.configuration_object)[0] for rule in model.pko}
+        if not isinstance(registration_objects, (tuple, list)) or any(
+            not isinstance(name, str) for name in registration_objects
+        ):
+            raise ValueError("registration_objects: список Вид.Имя")
+        for full_name in registration_objects:
+            kind, dot, name = full_name.partition(".")
+            key = kind.casefold(), name.casefold()
+            obj = structure.objects.get(key) if structure else None
+            if not dot or obj is None:
+                _refuse(
+                    "registration_object_missing", "Объект отсутствует в структуре: " + full_name
+                )
+            if key in pko_objects:
+                _refuse("registration_object_has_pko", "У объекта уже есть ПКО: " + full_name)
+            if not registration_events(obj.kind, obj.name):
+                _refuse(
+                    "registration_object_unsupported",
+                    "Объект не поддерживает регистрацию: " + full_name,
+                )
+            names.append(obj.kind + "." + obj.name)
+        selected = plan_name or metadata["arguments"]["plan"]
+        report, content = validate_plan_content(model, structure, selected, tuple(names))
+        if names and any(i.check == "ed.plan.content_unchecked" for i in report.issues):
+            _refuse(
+                "registration_plan_unchecked",
+                "Состав плана недоступен для объектов только для регистрации",
+            )
+        registration_report, subscriptions = validate_plan_registration(
+            structure, selected, content, tuple(names)
+        )
+        report.extend(registration_report)
+        return report, content, subscriptions, tuple(sorted(set(names)))
 
     def _manager_content_descriptions(self, metadata: dict, missing):
         root = self._read_path(metadata["arguments"]["configuration_path"])
@@ -1852,6 +1898,7 @@ class EdWriterMixin(EdAuthoringMixin):
         level,
         check_prefix,
         address_prefix,
+        registration_objects=None,
     ):
         validate_page(offset, limit)
         if section not in ("summary", "operations", "notices", "files", "issues_after", "skipped"):
@@ -1898,8 +1945,53 @@ class EdWriterMixin(EdAuthoringMixin):
                         model, metadata, required_unfilled=required_unfilled
                     )
                 )
-                content_report, missing_content = self._manager_plan_content(model, metadata)
+                registration_objects = (
+                    registration_objects if registration_objects is not None else []
+                )
+                content_report, missing_content, missing_subscriptions, registration_names = (
+                    self._manager_plan_delivery(
+                        model, metadata, registration_objects, selected.plan_name
+                    )
+                )
                 report.extend(content_report)
+                delivered_events = {
+                    (subscription.event, source)
+                    for subscription, sources in missing_subscriptions
+                    for source in sources
+                }
+                if len(delivered_events) != sum(
+                    i.check == "ed.plan.registration_unsubscribed" for i in content_report.issues
+                ):
+                    _refuse(
+                        "registration_subscription_missing",
+                        "Нет типовой подписки для дополнения источников",
+                    )
+                subscriptions = []
+                for subscription, sources in missing_subscriptions:
+                    description = self._manager_content_descriptions(
+                        metadata, (("EventSubscription", subscription.name, "EventSubscriptions"),)
+                    )[0]
+                    if description.uuid.casefold() != subscription.uuid.casefold():
+                        _refuse(
+                            "snapshot_mismatch",
+                            "UUID подписки не совпадает со структурой: " + subscription.name,
+                        )
+                    subscriptions.append(SubscriptionAddition(description, sources))
+                # Источник заимствованной подписки должен быть заимствован расширением;
+                # объекты штатного состава плана заимствуются без изменения состава.
+                subscription_objects = subscription_source_objects(
+                    missing_subscriptions, missing_content
+                )
+                root = self._read_path(args["configuration_path"])
+                for _, name, folder in subscription_objects:
+                    if not (root / folder / (name + ".xml")).is_file():
+                        _refuse(
+                            "subscription_source_unavailable",
+                            "Источник подписки отсутствует в выгрузке основной конфигурации: "
+                            + folder
+                            + "/"
+                            + name,
+                        )
                 errors = [
                     {"id": i.check, **i.to_dict()}
                     for i in report.issues
@@ -1937,6 +2029,11 @@ class EdWriterMixin(EdAuthoringMixin):
                     previous_files=previous_files if previous else None,
                     creation_fingerprint=metadata["creation_fingerprint"],
                     content_objects=self._manager_content_descriptions(metadata, missing_content),
+                    subscription_additions=tuple(subscriptions),
+                    subscription_objects=self._manager_content_descriptions(
+                        metadata, subscription_objects
+                    ),
+                    registration_objects=registration_names,
                     data_preflight=render_data_preflight(required_unfilled),
                 )
                 kit = with_key_data_instruction(

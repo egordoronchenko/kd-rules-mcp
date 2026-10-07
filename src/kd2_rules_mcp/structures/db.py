@@ -6,10 +6,13 @@
 типы) списки из сотен типов повторяются у тысяч свойств.
 """
 
+import json
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "2"
+from kd2_rules_mcp.structures.xmldump import EventSubscription
+
+SCHEMA_VERSION = "3"
 
 SCHEMA = """
 CREATE TABLE meta (
@@ -87,6 +90,15 @@ CREATE TABLE object_values (
     unresolved TEXT
 );
 CREATE INDEX object_values_object ON object_values(object_id);
+
+-- Подписки из XML-выгрузки; в MD83Exp сведений о них нет.
+CREATE TABLE event_subscriptions (
+    name TEXT PRIMARY KEY,
+    uuid TEXT NOT NULL,
+    event TEXT NOT NULL,
+    handler TEXT NOT NULL,
+    sources TEXT NOT NULL
+);
 """
 
 # Ключи таблицы meta.
@@ -131,3 +143,19 @@ def read_meta(connection: sqlite3.Connection) -> dict[str, str]:
 def write_meta(connection: sqlite3.Connection, values: dict[str, str]) -> None:
     """Записывает или заменяет значения метаданных."""
     connection.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", values.items())
+
+
+def read_subscriptions(connection: sqlite3.Connection) -> tuple[EventSubscription, ...] | None:
+    """None — подписки не читались (MD83Exp или старая схема), () — известный пустой список."""
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    if (
+        "event_subscriptions" not in tables
+        or read_meta(connection).get("subscriptions_known") != "true"
+    ):
+        return None
+    return tuple(
+        EventSubscription(name, uuid, event, handler, tuple(json.loads(sources)))
+        for name, uuid, event, handler, sources in connection.execute(
+            "SELECT name, uuid, event, handler, sources FROM event_subscriptions ORDER BY name"
+        )
+    )

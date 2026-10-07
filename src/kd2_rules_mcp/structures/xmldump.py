@@ -433,6 +433,98 @@ class ConfigDump:
     synonym: str = ""
     is_extension: bool = False
     objects: dict[str, list[MetaObject]] = field(default_factory=dict)
+    subscriptions: list["EventSubscription"] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class EventSubscription:
+    """Подписка: типы источников без префикса cfg; UUID основной подписки сохраняется."""
+
+    name: str
+    uuid: str
+    event: str
+    handler: str
+    sources: tuple[str, ...]
+    extended_uuid: str = ""
+
+    def covers(self, source: str) -> bool:
+        """Учитывает конкретный тип и общий тип объектов данного вида."""
+        names = {s.casefold() for s in self.sources}
+        return source.casefold() in names or source.partition(".")[0].casefold() in names
+
+
+def read_subscription(path: Path) -> EventSubscription:
+    """Форма основной подписки и заимствования расширением: опись ed-writer-plan-content-2026-10."""
+    obj = child(etree.parse(str(path)).getroot(), "EventSubscription")
+    if obj is None:
+        raise ValueError(f"Нет EventSubscription в {path}")
+    props = child(obj, "Properties")
+    return EventSubscription(
+        text(props, "Name"),
+        obj.get("uuid", ""),
+        text(props, "Event"),
+        text(props, "Handler"),
+        tuple(value for _, value in read_type(child(props, "Source")).entries),
+        text(props, "ExtendedConfigurationObject")
+        if text(props, "ObjectBelonging") == "Adopted"
+        else "",
+    )
+
+
+def plan_subscriptions(
+    subscriptions: tuple[EventSubscription, ...] | list[EventSubscription], plan_name: str
+) -> tuple[EventSubscription, ...]:
+    """Критерий БСП по Handler, а не по имени подписки; описание — docs/checks.md."""
+    result = []
+    for subscription in subscriptions:
+        parts = subscription.handler.split(".")
+        if (
+            len(parts) == 3
+            and parts[0].casefold() == "commonmodule"
+            and parts[1].casefold().startswith("обменданнымисобытия")
+            and parts[2].casefold().startswith(plan_name.casefold())
+            and subscription.event in {"BeforeWrite", "BeforeDelete"}
+        ):
+            result.append(subscription)
+    return tuple(sorted(result, key=lambda s: s.name))
+
+
+def registration_events(kind: str, name: str) -> tuple[tuple[str, str], ...]:
+    """События и тип источника: ссылочные объекты и наборы записей (опись формата)."""
+    tag = next((tag for tag, info in KINDS.items() if info[1].casefold() == kind.casefold()), "")
+    if not tag or tag == "Enum":
+        return ()
+    source = tag + ("RecordSet." if tag in REGISTER_TAGS else "Object.") + name
+    events = ("BeforeWrite",) if tag in REGISTER_TAGS else ("BeforeWrite", "BeforeDelete")
+    return tuple((event, source) for event in events)
+
+
+def registration_source_object(source: str) -> tuple[str, str] | None:
+    """Тег XML и имя объекта по типу источника подписки — обратное `registration_events`."""
+    type_name, _, name = source.partition(".")
+    for tag in KINDS:
+        suffix = "RecordSet" if tag in REGISTER_TAGS else "Object"
+        if name and tag != "Enum" and type_name == tag + suffix:
+            return tag, name
+    return None
+
+
+def subscription_accepts(subscription: EventSubscription, event: str, source: str) -> bool:
+    """Разные сигнатуры BeforeWrite: документ, набор записей, прочий ссылочный объект."""
+
+    def family(value: str) -> str:
+        tag = value.partition(".")[0]
+        return (
+            "recordset"
+            if tag.endswith("RecordSet")
+            else "document"
+            if tag == "DocumentObject"
+            else "object"
+        )
+
+    return subscription.event == event and any(
+        family(value) == family(source) or event == "BeforeDelete" for value in subscription.sources
+    )
 
 
 def read_dump(root: Path) -> ConfigDump:
@@ -453,6 +545,10 @@ def read_dump(root: Path) -> ConfigDump:
         if not isinstance(item.tag, str):
             continue
         tag = local(item)
+        if tag == "EventSubscription":
+            path = root / "EventSubscriptions" / f"{(item.text or '').strip()}.xml"
+            dump.subscriptions.append(read_subscription(path))
+            continue
         directory = directories.get(tag)
         if directory is None:
             continue

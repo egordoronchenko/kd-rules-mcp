@@ -8,7 +8,7 @@
 import json
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from kd2_rules_mcp.structures.xmldump import (
     KINDS,
@@ -134,12 +134,28 @@ class Metadata:
             (obj.tag, obj.name): obj for items in self.objects.values() for obj in items
         }
         self.extensions: list[str] = []
+        self.subscriptions = list(main.subscriptions)
         for extension in extensions:
             self._overlay(extension)
             self.extensions.append(extension.name)
 
     def _overlay(self, extension: ConfigDump) -> None:
         """Накладывает расширение: свои объекты добавляются, у заимствованных — новые части."""
+        for subscription in extension.subscriptions:
+            if subscription.extended_uuid:
+                for index, existing in enumerate(self.subscriptions):
+                    if existing.uuid.casefold() == subscription.extended_uuid.casefold():
+                        self.subscriptions[index] = replace(
+                            existing,
+                            sources=tuple(
+                                dict.fromkeys((*existing.sources, *subscription.sources))
+                            ),
+                        )
+                        break
+                else:
+                    raise ValueError(f"Не найдена заимствованная подписка {subscription.name}")
+            else:
+                self.subscriptions.append(subscription)
         for tag, items in extension.objects.items():
             for obj in items:
                 existing = self.index.get((tag, obj.name))
@@ -769,6 +785,14 @@ class BuildReport:
 
 def build(metadata: Metadata, connection: sqlite3.Connection) -> BuildReport:
     """Записывает структуру объединённых метаданных в пустую базу `connection`."""
+    connection.execute("INSERT OR REPLACE INTO meta VALUES ('subscriptions_known', 'true')")
+    connection.executemany(
+        "INSERT INTO event_subscriptions VALUES (?, ?, ?, ?, ?)",
+        (
+            (s.name, s.uuid, s.event, s.handler, json.dumps(s.sources))
+            for s in metadata.subscriptions
+        ),
+    )
     builder = Builder(metadata)
     writer = _Writer(connection)
     stub_attrs = builder.object_attrs(MetaObject(tag="", name=""))

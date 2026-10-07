@@ -495,7 +495,9 @@ class RegistrationRetargetMixin(EdAuthoringMixin):
                 result = replace(
                     result,
                     notices=result.notices
-                    + registration_plan_notices(result.document, exchange_plan, host.plan_content),
+                    + registration_plan_notices(
+                        result.document, exchange_plan, host.plan_content, host.subscriptions
+                    ),
                 )
                 own = {a.name.casefold() for a in attributes}
                 notices = _notices(result, own)

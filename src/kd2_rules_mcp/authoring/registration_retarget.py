@@ -51,6 +51,11 @@ from kd2_rules_mcp.kd2.diff import diff_rules
 from kd2_rules_mcp.kd2.model import Node, RegistrationRules, RulesDocument
 from kd2_rules_mcp.kd2.rules_io import dump_rules
 from kd2_rules_mcp.structures.queries import ObjectCard, ObjectProperty
+from kd2_rules_mcp.structures.xmldump import (
+    EventSubscription,
+    plan_subscriptions,
+    registration_events,
+)
 from kd2_rules_mcp.validation.address import pro_addresses
 from kd2_rules_mcp.validation.registration import _split_plan_property
 
@@ -305,7 +310,10 @@ def registration_rule_active(rule: Node) -> bool:
 
 
 def registration_plan_notices(
-    rules: RegistrationRules, plan_name: str, content: frozenset[str] | None
+    rules: RegistrationRules,
+    plan_name: str,
+    content: frozenset[str] | None,
+    subscriptions: tuple[EventSubscription, ...] | None = None,
 ) -> tuple[RetargetNotice, ...]:
     """Состав из той же выгрузки: ОДС:171–188,1389–1414; вне него ПРО не исполняется."""
     if content is None:
@@ -321,20 +329,49 @@ def registration_plan_notices(
             ),
         )
     members = {name.casefold() for name in content}
-    return tuple(
-        RetargetNotice(
-            "registration.plan_membership",
-            address,
-            "ОбъектМетаданныхИмя",
-            str(rule.get("ОбъектМетаданныхИмя")),
-            f"{address}: объект «{rule.get('ОбъектМетаданныхИмя')}» вне состава плана "
-            f"«{plan_name}»; правило не исполнится, пока объект не войдёт в состав плана.",
-            requires_acknowledgement=True,
-        )
-        for address, rule in zip(pro_addresses(rules.rules()), rules.rules(), strict=True)
-        if registration_rule_active(rule)
-        and str(rule.get("ОбъектМетаданныхИмя")).casefold() not in members
+    notices = []
+    selected = plan_subscriptions(subscriptions, plan_name) if subscriptions is not None else ()
+    advice = " Добавьте объектом «только для регистрации» в комплект модуля: " + (
+        'ed_authoring_build(scope="manager", registration_objects=["Вид.Имя"]).'
     )
+    for address, rule in zip(pro_addresses(rules.rules()), rules.rules(), strict=True):
+        if not registration_rule_active(rule):
+            continue
+        name = str(rule.get("ОбъектМетаданныхИмя"))
+        if name.casefold() not in members:
+            check = "registration.plan_membership"
+            message = (
+                f"{address}: объект «{name}» вне состава плана «{plan_name}»; "
+                "правило не исполнится до добавления в состав."
+            )
+        elif subscriptions is not None:
+            kind, _, object_name = name.partition(".")
+            missing = [
+                event
+                for event, source in registration_events(kind, object_name)
+                if not any(s.event == event and s.covers(source) for s in selected)
+            ]
+            if not missing:
+                continue
+            check = "registration.plan_registration_unsubscribed"
+            message = (
+                f"{address}: объект «{name}» в составе плана «{plan_name}», "
+                f"но вне источников подписок: {', '.join(missing)}; "
+                "ПРО не вызывается для этих событий."
+            )
+        else:
+            continue
+        notices.append(
+            RetargetNotice(
+                check,
+                address,
+                "ОбъектМетаданныхИмя",
+                name,
+                message + advice,
+                requires_acknowledgement=True,
+            )
+        )
+    return tuple(notices)
 
 
 def _has_deletion_mark(card: ObjectCard) -> bool:

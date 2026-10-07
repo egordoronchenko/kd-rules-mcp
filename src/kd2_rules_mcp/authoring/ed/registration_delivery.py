@@ -43,11 +43,13 @@ from kd2_rules_mcp.structures.xmldump import (
     KINDS,
     RU_KIND,
     ConfigDump,
+    EventSubscription,
     MetaObject,
     Tabular,
     _field,
     _md_ref,
     read_object,
+    read_subscription,
 )
 
 from .hook import valid_identifier
@@ -108,6 +110,7 @@ class PlanHost:
     card: ObjectCard
     objects: tuple[ObjectCard, ...] = ()
     plan_content: frozenset[str] | None = None
+    subscriptions: tuple[EventSubscription, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_hashes", MappingProxyType(dict(self.input_hashes)))
@@ -194,6 +197,7 @@ def _plan_metadata(
     hashes: dict[str, str],
     prefix: str = "",
     object_names: frozenset[str] = frozenset(),
+    read_registration: bool = False,
 ) -> ConfigDump:
     """Общий читатель структуры: план, наборы типов, общие реквизиты и имена ссылок.
 
@@ -206,6 +210,14 @@ def _plan_metadata(
     for item in xml.findall(f"{{{M}}}ChildObjects/*"):
         tag = etree.QName(item).localname
         name = (item.text or "").strip()
+        if tag == "EventSubscription" and read_registration:
+            path = f"EventSubscriptions/{name}.xml"
+            raw = _read(root / path)
+            model.subscriptions.append(read_subscription(root / path))
+            if _read(root / path) != raw:
+                raise RegistrationDeliveryProfileError("Подписка изменилась во время чтения")
+            hashes[prefix + path] = sha256(raw)
+            continue
         directory = KINDS[tag][0] if tag in KINDS else AUX_KINDS.get(tag)
         if not directory or not name:
             continue
@@ -385,7 +397,12 @@ def read_plan_host(
                         )
                     hashes[label + f"ExchangePlans/{plan_name}/Ext/Content.xml"] = sha256(before)
         main = _plan_metadata(
-            dump, config_raw, plan_name, hashes, object_names=frozenset(requested)
+            dump,
+            config_raw,
+            plan_name,
+            hashes,
+            object_names=frozenset(requested),
+            read_registration=check_plan_content,
         )
         overlays = []
         own: set[str] = set()
@@ -402,6 +419,7 @@ def read_plan_host(
                     hashes,
                     f"extensions/{index}/",
                     frozenset(requested),
+                    read_registration=check_plan_content,
                 )
             )
             path = extension / plan_path
@@ -444,6 +462,7 @@ def read_plan_host(
             _plan_card(metadata, plan_name),
             objects,
             frozenset(members) if check_plan_content and content_checked else None,
+            tuple(metadata.subscriptions) if check_plan_content else None,
         )
     except (
         AuthoringPreconditionError,
@@ -814,10 +833,19 @@ def render_registration_kit(
 def retarget_instruction_details(result: RetargetResult) -> str:
     """Дополнительные блоки появляются только при новых сведениях, сохраняя прежние байты."""
     blocks = []
-    membership = [n for n in result.notices if n.check == "registration.plan_membership"]
+    membership = [
+        n
+        for n in result.notices
+        if n.check
+        in {"registration.plan_membership", "registration.plan_registration_unsubscribed"}
+    ]
     if membership:
         blocks.append(
-            "## Правила для объектов вне состава плана\n\n"
+            (
+                "## Состав плана и подписки регистрации\n\n"
+                if any(n.check == "registration.plan_registration_unsubscribed" for n in membership)
+                else "## Правила для объектов вне состава плана\n\n"
+            )
             + table(
                 ("Правило", "Объект", "Что проверить"),
                 ((n.address, n.reference, n.message) for n in membership),

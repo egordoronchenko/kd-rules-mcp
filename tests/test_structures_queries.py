@@ -225,10 +225,12 @@ def test_exchange_plan_content_includes_unresolved_type(connection: sqlite3.Conn
         "name": "Валюты",
         "types": ["СправочникСсылка.Валюты"],
         "autoregistration": True,
+        "registration_subscriptions": None,
     }
     assert page.items[1]["name"] == "ДокументыОрганизаций"
     assert page.items[1]["autoregistration"] is False
     assert page.items[1]["types"] == []
+    assert page.items[1]["registration_subscriptions"] is None
     assert page.items[1]["unresolved"] == ["a0000000-0000-0000-0000-000000000999"]
     foreign = exchange_plan_content(connection, "Документ.Заказ")
     assert isinstance(foreign, NotFound)

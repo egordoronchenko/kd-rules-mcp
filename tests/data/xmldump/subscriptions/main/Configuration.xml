@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" version="2.20">
+<Configuration><Properties><Name>ТестПодписок</Name></Properties><ChildObjects><ExchangePlan>ПланФормата</ExchangePlan><Catalog>Должности</Catalog><Catalog>Штатный</Catalog><Document>Приход</Document><InformationRegister>История</InformationRegister><EventSubscription>Регистрация</EventSubscription><EventSubscription>РегистрацияДокумента</EventSubscription><EventSubscription>РегистрацияНабора</EventSubscription><EventSubscription>РегистрацияУдаления</EventSubscription></ChildObjects></Configuration>
+</MetaDataObject>

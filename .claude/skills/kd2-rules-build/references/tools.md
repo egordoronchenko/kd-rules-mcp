@@ -748,8 +748,8 @@ acknowledgements. Manager refuses legacy operations. Install/verify runtime sepa
 |---|---|---|---|
 | `project` | string \| null | `null` | Overlay host from project_list |
 | `configuration` | string \| null | `null` | Overlay host configuration |
-| `extension` | object \| null | `null` | Kit identity: name, prefix, synonym, version, compatibility_mode; details: docs/tools.md |
-| `operations` | array of object \| null | `null` | Up to 100 overlay operations: add_header_property, set_object_handler, preserve_missing_header_property, add_algorithmic_header_property. Targets/fields: docs/tools.md. Forbidden with scope=manager |
+| `extension` | object \| null | `null` | Overlay kit identity; see docs/tools.md |
+| `operations` | array of object \| null | `null` | Overlay operations (max 100); targets/fields: docs/tools.md. Forbidden with scope=manager |
 | `version_scope` | string \| null | `null` | Explicit manager scope consent |
 | `mode` | string | `"preview"` | Mode: preview or write |
 | `delivery` | string | `"extension"` | Kit form: extension or manual |
@@ -767,6 +767,7 @@ acknowledgements. Manager refuses legacy operations. Install/verify runtime sepa
 | `project_id` | string \| null | `null` | Manager project from ed_create |
 | `expected_revision` | string \| null | `null` | Current manager revision |
 | `route` | object \| null | `null` | Manager route: plan, format_version; defaults to project |
+| `registration_objects` | array of string \| null | `null` | Manager: Kind.Name objects without PKO; registration only |
 
 ## Error codes
 
@@ -2152,6 +2153,25 @@ the adopted plan's `Ext/Content.xml` with `AutoRecord=Deny` and adopts the objec
 `plan_content_additions` lists additions in the manifest; the instruction asks to check
 the extension mark in the Configurator plan content. Registration remains the ПРО's job.
 No additions preserve previous kit bytes. Unavailable content yields `ed.plan.content_unchecked`.
+`registration_objects` (manager only) accepts structure names `Вид.Имя` without any ПКО
+for that object. Unknown objects, unsupported event types and objects with a ПКО refuse.
+The list is deduplicated and must be supplied in both preview and write. These objects enter
+the plan content and registration event sources; they do not create conversion rules.
+Existing plan members are also checked for registration coverage. Each missing object/event
+produces `ed.plan.registration_unsubscribed` with a required acknowledgement. The kit adopts
+the relevant standard event subscriptions and extends `Source` using `cfg:*Object.Name`
+or `cfg:*RecordSet.Name`; the original handler remains inherited. Missing suitable standard
+subscriptions refuse delivery. MD83Exp has no subscriptions: `ed.plan.registration_unchecked`.
+The manifest exposes `registration_subscription_additions` (subscription name, base UUID,
+event, added source types) and `registration_objects`; instructions list both and runtime checks.
+Every added source type must be adopted by the extension: existing plan members whose types are
+added to `Source` are adopted (object file and `ChildObjects` entry) without changing the plan
+content and listed in `subscription_adopted_objects`; an unadopted source type refuses.
+`structure_object` for a plan exposes compact `registration_subscriptions` descriptions;
+each `structure_plan_content` item maps required events to covering subscription names.
+`null` means subscription data is unavailable. `registration_retarget` adds acknowledged
+`registration.plan_registration_unsubscribed` notices for active rules whose objects belong
+to the plan but lack event coverage, with the same registration-only object advice as membership notices.
 `ed.schema.required_unfilled` warns when a mandatory send property (including reference keys)
 has a non-algorithmic source without `FillChecking=ShowError`; declarative ПКПД/ПКО conversion
 does not protect empty values. Writing requires acknowledgement. The instruction includes

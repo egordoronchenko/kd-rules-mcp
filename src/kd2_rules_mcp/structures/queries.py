@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from difflib import get_close_matches
 from typing import Any
 
+from kd2_rules_mcp.structures.db import read_subscriptions
+from kd2_rules_mcp.structures.xmldump import plan_subscriptions, registration_events
+
 MAX_LIMIT = 200
 _SUGGESTIONS = 5
 
@@ -230,7 +233,7 @@ def describe_object(
         offset,
         limit,
     )
-    return {
+    result = {
         "name": f"{row['kind']}.{row['name']}",
         "type_name": row["type_name"],
         "kind": row["kind"],
@@ -238,6 +241,23 @@ def describe_object(
         "attrs": _attrs(str(row["attrs"])),
         "properties": Page([_property_item(item) for item in rows], total, offset, limit),
     }
+    if row["kind"] == "ПланОбмена":
+        subscriptions = read_subscriptions(conn)
+        result["registration_subscriptions"] = (
+            [
+                {
+                    "name": s.name,
+                    "uuid": s.uuid,
+                    "event": s.event,
+                    "handler": s.handler,
+                    "source_count": len(s.sources),
+                }
+                for s in plan_subscriptions(subscriptions, row["name"])
+            ]
+            if subscriptions is not None
+            else None
+        )
+    return result
 
 
 def object_values(
@@ -304,7 +324,24 @@ def exchange_plan_content(
         offset,
         limit,
     )
-    return Page([_content_item(item) for item in rows], total, offset, limit)
+    subscriptions = read_subscriptions(conn)
+    selected = plan_subscriptions(subscriptions, row["name"]) if subscriptions is not None else ()
+    items = []
+    for item in rows:
+        value = _content_item(item)
+        coverage = {}
+        for type_name in (*_lines(item["types"]), *_lines(item["unresolved"])):
+            obj = conn.execute(
+                "SELECT kind, name FROM objects WHERE type_name=?", (type_name,)
+            ).fetchone()
+            if obj is not None:
+                for event, source in registration_events(obj["kind"], obj["name"]):
+                    coverage[event] = [
+                        s.name for s in selected if s.event == event and s.covers(source)
+                    ]
+        value["registration_subscriptions"] = coverage if subscriptions is not None else None
+        items.append(value)
+    return Page(items, total, offset, limit)
 
 
 def compare_structures(old: sqlite3.Connection, new: sqlite3.Connection) -> StructureDiff:

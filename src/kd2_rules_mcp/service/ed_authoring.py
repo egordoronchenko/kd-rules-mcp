@@ -1720,6 +1720,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         project_id: str | None = None,
         expected_revision: str | None = None,
         route: dict | None = None,
+        registration_objects: list[str] | None = None,
     ) -> dict[str, Any]:
         if scope == "manager":
             if any(
@@ -1749,9 +1750,10 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 level,
                 check_prefix,
                 address_prefix,
+                registration_objects,
             )
         if scope not in (None, "overlay") or any(
-            v is not None for v in (project_id, expected_revision, route)
+            v is not None for v in (project_id, expected_revision, route, registration_objects)
         ):
             raise ValueError("scope: overlay или manager; поля менеджера требуют scope=manager")
         validate_page(offset, limit)

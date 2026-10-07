@@ -12,6 +12,7 @@ from lxml import etree
 
 from kd2_rules_mcp.ed.address import build_addresses
 from kd2_rules_mcp.ed.model import ObjectRule
+from kd2_rules_mcp.structures.xmldump import registration_source_object
 from kd2_rules_mcp.validation.ed_structure_snapshot import metadata_key
 
 from .hook import valid_identifier
@@ -60,6 +61,14 @@ class Description:
     uuid: str
     props: Mapping[str, str]
     generated_types: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionAddition:
+    """Типовая подписка и только добавляемые типы её источников."""
+
+    description: Description
+    sources: tuple[str, ...]
 
 
 def read_description(path: str, text: str, kind: str, name: str | None = None) -> Description:
@@ -475,7 +484,11 @@ def read_manager_host(
 
 
 def manager_identity_roles(
-    host: ManagerHost, module_name: str, content_objects: tuple[Description, ...] = ()
+    host: ManagerHost,
+    module_name: str,
+    content_objects: tuple[Description, ...] = (),
+    subscription_additions: tuple[SubscriptionAddition, ...] = (),
+    subscription_objects: tuple[Description, ...] = (),
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     """Роли UUID по составу пилота: конфигурация, язык, свой модуль и план."""
     plan_key = "ExchangePlan/" + host.exchange_plan.name
@@ -494,7 +507,11 @@ def manager_identity_roles(
         ),
     ]
     borrowed = {language_key: host.language.uuid, plan_key: host.exchange_plan.uuid}
-    for obj in content_objects:
+    for obj in (
+        *content_objects,
+        *subscription_objects,
+        *(s.description for s in subscription_additions),
+    ):
         key = obj.kind + "/" + obj.name
         paths.append(key)
         borrowed[key] = obj.uuid
@@ -506,6 +523,29 @@ def manager_identity_roles(
     return tuple(paths), borrowed
 
 
+def check_subscription_sources(
+    content_objects: tuple[Description, ...],
+    subscription_additions: tuple[SubscriptionAddition, ...],
+    subscription_objects: tuple[Description, ...],
+) -> None:
+    """Источник заимствованной подписки — только заимствованный объект расширения.
+
+    Эталон — расширение из корпуса (опись ed-writer-plan-content-2026-10): подписка
+    EventSubscriptions/ОбменБухгалтерияПредприятияДокументооборот20ПередЗаписьюДокумента.xml:10-12
+    добавляет источник, документ заимствован (Configuration.xml:501).
+    """
+    adopted = {(o.kind, o.name.casefold()) for o in (*content_objects, *subscription_objects)}
+    for addition in subscription_additions:
+        for value in addition.sources:
+            found = registration_source_object(value)
+            if found is None or (found[0], found[1].casefold()) not in adopted:
+                refuse(
+                    "metadata_profile_unsupported",
+                    "Источник подписки не заимствован расширением: " + value,
+                    addition.description.path,
+                )
+
+
 def dump_manager_extension(
     host: ManagerHost,
     module_name: str,
@@ -513,11 +553,14 @@ def dump_manager_extension(
     *,
     version: str,
     content_objects: tuple[Description, ...] = (),
+    subscription_additions: tuple[SubscriptionAddition, ...] = (),
+    subscription_objects: tuple[Description, ...] = (),
 ) -> Mapping[str, bytes]:
     """XML собственного модуля и заимствованного плана: состав (в) пилота маршрута.
 
     Флаги модуля: BR/CommonModules/МенеджерОбменаЧерезУниверсальныйФормат13.xml:13-20.
     ThisNode/GeneratedType/ManagerModule — XML работавшего расширения пилота, строки 4-30.
+    Источники подписок сверяет `check_subscription_sources` до вызова.
     """
     root, obj = new_object("Configuration", "Configuration", identity)
     info = node(obj, "InternalInfo")
@@ -550,7 +593,8 @@ def dump_manager_extension(
         ("Language", host.language.name),
         ("CommonModule", module_name),
         ("ExchangePlan", host.exchange_plan.name),
-        *((obj.kind, obj.name) for obj in content_objects),
+        *((obj.kind, obj.name) for obj in (*content_objects, *subscription_objects)),
+        *(("EventSubscription", s.description.name) for s in subscription_additions),
     ):
         node(children, kind, name)
     result = {"Configuration.xml": serialize(root)}
@@ -632,4 +676,21 @@ def dump_manager_extension(
             result[description.path] = serialize(root)
         content.append(extension)
         result["ExchangePlans/" + host.exchange_plan.name + "/Ext/Content.xml"] = serialize(content)
+    for description in subscription_objects:
+        # Источник подписки вне добавлений состава заимствуется без изменения состава плана:
+        # эталон — заимствованный документ расширения из корпуса (строки в описи
+        # docs/plans/ed-writer-plan-content-2026-10.md, раздел о подписках).
+        root, obj = adopted_xml(description, identity)
+        node(obj, "ChildObjects")
+        result[description.path] = serialize(root)
+    for addition in subscription_additions:
+        # эталон — заимствованная подписка расширения из корпуса (опись, раздел о подписках):
+        # заимствование содержит Source, без Handler, Event, ChildObjects и файлов Ext/.
+        root, obj = adopted_xml(addition.description, identity)
+        props = obj.find(f"{{{M}}}Properties")
+        assert props is not None
+        source = node(props, "Source")
+        for value in addition.sources:
+            node(source, "v8:Type", "cfg:" + value)
+        result[addition.description.path] = serialize(root)
     return MappingProxyType(result)

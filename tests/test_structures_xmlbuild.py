@@ -134,7 +134,7 @@ def test_fill_checking_xml_cache_snapshot_and_old_cache_reload(tmp_path):
         )
         assert isinstance(describe_object(conn, NOMENCLATURE), dict)
     assert not store.load_xml("fill", main).reused
-    assert store.meta("fill")["schema_version"] == db.SCHEMA_VERSION == "2"
+    assert store.meta("fill")["schema_version"] == db.SCHEMA_VERSION == "3"
     with closing(store.open("fill")) as conn:
         reread = StructureSnapshot.load(conn)
         assert reread == snap

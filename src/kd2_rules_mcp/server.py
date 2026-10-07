@@ -1525,20 +1525,14 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         extension: Annotated[
             dict[str, Any] | None,
-            Field(
-                description=(
-                    "Kit identity: name, prefix, synonym, version, compatibility_mode; "
-                    "details: docs/tools.md"
-                )
-            ),
+            Field(description=("Overlay kit identity; see docs/tools.md")),
         ] = None,
         operations: Annotated[
             list[dict[str, Any]] | None,
             Field(
                 description=(
-                    "Up to 100 overlay operations: add_header_property, set_object_handler, "
-                    "preserve_missing_header_property, add_algorithmic_header_property. "
-                    "Targets/fields: docs/tools.md. Forbidden with scope=manager"
+                    "Overlay operations (max 100); targets/fields: docs/tools.md. "
+                    "Forbidden with scope=manager"
                 )
             ),
         ] = None,
@@ -1598,6 +1592,10 @@ def create_server(service: Kd2Service) -> MCPServer:
             dict[str, Any] | None,
             Field(description="Manager route: plan, format_version; defaults to project"),
         ] = None,
+        registration_objects: Annotated[
+            list[str] | None,
+            Field(description=("Manager: Kind.Name objects without PKO; registration only")),
+        ] = None,
     ) -> dict[str, Any]:
         """Preview/write overlay or manager kits in workspace with current hash and required
         acknowledgements. Manager refuses legacy operations. Install/verify runtime separately."""
@@ -1624,6 +1622,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             project_id,
             expected_revision,
             route,
+            registration_objects,
         )
 
     return server

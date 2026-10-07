@@ -234,6 +234,9 @@ def render_manager_instruction(
     compatibility_mode: str = "",
     interface_compatibility_mode: str = "",
     plan_content_additions: tuple[str, ...] = (),
+    registration_subscriptions: tuple[str, ...] = (),
+    registration_objects: tuple[str, ...] = (),
+    subscription_objects: tuple[str, ...] = (),
 ) -> str:
     """Инструкция доставки W1 по (г) пилота; числа деклараций берутся из модели."""
     template = (
@@ -263,6 +266,26 @@ def render_manager_instruction(
             + "`: каждый объект должен быть виден с признаком расширения. "
             "Авторегистрация — «Запретить»; регистрацию ведут ПРО. "
             "Проверьте действующие ПРО и регистрацию изменений этих объектов.\n"
+        )
+    if registration_subscriptions:
+        result += (
+            "\n## Источники подписок регистрации дополнены\n\n"
+            + "\n".join("- `" + item + "`" for item in registration_subscriptions)
+            + "\n\nПосле установки проверьте источники типовых подписок в конфигураторе, "
+            "сохранение и удаление объектов, выполнение ПРО и регистрацию на нужных узлах.\n"
+        )
+        if subscription_objects:
+            result += (
+                "\nРади источников подписок заимствованы объекты штатного состава плана "
+                "(состав плана не меняется): "
+                + ", ".join("`" + item + "`" for item in subscription_objects)
+                + ".\n"
+            )
+    if registration_objects:
+        result += (
+            "\n## Объекты только для регистрации\n\n"
+            + "\n".join("- `" + item + "`" for item in registration_objects)
+            + "\n\nПКО для этих объектов нет; настройте ПРО, регистрирующие владельца.\n"
         )
     return result
 

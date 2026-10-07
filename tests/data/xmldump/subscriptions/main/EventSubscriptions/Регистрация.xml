@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" version="2.20">
+<EventSubscription uuid="22222222-2222-4222-8222-000000000001"><Properties><Name>Регистрация</Name><Source><v8:Type>cfg:CatalogObject.Штатный</v8:Type></Source><Event>BeforeWrite</Event><Handler>CommonModule.ОбменДаннымиСобытияТест.ПланФорматаПередЗаписью</Handler></Properties></EventSubscription>
+</MetaDataObject>
