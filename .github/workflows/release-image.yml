@@ -1,0 +1,72 @@
+name: Release image and skills
+
+"on":
+  push:
+    tags: ["v*"]
+
+permissions:
+  packages: write
+  contents: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/egordoronchenko/kd-rules-mcp
+          tags: |
+            type=match,pattern=v(.*),group=1
+            type=raw,value=latest
+      - name: Build and publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  skills:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - name: Install runtime dependencies
+        run: uv sync --frozen --no-dev
+      - name: Package skills and release notes
+        shell: bash
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          uv run python scripts/changelog_section.py "$version" --output "$RUNNER_TEMP/release-notes.md"
+          for client in claude agents; do
+            dest="$RUNNER_TEMP/skills-$client"
+            mkdir -p "$dest"
+            uv run python scripts/build_packs.py --dest "$dest" --client "$client"
+            uv run python -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2])' "$RUNNER_TEMP/kd-rules-mcp-skills-$client-$version" "$dest"
+          done
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          files: ${{ runner.temp }}/kd-rules-mcp-skills-*.zip
+          fail_on_unmatched_files: true

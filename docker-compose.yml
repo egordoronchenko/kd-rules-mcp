@@ -1,12 +1,14 @@
 # MCP-сервер правил обмена «Конвертации данных 2».
+# Готовый образ: docker compose pull && docker compose up -d
+# Из исходников: docker compose up -d --build
 #
 # Публикация, имя контейнера и том кэша — переменные (умолчания: своя машина, порт 8060):
-#   KD2_BIND, KD2_PUBLISHED_PORT, KD2_CONTAINER, KD2_CACHE_VOLUME.
+#   KD2_BIND, KD2_PUBLISHED_PORT, KD2_CONTAINER, KD2_CACHE_VOLUME, KD_IMAGE_TAG.
 # Имя проекта — name ниже. Подстановка ${COMPOSE_PROJECT_NAME:-…} поддерживается, и заданный
 # COMPOSE_PROJECT_NAME перекрывает name. Эти переменные пишет scripts/setup_local.py в .env
-# по projects.local.yaml (bind, port, instance). Без .env действуют умолчания.
+# по projects.local.yaml (bind, port, instance, image_tag). Без .env действуют умолчания.
 #
-# Первый запуск на машине:
+# Первый запуск из исходников (готовый образ — setup в образе, см. docs/INSTALL.md):
 #   1. projects.local.example.yaml → projects.local.yaml, указать папки проектов;
 #   2. uv run python scripts/setup_local.py   — пишет .env, docker-compose.override.yml и .mcp.json;
 #   3. docker compose up -d --build
@@ -25,6 +27,7 @@ name: "${COMPOSE_PROJECT_NAME:-kd-rules-mcp}"
 services:
   kd-rules-mcp:
     container_name: ${KD2_CONTAINER:-kd_rules_mcp}
+    image: ghcr.io/egordoronchenko/kd-rules-mcp:${KD_IMAGE_TAG:-latest}
     build: .
     ports:
       - "${KD2_BIND:-127.0.0.1}:${KD2_PUBLISHED_PORT:-8060}:8060"

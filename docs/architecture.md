@@ -294,10 +294,25 @@ server.py (MCP, streamable HTTP /mcp) ──→ service/ (Kd2Service, PathMap, S
 
 ### 8.1 Контейнер
 
+Готовый образ — `ghcr.io/egordoronchenko/kd-rules-mcp:<версия-без-v>` и `:latest`, платформы
+`linux/amd64` и `linux/arm64`. `.github/workflows/release-image.yml` запускается при push тега
+`v*`: QEMU/Buildx, вход в GHCR через `GITHUB_TOKEN`, metadata, сборка/публикация и кэш gha.
+Второй job устанавливает основные зависимости и собирает упаковки `claude` и `agents` через
+`scripts/build_packs.py --dest`; ZIP прикладываются к релизу тега, который создаётся при отсутствии.
+Тело релиза — раздел версии из CHANGELOG, извлечённый `scripts/changelog_section.py`.
+
 Образ — `python:3.12-slim` в две стадии, зависимости строго по `uv.lock`; сервер работает от пользователя
-uid 1000, корень нужен только точке входа, чтобы отдать тома (`Dockerfile:40-52`). Базовый
-`docker-compose.yml` не содержит путей машины; папки проектов, `rules_dir` и перевод путей дописывает
-`scripts/setup_local.py` в `docker-compose.override.yml`.
+uid 1000, корень нужен точке входа, чтобы отдать тома. OCI-метки: source, version (`ARG VERSION`), licenses.
+Без аргументов entrypoint запускает сервер; `setup` вызывает `scripts/setup_local.py --root /work --host-paths`
+до смены пользователя. Установочные скрипты и публичные справочники/скиллы входят в образ, dev-зависимости
+не требуются. `--user` задаёт владельца файлов setup; иначе на Linux предупреждение о root.
+Внешние проекты можно подключить только для чтения с `--project-mount ID=PATH` для чтения их MCP и логинов;
+пути в override при этом остаются путями хоста. Проверки существования внешних каталогов без таких томов
+невозможны; setup явно предупреждает, каталоги на запись должны быть созданы пользователем заранее.
+Отдельного одноразового `check` нет: `scripts/check_server.py` запускается через exec в контейнере сервера.
+Базовый `docker-compose.yml` не содержит путей машины; папки проектов, `rules_dir` и перевод путей дописывает
+тот же `scripts/setup_local.py` в `docker-compose.override.yml`. В compose рядом заданы `image` и `build`:
+готовый образ — `docker compose pull` и `docker compose up -d`, исходники — `docker compose up -d --build`.
 
 | Путь в контейнере | Откуда | Доступ |
 |---|---|---|
@@ -308,8 +323,9 @@ uid 1000, корень нужен только точке входа, чтобы
 | `/data/workspace` | `workspace\` репозитория (рабочая папка) | **запись** |
 | `/data/cache` | именованный том `kd2_structures_cache` (`KD2_CACHE_VOLUME`) | запись (кэш структур) |
 
-`scripts/setup_local.py` пишет `.env` в каталоге репозитория (compose читает его сам) по полям `bind`, `port` и
-`instance` в `projects.local.yaml`. Нет ни одного из них — файла нет, действуют умолчания. Внутри контейнера
+`scripts/setup_local.py` пишет `.env` в каталоге установки (compose читает его сам) по полям `bind`, `port`,
+`instance` и `image_tag` в `projects.local.yaml`. Нет ни одного из них — файла нет, действуют умолчания.
+Внутри контейнера
 порт процесса не меняется (в образе `KD2_PORT=8060`); `port` — только публикуемый порт хоста.
 
 | Переменная | Когда пишется | Умолчание в `docker-compose.yml` |
@@ -319,6 +335,7 @@ uid 1000, корень нужен только точке входа, чтобы
 | `KD2_CONTAINER` | задан `instance` | `kd_rules_mcp` |
 | `KD2_CACHE_VOLUME` | задан `instance` | `kd2_structures_cache` |
 | `COMPOSE_PROJECT_NAME` | задан `instance` | `kd-rules-mcp` |
+| `KD_IMAGE_TAG` | задан `image_tag` (тег без `v`) | `latest` |
 
 `instance` — суффикс второго экземпляра (`[A-Za-z0-9_-]+`): контейнер `kd_rules_mcp_<instance>`, том
 `kd2_structures_cache_<instance>`, проект `kd-rules-mcp-<instance>`. Имя проекта в файле —

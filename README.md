@@ -84,8 +84,43 @@ MCP-сервер, с которым агент (Claude Code, Cursor и друг�
 https://github.com/egordoronchenko/kd-rules-mcp/blob/main/.claude/skills/kd-install/SKILL.md».
 Ниже — коротко, для тех, кто знаком с Docker и MCP.
 
-Нужны Docker, Python 3.12 с [`uv`](https://docs.astral.sh/uv/) и — для необязательных финальных проверок —
-Windows с платформой 1С 8.3 (см. раздел 4). «Конвертация данных» для работы сервера не нужна.
+Для готового образа нужен Docker с Compose. Для сборки из клона — ещё Python 3.12 с
+[`uv`](https://docs.astral.sh/uv/); для необязательных финальных проверок — Windows с платформой 1С 8.3
+(см. раздел 4). «Конвертация данных» для работы сервера не нужна.
+
+### Быстрый старт (образ)
+
+Выберите выпущенный тег `vX.Y.Z` с образом в [релизах](https://github.com/egordoronchenko/kd-rules-mcp/releases).
+В пустую папку скачайте три файла **этого тега**:
+[docker-compose.yml](https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/vX.Y.Z/docker-compose.yml),
+[projects.example.yaml](https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/vX.Y.Z/projects.example.yaml),
+[projects.local.example.yaml](https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/vX.Y.Z/projects.local.example.yaml).
+В ссылках и командах замените `X.Y.Z` выбранной версией. Клон, Git и Python/uv не нужны.
+
+Три команды в PowerShell (между первой и второй скопируйте примеры в `projects.yaml` и
+`projects.local.yaml`, заполните свои проекты и **абсолютные пути на вашей машине**;
+`image_tag: X.Y.Z` закрепит тот же образ для compose):
+
+```powershell
+'docker-compose.yml','projects.example.yaml','projects.local.example.yaml' | ForEach-Object { Invoke-WebRequest "https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/vX.Y.Z/$_" -OutFile $_ }
+docker run --rm -v "${PWD}:/work" ghcr.io/egordoronchenko/kd-rules-mcp:X.Y.Z setup
+docker compose up -d
+```
+
+Для sh настройка: `docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/work" ghcr.io/egordoronchenko/kd-rules-mcp:X.Y.Z setup`.
+Для Windows cmd том — `-v "%cd%":/work`.
+Без `--user` файлы настройки на Linux принадлежат root, `setup` об этом предупреждает.
+`setup` пишет те же настройки, что локальный скрипт ниже; пути проектов в override остаются путями хоста.
+Внешние `.mcp.json` и `.dev.env` читаются, если проекты также подключены в контейнер настройки
+(пример `--project-mount` — в INSTALL). Папки `rules_dir` и `writable_extensions` создайте заранее.
+
+Скиллы — `kd-rules-mcp-skills-claude-X.Y.Z.zip` (Claude Code, Cursor, OpenCode) или
+`kd-rules-mcp-skills-agents-X.Y.Z.zip` (Codex) из того же релиза; установите одну упаковку.
+В существующем проекте объедините запись `kd-rules-mcp` из `.mcp.json` с текущей и укажите свой
+`server_url` и заголовок при `token`. Из клона можно использовать `scripts/build_packs.py --dest …`.
+Точные команды PowerShell и sh, проверка без клона и откат — [INSTALL](docs/INSTALL.md#готовый-образ-без-клона).
+
+### Из исходников
 
 Настройки разделены на файлы (в git — только примеры):
 
@@ -277,9 +312,10 @@ uv run python kdbase/exchange_check.py delete --plan <план> --source <про
 ## План развития
 
 Задачи — в [Issues](https://github.com/egordoronchenko/kd-rules-mcp/issues), доска —
-[kd-rules-mcp — план развития](https://github.com/users/egordoronchenko/projects/1). Версия 1.0.0 закрывает
-цель «КД 2 и собственный модуль КД 3 через агента»; дальше — комплект в существующее расширение пользователя
-(#69), переименование в `kd-rules-mcp` (#68) и то, что принесут новые переносы. Что сделано по версиям —
+[kd-rules-mcp — план развития](https://github.com/users/egordoronchenko/projects/1). Версия 1.0.0 закрыла
+цель «КД 2 и собственный модуль КД 3 через агента»; 1.1.0 — переименование, готовый образ, комплект в
+существующее расширение пользователя и проверки по находкам живого обмена; дальше — то, что принесут новые
+переносы. Что сделано по версиям —
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Разработка

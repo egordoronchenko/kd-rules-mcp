@@ -3,6 +3,7 @@
 Читает общий `projects.yaml` и личный `projects.local.yaml` и пишет (в git не попадают):
 
 - `.env` — публикация compose: `KD2_BIND` (если задан `bind`), `KD2_PUBLISHED_PORT` (если `port`),
+  `KD_IMAGE_TAG` (если `image_tag`),
   а при `instance` ещё `KD2_CONTAINER`, `KD2_CACHE_VOLUME` и `COMPOSE_PROJECT_NAME`. Нет ни одного
   из этих полей — файла нет (и прежний сгенерированный удаляется): в `docker-compose.yml` остаются
   умолчания;
@@ -16,15 +17,20 @@
   При `token` у `kd-rules-mcp` — заголовок `Authorization: Bearer`.
 
 Запуск: `uv run python scripts/setup_local.py`, затем `docker compose up -d`.
+В образе: `setup` вызывает этот же скрипт с `--root /work --host-paths`.
 Если имена контейнера и проекта compose уже не прежние, а старый контейнер или проект
 ещё запущен, скрипт печатает одну строку — чем его остановить — и сам ничего не меняет.
 Docker не установлен или не отвечает — молчит.
 """
 
+import argparse
 import json
+import os
+import re
 import subprocess
 from collections.abc import Callable
-from pathlib import Path
+from dataclasses import replace
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -64,11 +70,11 @@ def _compose_bind(bind: str) -> str:
     return f"[{bind}]" if ":" in bind else bind
 
 
-def render_env(local: LocalSettings) -> str | None:
+def render_env(local: LocalSettings, image_tag: str | None = None) -> str | None:
     """Текст `.env` или None, если хватает умолчаний `docker-compose.yml`.
 
     `KD2_BIND` — только при `bind`, `KD2_PUBLISHED_PORT` — только при `port`, имена контейнера,
-    тома и проекта — только при `instance`.
+    тома и проекта — только при `instance`, `KD_IMAGE_TAG` — только при `image_tag`.
     """
     lines: list[str] = []
     if local.bind:
@@ -80,12 +86,14 @@ def render_env(local: LocalSettings) -> str | None:
         lines.append(f"KD2_CONTAINER={names['KD2_CONTAINER']}")
         lines.append(f"KD2_CACHE_VOLUME={names['KD2_CACHE_VOLUME']}")
         lines.append(f"COMPOSE_PROJECT_NAME={names['COMPOSE_PROJECT_NAME']}")
+    if image_tag is not None:
+        lines.append(f"KD_IMAGE_TAG={image_tag}")
     if not lines:
         return None
     return HEADER + "\n".join(lines) + "\n"
 
 
-def write_env_file(path: Path, local: LocalSettings) -> bool:
+def write_env_file(path: Path, local: LocalSettings, image_tag: str | None = None) -> bool:
     """Пишет `.env` или удаляет свой прежний, чтобы старые порт и имена не остались в силе.
 
     Чужой `.env` (без `HEADER`, то есть написанный не этим скриптом — например, ручные
@@ -93,7 +101,7 @@ def write_env_file(path: Path, local: LocalSettings) -> bool:
     вернулся бы к именам по умолчанию и пересоздал бы контейнер другого клона. Возвращает,
     остался ли на месте чужой файл, когда свой писать нечего.
     """
-    text = render_env(local)
+    text = render_env(local, image_tag)
     if text is None:
         own = HEADER.rstrip("\n").encode("utf-8")  # концы строк файла могут быть любыми
         if path.is_file() and not path.read_bytes().startswith(own):
@@ -104,7 +112,7 @@ def write_env_file(path: Path, local: LocalSettings) -> bool:
     return False
 
 
-def compose_override(catalog: Catalog, local: LocalSettings) -> str:
+def compose_override(catalog: Catalog, local: LocalSettings, *, host_paths: bool = False) -> str:
     """Подключение папок проектов и перевод путей для контейнера."""
     volumes: list[str] = []
     dirs: list[str] = []
@@ -116,20 +124,21 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
         dirs.append(f"{project_id}={target}")
         path_map.append(f"{folder}={target}")
     rules: list[str] = []
-    for project_id, folder in existing_rules_dirs(catalog, local).items():
+    for project_id, folder in existing_rules_dirs(catalog, local, host_paths=host_paths).items():
         # Единственное место проекта на запись; путь агента длиннее папки проекта, поэтому
         # PathMap переводит файлы внутри неё сюда, а не в /projects (там только чтение).
         target = f"/rules/{project_id}"
         volumes.append(f"{_posix(folder)}:{target}")
         rules.append(f"{project_id}={target}")
         path_map.append(f"{folder}={target}")
-    workspace = local.workspace or ROOT / "workspace"
+    # Относительные пути относятся к папке compose на машине пользователя, а не к /work.
+    workspace = local.workspace or Path("workspace")
     extensions: list[str] = []
     for project_id, folder in local.project_dirs.items():
         for configuration in catalog.project(project_id).configurations.values():
             for index, relative in enumerate(configuration.writable_extensions):
-                path = resolve(folder, relative)
-                if not path.is_dir():
+                path = _host_join(folder, relative)
+                if (not host_paths or folder.is_dir()) and not path.is_dir():
                     continue
                 key = f"{project_id}.{configuration.id}.{index}"
                 target = f"/extensions/{key}"
@@ -137,7 +146,7 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
                 extensions.append(f"{key}={target}")
                 path_map.append(f"{path}={target}")
     path_map.append(f"{workspace}=/data/workspace")
-    path_map.append(f"{ROOT / 'structures'}=/structures")
+    path_map.append("structures=/structures")
     if local.workspace is not None:
         volumes.append(f"{_posix(local.workspace)}:/data/workspace")
     service: dict[str, Any] = {
@@ -161,8 +170,20 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
     return HEADER + body
 
 
-def existing_rules_dirs(catalog: Catalog, local: LocalSettings) -> dict[str, Path]:
+def existing_rules_dirs(
+    catalog: Catalog, local: LocalSettings, *, host_paths: bool = False
+) -> dict[str, Path]:
     """Папки живых правил, которые есть на диске; нет папки — Docker создал бы её сам (root)."""
+    if host_paths:
+        return {
+            project_id: _host_join(folder, catalog.project(project_id).rules_dir)
+            for project_id, folder in local.project_dirs.items()
+            if catalog.project(project_id).rules_dir
+            and (
+                not folder.is_dir()
+                or _host_join(folder, catalog.project(project_id).rules_dir).is_dir()
+            )
+        }
     found = project_rules_dirs(catalog, local.project_dirs)
     return {project_id: folder for project_id, folder in found.items() if folder.is_dir()}
 
@@ -211,8 +232,33 @@ def mcp_servers(
     return servers, warnings
 
 
-def main() -> None:
+def image_tag_from_file(path: Path) -> str | None:
+    """Необязательный тег Docker; проверка исключает подстановки и строки в `.env`."""
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    value = data.get("image_tag")
+    if value is None:
+        return None
+    tag = str(value)
+    if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", tag) is None:
+        raise SystemExit("image_tag: нужен тег Docker без префикса v и подстановок")
+    return tag
+
+
+def main(argv: list[str] | None = None) -> None:
+    global ROOT
     utf8_stdout()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT, help="папка файлов настройки")
+    parser.add_argument("--host-paths", action="store_true", help="пути принадлежат хосту Docker")
+    parser.add_argument(
+        "--project-mount",
+        action="append",
+        default=[],
+        metavar="ID=PATH",
+        help="папка проекта, дополнительно подключённая в контейнер setup только для чтения",
+    )
+    args = parser.parse_args(argv)
+    ROOT = args.root.resolve()
     if not (ROOT / "projects.yaml").is_file():
         # Без файла Docker смонтировал бы на его место пустой каталог.
         raise SystemExit(
@@ -226,18 +272,44 @@ def main() -> None:
         )
     catalog = load_catalog(ROOT / "projects.yaml")
     local = load_local(local_file)
+    image_tag = image_tag_from_file(local_file)
+    for project_id, folder in local.project_dirs.items():
+        catalog.project(project_id)
+        if args.host_paths and not (
+            folder.is_absolute() or PureWindowsPath(str(folder)).is_absolute()
+        ):
+            raise SystemExit(f"{project_id}: для setup в образе нужен абсолютный путь проекта")
     missing = [pid for pid, folder in local.project_dirs.items() if not folder.is_dir()]
-    if missing:
+    if missing and not args.host_paths:
         raise SystemExit(
             f"Нет папок проектов: {', '.join(missing)} — проверьте projects.local.yaml"
         )
 
+    read_dirs = dict(local.project_dirs)
+    for mount in args.project_mount:
+        project_id, separator, mounted = mount.partition("=")
+        if not separator or project_id not in read_dirs or not Path(mounted).is_dir():
+            parser.error("--project-mount: нужен ID=PATH с известным проектом и доступной папкой")
+        read_dirs[project_id] = Path(mounted)
+    readable = replace(local, project_dirs=read_dirs)
     (ROOT / "docker-compose.override.yml").write_bytes(
-        compose_override(catalog, local).encode("utf-8")
+        compose_override(catalog, local, host_paths=args.host_paths).encode("utf-8")
     )
-    foreign_env = write_env_file(ROOT / ".env", local)
-    servers, warnings = mcp_servers(catalog, local)
-    warnings += missing_rules_dirs(catalog, local)
+    foreign_env = write_env_file(ROOT / ".env", local, image_tag)
+    servers, warnings = mcp_servers(catalog, readable)
+    if args.host_paths:
+        warnings.append(
+            "Пути проектов сохранены как на хосте; проверьте существование rules_dir и "
+            "writable_extensions до запуска compose. Для чтения .mcp.json и .dev.env внешних "
+            "проектов подключите их также в setup и задайте --project-mount ID=PATH."
+        )
+        if getattr(os, "geteuid", lambda: -1)() == 0:
+            warnings.append(
+                "Linux: файлы setup принадлежат root; запускайте docker run с "
+                '--user "$(id -u):$(id -g)" для владельца текущего пользователя.'
+            )
+    else:
+        warnings += missing_rules_dirs(catalog, local)
     if foreign_env:
         warnings.append(
             ".env написан не этим скриптом и оставлен как есть: имена контейнера и тома берутся "
@@ -257,11 +329,11 @@ def main() -> None:
         f"Контейнер {names['KD2_CONTAINER']}, порт {host}:{names['KD2_PUBLISHED_PORT']}, "
         f"том {names['KD2_CACHE_VOLUME']}"
     )
-    notice = legacy_runtime_notice()
+    notice = None if args.host_paths else legacy_runtime_notice()
     if notice:
         print(notice)
     print(f"Проекты: {', '.join(local.project_dirs) or 'нет'}")
-    writable = existing_rules_dirs(catalog, local)
+    writable = existing_rules_dirs(catalog, local, host_paths=args.host_paths)
     if writable:
         print("Папки правил на запись: " + ", ".join(f"{p} → {f}" for p, f in writable.items()))
     print(f"Серверы агентов: {len(servers)} ({local.server_url} — {SERVER})")
@@ -421,6 +493,13 @@ def server_url_port_warning(local: LocalSettings) -> str | None:
 
 def _posix(path: Path) -> str:
     return str(path).replace("\\", "/")
+
+
+def _host_join(folder: Path, relative: str) -> Path:
+    """Сохраняет синтаксис Windows при генерации override в Linux-контейнере."""
+    if PureWindowsPath(str(folder)).is_absolute():
+        return Path(str(PureWindowsPath(str(folder)) / relative))
+    return resolve(folder, relative)
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:

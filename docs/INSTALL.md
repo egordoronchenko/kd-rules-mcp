@@ -16,6 +16,150 @@ https://github.com/egordoronchenko/kd-rules-mcp/blob/main/.claude/skills/kd-inst
 
 Обновление уже установленного сервера и откат — шаг 9.
 
+## Готовый образ без клона
+
+Это первый вариант установки: нужен только Docker с Compose и клиент агента. Git, Python и uv
+на машине не требуются. Сначала выберите в [релизах](https://github.com/egordoronchenko/kd-rules-mcp/releases)
+тег с опубликованным образом: `vX.Y.Z` ниже — заменяемый пример, образ имеет тег `X.Y.Z` без `v`.
+Архитектуры — `linux/amd64` и `linux/arm64` (Windows запускает Linux-контейнеры через Docker Desktop).
+При первой публикации принимающий проверяет доступность пакета GHCR без авторизации;
+для установки на чистой машине его видимость должна быть public.
+
+Быстрый старт — скачать три файла тега, заполнить настройки, выполнить `setup` и `docker compose up -d`.
+Исходники для скачивания:
+[docker-compose.yml](https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/vX.Y.Z/docker-compose.yml),
+[projects.example.yaml](https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/vX.Y.Z/projects.example.yaml),
+[projects.local.example.yaml](https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/vX.Y.Z/projects.local.example.yaml).
+Ссылки тоже требуют выбранного тега вместо `vX.Y.Z`.
+
+### Windows PowerShell: установка и проверка на чистой машине
+
+В новой папке (команды совместимы с Windows PowerShell 5.1):
+
+```powershell
+New-Item -ItemType Directory kd-rules-mcp-clean | Out-Null
+Set-Location kd-rules-mcp-clean
+$releaseTag = 'vX.Y.Z' # выбранный опубликованный тег с образом
+$kdVersion = $releaseTag.Substring(1)
+docker --version
+docker compose version
+docker info --format '{{.ServerVersion}}'
+'docker-compose.yml','projects.example.yaml','projects.local.example.yaml' | ForEach-Object { Invoke-WebRequest "https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/$releaseTag/$_" -OutFile $_ }
+Copy-Item projects.example.yaml projects.yaml
+Copy-Item projects.local.example.yaml projects.local.yaml
+```
+
+Заполните `projects.yaml` по шагу 3 и `projects.local.yaml` по шагу 4 ниже: абсолютные пути
+к существующим проектам с XML-выгрузками; удалите проекты примера, которых у вас нет. Впишите
+`image_tag: X.Y.Z` с выбранной версией. Для этой минимальной проверки оставьте стандартные
+`server_url` и порт, без `bind`/`token`. Каталоги `rules_dir` и `writable_extensions`, если они
+описаны, должны существовать до запуска compose. Затем:
+
+```powershell
+docker run --rm -v "${PWD}:/work" "ghcr.io/egordoronchenko/kd-rules-mcp:$kdVersion" setup
+if ($LASTEXITCODE -ne 0) { throw 'setup завершился с ошибкой' }
+'.env','docker-compose.override.yml','.mcp.json','.cursor/mcp.json' | ForEach-Object { if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) { throw "Нет $_" } }
+if (Test-Path .git) { throw 'Проверка должна проходить без клона' }
+docker compose config --quiet
+if ($LASTEXITCODE -ne 0) { throw 'Некорректный compose' }
+docker compose pull
+if ($LASTEXITCODE -ne 0) { throw 'Образ не скачан' }
+docker compose up -d --no-build
+if ($LASTEXITCODE -ne 0) { throw 'Сервер не запущен' }
+docker compose ps
+docker compose exec -T kd-rules-mcp python scripts/check_server.py http://127.0.0.1:8060/mcp
+if ($LASTEXITCODE -ne 0) { throw 'Проверка сервера не прошла; проверьте logs и повторите после готовности сервера' }
+```
+
+Для Windows cmd эквивалент настройки:
+`docker run --rm -v "%cd%":/work ghcr.io/egordoronchenko/kd-rules-mcp:X.Y.Z setup`.
+
+### sh: установка и проверка на чистой машине
+
+```sh
+set -eu
+mkdir kd-rules-mcp-clean
+cd kd-rules-mcp-clean
+release_tag=vX.Y.Z # выбранный опубликованный тег с образом
+kd_version=${release_tag#v}
+docker --version
+docker compose version
+docker info --format '{{.ServerVersion}}'
+for file in docker-compose.yml projects.example.yaml projects.local.example.yaml; do
+  curl -fsSL "https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/$release_tag/$file" -o "$file"
+done
+cp projects.example.yaml projects.yaml
+cp projects.local.example.yaml projects.local.yaml
+```
+
+Заполните оба файла как выше, в `projects.local.yaml` укажите абсолютные пути Linux/macOS и
+`image_tag: X.Y.Z`. После заполнения:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/work" "ghcr.io/egordoronchenko/kd-rules-mcp:$kd_version" setup
+for file in .env docker-compose.override.yml .mcp.json .cursor/mcp.json; do test -f "$file"; done
+test ! -d .git
+if [ "$(uname -s)" = Darwin ]; then kd_owner=$(stat -f %u .env); else kd_owner=$(stat -c %u .env); fi
+test "$kd_owner" = "$(id -u)"
+docker compose config --quiet
+docker compose pull
+docker compose up -d --no-build
+docker compose ps
+docker compose exec -T kd-rules-mcp python scripts/check_server.py http://127.0.0.1:8060/mcp
+```
+
+Без `--user` настройка на Linux пишет файлы владельца root и предупреждает. `setup` не меняет
+владельца тома `/work`; с `--user` пишет от указанного uid/gid. Сервер при обычном запуске работает
+от uid 1000. Если он не может писать в `workspace`, дайте этому uid доступ к рабочей папке.
+`check_server.py` запускается **в уже работающем контейнере сервера**, поэтому его loopback —
+именно сервер. Отдельной подкоманды `check` в одноразовом контейнере нет. Проверка выше для
+локальной установки без токена; проверка авторизованного MCP — клиентом после одобрения сервера.
+
+Настройка использует тот же код, что `scripts/setup_local.py`. `.env` содержит `KD_IMAGE_TAG`
+только при заданном `image_tag`; без него compose использует `latest`. Пути проектов, рабочей
+папки и каталогов на запись остаются **путями хоста**, а стандартные `workspace` и `structures`
+в карте путей относительны папке compose. Для работы агента из другой папки задайте `workspace`
+абсолютным путём в `projects.local.yaml`. Внешние каталоги не видны запуску только с `/work`:
+`setup` предупреждает об этом, а каталоги на запись берёт из описания проектов. Чтобы также
+собрать серверы 1С из `.mcp.json` и логины из `.dev.env`, подключите проект только для чтения и
+передайте его идентификатор (повторите для каждого нужного проекта):
+
+```powershell
+docker run --rm -v "${PWD}:/work" -v "D:/Repos/bp:/inputs/bp:ro" "ghcr.io/egordoronchenko/kd-rules-mcp:$kdVersion" setup --project-mount bp=/inputs/bp
+```
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/work" -v "/srv/repos/bp:/inputs/bp:ro" "ghcr.io/egordoronchenko/kd-rules-mcp:$kd_version" setup --project-mount bp=/inputs/bp
+```
+
+Скиллы скачайте из того же релиза: `kd-rules-mcp-skills-claude-X.Y.Z.zip` для Claude Code,
+Cursor/OpenCode или `kd-rules-mcp-skills-agents-X.Y.Z.zip` для Codex. Для проверки ZIP без клона:
+
+```powershell
+Invoke-WebRequest "https://github.com/egordoronchenko/kd-rules-mcp/releases/download/$releaseTag/kd-rules-mcp-skills-agents-$kdVersion.zip" -OutFile skills.zip
+Expand-Archive skills.zip -DestinationPath skills-check
+if (-not (Test-Path skills-check/.agents/skills/kd3-rules/SKILL.md)) { throw 'Нет скилла КД 3' }
+if (-not (Test-Path skills-check/KD-RULES.md)) { throw 'Нет точки входа Codex' }
+```
+
+```sh
+curl -fsSL "https://github.com/egordoronchenko/kd-rules-mcp/releases/download/$release_tag/kd-rules-mcp-skills-agents-$kd_version.zip" -o skills.zip
+unzip -q skills.zip -d skills-check
+test -f skills-check/.agents/skills/kd3-rules/SKILL.md
+test -f skills-check/KD-RULES.md
+```
+
+Установите **одну** упаковку в проект: скопируйте её `.claude/skills` или `.agents/skills` и
+`KD-RULES.md` (для agents). В существующем `.mcp.json` объедините только запись `kd-rules-mcp`
+с текущими серверами, укажите свой адрес и заголовок при токене; не заменяйте весь файл из ZIP.
+Для Cursor добавьте запись также в `.cursor/mcp.json`. Подключение клиента и первая загрузка
+структуры — шаг 6 ниже. В новом сеансе агент должен выполнить `project_list` и
+`structure_load_project`: это финальная проверка метаданных после проверки доступности сервера.
+
+## Установка из исходников (альтернатива)
+
+Этот путь нужен для разработки или дополнительных проверок через базы 1С; в нём нужны Git и uv.
+
 ---
 
 ## 1. Программы
@@ -257,13 +401,26 @@ HTTP-серверы из `.mcp.json` проекта (серверы с `command`
 `rules_projects` в клиенте — что открыто, `saved_path` — куда сохранено; не сохранён проект с пустым
 `saved_path` или с `modified: true` (правки после открытия или сохранения).
 
-Имя образа для отката — `docker compose config --images` в папке клона (по умолчанию
-`kd-rules-mcp-kd-rules-mcp`; другое — если в `.env` задан `COMPOSE_PROJECT_NAME` или другой compose-файл).
+**Готовый образ.** Запишите прежний `image_tag` (если использовали `latest`, сначала выберите тег
+этой версии в релизах). Имя — `ghcr.io/egordoronchenko/kd-rules-mcp`, тег — версия без `v`.
+Для обновления поменяйте `image_tag` в `projects.local.yaml`, скачайте compose и примеры нового
+тега, повторите `docker run … ghcr.io/egordoronchenko/kd-rules-mcp:<новая-версия> setup`, затем
+`docker compose config --quiet`, `docker compose pull` и `docker compose up -d --no-build`.
+Используйте те же дополнительные тома проектов и `--user`, что при первой настройке.
+Проверка — `check_server.py` через `docker compose exec`, затем инструменты в клиенте.
+
+**Откат готового образа.** Верните `image_tag: <прежняя-версия>`, выполните `setup` из
+`ghcr.io/egordoronchenko/kd-rules-mcp:<прежняя-версия>`, `docker compose pull` и
+`docker compose up -d --no-build --force-recreate`; проверьте сервер. Compose и скиллы тоже
+берутся из прежнего тега. Том кэша и `workspace` сохраняются.
+
+**Из исходников.** Имя образа теперь тоже `ghcr.io/egordoronchenko/kd-rules-mcp`; текущий тег
+показывает `docker compose config --images`. При `image_tag` ниже замените `latest` своим тегом.
 
 ```powershell
 cd <папка kd-rules-mcp>
 docker compose config --images                     # имя образа, ниже — по умолчанию
-docker image tag kd-rules-mcp-kd-rules-mcp:latest kd-rules-mcp-kd-rules-mcp:prev   # для отката
+docker image tag ghcr.io/egordoronchenko/kd-rules-mcp:latest ghcr.io/egordoronchenko/kd-rules-mcp:prev
 git pull
 uv sync
 uv run python scripts/setup_local.py
@@ -297,7 +454,7 @@ uv run python scripts/check_server.py
 
 ```powershell
 git checkout <прежний коммит или тег>
-docker image tag kd-rules-mcp-kd-rules-mcp:prev kd-rules-mcp-kd-rules-mcp:latest
+docker image tag ghcr.io/egordoronchenko/kd-rules-mcp:prev ghcr.io/egordoronchenko/kd-rules-mcp:latest
 docker compose up -d --force-recreate
 ```
 

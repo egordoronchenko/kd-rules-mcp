@@ -23,11 +23,19 @@ RUN uv sync --frozen --no-dev --no-editable --python /usr/local/bin/python3
 
 FROM python:3.12-slim
 
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/egordoronchenko/kd-rules-mcp" \
+    org.opencontainers.image.version="${VERSION}" \
+    org.opencontainers.image.licenses="MIT"
+
 WORKDIR /app
 
 COPY --from=build /app/.venv /app/.venv
 COPY src ./src
 COPY pyproject.toml uv.lock ./
+COPY scripts/setup_local.py scripts/check_server.py scripts/build_packs.py scripts/our_skills.py ./scripts/
+COPY docs ./docs
+COPY .claude/skills ./.claude/skills
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -44,6 +52,12 @@ RUN useradd --uid 1000 --create-home --user-group kd2 \
     && printf '%s\n' \
         '#!/bin/sh' \
         'set -eu' \
+        'if [ "${1:-}" = setup ]; then' \
+        '  shift' \
+        '  exec python /app/scripts/setup_local.py --root /work --host-paths "$@"' \
+        'fi' \
+        'if [ "$#" -gt 0 ]; then exec "$@"; fi' \
+        'if [ "$(id -u)" -ne 0 ]; then exec /app/.venv/bin/kd-rules-mcp; fi' \
         'mkdir -p /data/cache /data/workspace' \
         'chown kd2:kd2 /data/cache' \
         'chown kd2:kd2 /data/workspace 2>/dev/null || true' \

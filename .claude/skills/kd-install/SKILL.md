@@ -1,6 +1,6 @@
 ---
 name: kd-install
-description: Установить и подключить MCP-сервер kd-rules-mcp (правила обмена «Конвертации данных 2» для 1С) — от клонирования до рабочего project_list, с вопросами человеку и проверкой после каждого шага. Использовать, когда просят «установи/настрой/подключи kd-rules-mcp», подключить его к проекту 1С или добавить в него новый проект.
+description: Установить и подключить MCP-сервер kd-rules-mcp (правила обмена «Конвертации данных 2» для 1С) — из готового образа или клона до рабочего project_list, с вопросами человеку и проверкой после каждого шага. Использовать, когда просят «установи/настрой/подключи kd-rules-mcp», подключить его к проекту 1С или добавить в него новый проект.
 ---
 
 # Установка kd-rules-mcp агентом
@@ -28,7 +28,8 @@ https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/main/.claude/skil
   6. Обновление при несохранённых проектах правил (шаг 9.1, до любых команд обновления); предусловие проекта, без которого сервер не работает
      (шаг 2); `docker info` падает (шаг 0).
 - **Инструменты сервера — только через клиент.** Свой MCP-клиент, HTTP-запросы к серверу из скриптов — нельзя:
-  это обход одобрения сервера человеком. Исключение — `scripts/check_server.py` из клона как проверка шага 5.
+  это обход одобрения сервера человеком. Исключение — `scripts/check_server.py` из клона либо через
+  `docker compose exec` своего сервера как проверка шага 5.
 - **Чужие настройки не читать.** Глобальные настройки клиентов (`~\.cursor`, `~\.claude`, `%APPDATA%\…`) не
   читать и не цитировать: там токены других серверов. Что подключено к клиенту — `claude mcp list` /
   `cursor-agent mcp list` или вопрос человеку. Чужие контейнеры и процессы (`docker inspect`, `docker exec` не
@@ -52,8 +53,10 @@ docker info --format '{{.ServerVersion}}'
 `powershell -Command "…"` (`docker` отвечает «unknown shorthand flag»). Оболочка клиента недоступна, отвечает
 ошибкой разбора или нечитаемым выводом (cp866) — те же строки в другой оболочке (bash ↔ PowerShell).
 
-- Нет `git`/`uv` — предложить установку (uv: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`),
-  выполнить после согласия.
+- Docker работает, а Python/uv или Git нет — по умолчанию **готовый образ**, ничего из них ставить не нужно.
+  Образ подходит и при наличии uv. Клон выбирается для разработки/проверок через базы 1С или по просьбе человека.
+  Только для пути из клона: нет `git`/`uv` — предложить установку
+  (uv: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`), выполнить после согласия.
 - Нет Docker или `docker info` падает — **закончить ход**: человек ставит/запускает Docker Desktop (WSL 2), потом
   продолжаем.
 
@@ -61,7 +64,17 @@ docker info --format '{{.ServerVersion}}'
 `uv run python scripts/check_server.py` — перейти к нужному шагу (новый проект — шаг 3, подключение к другому
 проекту — шаг 6, обновление — шаг 9).
 
-## 1. Клон и окружение
+## 1. Образ или клон
+
+**Готовый образ (по умолчанию без Python/uv).** Спросить папку установки и выбрать опубликованный
+тег с образом в релизах https://github.com/egordoronchenko/kd-rules-mcp/releases. В пустую папку
+скачать `docker-compose.yml`, `projects.example.yaml`, `projects.local.example.yaml` по адресу
+`https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/<тег-vX.Y.Z>/<файл>`.
+Команды PowerShell и sh — раздел «Готовый образ без клона» в
+https://github.com/egordoronchenko/kd-rules-mcp/blob/main/docs/INSTALL.md.
+Проверка: три файла есть, Docker отвечает; клона и uv для этого пути нет.
+
+**Из исходников.**
 
 Спросить, куда ставить (по умолчанию — рядом с проектами 1С). Затем:
 
@@ -116,10 +129,16 @@ copy projects.example.yaml projects.yaml
 серверы кода и метаданных проекта из его `.mcp.json`, граф метаданных (`1c-graph-metadata-mcp`) тоже;
 `data_mcp` — только у песочницы, которую человек подтвердил на шаге 2, иначе строки нет.
 
-Проверка:
+Проверка для клона:
 
 ```powershell
 uv run python -c "from pathlib import Path; from kd_rules_mcp.projects import load_catalog; print(list(load_catalog(Path('projects.yaml')).projects))"
+```
+
+Для образа (версия выбранного релиза вместо `X.Y.Z`, Python работает внутри контейнера):
+
+```powershell
+docker run --rm -v "${PWD}:/work" ghcr.io/egordoronchenko/kd-rules-mcp:X.Y.Z python -c "from pathlib import Path; from kd_rules_mcp.projects import load_catalog; print(list(load_catalog(Path('/work/projects.yaml')).projects))"
 ```
 
 Проверка прошла — **закончить ход**: показать человеку `projects.yaml` целиком и спросить, всё ли верно. Ответы на
@@ -141,9 +160,32 @@ copy projects.local.example.yaml projects.local.yaml
   затрагивается.
 
 `setup_local.py` (шаг 5) пишет из этих полей `.env` клона (`KD2_PUBLISHED_PORT`, `KD2_BIND`, `KD2_CONTAINER`,
-`KD2_CACHE_VOLUME`, `COMPOSE_PROJECT_NAME`); `.env` и `docker-compose.yml` руками не править.
+`KD2_CACHE_VOLUME`, `COMPOSE_PROJECT_NAME`); тот же код `setup` в образе работает без uv на хосте.
+`image_tag: X.Y.Z` закрепляет образ релиза без префикса `v` (`KD_IMAGE_TAG` в `.env`);
+без поля используется `latest`. `.env` и `docker-compose.yml` руками не править.
 
 ## 5. Запуск
+
+**Образ.** Выбранная версия без `v` вместо `X.Y.Z`; в `projects.local.yaml` — абсолютные пути хоста.
+
+```powershell
+docker run --rm -v "${PWD}:/work" ghcr.io/egordoronchenko/kd-rules-mcp:X.Y.Z setup
+docker compose pull
+docker compose up -d --no-build
+docker compose exec -T kd-rules-mcp python scripts/check_server.py http://127.0.0.1:8060/mcp
+```
+
+Для sh: `docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd):/work" ghcr.io/egordoronchenko/kd-rules-mcp:X.Y.Z setup`.
+Для cmd: `-v "%cd%":/work`. Без `--user` файлы на Linux принадлежат root: setup предупреждает;
+с `--user` — указанному uid. Проекты вне `/work` подключить также в setup томами только для чтения,
+например `-v "D:/Repos/bp:/inputs/bp:ro"`, и передать `--project-mount bp=/inputs/bp`:
+это позволяет собрать их MCP и логины; override сохранит хостовый путь `D:/Repos/bp`.
+Без дополнительных томов setup предупреждает о недоступных внешних настройках; существование
+`rules_dir` и `writable_extensions` проверить на хосте до up. Рабочая папка должна быть доступна uid 1000 сервера.
+Команда проверки через exec выше — для локальной установки без `token`; при токене проверить MCP
+в клиенте после одобрения. Одноразовой подкоманды `check` нет: loopback должен относиться к работающему серверу.
+
+**Клон.**
 
 ```powershell
 uv run python scripts/setup_local.py
@@ -157,6 +199,14 @@ uv run python scripts/check_server.py
 `docker compose up -d`.
 
 ## 6. Подключить агента
+
+Для пути образа: скачать ZIP **того же релиза** `kd-rules-mcp-skills-claude-X.Y.Z.zip` или
+`kd-rules-mcp-skills-agents-X.Y.Z.zip` (одну упаковку). После согласия на правку проекта перенести
+`.claude/skills` либо `.agents/skills` и `KD-RULES.md` (agents). В `.mcp.json` объединить только
+запись `kd-rules-mcp` с существующими серверами, указать свой `server_url` и заголовок при токене;
+файл целиком из ZIP не заменять. Для Cursor аналогично `.cursor/mcp.json`. Проверка: файлы
+скиллов и запись своего сервера есть, затем перезапуск клиента и первая загрузка как ниже.
+Скрипт `build_packs.py --dest` ниже — альтернатива из клона.
 
 Клиент читает `.mcp.json` только при запуске: **в этой сессии инструментов `kd-rules-mcp` не будет**. Не искать
 их и не вызывать сервер в обход клиента (правило «Инструменты сервера — только через клиент»): сервер в этой
@@ -222,10 +272,15 @@ uv run python kdbase/kd_check.py check tests/data/exchange_rules.xml
    Вызвать `rules_projects`: открытые проекты правил переживают пересоздание контейнера (снимки в рабочей
    папке, `.projects\`), но обновление может сменить формат снимка. Есть несохранённые — `saved_path` пуст
    **или** `modified: true` — **закончить ход**: спросить человека, сохранить ли их `rules_save` и куда.
-2. **Запомнить образ для отката.** Имя образа не угадывать: в папке клона `docker compose config --images` —
-   имя образа сервиса (учитывает `name:` в compose и `COMPOSE_PROJECT_NAME` из `.env`); по умолчанию
-   `kd-rules-mcp-kd-rules-mcp`, при `instance` — `kd-rules-mcp-<суффикс>-kd-rules-mcp`. Затем `docker image tag <образ>:latest <образ>:prev`; записать текущий
-   коммит: `git rev-parse --short HEAD`.
+2. **Запомнить образ для отката.** `docker compose config --images` — текущее имя с тегом:
+   `ghcr.io/egordoronchenko/kd-rules-mcp:<image_tag или latest>`. Для образа запомнить версию релиза
+   (при latest выбрать её тег); для клона — `docker image tag <текущий-образ-с-тегом> ghcr.io/egordoronchenko/kd-rules-mcp:prev`
+   и `git rev-parse --short HEAD`.
+   Путь образа: обновить `image_tag`, взять compose и скиллы из нового тега, выполнить `setup`
+   из новой версии с теми же томами/`--user`, `docker compose config --quiet`, `docker compose pull`,
+   `docker compose up -d --no-build`. Проверить через exec и клиент. Откат — прежний `image_tag`,
+   compose/скиллы прежнего тега, `setup` из прежней версии, pull и up с `--no-build --force-recreate`.
+   Следующие команды git/uv — только для клона.
 3. **Обновить:** в папке сервера `git pull` → `uv sync` → `uv run python scripts/setup_local.py` →
    `docker compose config` → `docker compose up -d --build`. `setup_local.py` — после каждого обновления: новая
    версия может добавить папки, переменные или серверы; он переписывает `docker-compose.override.yml`, `.mcp.json`,
