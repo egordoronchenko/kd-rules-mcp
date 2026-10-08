@@ -4,21 +4,21 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import parse_operation
-from kd2_rules_mcp.authoring.ed.manager_render import _reread
-from kd2_rules_mcp.authoring.ed.model import AuthoringPreconditionError
-from kd2_rules_mcp.ed.canonical import canonicalize
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import (
+from kd_rules_mcp.authoring.ed.manager_operations import parse_operation
+from kd_rules_mcp.authoring.ed.manager_render import _reread
+from kd_rules_mcp.authoring.ed.model import AuthoringPreconditionError
+from kd_rules_mcp.ed.canonical import canonicalize
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import (
     LayoutElement,
     RetainedBlock,
     dump_model,
     load_model,
     text_hash,
 )
-from kd2_rules_mcp.validation.ed_writer import validate_writer
+from kd_rules_mcp.validation.ed_writer import validate_writer
 from tests.test_ed_writer_code import round_trip
 from tests.test_ed_writer_values import commit_batch
 

@@ -2,8 +2,8 @@
 
 import pytest
 
-from kd2_rules_mcp.errors import RulesFormatError
-from kd2_rules_mcp.kd2.canonical import canonical_diff, canonical_form
+from kd_rules_mcp.errors import RulesFormatError
+from kd_rules_mcp.kd2.canonical import canonical_diff, canonical_form
 
 
 def same(left: str, right: str) -> bool:

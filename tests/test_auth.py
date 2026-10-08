@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.server import create_app, main
-from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
+from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.server import create_app, main
+from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 
 
 def _service(tmp_path: Path) -> Kd2Service:
@@ -59,7 +59,7 @@ def test_main_refuses_external_host_without_token(
         nonlocal ran
         ran = True
 
-    monkeypatch.setattr("kd2_rules_mcp.server.uvicorn.run", _run)
+    monkeypatch.setattr("kd_rules_mcp.server.uvicorn.run", _run)
     with pytest.raises(SystemExit, match="задайте token"):
         main()
     assert not ran
@@ -78,7 +78,7 @@ def test_main_in_container_listens_without_token(
     def _run(*_args: object, **kwargs: object) -> None:
         seen.update(kwargs)
 
-    monkeypatch.setattr("kd2_rules_mcp.server.uvicorn.run", _run)
+    monkeypatch.setattr("kd_rules_mcp.server.uvicorn.run", _run)
     main()
     assert seen["host"] == "0.0.0.0"
     assert seen["port"] == 8060

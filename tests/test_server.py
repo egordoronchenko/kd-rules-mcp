@@ -9,11 +9,11 @@ from typing import Any
 import pytest
 from mcp import Client
 
-from kd2_rules_mcp.errors import DuplicateRuleError, RuleNotFoundError
-from kd2_rules_mcp.kd2.model import ExchangeRules
-from kd2_rules_mcp.kd2.rules_io import load_registration_rules
-from kd2_rules_mcp.server import create_server
-from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
+from kd_rules_mcp.errors import DuplicateRuleError, RuleNotFoundError
+from kd_rules_mcp.kd2.model import ExchangeRules
+from kd_rules_mcp.kd2.rules_io import load_registration_rules
+from kd_rules_mcp.server import create_server
+from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 from tests.test_ed_authoring_handlers import HANDLERS
 from tests.test_service_ed_authoring import handler_setup
 from tests.test_service_ed_authoring import setup as setup
@@ -207,7 +207,7 @@ EXPECTED_TOOLS = {
 
 @pytest.mark.anyio
 async def test_ed_layer_parameters_and_responses(service: Kd2Service, monkeypatch) -> None:
-    from kd2_rules_mcp.service import ed_routes as routes_service
+    from kd_rules_mcp.service import ed_routes as routes_service
     from tests import session_inputs
 
     assert session_inputs._orig_read_routes is not None
@@ -797,7 +797,7 @@ def _info_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         record.getMessage()
         for record in caplog.records
-        if record.name == "kd2_rules_mcp" and record.levelno == logging.INFO
+        if record.name == "kd_rules_mcp" and record.levelno == logging.INFO
     ]
 
 
@@ -811,7 +811,7 @@ async def test_unexpected_exception_is_internal(
 
     # Имя функции — имя инструмента: call пишет function.__name__.
     monkeypatch.setattr(service, "project_list", project_list)
-    with caplog.at_level(logging.DEBUG, logger="kd2_rules_mcp"):
+    with caplog.at_level(logging.DEBUG, logger="kd_rules_mcp"):
         async with Client(create_server(service)) as client:
             error = await _error(client, "project_list")
     assert error["code"] == "internal"
@@ -819,7 +819,7 @@ async def test_unexpected_exception_is_internal(
     errors = [
         record
         for record in caplog.records
-        if record.name == "kd2_rules_mcp" and record.levelno == logging.ERROR
+        if record.name == "kd_rules_mcp" and record.levelno == logging.ERROR
     ]
     assert len(errors) == 1
     assert errors[0].exc_info is not None
@@ -829,7 +829,7 @@ async def test_unexpected_exception_is_internal(
 
 async def test_tool_calls_are_logged(service: Kd2Service, caplog: pytest.LogCaptureFixture) -> None:
     """Успех и project_not_found дают по строке INFO с именем инструмента и итогом."""
-    with caplog.at_level(logging.DEBUG, logger="kd2_rules_mcp"):
+    with caplog.at_level(logging.DEBUG, logger="kd_rules_mcp"):
         async with Client(create_server(service)) as client:
             await _call(client, "structure_list")
             error = await _error(client, "rules_overview", project_id="нет")
@@ -841,7 +841,7 @@ async def test_tool_calls_are_logged(service: Kd2Service, caplog: pytest.LogCapt
         for line in messages
     )
     assert not any(
-        record.name == "kd2_rules_mcp" and record.levelno >= logging.ERROR
+        record.name == "kd_rules_mcp" and record.levelno >= logging.ERROR
         for record in caplog.records
     )
 

@@ -59,7 +59,7 @@ from live_checks import (
 )
 from lxml import etree
 
-from kd2_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.console import utf8_stdout
 
 __all__ = ["DataServer", "ExchangeCheckError", "server_for", "short_error"]
 

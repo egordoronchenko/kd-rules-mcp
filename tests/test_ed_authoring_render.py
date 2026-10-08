@@ -13,24 +13,24 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed import ArtifactManifest, IdentityMap, render_authoring
-from kd2_rules_mcp.authoring.ed.identity import (
+from kd_rules_mcp.authoring.ed import ArtifactManifest, IdentityMap, render_authoring
+from kd_rules_mcp.authoring.ed.identity import (
     EXTENSION_IDENTITY_SEED,
     artifact_uuid,
     identity_map_from_xml,
     make_identity_map,
 )
-from kd2_rules_mcp.authoring.ed.model import (
+from kd_rules_mcp.authoring.ed.model import (
     AttributeDraft,
     AuthoringPreconditionError,
     ExtensionIdentity,
     SourceSet,
     digest,
 )
-from kd2_rules_mcp.authoring.ed.xml_dump import V8, XR, XSI, M, profile_template
-from kd2_rules_mcp.structures import db, xmlbuild, xmldump
-from kd2_rules_mcp.validation.ed_authoring import prepare_authoring
-from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+from kd_rules_mcp.authoring.ed.xml_dump import V8, XR, XSI, M, profile_template
+from kd_rules_mcp.structures import db, xmlbuild, xmldump
+from kd_rules_mcp.validation.ed_authoring import prepare_authoring
+from kd_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 from tests.test_ed_authoring_hook import whitelist, with_test_fields
 from tests.test_ed_authoring_model import DATA, IDENTITY, OPERATION, TARGET, inputs
 
@@ -502,7 +502,7 @@ def test_owned_content_changed(damage):
 
 @pytest.mark.parametrize("damage", ["missing", "invalid_json", "invalid_content"])
 def test_previous_artifact_names_damaged_manifest(damage):
-    from kd2_rules_mcp.authoring.ed.artifacts import previous_artifact
+    from kd_rules_mcp.authoring.ed.artifacts import previous_artifact
 
     bundle = render_authoring(prepared(), descriptions())
     actual = dict(bundle.files)
@@ -654,8 +654,8 @@ def test_instruction_stand_risks_safe_mode_probes_and_spacing(delivery, directio
     assert probes.count("Для Каждого ПКО Из Правила Цикл") == 2
     assert probes.count("Если Правило = Неопределено Тогда") == 2
     assert "Отправка: " in probes and "Получение: " in probes
-    from kd2_rules_mcp.ed.lexer import lex
-    from kd2_rules_mcp.ed.model import SourceFile
+    from kd_rules_mcp.ed.lexer import lex
+    from kd_rules_mcp.ed.model import SourceFile
 
     for code in re.findall(r"```bsl\n(.*?)\n```", probes, re.S):
         offsets = (0, *(i + 1 for i, char in enumerate(code) if char == "\n"))
@@ -702,10 +702,10 @@ def xml_except_version(payload: bytes) -> bytes:
 
 def test_v1_kit_plus_handler_keeps_object_uuids_and_rejects_tamper():
     """Переход на форму с обработчиками — явный просмотр; UUID объектов остаются."""
-    from kd2_rules_mcp.authoring.ed.artifacts import previous_artifact
-    from kd2_rules_mcp.authoring.ed.model import PreserveMissingHeaderProperty
-    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
-    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from kd_rules_mcp.authoring.ed.artifacts import previous_artifact
+    from kd_rules_mcp.authoring.ed.model import PreserveMissingHeaderProperty
+    from kd_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd_rules_mcp.validation.ed_authoring import prepare_handler_operations
     from tests.test_ed_authoring_handlers import handler_inputs
 
     op = replace(OPERATION, target=replace(TARGET, direction="receive"))
@@ -792,8 +792,8 @@ def test_v1_kit_plus_handler_keeps_object_uuids_and_rejects_tamper():
 
 def test_handler_only_xml_matches_v1_on_an_existing_attribute():
     """XML комплекта без прямых ПКС совпадает с v1 на существующем реквизите."""
-    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
-    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from kd_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd_rules_mcp.validation.ed_authoring import prepare_handler_operations
     from tests.test_ed_authoring_handlers import handler, handler_inputs
 
     value = handler_inputs()
@@ -826,8 +826,8 @@ def test_handler_only_xml_matches_v1_on_an_existing_attribute():
 
 
 def test_direct_only_plan_is_refused_and_empty_preparation_stays_closed():
-    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
-    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from kd_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd_rules_mcp.validation.ed_authoring import prepare_handler_operations
     from tests.test_ed_authoring_handlers import handler_inputs
 
     value = handler_inputs()
@@ -847,8 +847,8 @@ def test_direct_only_plan_is_refused_and_empty_preparation_stays_closed():
 
 
 def test_version_two_adds_and_drops_an_operation_only_when_named():
-    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
-    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from kd_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd_rules_mcp.validation.ed_authoring import prepare_handler_operations
     from tests.test_ed_authoring_handlers import handler, handler_inputs
 
     value = handler_inputs()
@@ -1094,7 +1094,7 @@ def test_borrowed_uuid_is_copied_byte_for_byte():
 
 def test_resources_in_built_wheel(tmp_path):
     assert profile_template()["profile"] == "xml-2.20-platform-8.3.27"
-    resource = files("kd2_rules_mcp.authoring.ed").joinpath("templates/instruction.md")
+    resource = files("kd_rules_mcp.authoring.ed").joinpath("templates/instruction.md")
     assert "${operations_table}" in resource.read_text("utf-8")
     result = subprocess.run(
         [
@@ -1116,10 +1116,10 @@ def test_resources_in_built_wheel(tmp_path):
     wheel = next(tmp_path.glob("*.whl"))
     with zipfile.ZipFile(wheel) as archive:
         for name in ("instruction.md", "handlers_instruction.md", "xml_profile_2_20.json"):
-            packaged = archive.read("kd2_rules_mcp/authoring/ed/templates/" + name)
+            packaged = archive.read("kd_rules_mcp/authoring/ed/templates/" + name)
             assert (
                 packaged
-                == files("kd2_rules_mcp.authoring.ed").joinpath("templates/" + name).read_bytes()
+                == files("kd_rules_mcp.authoring.ed").joinpath("templates/" + name).read_bytes()
             )
 
 

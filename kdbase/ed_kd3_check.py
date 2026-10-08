@@ -27,14 +27,14 @@ from pathlib import Path
 from typing import Any, NoReturn
 from uuid import uuid4
 
-from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.ed.canonical import canonicalize
-from kd2_rules_mcp.ed.diff import compare_models
-from kd2_rules_mcp.ed.errors import EdFormatError, EdReadError, EdResourceLimitError
-from kd2_rules_mcp.ed.model import EdDocument, Routine
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import RenderMode, render
-from kd2_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.ed.canonical import canonicalize
+from kd_rules_mcp.ed.diff import compare_models
+from kd_rules_mcp.ed.errors import EdFormatError, EdReadError, EdResourceLimitError
+from kd_rules_mcp.ed.model import EdDocument, Routine
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import RenderMode, render
+from kd_rules_mcp.ed.writer_import import import_manager
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "kdbase" / "run"

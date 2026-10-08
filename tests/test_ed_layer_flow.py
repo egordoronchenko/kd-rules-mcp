@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.ed.errors import EdReadError
-from kd2_rules_mcp.ed.layer_model import (
+from kd_rules_mcp.ed.errors import EdReadError
+from kd_rules_mcp.ed.layer_model import (
     SKIP_REASONS,
     Certainty,
     LayerDescriptor,
@@ -16,10 +16,10 @@ from kd2_rules_mcp.ed.layer_model import (
     OperationKind,
     rule_view,
 )
-from kd2_rules_mcp.ed.layer_reader import read_extension_text
-from kd2_rules_mcp.ed.layers import compose_manager, read_layers
-from kd2_rules_mcp.ed.model import ObjectRule
-from kd2_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.layers import compose_manager, read_layers
+from kd_rules_mcp.ed.model import ObjectRule
+from kd_rules_mcp.ed.reader import read_manager_text
 
 ROOT = Path(__file__).resolve().parent / "data" / "ed" / "layers"
 HELPERS = frozenset({"добавитьпкс", "добавитьпктч"})

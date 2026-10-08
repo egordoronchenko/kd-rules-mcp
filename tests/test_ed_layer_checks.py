@@ -6,27 +6,27 @@ from shutil import copytree
 
 import pytest
 
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.layer_model import LayerDescriptor
-from kd2_rules_mcp.ed.layers import compose_manager, read_layers
-from kd2_rules_mcp.ed.model import PropertyGroup
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.refs import build_references
-from kd2_rules_mcp.ed.route_model import FormatExtension, RouteSource
-from kd2_rules_mcp.ed.routes import apply_route_layers
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-from kd2_rules_mcp.validation.ed_layers import (
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.layer_model import LayerDescriptor
+from kd_rules_mcp.ed.layers import compose_manager, read_layers
+from kd_rules_mcp.ed.model import PropertyGroup
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.refs import build_references
+from kd_rules_mcp.ed.route_model import FormatExtension, RouteSource
+from kd_rules_mcp.ed.routes import apply_route_layers
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.ed.schema.profile import ValidationProfile
+from kd_rules_mcp.validation.ed_layers import (
     LAYER_CHECKS,
     effective_document,
     select_context,
     validate_effective_links,
     validate_layers,
 )
-from kd2_rules_mcp.validation.ed_links import validate_links
-from kd2_rules_mcp.validation.ed_routes import compare_routes, select_route
-from kd2_rules_mcp.validation.ed_schema import validate_schema
-from kd2_rules_mcp.validation.ed_structure import validate_structure
+from kd_rules_mcp.validation.ed_links import validate_links
+from kd_rules_mcp.validation.ed_routes import compare_routes, select_route
+from kd_rules_mcp.validation.ed_schema import validate_schema
+from kd_rules_mcp.validation.ed_structure import validate_structure
 from tests import session_inputs
 from tests.test_ed_layers import _reading
 from tests.test_ed_profile import DATA, document
@@ -667,7 +667,7 @@ def test_routes_overlay_history_own_manager_and_no_effect_contract(kits):
 
 
 def test_route_documents_observation_and_layers_work_together(kits, monkeypatch):
-    from kd2_rules_mcp.ed import routes as route_module
+    from kd_rules_mcp.ed import routes as route_module
 
     base = kits[""].base
     original = route_module.read_manager

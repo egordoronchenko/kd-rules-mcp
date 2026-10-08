@@ -10,11 +10,11 @@ import pytest
 import yaml
 from mcp import Client
 
-from kd2_rules_mcp.authoring.workspace import RulesWorkspace
-from kd2_rules_mcp.errors import WorkspacePathError
-from kd2_rules_mcp.projects import ProjectConfigError, load_catalog, load_local
-from kd2_rules_mcp.server import create_server
-from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
+from kd_rules_mcp.authoring.workspace import RulesWorkspace
+from kd_rules_mcp.errors import WorkspacePathError
+from kd_rules_mcp.projects import ProjectConfigError, load_catalog, load_local
+from kd_rules_mcp.server import create_server
+from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(__file__).parent / "data"
@@ -170,7 +170,7 @@ def test_setup_mounts_existing_rules_dir_for_writing(tmp_path: Path) -> None:
     )
     local = load_local(local_file)
     service = yaml.safe_load(setup_local.compose_override(catalog, local))["services"][
-        "kd2-rules-mcp"
+        "kd-rules-mcp"
     ]
     posix = str(rules).replace("\\", "/")
     assert f"{posix}:/rules/alpha" in service["volumes"]

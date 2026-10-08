@@ -1,6 +1,6 @@
 # Образ MCP-сервера правил обмена КД 2.
 # Зависимости ставятся из uv.lock (`uv sync --frozen --no-dev`); в рантайме uv нет.
-# Запуск: kd2-rules-mcp. Корень нужен только точке входа, чтобы отдать том кэша
+# Запуск: kd-rules-mcp. Корень нужен только точке входа, чтобы отдать том кэша
 # пользователю kd2; сам сервер работает не от root.
 
 FROM python:3.12-slim AS build
@@ -47,7 +47,7 @@ RUN useradd --uid 1000 --create-home --user-group kd2 \
         'mkdir -p /data/cache /data/workspace' \
         'chown kd2:kd2 /data/cache' \
         'chown kd2:kd2 /data/workspace 2>/dev/null || true' \
-        'exec setpriv --reuid=1000 --regid=1000 --init-groups --inh-caps=-all /app/.venv/bin/kd2-rules-mcp' \
+        'exec setpriv --reuid=1000 --regid=1000 --init-groups --inh-caps=-all /app/.venv/bin/kd-rules-mcp' \
         > /usr/local/bin/docker-entrypoint \
     && chmod 755 /usr/local/bin/docker-entrypoint \
     && command -v setpriv >/dev/null

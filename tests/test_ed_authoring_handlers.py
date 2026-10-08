@@ -10,9 +10,9 @@ from types import MappingProxyType
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.canonical import canonicalize_operations
-from kd2_rules_mcp.authoring.ed.context import AuthoringContext
-from kd2_rules_mcp.authoring.ed.handlers import (
+from kd_rules_mcp.authoring.ed.canonical import canonicalize_operations
+from kd_rules_mcp.authoring.ed.context import AuthoringContext
+from kd_rules_mcp.authoring.ed.handlers import (
     DISPATCHER,
     EVENT_PARAMETERS,
     canonical_operations_bytes,
@@ -21,7 +21,7 @@ from kd2_rules_mcp.authoring.ed.handlers import (
     operation_from_input,
     preservation_marker,
 )
-from kd2_rules_mcp.authoring.ed.model import (
+from kd_rules_mcp.authoring.ed.model import (
     AddAlgorithmicHeaderProperty,
     AddHeaderProperty,
     AttributeDraft,
@@ -36,19 +36,19 @@ from kd2_rules_mcp.authoring.ed.model import (
     SourceSet,
     normalize_body,
 )
-from kd2_rules_mcp.authoring.ed.operations import validate_preconditions
-from kd2_rules_mcp.ed import read_manager
-from kd2_rules_mcp.ed.routes import read_routes
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.ed.schema.xdto import metadata
-from kd2_rules_mcp.errors import EdAuthoringResourceLimitError
-from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
-from kd2_rules_mcp.validation.ed_authoring_handlers import (
+from kd_rules_mcp.authoring.ed.operations import validate_preconditions
+from kd_rules_mcp.ed import read_manager
+from kd_rules_mcp.ed.routes import read_routes
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.ed.schema.xdto import metadata
+from kd_rules_mcp.errors import EdAuthoringResourceLimitError
+from kd_rules_mcp.validation.ed_authoring import prepare_handler_operations
+from kd_rules_mcp.validation.ed_authoring_handlers import (
     check_body,
     enforce_handler_result,
     preset_procedure_text,
 )
-from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+from kd_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 from tests.session_inputs import corpus_structure
 from tests.test_ed_authoring_model import DATA, IDENTITY, TARGET, inputs, refreshed
 
@@ -907,7 +907,7 @@ def test_identity_order_drop_and_body_changes():
 def test_generated_name_collision_and_duplicate_algorithmic_attributes(monkeypatch):
     value = handler_inputs()
     monkeypatch.setattr(
-        "kd2_rules_mcp.validation.ed_authoring_handlers.handler_name", lambda *args: "доп_Коллизия"
+        "kd_rules_mcp.validation.ed_authoring_handlers.handler_name", lambda *args: "доп_Коллизия"
     )
     other = replace(handler(), target=replace(TARGET, pko_address="ПКО/Заказ"))
     assert_refusal(value, (handler(), other), "handler_name_occupied")
@@ -1072,7 +1072,7 @@ def test_closed_corpus_pilot_preconditions():
         )
         context = AuthoringContext(value)
         # Имена ПКО берутся из поиска в исходнике пилота; его BSL не исполняется.
-        from kd2_rules_mcp.ed.lexer import tokenize
+        from kd_rules_mcp.ed.lexer import tokenize
 
         tokens = tokenize(modules[0].read_text("utf-8"))
         names = [

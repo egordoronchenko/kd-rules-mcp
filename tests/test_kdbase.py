@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.pack import pack_rules
-from kd2_rules_mcp.kd2.canonical import parse_xml
+from kd_rules_mcp.authoring.pack import pack_rules
+from kd_rules_mcp.kd2.canonical import parse_xml
 from tests.corpus import CORPUS_ENV, CorpusFile, corpus_files
 
 ROOT = Path(__file__).resolve().parents[1]

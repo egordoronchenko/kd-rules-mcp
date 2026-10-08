@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     HandlerPatch,
     ManagerOperation,
     ManagerOperationError,
@@ -17,10 +17,10 @@ from kd2_rules_mcp.authoring.ed.manager_operations import (
     parse_operation,
     preview,
 )
-from kd2_rules_mcp.ed.canonical import canonicalize, model_addresses
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import parameter_accesses
-from kd2_rules_mcp.ed.writer_model import logical_id
+from kd_rules_mcp.ed.canonical import canonicalize, model_addresses
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import parameter_accesses
+from kd_rules_mcp.ed.writer_model import logical_id
 from tests.test_ed_writer_review import checks, imported, plan
 from tests.test_ed_writer_values import commit_batch, value_model
 from tests.test_service_ed_writer import writer_setup as writer_setup

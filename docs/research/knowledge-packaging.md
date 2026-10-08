@@ -60,14 +60,14 @@
 | Codex | `~/.codex/AGENTS.md` (или `.override.md`), затем `AGENTS.override.md`/`AGENTS.md` от корня git до рабочей папки; лимит `project_doc_max_bytes` 32 КиБ; другие имена — `project_doc_fallback_filenames` [11] | `.agents/skills` в каждой папке от рабочей до корня репозитория, `$HOME/.agents/skills`, `/etc/codex/skills`; обязательны `name`, `description` [12] | инструкции — при старте; список скиллов — не больше 2 % окна контекста (8 000 символов, если окно неизвестно), тело — при выборе скилла [12] |
 | OpenCode | `AGENTS.md` (вверх от рабочей папки), запасной — `CLAUDE.md`; глобально `~/.config/opencode/AGENTS.md`; поле `instructions` в `opencode.json` — пути, маски, URL [13] | `.opencode/skills/`, `.claude/skills/`, `.agents/skills/` и те же в `~`; поля `name`, `description`, `license`, `compatibility`, `metadata` [14] | ссылки на файлы внутри `AGENTS.md` сами не разбираются: «opencode doesn't automatically parse file references» — нужен `instructions` или прямое указание прочитать [13] |
 
-Переносимый файл инструкций `KD2-RULES.md` (упаковка для клиентов без скиллов или как точка входа) должен:
+Переносимый файл инструкций `KD-RULES.md` (упаковка для клиентов без скиллов или как точка входа) должен:
 быть самодостаточным и коротким (≤ 60 строк — в лимит Codex помещается с запасом); давать порядок работы
 (структуры → правила → кандидаты → правки → проверки → сохранение) и **прямые указания** «прочитай
 `kd2-rules/<файл>.md`, когда …» — OpenCode и, вероятно, другие клиенты ссылки сами не открывают; называть точки
 остановки (пароли, правка чужого репозитория, загрузка в небезопасную базу); называть серверы 1С ролями и
 отсылать к `project_list`; ссылаться на правила набора `ai_rules_1c` проекта по путям `.cursor/rules/…`.
-Подключение — одна строка в `AGENTS.md` пользователя: «Правила обмена КД 2 и сервер kd2-rules-mcp — прочитай
-`KD2-RULES.md` перед работой с ними» (для Claude Code — `@KD2-RULES.md` в `CLAUDE.md`, для OpenCode — путь в
+Подключение — одна строка в `AGENTS.md` пользователя: «Правила обмена КД 2 и сервер kd-rules-mcp — прочитай
+`KD-RULES.md` перед работой с ними» (для Claude Code — `@KD-RULES.md` в `CLAUDE.md`, для OpenCode — путь в
 `instructions`).
 
 ## 4. Субагенты для роли «разработчик обработчиков»
@@ -81,7 +81,7 @@
 | Прочее | `skills` — заранее загрузить скиллы; `omitClaudeMd` | `is_background` |
 
 Один файл `.claude/agents/kd2-handler-developer.md` виден обоим клиентам. Запрет `rules_save`, `kdbase` и
-оболочки работает в Claude Code полем `disallowedTools` (например, `Bash, mcp__kd2-rules-mcp__rules_save`); в
+оболочки работает в Claude Code полем `disallowedTools` (например, `Bash, mcp__kd-rules-mcp__rules_save`); в
 Cursor — только текстом роли. Читает ли Cursor поля Claude Code (`tools`, `skills`) или игнорирует их, в
 документации не сказано — проверить на одном файле до того, как заводить вторую копию в `.cursor/agents/`.
 
@@ -92,8 +92,8 @@ Cursor — только текстом роли. Читает ли Cursor пол
 ```
 skills/kd2-rules-build/         SKILL.md + references/
 skills/kd2-exchange-pitfalls/   SKILL.md (+ references/)
-skills/kd2-install/             SKILL.md
-skills/KD2-RULES.md             точка входа для клиентов без скиллов
+skills/kd-install/             SKILL.md
+skills/KD-RULES.md             точка входа для клиентов без скиллов
 docs/rules/mcp-1c.md            правило работы с серверами 1С
 docs/checks.md, docs/tools.md, docs/glossary.md   справочники, входят в упаковки копиями
 ```
@@ -104,7 +104,7 @@ docs/checks.md, docs/tools.md, docs/glossary.md   справочники, вхо
 | Упаковка | Что кладёт | Кто её читает |
 |---|---|---|
 | `claude` | `.claude/skills/kd2-*` (+ `references/mcp-1c.md`, `checks.md`, `tools.md`, `glossary.md` в скиллы, которые на них ссылаются) | Claude Code, Cursor, OpenCode |
-| `agents` | `.agents/skills/kd2-*` (то же) + `KD2-RULES.md` | Codex, Cursor, OpenCode |
+| `agents` | `.agents/skills/kd2-*` (то же) + `KD-RULES.md` | Codex, Cursor, OpenCode |
 | `cursor-rules` | `.cursor/rules/mcp-1c.mdc` полным текстом с `description` и `alwaysApply: false` | Cursor (редактор и CLI) |
 
 - В один проект ставится **либо** `claude`, **либо** `agents`: Cursor и OpenCode читают оба каталога и получат
@@ -112,13 +112,13 @@ docs/checks.md, docs/tools.md, docs/glossary.md   справочники, вхо
   Cursor. Тест «чужой проект» собирает каждую упаковку в пустую папку и проверяет: ссылки разрешаются внутри
   упаковки, путей этого репозитория (`scripts/`, `workspace\`, `docs/`) нет, имена инструментов есть в сервере.
 - **Исчезают:** `.cursor/skills/kd2-*` (ручная копия) и побайтовое сравнение копий в `tests/test_skills.py` (его
-  место — `build_packs.py --check`); шаг 6 `kd2-install`/`INSTALL.md` «скопировать скиллы в проект» превращается в
+  место — `build_packs.py --check`); шаг 6 `kd-install`/`INSTALL.md` «скопировать скиллы в проект» превращается в
   `build_packs.py --client … --dest <папка проекта>` с согласия человека. **Появляются:** `skills/`,
   `scripts/build_packs.py`, `.agents/skills/kd2-*` — только в чужих проектах по `--dest`, в этом репозитории их
   не коммитить (тут уже лежат `.agents/skills/openspec-*`, и Cursor увидел бы `kd2-*` дважды).
 - `.cursor/rules/mcp-1c.mdc` из указателя на `docs/rules/` становится сборкой полного текста.
 - `setup_local.py` не меняется по знаниям: он пишет `.mcp.json` и `.cursor/mcp.json` этого репозитория. Для
-  чужого проекта запись `kd2-rules-mcp` в его `.mcp.json` и `.cursor/mcp.json` — часть `build_packs.py --dest`
+  чужого проекта запись `kd-rules-mcp` в его `.mcp.json` и `.cursor/mcp.json` — часть `build_packs.py --dest`
   (добавить, не затирая существующие серверы; адрес — `server_url` из `projects.local.yaml`).
 - **Имена серверов 1С** в упаковках — ролями («сервер кода источника», «сервер данных песочницы приёмника»); имя
   агент берёт из `project_list` и списка подключённых серверов своего клиента. Шаблон `<проект>-1c-…` верен

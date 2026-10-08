@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.errors import (
     EdSchemaAmbiguousImportError,
     EdSchemaNotFoundError,
     EdSchemaProfileMismatchError,
     EdSchemaResourceLimitError,
     EdSchemaTypeNotFoundError,
 )
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.service import ed_schema as service_module
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service import ed_schema as service_module
 
 DATA = Path(__file__).parent / "data/ed/schema"
 

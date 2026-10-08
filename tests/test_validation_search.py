@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.kd2.model import ExchangeRules
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
-from kd2_rules_mcp.structures import db
-from kd2_rules_mcp.validation.report import Level, Skipped, ValidationReport
-from kd2_rules_mcp.validation.search import (
+from kd_rules_mcp.kd2.model import ExchangeRules
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.structures import db
+from kd_rules_mcp.validation.report import Level, Skipped, ValidationReport
+from kd_rules_mcp.validation.search import (
     CONTINUE_WITHOUT_FIELDS,
     GROUP_FLAG,
     NAME_NOT_SEARCH_PROP,

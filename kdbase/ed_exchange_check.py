@@ -40,10 +40,10 @@ from pathlib import Path
 from bsp_load import DataServer, ExchangeCheckError, guarded, server_for, short_error
 from lxml import etree
 
-from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.ed.schema import QName, load_schema, resolve_property
-from kd2_rules_mcp.ed.schema.xdto import metadata
-from kd2_rules_mcp.projects import ProjectConfigError
+from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.ed.schema import QName, load_schema, resolve_property
+from kd_rules_mcp.ed.schema.xdto import metadata
+from kd_rules_mcp.projects import ProjectConfigError
 
 __all__ = ["CaseError", "bsl_expr", "load_case", "server_for"]
 

@@ -8,16 +8,16 @@ from shutil import copytree
 
 import pytest
 
-from kd2_rules_mcp import ed
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-from kd2_rules_mcp.errors import EdReadError, RuleNotFoundError
-from kd2_rules_mcp.server import error_payload
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.service import ed as ed_service
-from kd2_rules_mcp.service import ed_routes as routes_service
-from kd2_rules_mcp.service.ed_views import references_summary, validation_view
-from kd2_rules_mcp.validation.ed_links import validate_links
-from kd2_rules_mcp.validation.report import Issue
+from kd_rules_mcp import ed
+from kd_rules_mcp.ed.schema.profile import ValidationProfile
+from kd_rules_mcp.errors import EdReadError, RuleNotFoundError
+from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service import ed as ed_service
+from kd_rules_mcp.service import ed_routes as routes_service
+from kd_rules_mcp.service.ed_views import references_summary, validation_view
+from kd_rules_mcp.validation.ed_links import validate_links
+from kd_rules_mcp.validation.report import Issue
 from tests import session_inputs
 from tests.test_ed_layers_handler_safety import extension_wrapper, pod_handler
 from tests.test_ed_layers_handlers import EXTENSION, SEND_BODY, base_document

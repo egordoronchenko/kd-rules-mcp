@@ -4,17 +4,17 @@ import re
 
 import pytest
 
-from kd2_rules_mcp.kd2.canonical import parse_xml
-from kd2_rules_mcp.kd2.model import ExchangeRules
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
-from kd2_rules_mcp.validation.algorithms import (
+from kd_rules_mcp.kd2.canonical import parse_xml
+from kd_rules_mcp.kd2.model import ExchangeRules
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.validation.algorithms import (
     MISSING_ALGORITHM,
     WRONG_MODE,
     check_algorithm_refs,
     references,
 )
-from kd2_rules_mcp.validation.report import Level
-from kd2_rules_mcp.validation.structure import REF_ONLY_LOAD_NOTE
+from kd_rules_mcp.validation.report import Level
+from kd_rules_mcp.validation.structure import REF_ONLY_LOAD_NOTE
 from tests.corpus import EXCHANGE_KINDS, CorpusFile, corpus_params
 
 _HEAD = "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>"

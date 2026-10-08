@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from kd2_rules_mcp.ed import (
+from kd_rules_mcp.ed import (
     EdFormatError,
     EdReadError,
     EdResourceLimitError,
@@ -17,7 +17,7 @@ from kd2_rules_mcp.ed import (
     read_manager_text,
     reader,
 )
-from kd2_rules_mcp.ed.address import locate
+from kd_rules_mcp.ed.address import locate
 
 DATA = Path(__file__).parent / "data/ed"
 

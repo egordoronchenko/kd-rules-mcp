@@ -4,16 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.errors import RulesFormatError
-from kd2_rules_mcp.kd2.canonical import canonical_diff, canonical_form
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
-from kd2_rules_mcp.kd2.rules_io import (
+from kd_rules_mcp.errors import RulesFormatError
+from kd_rules_mcp.kd2.canonical import canonical_diff, canonical_form
+from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
+from kd_rules_mcp.kd2.rules_io import (
     dump_rules,
     load_exchange_rules,
     load_registration_rules,
     load_rules,
 )
-from kd2_rules_mcp.kd2.xmlstyle import BOM, KD_STYLE
+from kd_rules_mcp.kd2.xmlstyle import BOM, KD_STYLE
 
 DATA = Path(__file__).parent / "data"
 

@@ -5,18 +5,18 @@ from typing import cast
 
 import pytest
 
-from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.kd2.canonical import canonical_form
-from kd2_rules_mcp.kd2.diff import diff_rules
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
-from kd2_rules_mcp.kd2.rules_io import (
+from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.kd2.canonical import canonical_form
+from kd_rules_mcp.kd2.diff import diff_rules
+from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
+from kd_rules_mcp.kd2.rules_io import (
     dump_rules,
     load_exchange_rules,
     load_registration_rules,
     load_rules,
 )
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.service.views import TEXT_LIMIT
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service.views import TEXT_LIMIT
 from tests.corpus import CorpusFile, corpus_params
 
 DATA = Path(__file__).parent / "data"

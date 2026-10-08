@@ -1,4 +1,4 @@
-# Личные настройки машины для kd2-rules-mcp. Скопируйте в projects.local.yaml (в git не попадает),
+# Личные настройки машины для kd-rules-mcp. Скопируйте в projects.local.yaml (в git не попадает),
 # поправьте пути и выполните:  uv run python scripts/setup_local.py
 #
 # projects — где на этой машине лежит папка каждого проекта из projects.yaml (любые диски).

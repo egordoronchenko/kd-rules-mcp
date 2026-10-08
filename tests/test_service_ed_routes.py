@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.ed import routes as routes_module
-from kd2_rules_mcp.ed.schema.model import EdSchema
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.ed import routes as routes_module
+from kd_rules_mcp.ed.schema.model import EdSchema
+from kd_rules_mcp.errors import (
     EdRouteFormatError,
     EdRouteProfileNotFoundError,
     EdRouteReadError,
@@ -17,10 +17,10 @@ from kd2_rules_mcp.errors import (
     EdSchemaResourceLimitError,
     Kd2Error,
 )
-from kd2_rules_mcp.server import error_payload
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.service import ed_routes as routes_service
-from kd2_rules_mcp.validation.ed_routes import SchemaUnavailable
+from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service import ed_routes as routes_service
+from kd_rules_mcp.validation.ed_routes import SchemaUnavailable
 from tests import session_inputs
 
 DATA = Path(__file__).parent / "data" / "ed" / "routes"

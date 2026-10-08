@@ -1,7 +1,7 @@
 # Round-trip правил КД 2 на корпусе: расхождения и правила канонизации
 
 Дата: 26.09.2026.
-Код: `src/kd2_rules_mcp/kd2/` (`schema.py`, `rules_io.py`, `canonical.py`, `xmlstyle.py`, `model.py`).
+Код: `src/kd_rules_mcp/kd2/` (`schema.py`, `rules_io.py`, `canonical.py`, `xmlstyle.py`, `model.py`).
 Тесты: `tests/test_canonical.py`, `tests/test_rules_io.py`, `tests/test_corpus_roundtrip.py`.
 
 Обозначения ссылок: `ВК` — `reference/kd2-cfg/DataProcessors/ВыгрузкаКонвертации/Ext/ObjectModule.bsl`,

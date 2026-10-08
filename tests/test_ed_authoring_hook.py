@@ -5,14 +5,14 @@ from types import MappingProxyType
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.hook import generate_hook, validate_hook_forms
-from kd2_rules_mcp.authoring.ed.model import AuthoringPreconditionError, digest
-from kd2_rules_mcp.authoring.ed.operations import apply_header_properties, validate_preconditions
-from kd2_rules_mcp.ed.lexer import lex, split_arguments
-from kd2_rules_mcp.ed.model import SourceFile
-from kd2_rules_mcp.ed.schema.model import QName
-from kd2_rules_mcp.validation.ed_authoring import prepare_authoring
-from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+from kd_rules_mcp.authoring.ed.hook import generate_hook, validate_hook_forms
+from kd_rules_mcp.authoring.ed.model import AuthoringPreconditionError, digest
+from kd_rules_mcp.authoring.ed.operations import apply_header_properties, validate_preconditions
+from kd_rules_mcp.ed.lexer import lex, split_arguments
+from kd_rules_mcp.ed.model import SourceFile
+from kd_rules_mcp.ed.schema.model import QName
+from kd_rules_mcp.validation.ed_authoring import prepare_authoring
+from kd_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 from tests.test_ed_authoring_model import DATA, IDENTITY, OPERATION, TARGET, inputs, refreshed
 
 
@@ -314,7 +314,7 @@ def test_mixed_direction_grouping_and_no_auto_mirroring():
 
 
 def test_whitelist_is_enforced_by_production_generation(monkeypatch):
-    import kd2_rules_mcp.authoring.ed.hook as hook_module
+    import kd_rules_mcp.authoring.ed.hook as hook_module
 
     original = hook_module.lex
 
@@ -338,8 +338,8 @@ def test_raw_generation_requires_read_inputs_for_canonical_names():
 
 
 def test_public_canonical_marker_cannot_bypass_resolution():
-    from kd2_rules_mcp.authoring.ed.canonical import canonicalize_operations
-    from kd2_rules_mcp.authoring.ed.model import CanonicalHeaderProperty
+    from kd_rules_mcp.authoring.ed.canonical import canonicalize_operations
+    from kd_rules_mcp.authoring.ed.model import CanonicalHeaderProperty
 
     value = inputs()
     forged = CanonicalHeaderProperty(OPERATION.target, "заметка", " НетТакого ")
@@ -354,7 +354,7 @@ def test_public_canonical_marker_cannot_bypass_resolution():
 
 def test_handler_fill_assigns_event_and_legacy_hook_stays_direct():
     """Новая форма заполнителя не подменяет комментарий и вызов прямой ПКС первого среза."""
-    from kd2_rules_mcp.authoring.ed.hook import (
+    from kd_rules_mcp.authoring.ed.hook import (
         event_assignment_line,
         generate_handler_fill,
         header_property_lines,

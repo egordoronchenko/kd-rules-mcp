@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.kd2.model import RulesDocument
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules, load_registration_rules, load_rules
-from kd2_rules_mcp.validation.format import (
+from kd_rules_mcp.kd2.model import RulesDocument
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules, load_registration_rules, load_rules
+from kd_rules_mcp.validation.format import (
     DANGLING_REF,
     DUPLICATE_CODE,
     DUPLICATE_NAME,
@@ -15,7 +15,7 @@ from kd2_rules_mcp.validation.format import (
     UNKNOWN_TAG,
     check_format,
 )
-from kd2_rules_mcp.validation.report import Level, ValidationReport
+from kd_rules_mcp.validation.report import Level, ValidationReport
 from tests.corpus import CorpusFile, corpus_params
 
 DATA = Path(__file__).parent / "data"

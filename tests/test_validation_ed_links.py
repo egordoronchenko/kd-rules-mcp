@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.ed import forms, read_manager_text
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.refs import build_references
-from kd2_rules_mcp.validation.ed_links import validate_links
+from kd_rules_mcp.ed import forms, read_manager_text
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.refs import build_references
+from kd_rules_mcp.validation.ed_links import validate_links
 
 DATA = Path(__file__).parent / "data" / "ed"
 BASE = (DATA / "checks_base.bsl").read_text(encoding="utf-8")

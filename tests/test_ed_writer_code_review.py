@@ -4,7 +4,7 @@ from collections import Counter
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     AlgorithmPatch,
     HandlerPatch,
     ManagerOperation,
@@ -14,13 +14,13 @@ from kd2_rules_mcp.authoring.ed.manager_operations import (
     apply,
     preview,
 )
-from kd2_rules_mcp.ed.canonical import model_addresses
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import Reference
-from kd2_rules_mcp.validation.ed_writer import _code_checks, validate_writer
-from kd2_rules_mcp.validation.report import ValidationReport
+from kd_rules_mcp.ed.canonical import model_addresses
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import Reference
+from kd_rules_mcp.validation.ed_writer import _code_checks, validate_writer
+from kd_rules_mcp.validation.report import ValidationReport
 from tests.test_ed_writer_code import code_model, execute, handler, round_trip
 
 
@@ -419,7 +419,7 @@ def test_v4_body_update_rejects_separator_and_create_normalizes_crlf(kind):
         target = next(u.logical_id for u in model.code_units if u.name == "Compute")
         patch = AlgorithmPatch(body="// a\u2028Compute(5);")
     else:
-        from kd2_rules_mcp.authoring.ed.manager_operations import ConversionEventPatch
+        from kd_rules_mcp.authoring.ed.manager_operations import ConversionEventPatch
 
         target = model.conversion_events[0].logical_id
         patch = ConversionEventPatch(body="// a\u2028Compute(5);")

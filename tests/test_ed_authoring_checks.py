@@ -6,26 +6,26 @@ from types import MappingProxyType
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.model import (
+from kd_rules_mcp.authoring.ed.model import (
     AuthoringPreconditionError,
     ExtensionIdentity,
     ProfileReport,
     SourceSet,
     ValidationDelta,
 )
-from kd2_rules_mcp.ed.model import Field, HandlerBinding, PropertyRule, UnknownFragment
-from kd2_rules_mcp.ed.route_model import RouteEntry, RouteSkip
-from kd2_rules_mcp.ed.schema.model import EdSchema, QName
-from kd2_rules_mcp.ed.schema.xdto import XS
-from kd2_rules_mcp.validation.ed_authoring import (
+from kd_rules_mcp.ed.model import Field, HandlerBinding, PropertyRule, UnknownFragment
+from kd_rules_mcp.ed.route_model import RouteEntry, RouteSkip
+from kd_rules_mcp.ed.schema.model import EdSchema, QName
+from kd_rules_mcp.ed.schema.xdto import XS
+from kd_rules_mcp.validation.ed_authoring import (
     check_profile,
     compare_reports,
     enforce_delta,
 )
-from kd2_rules_mcp.validation.ed_authoring import (
+from kd_rules_mcp.validation.ed_authoring import (
     prepare_authoring as _prepare_authoring,
 )
-from kd2_rules_mcp.validation.report import Issue, Level, Skipped
+from kd_rules_mcp.validation.report import Issue, Level, Skipped
 from tests.test_ed_authoring_model import (
     DATA,
     IDENTITY,
@@ -39,7 +39,7 @@ from tests.test_ed_authoring_model import (
 
 def test_missing_value_notice_distinguishes_paths_and_explicit_empty():
     """Пилот H3–H4: исходы разных путей нельзя сводить к общей очистке."""
-    from kd2_rules_mcp.authoring.ed.operations import validate_preconditions
+    from kd_rules_mcp.authoring.ed.operations import validate_preconditions
 
     op = replace(OPERATION, target=replace(TARGET, direction="receive"))
     notice = next(
@@ -443,8 +443,8 @@ def test_missing_value_notice_reason_matches_executor_branch(full):
 
 
 def test_exact_property_name_wins_case_ambiguity():
-    from kd2_rules_mcp.authoring.ed.canonical import canonical_property
-    from kd2_rules_mcp.ed.schema.profile import ValidationProfile
+    from kd_rules_mcp.authoring.ed.canonical import canonical_property
+    from kd_rules_mcp.ed.schema.profile import ValidationProfile
 
     value = inputs()
     schema = value.schemas["1.20"]
@@ -817,9 +817,9 @@ def test_other_notice_distinguishes_absence_and_type_mismatch_by_key():
 
 
 def test_preparation_reuses_indices_profiles_and_does_not_rehash_inputs(monkeypatch):
-    import kd2_rules_mcp.authoring.ed.context as context_module
-    import kd2_rules_mcp.validation.ed_authoring as checking
-    from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
+    import kd_rules_mcp.authoring.ed.context as context_module
+    import kd_rules_mcp.validation.ed_authoring as checking
+    from kd_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
 
     value = inputs()
     counts = {"addresses": 0, "references": 0, "profile": 0, "applicability": 0}
@@ -859,7 +859,7 @@ def test_preparation_reuses_indices_profiles_and_does_not_rehash_inputs(monkeypa
 
 
 def test_scoped_document_keeps_conversion_dependencies_and_full_addresses():
-    from kd2_rules_mcp.authoring.ed.context import AuthoringContext
+    from kd_rules_mcp.authoring.ed.context import AuthoringContext
 
     value = inputs()
     target, dependency = value.document.pko
@@ -879,8 +879,8 @@ def test_scoped_document_keeps_conversion_dependencies_and_full_addresses():
 
 
 def test_reference_cache_rebuilds_when_handler_or_uses_change():
-    from kd2_rules_mcp.authoring.ed.context import AuthoringContext
-    from kd2_rules_mcp.ed.refs import build_references
+    from kd_rules_mcp.authoring.ed.context import AuthoringContext
+    from kd_rules_mcp.ed.refs import build_references
 
     value = inputs()
     context = AuthoringContext(value)
@@ -893,13 +893,13 @@ def test_reference_cache_rebuilds_when_handler_or_uses_change():
 
 
 def test_cached_checkers_equal_original_reports_and_keep_global_dependencies(monkeypatch):
-    from kd2_rules_mcp.ed.address import build_addresses
-    from kd2_rules_mcp.ed.refs import build_references
-    from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-    from kd2_rules_mcp.validation.ed_links import validate_links
-    from kd2_rules_mcp.validation.ed_schema import validate_schema
-    from kd2_rules_mcp.validation.ed_structure import validate_structure
-    from kd2_rules_mcp.validation.ed_structure_snapshot import CheckContext
+    from kd_rules_mcp.ed.address import build_addresses
+    from kd_rules_mcp.ed.refs import build_references
+    from kd_rules_mcp.ed.schema.profile import ValidationProfile
+    from kd_rules_mcp.validation.ed_links import validate_links
+    from kd_rules_mcp.validation.ed_schema import validate_schema
+    from kd_rules_mcp.validation.ed_structure import validate_structure
+    from kd_rules_mcp.validation.ed_structure_snapshot import CheckContext
 
     value = inputs()
     prepared = prepare_authoring(value, (OPERATION,), IDENTITY, version_scope="manager")
@@ -952,7 +952,7 @@ def test_cached_checkers_equal_original_reports_and_keep_global_dependencies(mon
 
 
 def test_overlay_delivery_view_does_not_change_common_data_checks():
-    from kd2_rules_mcp.authoring.ed.manifest import overlay_report_view, validation_dict
+    from kd_rules_mcp.authoring.ed.manifest import overlay_report_view, validation_dict
 
     prepared = prepare_authoring(inputs(), (OPERATION,), IDENTITY, version_scope="manager")
     raw_profiles = prepared.selected_profiles + prepared.other_profiles

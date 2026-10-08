@@ -1,7 +1,7 @@
 # Сборка структуры из XML-выгрузки: сверка с MD83Exp
 
 Дата: 26.09.2026. Этап 4: сборка структуры из XML-выгрузки.
-Код: `src/kd2_rules_mcp/structures/xmldump.py` (чтение выгрузки), `xmlbuild.py` (сборка),
+Код: `src/kd_rules_mcp/structures/xmldump.py` (чтение выгрузки), `xmlbuild.py` (сборка),
 `store.py` (`StructureStore.load_xml`). Тесты: `tests/test_structures_xmlbuild.py` (синтетическая выгрузка);
 тест на реальных выгрузках (маркер `structures`) в репозиторий не входит.
 Ссылки «MD83Exp:N» — строки `reference/kd2-dist-src/MD83Exp/ВыгрузкаМетаданных/Ext/ObjectModule.bsl`.

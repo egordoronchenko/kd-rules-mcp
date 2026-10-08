@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 import pytest
 
-from kd2_rules_mcp import ed
-from kd2_rules_mcp.ed import forms
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp import ed
+from kd_rules_mcp.ed import forms
+from kd_rules_mcp.errors import (
     AmbiguousAddressError,
     EdFormatError,
     EdReadError,
@@ -20,9 +20,9 @@ from kd2_rules_mcp.errors import (
     ProjectNotFoundError,
     RuleNotFoundError,
 )
-from kd2_rules_mcp.server import error_payload
-from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
-from kd2_rules_mcp.service.ed_views import short
+from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.service import Kd2Service, PathMap, Settings
+from kd_rules_mcp.service.ed_views import short
 
 DATA = Path(__file__).parent / "data/ed"
 
@@ -381,7 +381,7 @@ def test_errors(service, tmp_path):
         (ed.EdResourceLimitError, EdResourceLimitError, "ed_resource_limit"),
     ):
         with patch(
-            "kd2_rules_mcp.service.ed.ed.read_manager", side_effect=package_error("Сообщение")
+            "kd_rules_mcp.service.ed.ed.read_manager", side_effect=package_error("Сообщение")
         ):
             with pytest.raises(service_error, match="Сообщение") as caught:
                 service.ed_open(str(foreign))
@@ -409,7 +409,7 @@ def test_preview_and_version_limits(service):
     document = replace(
         document, conversion=replace(document.conversion, format_version_mentions=mentions)
     )
-    with patch("kd2_rules_mcp.service.ed.ed.read_manager", return_value=document):
+    with patch("kd_rules_mcp.service.ed.ed.read_manager", return_value=document):
         project = opened(service, 3)
     versions = service.ed_overview(project)["format_versions"]
     assert versions["total"] == 23 and len(versions["items"]) == 20 and versions["has_more"]
@@ -448,11 +448,9 @@ def test_long_raw_and_diagnostics(service, tmp_path):
 def test_index_built_once_and_atomic_open(service, tmp_path):
     path = tmp_path / "atomic.bsl"
     path.write_bytes((DATA / "manager_v2.bsl").read_bytes())
-    from kd2_rules_mcp.ed.address import build_addresses
+    from kd_rules_mcp.ed.address import build_addresses
 
-    with patch(
-        "kd2_rules_mcp.service.ed.addresses.build_addresses", wraps=build_addresses
-    ) as build:
+    with patch("kd_rules_mcp.service.ed.addresses.build_addresses", wraps=build_addresses) as build:
         project = service.ed_open(str(path))["project_id"]
         service.ed_open(str(path))
         service.ed_get(project, "ПКО/Товар")
@@ -484,7 +482,7 @@ def test_short_id_collision(service, tmp_path):
             return SimpleNamespace(hexdigest=lambda: hashes[raw])
         return real_hash(raw, **kwargs)
 
-    with patch("kd2_rules_mcp.service.ed.hashlib.sha256", side_effect=collide):
+    with patch("kd_rules_mcp.service.ed.hashlib.sha256", side_effect=collide):
         left = service.ed_open(str(first))
         right = service.ed_open(str(second))
         assert left["project_id"] == "ed-manager-" + "a" * 12
@@ -644,7 +642,7 @@ def test_validate_profile_inputs_and_filters(service, tmp_path):
 
 
 def test_validate_profile_input_errors(service, tmp_path):
-    from kd2_rules_mcp.errors import EdSchemaNotFoundError, StructureNotFoundError
+    from kd_rules_mcp.errors import EdSchemaNotFoundError, StructureNotFoundError
 
     project = service.ed_open(str(checks_file(tmp_path)))["project_id"]
     with pytest.raises(EdSchemaNotFoundError):
@@ -689,8 +687,8 @@ def test_validate_without_schema_keeps_version_condition_unknown(service, tmp_pa
 
 
 def test_validate_caches_structure_input_and_releases_general_lock(service, tmp_path, monkeypatch):
-    from kd2_rules_mcp.service import ed as service_ed
-    from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+    from kd_rules_mcp.service import ed as service_ed
+    from kd_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
     from tests.test_ed_profile import BASE, document
     from tests.test_ed_profile import DATA as SCHEMA_DATA
 
@@ -757,7 +755,7 @@ def test_validate_caches_structure_input_and_releases_general_lock(service, tmp_
 
 
 def test_validate_sorts_reference_with_stub_address(service, tmp_path, monkeypatch):
-    from kd2_rules_mcp.service import ed as service_ed
+    from kd_rules_mcp.service import ed as service_ed
     from tests.test_ed_profile import BASE, document
 
     text = BASE + (
@@ -847,8 +845,8 @@ def test_validate_filters_pages_and_keeps_full_summary(service, tmp_path):
 
 def test_rules_report_view_keeps_full_skipped_list() -> None:
     """Общий вид отчёта rules_validate не сворачивает пропуски."""
-    from kd2_rules_mcp.service.views import report_view
-    from kd2_rules_mcp.validation.report import ValidationReport
+    from kd_rules_mcp.service.views import report_view
+    from kd_rules_mcp.validation.report import ValidationReport
 
     report = ValidationReport()
     report.warning("format.unknown_tag", "ПКО/Товар", "неизвестный тег")

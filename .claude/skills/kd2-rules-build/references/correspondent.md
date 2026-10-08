@@ -3,9 +3,9 @@
 
 Ссылки `(Процедура, стр. N)` — модуль объекта `КонвертацияОбъектовИнформационныхБаз` (БСП 3.1.12);
 `reference/kd2-cfg/…:N` — выгрузка КД 2.1.8.2; `correspondent.py:N` и `pack.py:N` — строки модулей сервера
-([correspondent.py](https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/src/kd2_rules_mcp/authoring/correspondent.py),
-[pack.py](https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/src/kd2_rules_mcp/authoring/pack.py));
-`разбор:N` — [сверка черновика с ручными правилами](https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/docs/research/rules-authoring.md#65-черновик-правил-корреспондента).
+([correspondent.py](https://github.com/egordoronchenko/kd-rules-mcp/blob/main/src/kd_rules_mcp/authoring/correspondent.py),
+[pack.py](https://github.com/egordoronchenko/kd-rules-mcp/blob/main/src/kd_rules_mcp/authoring/pack.py));
+`разбор:N` — [сверка черновика с ручными правилами](https://github.com/egordoronchenko/kd-rules-mcp/blob/main/docs/research/rules-authoring.md#65-черновик-правил-корреспондента).
 Параметры и ответ инструмента — `tools.md`, `correspondent_draft`.
 
 ## Что такое правила обратного направления

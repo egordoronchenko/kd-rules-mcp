@@ -11,12 +11,12 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.handlers import operation_from_input
-from kd2_rules_mcp.authoring.ed.manifest import operation_dict
-from kd2_rules_mcp.authoring.ed.xml_dump import M, serialize
-from kd2_rules_mcp.server import error_payload
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.service import ed_authoring as module
+from kd_rules_mcp.authoring.ed.handlers import operation_from_input
+from kd_rules_mcp.authoring.ed.manifest import operation_dict
+from kd_rules_mcp.authoring.ed.xml_dump import M, serialize
+from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service import ed_authoring as module
 from tests.test_ed_authoring_handlers import HANDLERS, handler_inputs
 from tests.test_ed_authoring_model import DATA, IDENTITY, OPERATION
 from tests.test_service_ed_routes import _xml
@@ -628,9 +628,9 @@ def test_rebuild_portable_source_paths_and_project_root(setup, tmp_path):
 
 
 def test_rebuild_preserves_previously_assigned_uuid(setup):
-    from kd2_rules_mcp.authoring.ed.artifacts import with_source_hashes
-    from kd2_rules_mcp.authoring.ed.identity import IdentityMap
-    from kd2_rules_mcp.authoring.ed.render import render_authoring
+    from kd_rules_mcp.authoring.ed.artifacts import with_source_hashes
+    from kd_rules_mcp.authoring.ed.identity import IdentityMap
+    from kd_rules_mcp.authoring.ed.render import render_authoring
 
     first = write(setup)
     service = setup[0]
@@ -1056,7 +1056,7 @@ def test_two_managers_augmentation_after_service_restart(setup):
 
 
 def test_other_schema_read_failure_becomes_notice(setup, monkeypatch):
-    from kd2_rules_mcp.validation.ed_routes import SchemaUnavailable
+    from kd_rules_mcp.validation.ed_routes import SchemaUnavailable
 
     monkeypatch.setattr(
         module,
@@ -1320,10 +1320,10 @@ def test_build_section_arguments_are_validated_before_work(setup, options, monke
 
 
 def test_summary_sections_filters_and_full_bundle_are_independent(setup, monkeypatch):
-    from kd2_rules_mcp.authoring.ed.model import ValidationDelta
-    from kd2_rules_mcp.authoring.ed.render import render_authoring
-    from kd2_rules_mcp.service.ed_authoring_views import json_size
-    from kd2_rules_mcp.validation.report import Issue, Level, Skipped
+    from kd_rules_mcp.authoring.ed.model import ValidationDelta
+    from kd_rules_mcp.authoring.ed.render import render_authoring
+    from kd_rules_mcp.service.ed_authoring_views import json_size
+    from kd_rules_mcp.validation.report import Issue, Level, Skipped
 
     original = module.prepare_authoring
     captured = []
@@ -1408,7 +1408,7 @@ def test_summary_sections_filters_and_full_bundle_are_independent(setup, monkeyp
 
 
 def test_scopes_flat_rows_keep_variants_without_call_chains(setup, monkeypatch):
-    from kd2_rules_mcp.ed.route_model import VariantInfo
+    from kd_rules_mcp.ed.route_model import VariantInfo
 
     service, _, _ = setup
     original = service._inputs_for
@@ -1439,7 +1439,7 @@ def test_scopes_flat_rows_keep_variants_without_call_chains(setup, monkeypatch):
 
 
 def test_candidates_hundreds_of_properties_have_bounded_pages(setup):
-    from kd2_rules_mcp.service.ed_authoring_views import json_size
+    from kd_rules_mcp.service.ed_authoring_views import json_size
 
     service, args, root = setup
     path = root / "XDTOPackages/Формат120/Ext/Package.bin"
@@ -1591,7 +1591,7 @@ def test_stand_chained_validation_records_previous_call_and_changed_procedure(se
 
 @pytest.mark.parametrize("skipped_only", [False, True])
 def test_stand_other_version_notice_names_property_and_version(setup, monkeypatch, skipped_only):
-    from kd2_rules_mcp.validation.report import Skipped
+    from kd_rules_mcp.validation.report import Skipped
 
     fixture = json.loads((HANDLERS / "dto/algorithmic-send.json").read_text("utf-8"))
     current, _ = handler_setup(setup, fixture)
@@ -1625,7 +1625,7 @@ def test_stand_other_version_notice_names_property_and_version(setup, monkeypatc
 
 
 def test_stand_section_budget_excludes_header_and_packs_whole_records():
-    from kd2_rules_mcp.service.ed_authoring_views import compact_page, json_size
+    from kd_rules_mcp.service.ed_authoring_views import compact_page, json_size
 
     rows = [{"number": i, "message": "Запись " * 15} for i in range(150)]
     base = {"summary": "Шапка " * 3000}
@@ -1653,7 +1653,7 @@ def test_recheck_migration_keeps_property_notices_and_fits_summary_page(setup):
     ``docs/plans/evals/2026-10-05-ed-handlers-stand/recheck`` (Н-С1): семь версий,
     каждая дважды и с внутренним кодом, четыре подтверждения в шапке.
     """
-    from kd2_rules_mcp.service.ed_authoring_views import compact_page, json_size
+    from kd_rules_mcp.service.ed_authoring_views import compact_page, json_size
 
     recheck = (
         Path(__file__).parents[1]
@@ -1805,8 +1805,8 @@ def test_stand_instruction_probes_sections_hash_and_installation(setup, scenario
 def test_stand_migration_summary_folds_other_skips_and_shows_all_acknowledgements(
     setup, monkeypatch
 ):
-    from kd2_rules_mcp.authoring.ed.model import ValidationDelta
-    from kd2_rules_mcp.validation.report import Skipped
+    from kd_rules_mcp.authoring.ed.model import ValidationDelta
+    from kd_rules_mcp.validation.report import Skipped
 
     fixture = json.loads((HANDLERS / "dto/preserve-receive.json").read_text("utf-8"))
     current, _ = handler_setup(setup, fixture)

@@ -4,17 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.ed.address import escape_segment
-from kd2_rules_mcp.ed.errors import EdFormatError, EdResourceLimitError
-from kd2_rules_mcp.ed.model import Classification, ParseStatus
-from kd2_rules_mcp.ed.registration import (
+from kd_rules_mcp.ed.address import escape_segment
+from kd_rules_mcp.ed.errors import EdFormatError, EdResourceLimitError
+from kd_rules_mcp.ed.model import Classification, ParseStatus
+from kd_rules_mcp.ed.registration import (
     AmbiguousRegistrationAddress,
     find_rule,
     read_registration_manager,
     read_registration_manager_text,
     rule_address,
 )
-from kd2_rules_mcp.ed.registration_model import HANDLER_EVENTS, XmlNode
+from kd_rules_mcp.ed.registration_model import HANDLER_EVENTS, XmlNode
 
 DATA = Path(__file__).parent / "data" / "ed" / "registration"
 EVENTS = tuple(event for event, _ in HANDLER_EVENTS)
@@ -312,14 +312,14 @@ def test_dtd_depth_and_size_do_not_drop_the_neighbor(monkeypatch: pytest.MonkeyP
         "<СвойствоПланаОбмена>A</СвойствоПланаОбмена></ЭлементОтбора></Группа>"
         "</ОтборПоСвойствамПланаОбмена>"
     )
-    monkeypatch.setattr("kd2_rules_mcp.ed.registration.MAX_XML_DEPTH", 2)
+    monkeypatch.setattr("kd_rules_mcp.ed.registration.MAX_XML_DEPTH", 2)
     document = read_registration_manager_text(deep)
     assert document.rules[0].plan_filter is not None
     assert document.rules[0].plan_filter.error == "глубина XML отбора превышает 2"
     assert document.rules[1].identifier == "Товары"
 
     wide = _pair("<ОтборПоСвойствамПланаОбмена>" + (" " * 40) + "</ОтборПоСвойствамПланаОбмена>")
-    monkeypatch.setattr("kd2_rules_mcp.ed.registration.MAX_FILTER_BYTES", 60)
+    monkeypatch.setattr("kd_rules_mcp.ed.registration.MAX_FILTER_BYTES", 60)
     document = read_registration_manager_text(wide)
     assert document.rules[0].plan_filter is not None
     assert document.rules[0].plan_filter.error == "размер литерала отбора превышает 4 МиБ"
@@ -328,7 +328,7 @@ def test_dtd_depth_and_size_do_not_drop_the_neighbor(monkeypatch: pytest.MonkeyP
 
 
 def test_input_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("kd2_rules_mcp.ed.registration.MAX_BYTES", 20)
+    monkeypatch.setattr("kd_rules_mcp.ed.registration.MAX_BYTES", 20)
     with pytest.raises(EdResourceLimitError):
         read_registration_manager_text("x" * 40)
 

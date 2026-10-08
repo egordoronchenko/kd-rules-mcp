@@ -2,14 +2,14 @@
 
 from pathlib import Path
 
-from kd2_rules_mcp.authoring.ed.format_package import (
+from kd_rules_mcp.authoring.ed.format_package import (
     FormatFacet,
     FormatPackage,
     FormatProperty,
     FormatType,
 )
-from kd2_rules_mcp.ed.schema import QName, load_schema
-from kd2_rules_mcp.ed.schema.xdto import XS
+from kd_rules_mcp.ed.schema import QName, load_schema
+from kd_rules_mcp.ed.schema.xdto import XS
 
 OWN = "urn:fiction:extension"
 BASE = "urn:fiction:base"

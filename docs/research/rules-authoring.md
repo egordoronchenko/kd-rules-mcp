@@ -1,12 +1,12 @@
 # Составление правил: обоснование и результаты
 
-Дата: 27.09.2026. Этап 6: составление правил. Код — пакет `src/kd2_rules_mcp/authoring/`.
+Дата: 27.09.2026. Этап 6: составление правил. Код — пакет `src/kd_rules_mcp/authoring/`.
 
 Ссылки «КД:…» — модули эталона `reference/kd2-cfg/`.
 
 ## 6.1. Рабочий проект правил
 
-Код: `src/kd2_rules_mcp/authoring/workspace.py` (`RulesWorkspace`: `open_rules`, `create_exchange`, `save`, `get`),
+Код: `src/kd_rules_mcp/authoring/workspace.py` (`RulesWorkspace`: `open_rules`, `create_exchange`, `save`, `get`),
 тесты: `tests/test_authoring_workspace.py`; ошибки `WorkspacePathError`, `ProjectNotFoundError` в `errors.py`.
 
 - Проекты живут в памяти по идентификатору; открыть можно XML правил обмена или регистрации по любому пути.
@@ -23,7 +23,7 @@
 
 ## 6.2. Кандидаты сопоставления
 
-Код: `src/kd2_rules_mcp/authoring/candidates.py` (`object_candidates`, `property_candidates`, `value_candidates`,
+Код: `src/kd_rules_mcp/authoring/candidates.py` (`object_candidates`, `property_candidates`, `value_candidates`,
 `auto_allowed`), тесты: `tests/test_authoring_candidates.py`. Для поиска объекта по `Вид.Имя` или имени
 типа в `structures/queries.py` добавлена публичная `find_object`.
 
@@ -50,7 +50,7 @@
 
 ## 6.3. Точечные правки правил
 
-Код: `src/kd2_rules_mcp/authoring/edits.py` (`create_rule`, `update_rule`, `delete_rule`,
+Код: `src/kd_rules_mcp/authoring/edits.py` (`create_rule`, `update_rule`, `delete_rule`,
 `create_pko_with_properties`, результат `EditResult`), тесты: `tests/test_authoring_edits.py`; ошибки `RuleEditError`
 и наследники (`UnknownFieldError`, `DuplicateRuleError`, `RuleNotFoundError`, `DanglingReferenceError`) в `errors.py`.
 
@@ -67,7 +67,7 @@
 
 ## 6.4. Правила регистрации из состава плана обмена
 
-Код: `src/kd2_rules_mcp/authoring/registration.py` (`build_registration_rules` и спецификации `RegistrationObject`,
+Код: `src/kd_rules_mcp/authoring/registration.py` (`build_registration_rules` и спецификации `RegistrationObject`,
 `PlanFilter`, `ObjectFilter` с группами), тесты: `tests/test_authoring_registration.py`.
 
 - Заголовок, `ПланОбмена`, `Конфигурация`, `СоставПланаОбмена` (тип и авторегистрация из структуры источника), ПРО,
@@ -87,7 +87,7 @@
 
 ## 6.5. Черновик правил корреспондента
 
-Код: `src/kd2_rules_mcp/authoring/correspondent.py` (`mirror_rules(rules, codes, target_structure)`), тесты:
+Код: `src/kd_rules_mcp/authoring/correspondent.py` (`mirror_rules(rules, codes, target_structure)`), тесты:
 `tests/test_authoring_correspondent.py`; построитель маленьких структур для тестов вынесен в `tests/sqlite_structure.py`.
 В КД механизма нет (дайджест §2.9, §6), поэтому результат — черновик: `Комментарий` заголовка
 и признак `draft` в ответе.

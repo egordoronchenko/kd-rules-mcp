@@ -5,8 +5,8 @@ from functools import cache
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.kd2.canonical import canonical_diff, canonical_form, parse_xml
-from kd2_rules_mcp.kd2.rules_io import (
+from kd_rules_mcp.kd2.canonical import canonical_diff, canonical_form, parse_xml
+from kd_rules_mcp.kd2.rules_io import (
     dump_rules,
     load_exchange_rules,
     load_registration_rules,

@@ -4,20 +4,20 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     ManagerOperation,
     PkoPatch,
     PropertyPatch,
     parse_operation,
 )
-from kd2_rules_mcp.ed.canonical import model_addresses
-from kd2_rules_mcp.ed.executor_profile import BSP_3_1_12_XDTO, RuleColumn
-from kd2_rules_mcp.ed.forms import EVENT_SIGNATURES
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import Event, Reference, Value, dump_model, load_model
-from kd2_rules_mcp.validation.ed_writer import validate_writer
+from kd_rules_mcp.ed.canonical import model_addresses
+from kd_rules_mcp.ed.executor_profile import BSP_3_1_12_XDTO, RuleColumn
+from kd_rules_mcp.ed.forms import EVENT_SIGNATURES
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import Event, Reference, Value, dump_model, load_model
+from kd_rules_mcp.validation.ed_writer import validate_writer
 from tests.test_ed_writer import execute, pilot_model
 from tests.test_ed_writer_profiles import verified_detection
 
@@ -30,8 +30,8 @@ def report_for(model, text=None, **kwargs):
 
 
 def test_live_unknown_names_cover_algorithms_events_and_preserve_boundary():
-    from kd2_rules_mcp.authoring.ed.manager_operations import AlgorithmPatch, ConversionEventPatch
-    from kd2_rules_mcp.validation.ed_names import validate_handler_names
+    from kd_rules_mcp.authoring.ed.manager_operations import AlgorithmPatch, ConversionEventPatch
+    from kd_rules_mcp.validation.ed_names import validate_handler_names
 
     model = execute(
         new_manager(),

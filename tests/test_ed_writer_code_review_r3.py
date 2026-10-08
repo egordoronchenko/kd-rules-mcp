@@ -2,13 +2,13 @@
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     HandlerPatch,
     ManagerOperation,
     parse_operation,
     preview,
 )
-from kd2_rules_mcp.ed.writer import render
+from kd_rules_mcp.ed.writer import render
 from tests.test_ed_writer_code import execute, round_trip
 from tests.test_ed_writer_code_review import base, branch_text, checks, imported, planned
 from tests.test_ed_writer_code_review_r2 import OTHER

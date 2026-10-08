@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     AlgorithmPatch,
     ConversionEventPatch,
     HandlerPatch,
@@ -18,14 +18,14 @@ from kd2_rules_mcp.authoring.ed.manager_operations import (
     parse_operation,
     preview,
 )
-from kd2_rules_mcp.ed.canonical import canonicalize, model_addresses
-from kd2_rules_mcp.ed.diff import compare_models
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import code_occurrences, import_manager
-from kd2_rules_mcp.ed.writer_model import Reference, TextStyle, dump_model, load_model
-from kd2_rules_mcp.validation.ed_writer import _code_checks
-from kd2_rules_mcp.validation.report import ValidationReport
+from kd_rules_mcp.ed.canonical import canonicalize, model_addresses
+from kd_rules_mcp.ed.diff import compare_models
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import code_occurrences, import_manager
+from kd_rules_mcp.ed.writer_model import Reference, TextStyle, dump_model, load_model
+from kd_rules_mcp.validation.ed_writer import _code_checks
+from kd_rules_mcp.validation.report import ValidationReport
 
 
 def execute(model, op):

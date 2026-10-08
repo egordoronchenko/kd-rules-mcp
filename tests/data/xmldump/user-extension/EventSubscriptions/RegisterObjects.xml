@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.20">
+	<EventSubscription uuid="44444444-4444-4444-8444-444444444444">
+		<InternalInfo/>
+		<Properties>
+			<ObjectBelonging>Adopted</ObjectBelonging>
+			<Name>RegisterObjects</Name>
+			<ExtendedConfigurationObject>55555555-5555-4555-8555-555555555555</ExtendedConfigurationObject>
+			<Source>
+				<v8:Type>cfg:CatalogObject.Foreign</v8:Type>
+				<v8:Type>cfg:CatalogObject.Existing</v8:Type>
+			</Source>
+		</Properties>
+	</EventSubscription>
+</MetaDataObject>

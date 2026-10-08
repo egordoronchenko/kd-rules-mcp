@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.projects import load_catalog, load_local, resolve
+from kd_rules_mcp.projects import load_catalog, load_local, resolve
 
 ROOT = Path(__file__).resolve().parents[1]
 

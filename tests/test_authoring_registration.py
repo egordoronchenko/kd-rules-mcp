@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.registration import (
+from kd_rules_mcp.authoring.registration import (
     FilterProperty,
     ObjectFilter,
     ObjectFilterGroup,
@@ -19,15 +19,15 @@ from kd2_rules_mcp.authoring.registration import (
     parse_registration_object,
     replace_registration_filters,
 )
-from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.kd2.canonical import canonical_form, parse_xml
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_registration_rules
-from kd2_rules_mcp.kd2.xmlstyle import KD_STYLE
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.structures.store import StructureStore
-from kd2_rules_mcp.validation.format import check_format
-from kd2_rules_mcp.validation.registration import check_registration
+from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.kd2.canonical import canonical_form, parse_xml
+from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_registration_rules
+from kd_rules_mcp.kd2.xmlstyle import KD_STYLE
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.structures.store import StructureStore
+from kd_rules_mcp.validation.format import check_format
+from kd_rules_mcp.validation.registration import check_registration
 
 DUMP = Path(__file__).parent / "data" / "registration" / "dump"
 WHEN = datetime(2026, 9, 27, 8, 0, 0)

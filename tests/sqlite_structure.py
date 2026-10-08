@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from pathlib import Path
 
-from kd2_rules_mcp.structures import db
+from kd_rules_mcp.structures import db
 
 # (вид, имя, синоним, типы, вложенные свойства)
 Prop = tuple[str, str, str, str, Sequence["Prop"]]

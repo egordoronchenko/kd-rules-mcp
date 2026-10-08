@@ -2,8 +2,8 @@
 
 import pytest
 
-from kd2_rules_mcp.ed import read_manager_text
-from kd2_rules_mcp.ed.address import (
+from kd_rules_mcp.ed import read_manager_text
+from kd_rules_mcp.ed.address import (
     AmbiguousAddressError,
     EntityNotFoundError,
     build_addresses,

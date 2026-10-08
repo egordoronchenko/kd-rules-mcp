@@ -13,7 +13,7 @@ from typing import ClassVar
 
 import pytest
 
-from kd2_rules_mcp.projects import ProjectConfigError
+from kd_rules_mcp.projects import ProjectConfigError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "kdbase"))

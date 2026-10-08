@@ -1,11 +1,11 @@
-"""Переключение stdout и stderr скриптов на UTF-8 (`kd2_rules_mcp.console`)."""
+"""Переключение stdout и stderr скриптов на UTF-8 (`kd_rules_mcp.console`)."""
 
 import io
 import sys
 
 import pytest
 
-from kd2_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.console import utf8_stdout
 
 SAMPLE = "→ — ✓"
 

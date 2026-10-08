@@ -7,23 +7,23 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     IdentificationPatch,
     ManagerOperation,
     PkoPatch,
 )
-from kd2_rules_mcp.ed.executor_profile import (
+from kd_rules_mcp.ed.executor_profile import (
     BSP_3_1_12_XDTO,
     detect_profile,
     detect_profile_text,
     executor_fingerprint,
 )
-from kd2_rules_mcp.ed.lexer import tokenize
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import import_manager, import_signature
-from kd2_rules_mcp.ed.writer_model import EntityStyle, Value, dump_model, load_model, validate_model
-from kd2_rules_mcp.validation.ed_writer import validate_writer
+from kd_rules_mcp.ed.lexer import tokenize
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import import_manager, import_signature
+from kd_rules_mcp.ed.writer_model import EntityStyle, Value, dump_model, load_model, validate_model
+from kd_rules_mcp.validation.ed_writer import validate_writer
 from tests.test_ed_writer import execute, pilot_model
 
 
@@ -89,7 +89,7 @@ def test_filesystem_missing_executor(tmp_path):
 def test_extensions_invalidate_only_executor_interceptions(
     tmp_path, monkeypatch, annotation, intercepted
 ):
-    from kd2_rules_mcp.ed import executor_profile
+    from kd_rules_mcp.ed import executor_profile
 
     _, texts, profile = verified_detection()
     monkeypatch.setattr(executor_profile, "PROFILES", (profile,))
@@ -138,7 +138,7 @@ def test_snapshot_contains_selection_only_and_runtime_stays_in_registry():
 
 
 def test_legacy_snapshot_drops_proofs_and_migrates_revision():
-    from kd2_rules_mcp.ed.writer_model import json_value
+    from kd_rules_mcp.ed.writer_model import json_value
 
     model = load_model(
         (Path(__file__).parent / "data/ed/writer/legacy-profile.ed.json").read_bytes()

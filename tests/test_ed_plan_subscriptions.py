@@ -9,25 +9,25 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.model import AuthoringPreconditionError
-from kd2_rules_mcp.authoring.ed.xml_dump import (
+from kd_rules_mcp.authoring.ed.model import AuthoringPreconditionError
+from kd_rules_mcp.authoring.ed.xml_dump import (
     SubscriptionAddition,
     check_subscription_sources,
     read_description,
 )
-from kd2_rules_mcp.authoring.registration_retarget import registration_plan_notices
-from kd2_rules_mcp.errors import EdAuthoringAckRequiredError, EdAuthoringPreconditionError
-from kd2_rules_mcp.kd2.rules_io import load_registration_rules
-from kd2_rules_mcp.structures import db
-from kd2_rules_mcp.structures.queries import Page, describe_object, exchange_plan_content
-from kd2_rules_mcp.structures.xmlbuild import Metadata
-from kd2_rules_mcp.structures.xmlbuild import build as build_structure
-from kd2_rules_mcp.structures.xmldump import plan_subscriptions, read_dump, read_subscription
-from kd2_rules_mcp.validation.ed_plan import (
+from kd_rules_mcp.authoring.registration_retarget import registration_plan_notices
+from kd_rules_mcp.errors import EdAuthoringAckRequiredError, EdAuthoringPreconditionError
+from kd_rules_mcp.kd2.rules_io import load_registration_rules
+from kd_rules_mcp.structures import db
+from kd_rules_mcp.structures.queries import Page, describe_object, exchange_plan_content
+from kd_rules_mcp.structures.xmlbuild import Metadata
+from kd_rules_mcp.structures.xmlbuild import build as build_structure
+from kd_rules_mcp.structures.xmldump import plan_subscriptions, read_dump, read_subscription
+from kd_rules_mcp.validation.ed_plan import (
     subscription_source_objects,
     validate_plan_registration,
 )
-from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+from kd_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 from tests.test_ed_writer_plan_content import add_content
 from tests.test_service_ed_writer import PLAN, apply_packet, build, manager_operations
 from tests.test_service_ed_writer import writer_setup as writer_setup

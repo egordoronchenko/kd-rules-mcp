@@ -10,11 +10,11 @@ from typing import Any, cast
 
 import pytest
 
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-from kd2_rules_mcp.structures import db, md83exp
-from kd2_rules_mcp.validation.ed_structure import validate_structure
-from kd2_rules_mcp.validation.ed_structure_snapshot import (
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.schema.profile import ValidationProfile
+from kd_rules_mcp.structures import db, md83exp
+from kd_rules_mcp.validation.ed_structure import validate_structure
+from kd_rules_mcp.validation.ed_structure_snapshot import (
     COLLECTIONS,
     CheckContext,
     StructureSnapshot,
@@ -259,7 +259,7 @@ def test_absent_standard_attributes_are_skipped_for_properties_and_search(attrib
 
 
 def test_standard_attributes_depend_on_object_kind_and_table_context():
-    from kd2_rules_mcp.structures.xmldump import KINDS
+    from kd_rules_mcp.structures.xmldump import KINDS
 
     assert {row[2].casefold(): row[1] for row in KINDS.values()} == COLLECTIONS
     doc = document(

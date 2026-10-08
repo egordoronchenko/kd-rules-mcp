@@ -7,23 +7,23 @@ from types import MappingProxyType
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.model import AttributeDraft
-from kd2_rules_mcp.authoring.ed.operations import draft_property
-from kd2_rules_mcp.ed.layer_model import LayerDescriptor, rule_view
-from kd2_rules_mcp.ed.layer_reader import read_extension_text
-from kd2_rules_mcp.ed.layers import compose_manager
-from kd2_rules_mcp.ed.model import Classification
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.refs import binding_owners, build_references
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-from kd2_rules_mcp.validation.ed_layers import (
+from kd_rules_mcp.authoring.ed.model import AttributeDraft
+from kd_rules_mcp.authoring.ed.operations import draft_property
+from kd_rules_mcp.ed.layer_model import LayerDescriptor, rule_view
+from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.layers import compose_manager
+from kd_rules_mcp.ed.model import Classification
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.refs import binding_owners, build_references
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.ed.schema.profile import ValidationProfile
+from kd_rules_mcp.validation.ed_layers import (
     validate_effective_links,
     validate_effective_schema,
     validate_effective_structure,
     validate_layers,
 )
-from kd2_rules_mcp.validation.ed_projection import effective_document, select_context
+from kd_rules_mcp.validation.ed_projection import effective_document, select_context
 from tests.test_ed_layer_flow import HELPERS, MODULE
 from tests.test_validation_ed_structure import snapshot
 

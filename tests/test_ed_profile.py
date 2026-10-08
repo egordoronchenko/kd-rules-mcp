@@ -6,9 +6,9 @@ from typing import Any, cast
 
 import pytest
 
-from kd2_rules_mcp.ed import forms, read_manager_text
-from kd2_rules_mcp.ed.schema import QName, load_schema, resolve_property
-from kd2_rules_mcp.ed.schema.profile import (
+from kd_rules_mcp.ed import forms, read_manager_text
+from kd_rules_mcp.ed.schema import QName, load_schema, resolve_property
+from kd_rules_mcp.ed.schema.profile import (
     Applicability,
     ValidationProfile,
     evaluate_condition,

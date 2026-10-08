@@ -7,15 +7,15 @@ from pathlib import Path
 
 import pytest
 
-import kd2_rules_mcp.validation.ed_registration as registration_adapter
-from kd2_rules_mcp.ed.model import ParseStatus
-from kd2_rules_mcp.ed.registration import read_registration_manager, read_registration_manager_text
-from kd2_rules_mcp.kd2.model import RegistrationRules, RulesDocument
-from kd2_rules_mcp.kd2.rules_io import load_registration_rules
-from kd2_rules_mcp.structures.store import StructureStore
-from kd2_rules_mcp.validation.ed_registration import check_registration_module
-from kd2_rules_mcp.validation.registration import check_registration
-from kd2_rules_mcp.validation.report import ValidationReport
+import kd_rules_mcp.validation.ed_registration as registration_adapter
+from kd_rules_mcp.ed.model import ParseStatus
+from kd_rules_mcp.ed.registration import read_registration_manager, read_registration_manager_text
+from kd_rules_mcp.kd2.model import RegistrationRules, RulesDocument
+from kd_rules_mcp.kd2.rules_io import load_registration_rules
+from kd_rules_mcp.structures.store import StructureStore
+from kd_rules_mcp.validation.ed_registration import check_registration_module
+from kd_rules_mcp.validation.registration import check_registration
+from kd_rules_mcp.validation.report import ValidationReport
 
 DATA = Path(__file__).parent / "data" / "ed" / "registration"
 XML_RULES = Path(__file__).parent / "data" / "registration"

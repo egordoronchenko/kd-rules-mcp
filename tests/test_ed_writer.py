@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     IdentificationPatch,
     ManagerOperation,
     ManagerOperationError,
@@ -18,12 +18,12 @@ from kd2_rules_mcp.authoring.ed.manager_operations import (
     apply,
     preview,
 )
-from kd2_rules_mcp.ed.canonical import canonicalize
-from kd2_rules_mcp.ed.diff import compare_models
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import Reference, Value, dump_model, load_model, partition_report
+from kd_rules_mcp.ed.canonical import canonicalize
+from kd_rules_mcp.ed.diff import compare_models
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import Reference, Value, dump_model, load_model, partition_report
 from tests.test_ed_writer_model import SYNTHETIC, imported, layout_input
 
 
@@ -133,8 +133,8 @@ def test_goldens_are_generated_complete_and_stable(factory, name):
     document, back = reread(model, output)
     # Старый золотой файл проверяет весь прежний каркас; новый помощник W3 —
     # отдельно по независимому шаблону эталона, без изменения файлов данных.
-    from kd2_rules_mcp.ed.forms import helper_forms
-    from kd2_rules_mcp.ed.lexer import tokenize
+    from kd_rules_mcp.ed.forms import helper_forms
+    from kd_rules_mcp.ed.lexer import tokenize
 
     helper = next(r for r in document.routines if r.name == "ДобавитьПКТЧ")
 
@@ -326,7 +326,7 @@ def test_retained_inline_comment_is_stored_once_and_positional_address_refused()
     )
     assert not retained.trailing_comment and not element.trailing_comment
     assert sum("хвост R" in b.text for b in model.retained_blocks) == 1
-    from kd2_rules_mcp.ed.canonical import model_addresses
+    from kd_rules_mcp.ed.canonical import model_addresses
 
     address = model_addresses(model)[model.pko[0].logical_id] + "#2"
     plan = preview(
@@ -371,7 +371,7 @@ def test_all_direct_property_argument_presence_forms_roundtrip():
 
 
 def test_dispatcher_chain_is_generator_form_without_else_or_exception():
-    from kd2_rules_mcp.ed.writer_forms import dispatcher, empty_module
+    from kd_rules_mcp.ed.writer_forms import dispatcher, empty_module
 
     for function in (False, True):
         name = (
@@ -516,7 +516,7 @@ def test_bom_style_update_and_opaque_line_endings_refusal():
 
 
 def test_module_start_is_after_version_even_when_version_follows_other_routines():
-    from kd2_rules_mcp.ed.writer_forms import version
+    from kd_rules_mcp.ed.writer_forms import version
 
     source = render(new_manager()).text
     version_text = version(2).replace("\n", "\r\n")
@@ -554,7 +554,7 @@ def test_both_and_reversed_direction_forms_roundtrip(directions):
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize("count", [2, 3])
 def test_fourth_review_shared_line_does_not_consume_next_line(following, newline, count):
-    from kd2_rules_mcp.ed.writer_forms import HELPER
+    from kd_rules_mcp.ed.writer_forms import HELPER
 
     text = """Функция ВерсияФорматаМенеджераОбмена() Экспорт
     Возврат "2";
@@ -681,7 +681,7 @@ def test_fourth_review_default_rule_exits_singleton_but_stays_in_category():
 
 
 def test_fourth_review_interface_three_header_pass_returns_before_properties():
-    from kd2_rules_mcp.ed.writer_forms import HEADERS_GUARD
+    from kd_rules_mcp.ed.writer_forms import HEADERS_GUARD
 
     model = pilot_model(3)
     output = render(model)
@@ -696,7 +696,7 @@ def test_fourth_review_interface_three_header_pass_returns_before_properties():
 
 
 def test_fourth_review_inconsistent_property_fields_are_rejected():
-    from kd2_rules_mcp.ed.writer_model import validate_model
+    from kd_rules_mcp.ed.writer_model import validate_model
 
     model = pilot_model()
     rule = model.pko[0]
@@ -715,7 +715,7 @@ def test_fourth_review_compare_ignores_origin_and_direction_permutation():
 
 
 def test_fourth_review_style_hints_are_optional_and_offsets_include_bom():
-    from kd2_rules_mcp.ed.writer_forms import assignment_width
+    from kd_rules_mcp.ed.writer_forms import assignment_width
 
     model, _ = imported(layout_input())
     hinted = render(model, "canonical")
@@ -793,7 +793,7 @@ def test_fourth_review_rename_refuses_retained_pod_reference():
 
 
 def test_fourth_review_computed_notice_does_not_include_usage_keys():
-    from kd2_rules_mcp.ed.writer_model import CodeUnit, Signature, text_hash
+    from kd_rules_mcp.ed.writer_model import CodeUnit, Signature, text_hash
 
     model = pilot_model()
     units = tuple(
@@ -846,7 +846,7 @@ def test_fourth_review_ambiguous_editable_pod_reference_blocks_rename():
 
 
 def test_fourth_review_large_computed_notice_is_counted_and_requires_confirmation():
-    from kd2_rules_mcp.ed.writer_model import CodeUnit, Signature, text_hash
+    from kd_rules_mcp.ed.writer_model import CodeUnit, Signature, text_hash
 
     model = pilot_model()
     units = tuple(
@@ -874,7 +874,7 @@ def test_fourth_review_large_computed_notice_is_counted_and_requires_confirmatio
 
 
 def test_fourth_review_previous_snapshot_hashes_and_replay_remain_valid():
-    from kd2_rules_mcp.ed.writer_model import (
+    from kd_rules_mcp.ed.writer_model import (
         Decision,
         SourceSlice,
         content_hash,

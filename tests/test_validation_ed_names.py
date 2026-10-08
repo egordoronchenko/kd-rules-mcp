@@ -2,7 +2,7 @@
 
 import pytest
 
-from kd2_rules_mcp.validation.ed_names import unknown_names
+from kd_rules_mcp.validation.ed_names import unknown_names
 
 
 def names(body, parameters=(), **kwargs):

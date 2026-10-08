@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.manifest import sha256
-from kd2_rules_mcp.errors import EdAuthoringAckRequiredError
+from kd_rules_mcp.authoring.ed.manifest import sha256
+from kd_rules_mcp.errors import EdAuthoringAckRequiredError
 from tests.test_service_ed_writer import DATA, apply_packet, build, manager_operations
 from tests.test_service_ed_writer import writer_setup as writer_setup
 

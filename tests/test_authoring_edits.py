@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.edits import (
+from kd_rules_mcp.authoring.edits import (
     EditResult,
     create_pko_with_properties,
     create_rule,
@@ -15,7 +15,7 @@ from kd2_rules_mcp.authoring.edits import (
     update_rule,
     update_rules,
 )
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.errors import (
     AmbiguousAddressError,
     DanglingReferenceError,
     DuplicateRuleError,
@@ -24,13 +24,13 @@ from kd2_rules_mcp.errors import (
     RuleNotFoundError,
     UnknownFieldError,
 )
-from kd2_rules_mcp.kd2.canonical import canonical_diff, canonical_form
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_rules
-from kd2_rules_mcp.server import error_payload
-from kd2_rules_mcp.structures import db
-from kd2_rules_mcp.validation.address import side_name, walk_pks
-from kd2_rules_mcp.validation.format import check_format
+from kd_rules_mcp.kd2.canonical import canonical_diff, canonical_form
+from kd_rules_mcp.kd2.model import ExchangeRules, Node
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_rules
+from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.structures import db
+from kd_rules_mcp.validation.address import side_name, walk_pks
+from kd_rules_mcp.validation.format import check_format
 
 DATA = Path(__file__).parent / "data"
 

@@ -1,7 +1,7 @@
 # Загрузчик MD83Exp в SQLite: замеры и решения
 
 Дата: 26.09.2026.
-Код: `src/kd2_rules_mcp/structures/` (`db.py` — схема, `md83exp.py` — загрузчик, `store.py` — кэш).
+Код: `src/kd_rules_mcp/structures/` (`db.py` — схема, `md83exp.py` — загрузчик, `store.py` — кэш).
 Тесты: `tests/test_structures_md83exp.py` (синтетический файл `tests/data/md83exp_small.xml`);
 тест на реальных выгрузках (маркер `structures`) в репозиторий не входит.
 

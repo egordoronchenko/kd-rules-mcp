@@ -4,9 +4,9 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-from kd2_rules_mcp.validation.ed_compatibility import compatibility
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.ed.schema.profile import ValidationProfile
+from kd_rules_mcp.validation.ed_compatibility import compatibility
 from tests.test_ed_profile import DATA
 from tests.test_validation_ed_structure import snapshot
 

@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
-from kd2_rules_mcp.structures.store import StructureStore
-from kd2_rules_mcp.validation.address import pks_candidates, side_name
-from kd2_rules_mcp.validation.report import Issue, Level, ValidationReport
-from kd2_rules_mcp.validation.structure import _listed_types, check_rule, check_structures
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.structures.store import StructureStore
+from kd_rules_mcp.validation.address import pks_candidates, side_name
+from kd_rules_mcp.validation.report import Issue, Level, ValidationReport
+from kd_rules_mcp.validation.structure import _listed_types, check_rule, check_structures
 
 DUMP = Path(__file__).parent / "data" / "xmldump"
 

@@ -11,9 +11,9 @@ from typing import Any
 
 import pytest
 
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import render
-from kd2_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import render
+from kd_rules_mcp.ed.writer_import import import_manager
 from kdbase import ed_kd3_check as adapter
 
 DATA = Path(__file__).parent / "data" / "ed"

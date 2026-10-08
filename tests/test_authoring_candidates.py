@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.candidates import (
+from kd_rules_mcp.authoring.candidates import (
     KD_NAME_ANALOGS,
     PRIMITIVE_TO_REFERENCE,
     Candidate,
@@ -13,7 +13,7 @@ from kd2_rules_mcp.authoring.candidates import (
     property_candidates,
     value_candidates,
 )
-from kd2_rules_mcp.structures.queries import NotFound
+from kd_rules_mcp.structures.queries import NotFound
 from tests.sqlite_structure import StructureBuilder
 
 

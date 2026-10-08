@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-from kd2_rules_mcp.authoring.correspondent import DRAFT_COMMENT, MANUAL, mirror_rules
-from kd2_rules_mcp.kd2.canonical import canonical_form
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules
-from kd2_rules_mcp.validation.address import walk_pks
-from kd2_rules_mcp.validation.format import check_format
+from kd_rules_mcp.authoring.correspondent import DRAFT_COMMENT, MANUAL, mirror_rules
+from kd_rules_mcp.kd2.canonical import canonical_form
+from kd_rules_mcp.kd2.model import ExchangeRules, Node
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules
+from kd_rules_mcp.validation.address import walk_pks
+from kd_rules_mcp.validation.format import check_format
 from tests.sqlite_structure import StructureBuilder
 
 _HEAD = (

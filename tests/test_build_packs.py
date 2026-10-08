@@ -58,9 +58,9 @@ def test_dest_claude_installs_skills_and_server(
     assert _tree(tmp_path) == expected
     claude = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert claude["proj-1c-code"] == other["mcpServers"]["proj-1c-code"]
-    assert claude["kd2-rules-mcp"] == {"type": "http", "url": URL}
+    assert claude["kd-rules-mcp"] == {"type": "http", "url": URL}
     cursor = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
-    assert cursor["mcpServers"]["kd2-rules-mcp"] == {"url": URL}
+    assert cursor["mcpServers"]["kd-rules-mcp"] == {"url": URL}
     copy = tmp_path / ".claude/skills/kd2-rules-build/references/mcp-1c.md"
     assert copy.read_bytes() == build_packs.render_copy("docs/rules/mcp-1c.md").encode("utf-8")
 
@@ -77,7 +77,7 @@ def test_portability_check_catches_repository_paths() -> None:
             "Сервер из `.mcp.json` (его пишет `scripts/setup_local.py`), пишет в `workspace\\`.\n"
             "Правило — `docs/rules/mcp-1c.md`. Проверка — `uv run python kdbase/kd_check.py`.\n"
         ).encode(),
-        ".claude/skills/kd2-install/SKILL.md": b"uv run python scripts/setup_local.py",
+        ".claude/skills/kd-install/SKILL.md": b"uv run python scripts/setup_local.py",
         ".claude/skills/kd2-rules-build/references/checks.md": b"kdbase\\kd_check.py docs/x",
     }
     hits = build_packs.portability_hits(broken)
@@ -94,7 +94,7 @@ def test_portability_check_catches_repository_paths() -> None:
 def test_portability_check_allows_urls_and_project_paths() -> None:
     fine = {
         ".claude/skills/kd2-exchange-pitfalls/SKILL.md": (
-            "См. https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/docs/workflow.md и "
+            "См. https://github.com/egordoronchenko/kd-rules-mcp/blob/main/docs/workflow.md и "
             "`<папка проекта>\\.claude\\skills\\mcp-1c-tools\\docs\\<сервер>.md`; рабочая папка — "
             "`workspace` в `project_list`.\n"
         ).encode()
@@ -105,7 +105,7 @@ def test_portability_check_allows_urls_and_project_paths() -> None:
 def test_dest_agents_installs_skills_and_rules_entry(tmp_path: Path) -> None:
     report = build_packs.install(tmp_path, "agents", URL)
 
-    expected = _skill_files(".agents/skills") | {"KD2-RULES.md", ".mcp.json"}
+    expected = _skill_files(".agents/skills") | {"KD-RULES.md", ".mcp.json"}
     assert _tree(tmp_path) == expected
     assert not (tmp_path / ".claude").exists()
     assert any("AGENTS.md" in line for line in report), "строку в AGENTS.md добавляет человек"
@@ -114,7 +114,7 @@ def test_dest_agents_installs_skills_and_rules_entry(tmp_path: Path) -> None:
 
 
 def test_rules_entry_is_short_and_points_into_pack() -> None:
-    """KD2-RULES.md — точка входа клиента без скиллов: короткий, каждый названный файл есть."""
+    """KD-RULES.md — точка входа клиента без скиллов: короткий, каждый названный файл есть."""
     text = build_packs.RULES_ENTRY.read_text(encoding="utf-8")
     assert len(text.splitlines()) <= 60
     files = build_packs.pack_files("agents")
@@ -167,11 +167,11 @@ def test_cursor_flag_copies_http_servers_and_skips_stdio(
     servers = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))[
         "mcpServers"
     ]
-    assert set(servers) == {"code", "meta", "kd2-rules-mcp"}
+    assert set(servers) == {"code", "meta", "kd-rules-mcp"}
     assert servers["code"] == {"url": "http://code/mcp", "headers": {"Authorization": "Basic x"}}
     assert "type" not in servers["code"]
     assert servers["meta"] == {"url": "http://meta/mcp"}
-    assert servers["kd2-rules-mcp"] == {"url": URL}
+    assert servers["kd-rules-mcp"] == {"url": URL}
     assert "local-stdio" not in servers
     assert "перенесено серверов из .mcp.json: 2 (новых: code, meta)" in report
     assert "не перенесены: local-stdio" in report
@@ -197,7 +197,7 @@ def test_cursor_flag_adds_missing_servers_to_existing_config(
                     "kept-1c": {"url": "http://new/mcp"},
                     "meta": {"url": "http://meta/mcp"},
                     "local-stdio": {"command": "node", "args": ["srv.js"]},
-                    "kd2-rules-mcp": {
+                    "kd-rules-mcp": {
                         "type": "http",
                         "url": "http://other/mcp",
                         "headers": {"Authorization": "Basic from-mcp"},
@@ -209,7 +209,7 @@ def test_cursor_flag_adds_missing_servers_to_existing_config(
     )
     (tmp_path / ".cursor").mkdir()
     (tmp_path / ".cursor" / "mcp.json").write_text(
-        json.dumps({"mcpServers": {"kd2-rules-mcp": kd2, "kept-1c": kept}}),
+        json.dumps({"mcpServers": {"kd-rules-mcp": kd2, "kept-1c": kept}}),
         encoding="utf-8",
     )
 
@@ -218,7 +218,7 @@ def test_cursor_flag_adds_missing_servers_to_existing_config(
     servers = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))[
         "mcpServers"
     ]
-    assert servers["kd2-rules-mcp"] == kd2
+    assert servers["kd-rules-mcp"] == kd2
     assert servers["kept-1c"] == kept
     assert servers["code"] == {"url": "http://code/mcp", "headers": {"Authorization": "Basic x"}}
     assert "type" not in servers["code"]
@@ -247,7 +247,7 @@ def test_cursor_flag_keeps_edited_url_and_reports_nothing_new(
     )
     (tmp_path / ".cursor").mkdir()
     (tmp_path / ".cursor" / "mcp.json").write_text(
-        json.dumps({"mcpServers": {"kd2-rules-mcp": {"url": URL}, "code": kept}}),
+        json.dumps({"mcpServers": {"kd-rules-mcp": {"url": URL}, "code": kept}}),
         encoding="utf-8",
     )
 
@@ -257,7 +257,7 @@ def test_cursor_flag_keeps_edited_url_and_reports_nothing_new(
         "mcpServers"
     ]
     assert servers["code"] == kept
-    assert servers["kd2-rules-mcp"] == {"url": URL}
+    assert servers["kd-rules-mcp"] == {"url": URL}
     assert "серверы 1С в `.cursor/mcp.json` уже есть" in report
     assert "не перенесены: local-stdio" in report
     assert not any(line.startswith("перенесено серверов") for line in report)
@@ -282,7 +282,7 @@ def test_existing_cursor_without_flag_names_missing_servers(
         encoding="utf-8",
     )
     (tmp_path / ".cursor" / "mcp.json").write_text(
-        json.dumps({"mcpServers": {"kd2-rules-mcp": {"url": URL}}}),
+        json.dumps({"mcpServers": {"kd-rules-mcp": {"url": URL}}}),
         encoding="utf-8",
     )
 
@@ -291,8 +291,8 @@ def test_existing_cursor_without_flag_names_missing_servers(
     servers = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))[
         "mcpServers"
     ]
-    assert set(servers) == {"kd2-rules-mcp"}
-    assert servers["kd2-rules-mcp"] == {"url": URL}
+    assert set(servers) == {"kd-rules-mcp"}
+    assert servers["kd-rules-mcp"] == {"url": URL}
     assert (
         "Cursor: в `.cursor/mcp.json` нет серверов 1С: code, meta — "
         "запустите с `--cursor` или добавьте их в настройках MCP Cursor"
@@ -312,7 +312,7 @@ def test_dest_cursor_flag_creates_cursor_mcp_json(
     )
     build_packs.main()
     config = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
-    assert config["mcpServers"] == {"kd2-rules-mcp": {"url": URL}}
+    assert config["mcpServers"] == {"kd-rules-mcp": {"url": URL}}
 
 
 def test_dest_reinstall_removes_stale_files_only_in_own_skills(tmp_path: Path) -> None:
@@ -335,7 +335,7 @@ def test_default_server_url_is_an_address() -> None:
 
 def _mcp_server(project: Path) -> dict[str, object]:
     config = json.loads((project / ".mcp.json").read_text(encoding="utf-8"))
-    return config["mcpServers"]["kd2-rules-mcp"]
+    return config["mcpServers"]["kd-rules-mcp"]
 
 
 def test_dest_copies_authorization_header_from_local_token(
@@ -361,7 +361,7 @@ def test_dest_copies_authorization_header_from_local_token(
 
     project = tmp_path / "project"
     project.mkdir()
-    bare = {"mcpServers": {"kd2-rules-mcp": {"type": "http", "url": URL}}}
+    bare = {"mcpServers": {"kd-rules-mcp": {"type": "http", "url": URL}}}
     (project / ".mcp.json").write_text(json.dumps(bare), encoding="utf-8")
     report = build_packs.install(project, "claude", URL)
     assert _mcp_server(project) == {

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.ed.errors import EdFormatError
-from kd2_rules_mcp.ed.layer_model import (
+from kd_rules_mcp.ed.errors import EdFormatError
+from kd_rules_mcp.ed.layer_model import (
     Certainty,
     EffectiveRuleView,
     EntityState,
@@ -14,9 +14,9 @@ from kd2_rules_mcp.ed.layer_model import (
     OperationKind,
     rule_view,
 )
-from kd2_rules_mcp.ed.layer_reader import read_extension_text
-from kd2_rules_mcp.ed.layers import compose_manager, read_layers
-from kd2_rules_mcp.ed.model import ObjectRule, Parameter, ParseStatus
+from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.layers import compose_manager, read_layers
+from kd_rules_mcp.ed.model import ObjectRule, Parameter, ParseStatus
 
 ROOT = Path(__file__).resolve().parent / "data" / "ed" / "layers"
 HELPERS = frozenset({"добавитьпкс", "добавитьпктч"})
@@ -818,7 +818,7 @@ def test_unverified_helper_does_not_make_the_add_known(demo):
 
 
 def test_dispatcher_cases():
-    from kd2_rules_mcp.ed.reader import read_manager_text
+    from kd_rules_mcp.ed.reader import read_manager_text
 
     base_text = """\
 Функция ВерсияФорматаМенеджераОбмена() Экспорт
@@ -1122,8 +1122,8 @@ def test_effective_view_protocol_keeps_original_span(kit_b):
     assert tip.raw_text == kit_b.base.pko[0].raw_text
     added = next(prop for prop in tip.properties if prop.format_property == "Code")
     assert "Code" in added.raw_text or "ДопКод" in added.raw_text
-    root = Path(__file__).resolve().parents[1] / "src" / "kd2_rules_mcp" / "ed"
+    root = Path(__file__).resolve().parents[1] / "src" / "kd_rules_mcp" / "ed"
     for name in ("layers.py", "layer_reader.py", "layer_model.py", "layer_address.py"):
         text = (root / name).read_text(encoding="utf-8")
         assert "validation" not in text
-        assert "kd2_rules_mcp.service" not in text
+        assert "kd_rules_mcp.service" not in text

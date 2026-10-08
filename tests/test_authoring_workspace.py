@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.workspace import RulesProject, RulesWorkspace
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.authoring.workspace import RulesProject, RulesWorkspace
+from kd_rules_mcp.errors import (
     DuplicateProjectError,
     Kd2Error,
     ProjectNotFoundError,
@@ -22,12 +22,12 @@ from kd2_rules_mcp.errors import (
     UnknownFieldError,
     WorkspacePathError,
 )
-from kd2_rules_mcp.kd2.canonical import canonical_diff, canonical_form
-from kd2_rules_mcp.kd2.model import ExchangeRules
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_rules
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.structures.store import StructureStore
-from kd2_rules_mcp.validation.format import check_format
+from kd_rules_mcp.kd2.canonical import canonical_diff, canonical_form
+from kd_rules_mcp.kd2.model import ExchangeRules
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_rules
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.structures.store import StructureStore
+from kd_rules_mcp.validation.format import check_format
 from tests.test_rules_io import EXCHANGE, as_file
 
 DATA = Path(__file__).parent / "data"
@@ -360,7 +360,7 @@ def test_hash_collision_lengthens_id(tmp_path: Path, monkeypatch: pytest.MonkeyP
     def digest(path_key: str) -> str:
         return "abcd" + hashlib.sha256(path_key.encode("utf-8")).hexdigest()
 
-    monkeypatch.setattr("kd2_rules_mcp.authoring.workspace.path_digest", digest)
+    monkeypatch.setattr("kd_rules_mcp.authoring.workspace.path_digest", digest)
     workspace = RulesWorkspace(tmp_path / "ws")
     first = workspace.open_rules(_copy_rules(tmp_path / "a", "exchange_rules.xml")).project
     second = workspace.open_rules(_copy_rules(tmp_path / "b", "exchange_rules.xml")).project

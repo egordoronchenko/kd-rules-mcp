@@ -6,9 +6,9 @@ from typing import Any, cast
 
 import pytest
 
-from kd2_rules_mcp.ed.schema import load_schema, xdto
-from kd2_rules_mcp.ed.schema.errors import EdSchemaFormatError, EdSchemaResourceLimitError
-from kd2_rules_mcp.ed.schema.model import QName
+from kd_rules_mcp.ed.schema import load_schema, xdto
+from kd_rules_mcp.ed.schema.errors import EdSchemaFormatError, EdSchemaResourceLimitError
+from kd_rules_mcp.ed.schema.model import QName
 
 DATA = Path(__file__).parent / "data/ed/schema"
 

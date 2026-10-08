@@ -1,7 +1,7 @@
-# Установка kd2-rules-mcp — пошагово
+# Установка kd-rules-mcp — пошагово
 
-Инструкция для человека. Агенту дайте скилл установки: «Установи kd2-rules-mcp по
-https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/.claude/skills/kd2-install/SKILL.md» — он проведёт
+Инструкция для человека. Агенту дайте скилл установки: «Установи kd-rules-mcp по
+https://github.com/egordoronchenko/kd-rules-mcp/blob/main/.claude/skills/kd-install/SKILL.md» — он проведёт
 по тем же шагам, спросит нужное и остановится там, где нужны вы: программы с правами администратора, пароли,
 согласие с `projects.yaml`, правка репозитория проекта 1С, перезапуск клиента и одобрение сервера.
 
@@ -42,12 +42,12 @@ Docker Desktop должен быть запущен (значок кита в т
 
 ```powershell
 cd D:\Tools                       # любая папка
-git clone https://github.com/egordoronchenko/kd2-rules-mcp.git
-cd kd2-rules-mcp
+git clone https://github.com/egordoronchenko/kd-rules-mcp.git
+cd kd-rules-mcp
 uv sync
 ```
 
-**Проверка:** `uv run python -c "import kd2_rules_mcp; print('ok')"` печатает `ok`.
+**Проверка:** `uv run python -c "import kd_rules_mcp; print('ok')"` печатает `ok`.
 
 ## 3. Описать проекты — `projects.yaml`
 
@@ -66,6 +66,7 @@ copy projects.example.yaml projects.yaml
 | `name` | название для людей | — |
 | `configurations.full.dump` | путь к выгрузке основной конфигурации **от папки проекта** | папка, где лежит `Configuration.xml` основной конфигурации, например `src/Main` |
 | `configurations.full.extensions` | выгрузки расширений в порядке наложения, только активные в базе | папки с `Configuration.xml` каждого расширения |
+| `configurations.full.writable_extensions` | необязательно: пути из `extensions`, которые `setup_local.py` подключает на запись для доставки в своё расширение | например, `[src/cfe/МоёРасширение]` |
 | `bases` | базы проекта: `role` — `песочница` (скриптам можно подключаться) или `боевая` (только для справки), `connection` — строка соединения | `Srvr="сервер";Ref="база";` для серверной, `File="D:\Bases\база";` для файловой |
 | `bases.*.dev_env` | необязательно: `.dev.env` проекта с `IB_USER`/`IB_PASSWORD` этой базы | если логин базы уже лежит в `.dev.env` проекта |
 | `bases.*.data_mcp` | необязательно: имя MCP-сервера данных этой базы из `.mcp.json` проекта | если в базе опубликован MCP (см. README, «С чем работает в паре») |
@@ -82,12 +83,12 @@ copy projects.example.yaml projects.yaml
 | XML-выгрузка конфигурации и расширений (формат Конфигуратора, не EDT) | каталоги с `Configuration.xml` | сервер не работает с проектом |
 | база-песочница | строка соединения в `bases` | нет проверок `bsp_check` и `exchange_check` (шаг 8) |
 | MCP-серверы для 1С (пакет comol, README «С чем работает в паре»): код и метаданные, данные базы | `.mcp.json` проекта | правила разбираются и правятся, но код обработчиков агент пишет без API конфигурации |
-| набор правил comol [`ai_rules_1c`](https://github.com/comol/ai_rules_1c) | `.ai-rules.json` в корне проекта, правила `.cursor\rules\mcp-policy.mdc` и `.cursor\rules\mcp-first-search.mdc` (для Claude Code — `.claude\rules-1c\`, для Codex — `.codex\rules\`) | серверы 1С работают хуже: скиллы kd2-rules-mcp опираются на эти правила, а не повторяют их |
+| набор правил comol [`ai_rules_1c`](https://github.com/comol/ai_rules_1c) | `.ai-rules.json` в корне проекта, правила `.cursor\rules\mcp-policy.mdc` и `.cursor\rules\mcp-first-search.mdc` (для Claude Code — `.claude\rules-1c\`, для Codex — `.codex\rules\`) | серверы 1С работают хуже: скиллы kd-rules-mcp опираются на эти правила, а не повторяют их |
 
 **Проверка:**
 
 ```powershell
-uv run python -c "from pathlib import Path; from kd2_rules_mcp.projects import load_catalog; print(list(load_catalog(Path('projects.yaml')).projects))"
+uv run python -c "from pathlib import Path; from kd_rules_mcp.projects import load_catalog; print(list(load_catalog(Path('projects.yaml')).projects))"
 ```
 
 печатает список ваших проектов. Ошибка говорит, какое поле и в каком проекте не так.
@@ -125,7 +126,7 @@ docker compose up -d --build
 — какие папки проектов контейнер видит (только на чтение) и `KD2_TOKEN`, `.mcp.json` — подключение для Claude
 Code, `.cursor/mcp.json` — для Cursor. Первая сборка образа — пара минут.
 
-Порт по умолчанию виден только своей машине (`127.0.0.1:8060`), контейнер `kd2_rules_mcp`, том
+Порт по умолчанию виден только своей машине (`127.0.0.1:8060`), контейнер `kd_rules_mcp`, том
 `kd2_structures_cache`. С других машин до него не достучаться. Сервер для команды — `bind` и `token` (шаг 4).
 Другой порт — `port` и тот же порт в `server_url`. Второй экземпляр — `instance` (и свой `port`, если 8060 занят
 первым). Затем снова `setup_local.py` и `docker compose up -d`. Скрипт печатает имя контейнера, публикацию
@@ -134,7 +135,7 @@ Code, `.cursor/mcp.json` — для Cursor. Первая сборка образ
 **Проверка:**
 
 ```powershell
-docker compose ps                 # kd2_rules_mcp — running
+docker compose ps                 # kd_rules_mcp — running
 uv run python scripts/check_server.py
 ```
 
@@ -152,12 +153,12 @@ uv run python scripts/check_server.py
 ## 6. Подключить агента
 
 **Claude Code.** Запустите `claude` в папке репозитория — он спросит, разрешить ли серверы из `.mcp.json`,
-ответьте да. Проверка: `claude mcp list` показывает `kd2-rules-mcp … ✓ Connected`.
+ответьте да. Проверка: `claude mcp list` показывает `kd-rules-mcp … ✓ Connected`.
 
-**Cursor.** Откройте папку репозитория, Settings → MCP — включите `kd2-rules-mcp`. Проверка: у сервера зелёная
+**Cursor.** Откройте папку репозитория, Settings → MCP — включите `kd-rules-mcp`. Проверка: у сервера зелёная
 точка и список инструментов.
 
-Если задан `token`, `setup_local.py` добавляет в запись `kd2-rules-mcp` в `.mcp.json` и `.cursor/mcp.json`
+Если задан `token`, `setup_local.py` добавляет в запись `kd-rules-mcp` в `.mcp.json` и `.cursor/mcp.json`
 заголовок `Authorization: Bearer <token>`. Без него клиент получит HTTP 401.
 
 **Работать из папки проекта 1С** — поставьте туда скиллы и подключение сервера (это правка репозитория
@@ -168,7 +169,7 @@ uv run python scripts/build_packs.py --dest <папка проекта> --client
 ```
 
 Скрипт кладёт скиллы сервера (имена `kd-`, `kd2-` или `kd3-`) в `.claude\skills\` проекта (их читают Claude Code, Cursor и OpenCode) вместе со
-справочниками и правилом работы с серверами 1С, добавляет `kd2-rules-mcp` в `.mcp.json` проекта (и в
+справочниками и правилом работы с серверами 1С, добавляет `kd-rules-mcp` в `.mcp.json` проекта (и в
 `.cursor\mcp.json`, если он есть) и не трогает другие серверы. Адрес — `server_url` из `projects.local.yaml`,
 другой — `--server-url`. Заголовок с токеном (если он задан в `projects.local.yaml`) скрипт переносит сам.
 Работаете в Cursor — добавьте `--cursor`: скрипт создаст `.cursor\mcp.json`, если его нет, и перенесёт в него
@@ -176,14 +177,15 @@ HTTP-серверы из `.mcp.json` проекта (серверы с `command`
 `.cursor\mcp.json` уже есть, `--cursor` дописывает только недостающие HTTP-серверы 1С и не меняет существующие
 записи; без флага скрипт их не переносит и сообщает, каких серверов 1С в файле нет. Без флага и без этого файла
 добавьте сервер сами в настройках MCP Cursor. Папка проекта должна быть в `projects.local.yaml` (шаги 4–5):
-сервер видит только подключённые папки и пишет результат только в свою рабочую папку и в `rules_dir` проектов.
+сервер видит только подключённые папки и пишет результат в свою рабочую папку, в `rules_dir` проектов
+и в выгрузки расширений из `writable_extensions`.
 
 Клиент, который `.claude\skills` не читает (например, Codex), — `--client agents`: скиллы ложатся в
-`.agents\skills\`, а в корень проекта — `KD2-RULES.md` (порядок работы и какой файл когда читать). Подключите
-его строкой в `AGENTS.md` проекта: «Правила обмена КД 2 и сервер kd2-rules-mcp — прочитай KD2-RULES.md перед
+`.agents\skills\`, а в корень проекта — `KD-RULES.md` (порядок работы и какой файл когда читать). Подключите
+его строкой в `AGENTS.md` проекта: «Правила обмена КД 2 и сервер kd-rules-mcp — прочитай KD-RULES.md перед
 работой с ними». Обе упаковки в один проект не ставятся: Cursor и OpenCode увидели бы скиллы дважды.
 
-**Проверка:** скрипт печатает число файлов упаковки и «kd2-rules-mcp добавлен»; клиент, запущенный в папке
+**Проверка:** скрипт печатает число файлов упаковки и «kd-rules-mcp добавлен»; клиент, запущенный в папке
 проекта, видит сервер после одобрения.
 
 Клиент читает `.mcp.json` только при запуске. Если файл записан, пока клиент уже работал (например, установку
@@ -192,7 +194,7 @@ HTTP-серверы из `.mcp.json` проекта (серверы с `command`
 
 **Первая задача — проверка всей цепочки**, в новой сессии после одобрения. Попросите агента:
 
-> Через kd2-rules-mcp покажи project_list и загрузи структуру проекта `bp`.
+> Через kd-rules-mcp покажи project_list и загрузи структуру проекта `bp`.
 
 Ответ — число объектов конфигурации (для типовой БП — несколько тысяч). Первая загрузка большой конфигурации —
 до пары минут, повторная — доли секунды.
@@ -212,7 +214,7 @@ HTTP-серверы из `.mcp.json` проекта (серверы с `command`
 1. Создайте файловую базу КД в папке `base` репозитория (из PowerShell, путь к платформе — свой):
 
    ```powershell
-   & "C:\Program Files\1cv8\8.3.27.2170\bin\1cv8.exe" CREATEINFOBASE File="D:\Tools\kd2-rules-mcp\base" /UseTemplate "<путь к 1Cv8.cf КД>"
+   & "C:\Program Files\1cv8\8.3.27.2170\bin\1cv8.exe" CREATEINFOBASE File="D:\Tools\kd-rules-mcp\base" /UseTemplate "<путь к 1Cv8.cf КД>"
    ```
 
    или обычным способом: список баз → Добавить → Создание новой базы из шаблона КД, каталог — `base` репозитория.
@@ -256,12 +258,12 @@ HTTP-серверы из `.mcp.json` проекта (серверы с `command`
 `saved_path` или с `modified: true` (правки после открытия или сохранения).
 
 Имя образа для отката — `docker compose config --images` в папке клона (по умолчанию
-`kd2-rules-mcp-kd2-rules-mcp`; другое — если в `.env` задан `COMPOSE_PROJECT_NAME` или другой compose-файл).
+`kd-rules-mcp-kd-rules-mcp`; другое — если в `.env` задан `COMPOSE_PROJECT_NAME` или другой compose-файл).
 
 ```powershell
-cd <папка kd2-rules-mcp>
+cd <папка kd-rules-mcp>
 docker compose config --images                     # имя образа, ниже — по умолчанию
-docker image tag kd2-rules-mcp-kd2-rules-mcp:latest kd2-rules-mcp-kd2-rules-mcp:prev   # для отката
+docker image tag kd-rules-mcp-kd-rules-mcp:latest kd-rules-mcp-kd-rules-mcp:prev   # для отката
 git pull
 uv sync
 uv run python scripts/setup_local.py
@@ -276,11 +278,11 @@ uv run python scripts/check_server.py
   он тоже переписывает или удаляет; `.env`, написанный не им, оставляет и предупреждает об этом.
 - Перед `up` сверьте `docker compose config`: имя контейнера, порт и том должны быть те же, что у этого
   экземпляра. Если на машине два экземпляра (`instance` в `projects.local.yaml` или ручной `.env`) и имена вдруг
-  стали «по умолчанию» (`kd2_rules_mcp`, 8060), `up` пересоздаст чужой контейнер — остановитесь и разберитесь.
+  стали «по умолчанию» (`kd_rules_mcp`, 8060), `up` пересоздаст чужой контейнер — остановитесь и разберитесь.
 - **Кэш структур** (том `kd2_structures_cache`) переживает обновление. Если в новой версии изменился код
   загрузчика структур, сохранённая структура при следующем `structure_load_project` (или `structure_load_xml`,
   `structure_load_md83exp`) собирается заново сама — ключ кэша включает хеш кода загрузчика
-  (`src/kd2_rules_mcp/structures/store.py:36-37`). До повторной загрузки запросы отвечают по старой структуре,
+  (`src/kd_rules_mcp/structures/store.py:36-37`). До повторной загрузки запросы отвечают по старой структуре,
   поэтому агент загружает структуры в начале каждой задачи.
 - `projects.yaml` и `projects.local.yaml` обновление не трогает. Если в `projects.example.yaml` появились новые
   поля — сравните со своим `projects.yaml` (`git diff <старый коммит> -- projects.example.yaml`).
@@ -295,12 +297,30 @@ uv run python scripts/check_server.py
 
 ```powershell
 git checkout <прежний коммит или тег>
-docker image tag kd2-rules-mcp-kd2-rules-mcp:prev kd2-rules-mcp-kd2-rules-mcp:latest
+docker image tag kd-rules-mcp-kd-rules-mcp:prev kd-rules-mcp-kd-rules-mcp:latest
 docker compose up -d --force-recreate
 ```
 
 Без сохранённого тега — `git checkout <прежний коммит>` и `docker compose up -d --build` (сборка заново). Кэш
 структур при откате тоже пересоберётся при следующей загрузке, если код загрузчика отличался.
+
+### Переход с kd2-rules-mcp
+
+1. `git pull` — репозиторий переименован в `kd-rules-mcp`; старый адрес GitHub перенаправляется, но `git remote
+   set-url origin https://github.com/egordoronchenko/kd-rules-mcp.git` избавит от перенаправления.
+2. `uv sync` — пакет теперь `kd_rules_mcp`.
+3. `uv run python scripts/setup_local.py` — перепишет `.env`, `docker-compose.override.yml`, `.mcp.json` и
+   `.cursor/mcp.json` под новый ключ сервера `kd-rules-mcp` и имя контейнера `kd_rules_mcp`; старый ключ
+   `kd2-rules-mcp` из файлов клиентов убирается. Скрипт печатает команду остановки прежнего контейнера
+   `kd2_rules_mcp`, если он ещё запущен.
+4. `docker compose up -d --build`; том кэша структур и `workspace\` остаются прежними — проекты правил и
+   проекты модулей переживают переименование.
+5. В клиентах (Claude Code, Cursor) — перечитать настройки MCP (новый сеанс); в проектах 1С — снова
+   `uv run python scripts/build_packs.py --dest <папка проекта> --client claude` (или `agents`): установщик
+   удалит папки прежних имён скиллов и `KD2-RULES.md`.
+
+Не меняется: имена инструментов MCP, идентификаторы проверок, коды ошибок, переменные окружения `KD2_*`,
+`projects.yaml`.
 
 ## Если не получилось
 
@@ -311,7 +331,7 @@ docker compose up -d --force-recreate
 | 3 | `ProjectConfigError` | текст называет поле и проект; частое — `role` не `песочница`/`боевая`, база ссылается на несуществующую конфигурацию |
 | 5 | `setup_local.py`: «Нет projects.yaml» / «Нет папок проектов» | шаги 3–4; путь в `projects.local.yaml` — папка проекта, не выгрузки |
 | 5 | на месте `projects.yaml` появилась **папка** | запускали `docker compose up` раньше шага 3: остановить (`docker compose down`), удалить папку, пройти шаги 3–5 |
-| 5 | `check_server.py`: сервер недоступен | `docker compose ps`, `docker compose logs kd2-rules-mcp --tail 30`; порт 8060 не занят другим? |
+| 5 | `check_server.py`: сервер недоступен | `docker compose ps`, `docker compose logs kd-rules-mcp --tail 30`; порт 8060 не занят другим? |
 | 5 | «папка НЕ видна» | проект не в `projects.local.yaml` или после правки не запускали `setup_local.py` и `docker compose up -d` |
 | 6 | агент не видит инструменты | `.mcp.json` записан в текущей сессии — перезапустить клиент; затем Claude Code: `claude mcp list`, разрешить сервер; Cursor: включить сервер в настройках MCP |
 | 6 | `structure_load_project`: «Нет каталога выгрузки» | путь `dump`/`extensions` в `projects.yaml` не совпадает с папками проекта (регистр букв не важен, `/` и `\` равноправны) |

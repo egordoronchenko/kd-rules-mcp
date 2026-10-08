@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.edits import EditResult
-from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.kd2.model import Node
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
-from kd2_rules_mcp.service.views import (
+from kd_rules_mcp.authoring.edits import EditResult
+from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.kd2.model import Node
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.service.views import (
     TEXT_LIMIT,
     counts,
     edit_view,
@@ -20,8 +20,8 @@ from kd2_rules_mcp.service.views import (
     rule_row,
     slice_rows,
 )
-from kd2_rules_mcp.structures.queries import MAX_LIMIT, Page
-from kd2_rules_mcp.validation.report import ValidationReport
+from kd_rules_mcp.structures.queries import MAX_LIMIT, Page
+from kd_rules_mcp.validation.report import ValidationReport
 
 DATA = Path(__file__).parent / "data"
 

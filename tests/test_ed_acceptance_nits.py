@@ -7,19 +7,19 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.registration_delivery import (
+from kd_rules_mcp.authoring.ed.registration_delivery import (
     read_plan_host,
     render_registration_kit,
 )
-from kd2_rules_mcp.authoring.registration_retarget import RetargetNotice
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.authoring.registration_retarget import RetargetNotice
+from kd_rules_mcp.errors import (
     EdAuthoringPreconditionError,
     EdSchemaNotFoundError,
     StructureNotFoundError,
 )
-from kd2_rules_mcp.server import error_payload
-from kd2_rules_mcp.service.ed_reopen import reopen_details
-from kd2_rules_mcp.service.registration_retarget import _manual_files, _notices
+from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.service.ed_reopen import reopen_details
+from kd_rules_mcp.service.registration_retarget import _manual_files, _notices
 from tests.test_ed_registration_delivery import ATTR, DATA, HINTS, result
 from tests.test_ed_writer_plan_content import add_content
 from tests.test_service_ed_authoring import setup as setup
@@ -276,7 +276,7 @@ def test_registration_grouped_instruction_golden(with_extension):
     generated = registration_files(with_extension)
     assert generated["ИНСТРУКЦИЯ.md"] == (root / f"{name}.md").read_bytes()
     hashes = json.loads((root / f"{name}-unchanged.json").read_bytes())
-    from kd2_rules_mcp.authoring.ed.manifest import sha256
+    from kd_rules_mcp.authoring.ed.manifest import sha256
 
     assert {
         p: sha256(b) for p, b in generated.items() if p not in ("ИНСТРУКЦИЯ.md", "manifest.json")

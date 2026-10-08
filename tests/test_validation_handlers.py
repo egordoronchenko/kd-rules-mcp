@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.kd2.model import ExchangeRules
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
-from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS
-from kd2_rules_mcp.validation.address import pks_address, rule_address, walk_pks
-from kd2_rules_mcp.validation.handlers import (
+from kd_rules_mcp.kd2.model import ExchangeRules
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.kd2.schema import CONVERSION_EVENTS
+from kd_rules_mcp.validation.address import pks_address, rule_address, walk_pks
+from kd_rules_mcp.validation.handlers import (
     ALGORITHM_EVENT,
     EVENT_AREAS,
     HANDLER_PARAMS,

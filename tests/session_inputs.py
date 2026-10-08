@@ -26,20 +26,20 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
-from kd2_rules_mcp.ed.model import EdDocument
-from kd2_rules_mcp.ed.registration_model import RegistrationModuleDocument
-from kd2_rules_mcp.ed.route_model import RouteProfile
-from kd2_rules_mcp.ed.routes import RouteFileObservation
-from kd2_rules_mcp.ed.schema.model import EdSchema, SchemaPackage
-from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
-from kd2_rules_mcp.structures.store import (
+from kd_rules_mcp.ed.model import EdDocument
+from kd_rules_mcp.ed.registration_model import RegistrationModuleDocument
+from kd_rules_mcp.ed.route_model import RouteProfile
+from kd_rules_mcp.ed.routes import RouteFileObservation
+from kd_rules_mcp.ed.schema.model import EdSchema, SchemaPackage
+from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
+from kd_rules_mcp.structures.store import (
     BUILDER_VERSION,
     LoadResult,
     StructureStore,
     dump_fingerprint,
 )
-from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+from kd_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 
 _FileKey = tuple[str, int, int]
 _Rules = ExchangeRules | RegistrationRules
@@ -193,7 +193,7 @@ def corpus_structure(root: Path) -> Iterator[sqlite3.Connection]:
 
 def _cached_read_package(path: Path, role: str = "base") -> SchemaPackage:
     assert _orig_read_package is not None
-    import kd2_rules_mcp.ed.schema.xdto as xdto
+    import kd_rules_mcp.ed.schema.xdto as xdto
 
     try:
         # Пределы размера и глубины тесты подменяют и ждут отказ, а не прошлый пакет.
@@ -210,7 +210,7 @@ def _cached_read_package(path: Path, role: str = "base") -> SchemaPackage:
 
 def _schema_limits() -> tuple[int, ...]:
     """Пределы резолвера входят в ключ: тесты подменяют их и ждут ошибку, а не прошлую схему."""
-    import kd2_rules_mcp.ed.schema.resolver as resolver
+    import kd_rules_mcp.ed.schema.resolver as resolver
 
     return (
         resolver.MAX_TOTAL_BYTES,
@@ -517,15 +517,15 @@ def install() -> None:
         return
     _INSTALLED = True
 
-    import kd2_rules_mcp.ed as ed
-    import kd2_rules_mcp.ed.reader as reader
-    import kd2_rules_mcp.ed.registration as registration
-    import kd2_rules_mcp.ed.routes as routes
-    import kd2_rules_mcp.ed.schema as schema
-    import kd2_rules_mcp.ed.schema.resolver as resolver
-    import kd2_rules_mcp.ed.schema.xdto as xdto
-    import kd2_rules_mcp.kd2.rules_io as rules_io
-    import kd2_rules_mcp.structures.store as store
+    import kd_rules_mcp.ed as ed
+    import kd_rules_mcp.ed.reader as reader
+    import kd_rules_mcp.ed.registration as registration
+    import kd_rules_mcp.ed.routes as routes
+    import kd_rules_mcp.ed.schema as schema
+    import kd_rules_mcp.ed.schema.resolver as resolver
+    import kd_rules_mcp.ed.schema.xdto as xdto
+    import kd_rules_mcp.kd2.rules_io as rules_io
+    import kd_rules_mcp.structures.store as store
 
     # Резолвер вызывает `read_package` по глобальному имени: подменяются оба места.
     _orig_read_package = xdto.read_package
@@ -551,7 +551,7 @@ def install() -> None:
     _orig_load_xml = store.StructureStore.load_xml
     store.StructureStore.load_xml = _cached_load_xml
 
-    import kd2_rules_mcp.validation.ed_structure_snapshot as snapshot_module
+    import kd_rules_mcp.validation.ed_structure_snapshot as snapshot_module
 
     _orig_snapshot_load = snapshot_module.StructureSnapshot.load
 

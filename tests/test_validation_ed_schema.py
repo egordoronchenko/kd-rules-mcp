@@ -5,10 +5,10 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
-from kd2_rules_mcp.validation.ed_schema import validate_schema
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
+from kd_rules_mcp.validation.ed_schema import validate_schema
 from tests.test_ed_profile import BASE, DATA, document
 from tests.test_validation_ed_structure import snapshot, table_text
 
@@ -30,7 +30,7 @@ def check(text=BASE, direction="both", schema=None, *, include_value_ranges=Fals
 
 @pytest.mark.parametrize("direction", ["send", "receive"])
 def test_direct_faceted_strings_use_candidate_compatibility(tmp_path, direction):
-    from kd2_rules_mcp.authoring.ed.candidates import compatibility
+    from kd_rules_mcp.authoring.ed.candidates import compatibility
 
     path = tmp_path / "facets.bin"
     text = (DATA / "validation.bin").read_text(encoding="utf-8")
@@ -158,7 +158,7 @@ def test_batch3_empty_format_table_explains_children_skip():
         if s.check in {"ed.schema.property_missing", "ed.schema.type_incompatible"}
     ]
     assert child and all(s.reason.startswith("empty_format_side:") for s in child)
-    from kd2_rules_mcp.service.ed_views import validation_view
+    from kd_rules_mcp.service.ed_views import validation_view
 
     view = validation_view(report, None, None, None, "skipped", 0, 200, explain_skipped=True)
     for row in view["skipped"]["items"]:
@@ -518,7 +518,7 @@ def test_deleted_owner_suppresses_schema_and_structure_children():
         s.check == "ed.schema.pko_unavailable" and s.reason.startswith("owner_type_unavailable:")
         for s in report.skipped
     )
-    from kd2_rules_mcp.validation.ed_structure import validate_structure
+    from kd_rules_mcp.validation.ed_structure import validate_structure
 
     doc = document(text)
     schema = load_schema(DATA / "validation.bin")

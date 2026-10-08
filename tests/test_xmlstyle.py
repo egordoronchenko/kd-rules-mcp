@@ -2,7 +2,7 @@
 
 import pytest
 
-from kd2_rules_mcp.kd2.xmlstyle import (
+from kd_rules_mcp.kd2.xmlstyle import (
     BOM,
     XmlStyle,
     XmlWriter,
@@ -303,7 +303,7 @@ def test_preserve_line_endings_over_budget_falls_back(
     monkeypatch: pytest.MonkeyPatch, new: bytes, expected: bytes
 ) -> None:
     """Середина сверх предела диффа: сопоставление по месту либо грубый дифф, без потери строк."""
-    from kd2_rules_mcp.kd2 import xmlstyle
+    from kd_rules_mcp.kd2 import xmlstyle
 
     monkeypatch.setattr(xmlstyle, "_DIFF_BUDGET", 0)
     old = b"a\r\nb\nc\nd\r\ne\n"

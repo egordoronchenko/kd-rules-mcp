@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.errors import Kd2Error, StructureFormatError, StructureNotFoundError
-from kd2_rules_mcp.structures.store import StructureStore
+from kd_rules_mcp.errors import Kd2Error, StructureFormatError, StructureNotFoundError
+from kd_rules_mcp.structures.store import StructureStore
 
 SMALL = Path(__file__).parent / "data" / "md83exp_small.xml"
 

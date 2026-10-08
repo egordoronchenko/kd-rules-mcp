@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
-from kd2_rules_mcp.structures.db import SCHEMA
-from kd2_rules_mcp.structures.store import StructureStore
-from kd2_rules_mcp.validation.exchange_plan import (
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.structures.db import SCHEMA
+from kd_rules_mcp.structures.store import StructureStore
+from kd_rules_mcp.validation.exchange_plan import (
     AMBIGUOUS_PKO,
     ATTACHED,
     DOCUMENT_POSTING,
@@ -31,7 +31,7 @@ from kd2_rules_mcp.validation.exchange_plan import (
     check_exchange_plan,
     plan_name_from_path,
 )
-from kd2_rules_mcp.validation.report import Issue, ValidationReport
+from kd_rules_mcp.validation.report import Issue, ValidationReport
 
 DUMP = Path(__file__).parent / "data" / "xmldump"
 ENUM = "ПеречислениеСсылка.Виды"

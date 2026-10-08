@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.ed.errors import EdFormatError
-from kd2_rules_mcp.ed.reader import read_manager
-from kd2_rules_mcp.ed.routes import compare_versions, read_routes
+from kd_rules_mcp.ed.errors import EdFormatError
+from kd_rules_mcp.ed.reader import read_manager
+from kd_rules_mcp.ed.routes import compare_versions, read_routes
 
 DATA = Path(__file__).parent / "data" / "ed" / "routes"
 NODE = (
@@ -32,7 +32,7 @@ def test_default_profile_bytes_unchanged():
 
 
 def test_documents_and_observer_preserve_complete_profile(monkeypatch):
-    from kd2_rules_mcp.ed import routes
+    from kd_rules_mcp.ed import routes
 
     root = (DATA / "grammar").resolve()
     baseline = read_routes(root)
@@ -59,7 +59,7 @@ def test_documents_and_observer_preserve_complete_profile(monkeypatch):
 
 
 def test_changed_manager_is_read_instead_of_open_document(tmp_path, monkeypatch):
-    from kd2_rules_mcp.ed import routes
+    from kd_rules_mcp.ed import routes
 
     root = tmp_path / "dump"
     shutil.copytree(DATA / "managers", root)

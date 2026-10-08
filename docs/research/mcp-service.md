@@ -4,8 +4,8 @@
 
 ## 7.1. Поверхность инструментов
 
-Код: `src/kd2_rules_mcp/service/` (логика инструментов, `PathMap`, `Settings`), `src/kd2_rules_mcp/server.py`
-(регистрация в `MCPServer` из SDK `mcp` 2.2, коды ошибок, запуск), точка входа `kd2-rules-mcp`. Тесты:
+Код: `src/kd_rules_mcp/service/` (логика инструментов, `PathMap`, `Settings`), `src/kd_rules_mcp/server.py`
+(регистрация в `MCPServer` из SDK `mcp` 2.2, коды ошибок, запуск), точка входа `kd-rules-mcp`. Тесты:
 `tests/test_server.py` — клиент MCP в том же процессе вызывает каждый из 31 инструмента (на 27.09.2026 их было 27;
 `project_list`, `structure_load_project`, `rules_pack` и `rules_close` добавлены позже). Полный справочник с параметрами, ответами
 и кодами ошибок — [`docs/tools.md`](../tools.md), генерируется из сервера (`scripts/dump_tools.py`).
@@ -45,7 +45,7 @@
   (`workspace`), `KD2_PATH_MAP`, `KD2_RULES_DIRS`, `KD2_LOG_LEVEL` (с 01.10.2026: уровень лога, по умолчанию
   `INFO`; строка на вызов инструмента, трассировки непредвиденных исключений).
 
-Проверено также настоящим HTTP: `kd2-rules-mcp` на порту 8061, клиент по URL получил 27 инструментов и ответ
+Проверено также настоящим HTTP: `kd-rules-mcp` на порту 8061, клиент по URL получил 27 инструментов и ответ
 `structure_list`.
 
 ## 7.2. Docker
@@ -53,9 +53,9 @@
 Файлы: `Dockerfile`, `.dockerignore`, `docker-compose.yml`, тест `tests/test_deploy.py` (маркер `deploy`, запускается
 с `KD2_DEPLOY_URL`).
 
-- Образ `python:3.12-slim` в две стадии, зависимости строго по `uv.lock`, 255 МБ; сервер — `kd2-rules-mcp` от
+- Образ `python:3.12-slim` в две стадии, зависимости строго по `uv.lock`, 255 МБ; сервер — `kd-rules-mcp` от
   пользователя uid 1000 (точка входа от root только отдаёт ему тома и переключается через `setpriv`).
-- `docker-compose.yml`: контейнер `kd2_rules_mcp`, порт 8060, `restart: unless-stopped`; `projects.yaml` и
+- `docker-compose.yml`: контейнер `kd_rules_mcp`, порт 8060, `restart: unless-stopped`; `projects.yaml` и
   `structures\` → только на чтение; кэш структур — именованный том `kd2_structures_cache`; рабочая папка —
   `workspace\` репозитория → `/data/workspace` (сохранённые правила видны на машине). Папки проектов
   (`/projects/<проект>`, только чтение) и `KD2_PATH_MAP` (перевод путей агента) — в `docker-compose.override.yml`,
@@ -80,8 +80,8 @@
 
 ## 7.3. Подключение
 
-`kd2-rules-mcp` → `http://<сервер MCP>:8060/mcp` в `.mcp.json` и `.cursor/mcp.json`; раздел «Сервер
-`kd2-rules-mcp`» в `AGENTS.md` (инструменты, пути, рабочая папка, коды ошибок).
+`kd-rules-mcp` → `http://<сервер MCP>:8060/mcp` в `.mcp.json` и `.cursor/mcp.json`; раздел «Сервер
+`kd-rules-mcp`» в `AGENTS.md` (инструменты, пути, рабочая папка, коды ошибок).
 
 Проверка: `claude mcp list` в репозитории показывает сервер (статус «ожидает одобрения», как у `1C-docs-mcp` —
 серверы проектного `.mcp.json` включает пользователь один раз); новая сессия `claude -p` с `--mcp-config .mcp.json`
@@ -95,7 +95,7 @@
 - `projects.yaml` (пример — `projects.example.yaml`; в форке команды можно хранить в git) — проект → конфигурации (выгрузка и расширения, пути от папки проекта) → базы (роль
   `песочница`/`боевая`, строка соединения); `mcp_config` и `code_mcp` — серверы поиска по коду проекта из его
   `.mcp.json`; `shared_mcp` — общие серверы 1С; `exchanges` — план обмена и проекты. Разбор и проверка
-  согласованности — `src/kd2_rules_mcp/projects.py`.
+  согласованности — `src/kd_rules_mcp/projects.py`.
 - `projects.local.yaml` (не в git, пример — `projects.local.example.yaml`) — папка каждого проекта на этой машине
   (любые диски), `server_url`, необязательно `workspace`, `onec_platform` (путь к `1cv8.exe`) и `logins` (`<проект>.<база>: {user,
   password}` — пользователь 1С для баз с авторизацией; пароль только в личном файле).

@@ -1,5 +1,5 @@
 [project]
-name = "kd2-rules-mcp"
+name = "kd-rules-mcp"
 version = "1.0.0"
 description = "MCP-сервер правил обмена «Конвертации данных 2» (1С): разбор, сопоставление, правка и проверка"
 readme = "README.md"
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-kd2-rules-mcp = "kd2_rules_mcp:main"
+kd-rules-mcp = "kd_rules_mcp:main"
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]

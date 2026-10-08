@@ -1,7 +1,7 @@
 # Проверки правил: обоснование и разбор замечаний
 
 Дата: 26.09.2026. Этап 5: проверки 5.1–5.5.
-Каркас: `src/kd2_rules_mcp/validation/report.py` (замечание: уровень, идентификатор проверки, адрес,
+Каркас: `src/kd_rules_mcp/validation/report.py` (замечание: уровень, идентификатор проверки, адрес,
 текст; невыполненные проверки), `address.py` (адреса правил: код ПКО/ПВД/ПОД, имя алгоритма, путь ПКС).
 
 Ссылки «Исп:N» (и «БСП:N») — строки исполнителя БСП
@@ -10,7 +10,7 @@
 
 ## 5.1. Проверка формата
 
-Код: `src/kd2_rules_mcp/validation/format.py` (`check_format(document)`), тесты: `tests/test_validation_format.py`.
+Код: `src/kd_rules_mcp/validation/format.py` (`check_format(document)`), тесты: `tests/test_validation_format.py`.
 Ссылки на строки читателей выборочно сверены.
 Решения по уровням с обоснованием — в docstring модуля и таблице `_KIND_TAGS`. Кратко:
 
@@ -29,7 +29,7 @@
 
 ## 5.2. Проверка по структурам метаданных
 
-Код: `src/kd2_rules_mcp/validation/structure.py` (`check_structures(rules, source, target)`).
+Код: `src/kd_rules_mcp/validation/structure.py` (`check_structures(rules, source, target)`).
 Тесты: `tests/test_validation_structure.py` (синтетика этапа 4: источник `main`+`ext`, приёмник `main`);
 тест на реальных правилах (маркер `structures`) в репозиторий не входит.
 
@@ -87,7 +87,7 @@
 
 ## 5.3. Проверка правил регистрации
 
-Код: `src/kd2_rules_mcp/validation/registration.py` (`check_registration(rules, structure)`), тесты:
+Код: `src/kd_rules_mcp/validation/registration.py` (`check_registration(rules, structure)`), тесты:
 `tests/test_validation_registration.py` (синтетика `tests/data/registration/`, реальные правила — маркер `structures`).
 Обоснование каждой проверки — ссылки на читатель
 `ЗагрузкаПравилРегистрацииОбъектов` и исполнитель `ОбменДаннымиСобытия` в docstring функций. Главное:
@@ -107,7 +107,7 @@
 
 ## 5.4. Вынос обработчиков в BSL-обёртки
 
-Код: `src/kd2_rules_mcp/validation/handlers.py` (`export_handlers(rules, out_dir)`, `locate(export, file, line)`),
+Код: `src/kd_rules_mcp/validation/handlers.py` (`export_handlers(rules, out_dir)`, `locate(export, file, line)`),
 тесты: `tests/test_validation_handlers.py`.
 
 Эталон — обработка КД `reference/kd2-cfg/DataProcessors/ВыгрузкаОбработчиков`, которая выгружает обработчики во
@@ -142,7 +142,7 @@
 
 ## 5.5. Ссылки обработчиков на алгоритмы
 
-Код: `src/kd2_rules_mcp/validation/algorithms.py` (`check_algorithm_refs(rules)`), тесты:
+Код: `src/kd_rules_mcp/validation/algorithms.py` (`check_algorithm_refs(rules)`), тесты:
 `tests/test_validation_algorithms.py`. Отдельная проверка, а не часть `check_format`: читатель
 файл принимает, ошибка возникает только при выполнении обработчика. Синтакс-чекер 5.4 её не находит —
 `Алгоритмы` в обёртке объявлена переменной модуля.
@@ -164,7 +164,7 @@
 
 ## Параметры объекта в обработчике поиска
 
-`src/kd2_rules_mcp/validation/search.py`, входит в `rules_validate`. Добавлено 30.09.2026 по дублю
+`src/kd_rules_mcp/validation/search.py`, входит в `rules_validate`. Добавлено 30.09.2026 по дублю
 контрагентов в ДО при обмене из БП (рабочие правила обмена БП → ДО, ПКО «Контрагенты», `ТехПараметр1`).
 
 Загрузка ищет объект сразу по узлу `<Ссылка>` (БСП:10735–10757), в узел ссылки выгрузка пишет только

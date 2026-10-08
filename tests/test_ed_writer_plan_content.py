@@ -5,16 +5,16 @@ import sqlite3
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.manager_operations import parse_operation, preview
-from kd2_rules_mcp.authoring.ed.manager_render import ManagerManifest
-from kd2_rules_mcp.ed.writer import new_manager
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.authoring.ed.manager_operations import parse_operation, preview
+from kd_rules_mcp.authoring.ed.manager_render import ManagerManifest
+from kd_rules_mcp.ed.writer import new_manager
+from kd_rules_mcp.errors import (
     EdAuthoringAckRequiredError,
     EdAuthoringPreconditionError,
     EdSchemaNotFoundError,
     StructureNotFoundError,
 )
-from kd2_rules_mcp.server import error_payload
+from kd_rules_mcp.server import error_payload
 from tests.test_ed_writer_code import execute, round_trip
 from tests.test_ed_writer_tables import table_model
 from tests.test_service_ed_writer import (

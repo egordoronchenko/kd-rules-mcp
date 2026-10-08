@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.format_package import (
+from kd_rules_mcp.authoring.ed.format_package import (
     FORMAT_DECLARE_PROCEDURE,
     FORMAT_OVERRIDE_MODULE,
     FormatDeclaration,
@@ -22,16 +22,16 @@ from kd2_rules_mcp.authoring.ed.format_package import (
     render_format_extension,
     render_format_package,
 )
-from kd2_rules_mcp.authoring.ed.identity import make_identity_map
-from kd2_rules_mcp.authoring.ed.manager_render import ManagerRoute, render_manager_route
-from kd2_rules_mcp.authoring.ed.manifest import sha256
-from kd2_rules_mcp.authoring.ed.xml_dump import M, parse_xml, profile_template, read_description
-from kd2_rules_mcp.ed.layer_model import LayerDescriptor
-from kd2_rules_mcp.ed.layer_reader import read_extension_text
-from kd2_rules_mcp.ed.routes import read_routes
-from kd2_rules_mcp.ed.schema import QName, load_schema
-from kd2_rules_mcp.ed.schema.xdto import XDTO, XS
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.authoring.ed.identity import make_identity_map
+from kd_rules_mcp.authoring.ed.manager_render import ManagerRoute, render_manager_route
+from kd_rules_mcp.authoring.ed.manifest import sha256
+from kd_rules_mcp.authoring.ed.xml_dump import M, parse_xml, profile_template, read_description
+from kd_rules_mcp.ed.layer_model import LayerDescriptor
+from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.routes import read_routes
+from kd_rules_mcp.ed.schema import QName, load_schema
+from kd_rules_mcp.ed.schema.xdto import XDTO, XS
+from kd_rules_mcp.errors import (
     EdFormatDuplicateNameError,
     EdFormatEmptyObjectError,
     EdFormatIdentifierError,

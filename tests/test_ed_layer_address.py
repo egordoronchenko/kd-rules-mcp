@@ -5,15 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.ed.layer_address import (
+from kd_rules_mcp.ed.layer_address import (
     AmbiguousLayerAddress,
     LayerAddressNotFound,
     build_layer_addresses,
 )
-from kd2_rules_mcp.ed.layer_model import EntityState, LayerDescriptor
-from kd2_rules_mcp.ed.layer_reader import read_extension_text
-from kd2_rules_mcp.ed.layers import compose_manager, read_layers
-from kd2_rules_mcp.ed.model import Classification, ObjectRule, PropertyRule
+from kd_rules_mcp.ed.layer_model import EntityState, LayerDescriptor
+from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.layers import compose_manager, read_layers
+from kd_rules_mcp.ed.model import Classification, ObjectRule, PropertyRule
 
 ROOT = Path(__file__).resolve().parent / "data" / "ed" / "layers"
 

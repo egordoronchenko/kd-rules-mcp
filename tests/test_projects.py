@@ -12,7 +12,7 @@ import pytest
 import yaml
 from mcp import Client
 
-from kd2_rules_mcp.projects import (
+from kd_rules_mcp.projects import (
     LocalSettings,
     ProjectConfigError,
     compose_env,
@@ -23,8 +23,8 @@ from kd2_rules_mcp.projects import (
     resolve,
     with_login,
 )
-from kd2_rules_mcp.server import create_server
-from kd2_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.server import create_server
+from kd_rules_mcp.service import Kd2Service, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(__file__).parent / "data"
@@ -147,9 +147,9 @@ def test_load_local_port_and_instance(tmp_path: Path) -> None:
     assert settings.port == 8061
     assert settings.instance == "stand"
     assert compose_env(settings) == {
-        "KD2_CONTAINER": "kd2_rules_mcp_stand",
+        "KD2_CONTAINER": "kd_rules_mcp_stand",
         "KD2_CACHE_VOLUME": "kd2_structures_cache_stand",
-        "COMPOSE_PROJECT_NAME": "kd2-rules-mcp-stand",
+        "COMPOSE_PROJECT_NAME": "kd-rules-mcp-stand",
         "KD2_PUBLISHED_PORT": "8061",
     }
     path.write_text("projects: {}\n", encoding="utf-8")
@@ -170,19 +170,19 @@ def test_compose_override_ports_and_bearer(tmp_path: Path) -> None:
     catalog = load_catalog(_write_catalog(tmp_path))
     plain = LocalSettings()
     plain_service = yaml.safe_load(setup_local.compose_override(catalog, plain))["services"][
-        "kd2-rules-mcp"
+        "kd-rules-mcp"
     ]
     assert "ports" not in plain_service
     assert "KD2_TOKEN" not in plain_service["environment"]
     assert setup_local.render_env(plain) is None
     servers, _warnings = setup_local.mcp_servers(catalog, plain)
-    assert "headers" not in servers["kd2-rules-mcp"]
+    assert "headers" not in servers["kd-rules-mcp"]
 
     bound = LocalSettings(
         bind="192.0.2.10", token="секрет", server_url="http://192.0.2.10:8060/mcp"
     )
     service = yaml.safe_load(setup_local.compose_override(catalog, bound))["services"][
-        "kd2-rules-mcp"
+        "kd-rules-mcp"
     ]
     assert "ports" not in service
     assert service["environment"]["KD2_TOKEN"] == "секрет"
@@ -193,8 +193,8 @@ def test_compose_override_ports_and_bearer(tmp_path: Path) -> None:
     assert "KD2_CONTAINER" not in env
     servers, _warnings = setup_local.mcp_servers(catalog, bound)
     claude = {"mcpServers": {name: {"type": "http", **entry} for name, entry in servers.items()}}
-    assert claude["mcpServers"]["kd2-rules-mcp"]["headers"] == {"Authorization": "Bearer секрет"}
-    assert servers["kd2-rules-mcp"]["headers"]["Authorization"] == "Bearer секрет"
+    assert claude["mcpServers"]["kd-rules-mcp"]["headers"] == {"Authorization": "Bearer секрет"}
+    assert servers["kd-rules-mcp"]["headers"]["Authorization"] == "Bearer секрет"
     assert setup_local.localhost_server_url_warning(bound) is None
     loop = LocalSettings(bind="192.0.2.10", token="секрет")
     assert setup_local.localhost_server_url_warning(loop) is not None
@@ -219,13 +219,13 @@ def test_env_file_port_instance_and_server_url_warning(tmp_path: Path) -> None:
     assert "KD2_BIND" not in text
     for line in (
         "KD2_PUBLISHED_PORT=8061",
-        "KD2_CONTAINER=kd2_rules_mcp_stand",
+        "KD2_CONTAINER=kd_rules_mcp_stand",
         "KD2_CACHE_VOLUME=kd2_structures_cache_stand",
-        "COMPOSE_PROJECT_NAME=kd2-rules-mcp-stand",
+        "COMPOSE_PROJECT_NAME=kd-rules-mcp-stand",
     ):
         assert line in text
     service = yaml.safe_load(setup_local.compose_override(catalog, local))["services"][
-        "kd2-rules-mcp"
+        "kd-rules-mcp"
     ]
     assert "ports" not in service
     warning = setup_local.server_url_port_warning(local)
@@ -308,12 +308,12 @@ def test_compose_config_resolves_publication_from_env(tmp_path: Path) -> None:
     """
     compose = ROOT / "docker-compose.yml"
     bare = _compose_config(tmp_path / "bare", compose)
-    bare_service = bare["services"]["kd2-rules-mcp"]
+    bare_service = bare["services"]["kd-rules-mcp"]
     assert _published(bare_service) == ("127.0.0.1", "8060")
     assert len(bare_service["ports"]) == 1
-    assert bare_service["container_name"] == "kd2_rules_mcp"
+    assert bare_service["container_name"] == "kd_rules_mcp"
     assert bare["volumes"]["kd2_cache"]["name"] == "kd2_structures_cache"
-    assert bare["name"] == "kd2-rules-mcp"
+    assert bare["name"] == "kd-rules-mcp"
 
     project = tmp_path / "with-env"
     project.mkdir()
@@ -324,7 +324,7 @@ def test_compose_config_resolves_publication_from_env(tmp_path: Path) -> None:
         newline="\n",
     )
     loaded = _compose_config(project, compose, env_file)
-    service = loaded["services"]["kd2-rules-mcp"]
+    service = loaded["services"]["kd-rules-mcp"]
     assert _published(service) == ("127.0.0.1", "8061")
     assert len(service["ports"]) == 1
     assert service["container_name"] == "xx"
@@ -407,12 +407,12 @@ def test_setup_generates_mounts_and_agent_servers(tmp_path: Path) -> None:
     (alpha / "Проект" / ".dev.env").write_text("IB_USER=Агент\nIB_PASSWORD=1\n", encoding="utf-8")
     local = load_local_from(tmp_path, {"alpha": str(alpha)})
     override = yaml.safe_load(setup_local.compose_override(catalog, local))
-    service = override["services"]["kd2-rules-mcp"]
+    service = override["services"]["kd-rules-mcp"]
     assert f"{str(alpha).replace(chr(92), '/')}:/projects/alpha:ro" in service["volumes"]
     assert service["environment"]["KD2_PROJECT_DIRS"] == "alpha=/projects/alpha"
     assert f"{alpha}=/projects/alpha" in service["environment"]["KD2_PATH_MAP"]
     servers, warnings = setup_local.mcp_servers(catalog, local)
-    assert servers["kd2-rules-mcp"] == {"url": local.server_url}
+    assert servers["kd-rules-mcp"] == {"url": local.server_url}
     assert servers["docs"] == {"url": "http://h:2/mcp"}
     assert servers["alpha-code-a"] == {"url": "http://h:1/mcp"}
     # Сервер данных песочницы — с Basic-авторизацией логином базы из .dev.env (UTF-8).

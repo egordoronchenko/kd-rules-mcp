@@ -5,12 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import parse_operation, preview
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import dump_model, load_model
-from kd2_rules_mcp.validation.ed_writer import validate_writer
+from kd_rules_mcp.authoring.ed.manager_operations import parse_operation, preview
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import dump_model, load_model
+from kd_rules_mcp.validation.ed_writer import validate_writer
 from tests.test_ed_writer_code import round_trip
 from tests.test_ed_writer_values import commit_batch
 
@@ -65,7 +65,7 @@ def test_imported_release_snapshot_preserves_ids_decisions_and_source(release):
 def test_current_imported_snapshot_does_not_repeat_migration():
     model = load_model((DATA / "snapshot-import-w2.ed.json").read_bytes())
     with patch(
-        "kd2_rules_mcp.ed.writer_snapshot.migrate_imported",
+        "kd_rules_mcp.ed.writer_snapshot.migrate_imported",
         side_effect=AssertionError("Повторная миграция"),
     ):
         assert load_model(dump_model(model)).revision == model.revision

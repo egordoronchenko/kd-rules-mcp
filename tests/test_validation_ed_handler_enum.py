@@ -4,12 +4,12 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import parse_operation
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.validation.ed_handler_enum import enum_uses, validate_enum_handlers
+from kd_rules_mcp.authoring.ed.manager_operations import parse_operation
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.ed.schema.profile import ValidationProfile
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.validation.ed_handler_enum import enum_uses, validate_enum_handlers
 from tests.test_ed_profile import DATA
 from tests.test_ed_writer import execute
 

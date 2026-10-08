@@ -2,12 +2,12 @@
 
 import pytest
 
-from kd2_rules_mcp.ed.layer_model import LayerDescriptor, LayerHandlerBinding, rule_view
-from kd2_rules_mcp.ed.layer_reader import read_extension_text
-from kd2_rules_mcp.ed.layers import compose_manager
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.validation.ed_layers import validate_effective_links, validate_layers
-from kd2_rules_mcp.validation.ed_projection import effective_document, select_context
+from kd_rules_mcp.ed.layer_model import LayerDescriptor, LayerHandlerBinding, rule_view
+from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.layers import compose_manager
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.validation.ed_layers import validate_effective_links, validate_layers
+from kd_rules_mcp.validation.ed_projection import effective_document, select_context
 from tests.test_ed_layers_handlers import (
     EXTENSION,
     SEND_BODY,

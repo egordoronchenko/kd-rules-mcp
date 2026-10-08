@@ -8,19 +8,19 @@ from types import MappingProxyType
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.context import AuthoringContext
-from kd2_rules_mcp.authoring.ed.instruction import render_data_preflight
-from kd2_rules_mcp.ed import compose_manager
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.service.ed_views import validation_view
-from kd2_rules_mcp.validation.ed_authoring import check_profile
-from kd2_rules_mcp.validation.ed_layers import select_context, validate_effective_schema
-from kd2_rules_mcp.validation.ed_required import CHECK, RequiredUnfilled
-from kd2_rules_mcp.validation.ed_schema import validate_schema
-from kd2_rules_mcp.validation.report import Level, ValidationReport
+from kd_rules_mcp.authoring.ed.context import AuthoringContext
+from kd_rules_mcp.authoring.ed.instruction import render_data_preflight
+from kd_rules_mcp.ed import compose_manager
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.ed.schema.profile import ValidationProfile
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service.ed_views import validation_view
+from kd_rules_mcp.validation.ed_authoring import check_profile
+from kd_rules_mcp.validation.ed_layers import select_context, validate_effective_schema
+from kd_rules_mcp.validation.ed_required import CHECK, PARTIAL, RequiredUnfilled, partial_message
+from kd_rules_mcp.validation.ed_schema import validate_schema
+from kd_rules_mcp.validation.report import Level, ValidationReport
 from tests.test_ed_authoring_model import inputs as authoring_inputs
 from tests.test_ed_profile import BASE, DATA, document
 from tests.test_validation_ed_structure import snapshot
@@ -293,3 +293,108 @@ def test_force_reload_fill_checking_is_shared_by_direct_cached_and_layered_paths
     issues, skips = reports(fresh)
     assert not skips and len(issues) == 1
     assert "FillChecking=DontCheck" in issues[0].message
+
+
+def mixed_fill_report(tmp_path, first_fill, second_fill):
+    """Два объекта одной схемы: у каждого свой FillChecking реквизита Код."""
+    package = (DATA / "validation.bin").read_text(encoding="utf-8")
+    package = package.replace(
+        'xmlns:t="urn:test:validation"',
+        'xmlns:t="urn:test:validation" xmlns:m="urn:test:writer-message"',
+    ).replace(
+        '<objectType name="Keys">',
+        '<import namespace="urn:test:writer-message"/>'
+        '<valueType name="TestRef" base="m:Ref"/>'
+        '<objectType name="Keys"><property name="Ссылка" type="t:TestRef" nillable="true"/>',
+    )
+    package = package.replace(
+        '<property name="Код" type="xs:string"/>',
+        '<property name="Код" type="xs:string" lowerBound="1"/>',
+    )
+    path = tmp_path / "mixed.bin"
+    path.write_text(package, encoding="utf-8")
+    schema = load_schema(path, locate_import=lambda _: DATA.parent / "writer/message.bin")
+    call = "    ДобавитьПКО_Тест(ПравилаКонвертации);"
+    text = BASE.replace(
+        call,
+        call + "\n    ДобавитьПКО_БезПроверки(ПравилаКонвертации);",
+        1,
+    )
+    text += (
+        "\nПроцедура ДобавитьПКО_БезПроверки(ПравилаКонвертации)\n"
+        "    ПравилоКонвертации = ОбменДаннымиXDTOСервер."
+        "ИнициализироватьПравилоКонвертацииОбъекта(ПравилаКонвертации);\n"
+        '    ПравилоКонвертации.ИмяПКО = "БезПроверки";\n'
+        "    ПравилоКонвертации.ОбъектДанных = Метаданные.Справочники.БезПроверки;\n"
+        '    ПравилоКонвертации.ОбъектФормата = "Справочник.Тест";\n'
+        "    СвойстваШапки = ПравилоКонвертации.Свойства;\n"
+        '    ДобавитьПКС(СвойстваШапки, "Код", "Код", 0);\n'
+        "КонецПроцедуры\n"
+    )
+    doc = document(text)
+    snap = snapshot()
+    obj = snap.objects[("справочник", "тест")]
+    source = obj.property("Код")[0]
+    checked = replace(
+        obj,
+        properties=MappingProxyType(
+            {**obj.properties, ("код", ""): (replace(source, fill_checking=first_fill),)}
+        ),
+    )
+    missing = replace(
+        obj,
+        id=obj.id + 1,
+        name="БезПроверки",
+        type_name="СправочникСсылка.БезПроверки",
+        properties=MappingProxyType(
+            {("код", ""): (replace(source, fill_checking=second_fill, types=("Строка",)),)}
+        ),
+    )
+    snap = replace(
+        snap,
+        objects=MappingProxyType(
+            {
+                **snap.objects,
+                ("справочник", "тест"): checked,
+                ("справочник", "безпроверки"): missing,
+            }
+        ),
+    )
+    return validate_schema(
+        doc,
+        schema,
+        build_addresses(doc),
+        ValidationProfile.build(schema, "1.2", "send"),
+        snap,
+    )
+
+
+def test_partial_fill_checking_is_info_not_a_skip(tmp_path):
+    report = mixed_fill_report(tmp_path, "DontCheck", "")
+    warnings = [i for i in report.issues if i.check == CHECK]
+    assert len(warnings) == 1
+    assert warnings[0].address == "ПКО/Тест/ПКС/Код"
+    assert not [s for s in report.skipped if s.check == CHECK]
+    partial = next(i for i in report.issues if i.check == PARTIAL)
+    assert partial.level == Level.INFO
+    assert partial.address == "Конвертация"
+    assert partial.message == (
+        "Нет FillChecking (перечитайте XML-структуру): Справочник.БезПроверки."
+    )
+    assert "ed.schema.required_unfilled" not in report.summary().split("не выполнены проверки:")[-1]
+
+
+def test_fill_checking_skip_stays_when_nothing_was_found(tmp_path):
+    report = mixed_fill_report(tmp_path, "", "")
+    assert not [i for i in report.issues if i.check in (CHECK, PARTIAL)]
+    skips = [s for s in report.skipped if s.check == CHECK]
+    assert len(skips) == 1
+    assert skips[0].reason.startswith("fill_checking_unavailable (reload XML structure)")
+
+
+def test_partial_message_lists_three_names_then_the_rest():
+    names = [f"Справочник.Объект{n:02d}" for n in range(12)]
+    assert partial_message(names) == (
+        "Нет FillChecking (перечитайте XML-структуру): "
+        "Справочник.Объект00, Справочник.Объект01, Справочник.Объект02 и ещё 9."
+    )

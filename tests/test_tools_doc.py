@@ -11,8 +11,8 @@ import pytest
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 
-from kd2_rules_mcp.server import INSTRUCTIONS, _without_schema_titles, create_server
-from kd2_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.server import INSTRUCTIONS, _without_schema_titles, create_server
+from kd_rules_mcp.service import Kd2Service, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))

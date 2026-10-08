@@ -9,26 +9,27 @@ from uuid import UUID
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.manager_operations import ManagerOperation, PropertyPatch
-from kd2_rules_mcp.authoring.ed.manager_render import (
+from kd_rules_mcp.authoring.ed.manager_operations import ManagerOperation, PropertyPatch
+from kd_rules_mcp.authoring.ed.manager_render import (
     REQUIRED_ROUTINES,
     ManagerManifest,
     ManagerRoute,
     render_manager_kit,
 )
-from kd2_rules_mcp.authoring.ed.manifest import sha256
-from kd2_rules_mcp.authoring.ed.model import AuthoringPreconditionError, ExtensionIdentity
-from kd2_rules_mcp.authoring.ed.xml_dump import (
+from kd_rules_mcp.authoring.ed.manifest import sha256
+from kd_rules_mcp.authoring.ed.model import AuthoringPreconditionError, ExtensionIdentity
+from kd_rules_mcp.authoring.ed.xml_dump import (
     Description,
     ManagerHost,
+    SubscriptionAddition,
     profile_template,
     read_manager_host,
 )
-from kd2_rules_mcp.ed.canonical import canonicalize
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import FormatBinding, load_model
+from kd_rules_mcp.ed.canonical import canonicalize
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import FormatBinding, load_model
 from tests.test_ed_writer import execute, pilot_model
 
 PLAN = "СинхронизацияДанныхЧерезУниверсальныйФормат"
@@ -532,7 +533,7 @@ def test_instruction_counts_evidence_and_profile_hash():
 
 def test_live_instruction_counts_table_properties_in_the_same_total():
     model = pilot_model()
-    from kd2_rules_mcp.authoring.ed.manager_operations import parse_operation
+    from kd_rules_mcp.authoring.ed.manager_operations import parse_operation
 
     group = {
         "client_id": "rows",
@@ -563,7 +564,7 @@ def test_live_instruction_counts_table_properties_in_the_same_total():
 
 
 def test_host_and_delivery_template_are_decision_inputs(monkeypatch):
-    from kd2_rules_mcp.authoring.ed import manager_render
+    from kd_rules_mcp.authoring.ed import manager_render
 
     model = golden_model()
     first = build_kit(model)
@@ -731,7 +732,7 @@ def test_review_missing_host_mode_refused(missing, value):
 
 @pytest.mark.parametrize("legacy_output", ["version", "instruction", "xml", "writer"])
 def test_review_previous_manifest_owns_old_generator_bytes(monkeypatch, legacy_output):
-    from kd2_rules_mcp.authoring.ed import manager_render
+    from kd_rules_mcp.authoring.ed import manager_render
 
     current_version = manager_render.MANAGER_TEMPLATE_VERSION
     if legacy_output == "version":
@@ -919,7 +920,7 @@ def test_review_delivery_name_length(kind, length):
 
 
 def test_review_instruction_substitutions_without_editing_template(monkeypatch):
-    from kd2_rules_mcp.authoring.ed import instruction, manager_render
+    from kd_rules_mcp.authoring.ed import instruction, manager_render
 
     commands = (
         "create_infobase",
@@ -964,3 +965,68 @@ def test_review_instruction_substitutions_without_editing_template(monkeypatch):
     assert '/LoadConfigFromFiles "<каталог комплекта>/extension"' in lines[4]
     for command in lines[4:]:
         assert '-Extension "' + kit.manifest.identity.name + '"' in command
+
+
+def _adopted(kind, name, folder, uuid):
+    return Description(folder + "/" + name + ".xml", kind, name, uuid, {})
+
+
+def test_extension_child_objects_follow_configurator_kind_order():
+    """Состав, объект только для регистрации и источник подписки — группы видов конфигуратора.
+
+    Объект регистрации писатель до выгрузки добавляет в состав; здесь он уже в content_objects,
+    а registration_objects хранит то же имя. Порядок списков на входе намеренно не алфавитный.
+    """
+    catalog = _adopted("Catalog", "Яблоко", "Catalogs", "44444444-4444-4444-8444-444444444444")
+    document = _adopted("Document", "Ягода", "Documents", "55555555-5555-4555-8555-555555555555")
+    register = _adopted(
+        "InformationRegister",
+        "История",
+        "InformationRegisters",
+        "66666666-6666-4666-8666-666666666666",
+    )
+    later = SubscriptionAddition(
+        _adopted(
+            "EventSubscription",
+            "РегистрацияУдаления",
+            "EventSubscriptions",
+            "77777777-7777-4777-8777-777777777777",
+        ),
+        ("DocumentObject.Ягода",),
+    )
+    earlier = SubscriptionAddition(
+        _adopted(
+            "EventSubscription",
+            "Регистрация",
+            "EventSubscriptions",
+            "88888888-8888-4888-8888-888888888888",
+        ),
+        ("CatalogObject.Яблоко",),
+    )
+    expected = [
+        ("Language", "Русский"),
+        ("CommonModule", "кд3м_PilotManager"),
+        ("ExchangePlan", PLAN),
+        ("EventSubscription", "Регистрация"),
+        ("EventSubscription", "РегистрацияУдаления"),
+        ("Catalog", "Яблоко"),
+        ("Document", "Ягода"),
+        ("InformationRegister", "История"),
+    ]
+
+    def children(content):
+        kit = build_kit(
+            content_objects=content,
+            subscription_objects=(catalog,),
+            subscription_additions=(later, earlier),
+            registration_objects=("Документ.Ягода",),
+        )
+        node = xml_object(kit, "Configuration.xml").find("{*}ChildObjects")
+        assert node is not None
+        return kit, [(etree.QName(item).localname, item.text) for item in node]
+
+    forward, listed = children((register, document))
+    assert listed == expected
+    backward, listed_again = children((document, register))
+    assert listed_again == expected
+    assert forward.manifest.decision_hash != backward.manifest.decision_hash

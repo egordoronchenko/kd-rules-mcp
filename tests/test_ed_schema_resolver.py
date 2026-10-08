@@ -5,8 +5,8 @@ from typing import Any, cast
 
 import pytest
 
-from kd2_rules_mcp.ed.schema import QName, load_schema, resolve_property, resolver
-from kd2_rules_mcp.ed.schema.errors import (
+from kd_rules_mcp.ed.schema import QName, load_schema, resolve_property, resolver
+from kd_rules_mcp.ed.schema.errors import (
     EdSchemaConflictError,
     EdSchemaProfileMismatchError,
     EdSchemaResourceLimitError,

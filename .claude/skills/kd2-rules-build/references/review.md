@@ -15,7 +15,7 @@
    корреспондента — правила второй базы, по которым эта загружает (`ОбменДаннымиСервер`, стр. 10001–10083).
 2. Структуры обеих сторон (`structure_load_project`) → `rules_validate(project_id, source_structure,
    target_structure)`; без структуры стороны её проверки в `skipped` — итог неполный
-   ([structure.py:160-165](https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/src/kd2_rules_mcp/validation/structure.py#L160-L165);
+   ([structure.py:160-165](https://github.com/egordoronchenko/kd-rules-mcp/blob/main/src/kd_rules_mcp/validation/structure.py#L160-L165);
    `checks.md`, §2).
    Сначала `by_check`, затем ошибки по `check_prefix` постранично.
 3. `rules_list` по разделам: `pko` (выключенные, ПКО без источника), `pvd` (ПВД на каждый тип, который база
@@ -38,7 +38,7 @@
    правила с `Отключить` или без `Валидное` проверка пропускает, как и читатель (РЕГ, стр. 282–293), — их
    смотреть глазами.
 7. Комплект — `rules_pack(folder=…)` в рабочую папку: `warnings` — корреспондент не зеркален, регистрация для
-   другой конфигурации ([pack.py:133-151](https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/src/kd2_rules_mcp/authoring/pack.py#L133-L151)).
+   другой конфигурации ([pack.py:133-151](https://github.com/egordoronchenko/kd-rules-mcp/blob/main/src/kd_rules_mcp/authoring/pack.py#L133-L151)).
 
 ## Дефект или особенность
 

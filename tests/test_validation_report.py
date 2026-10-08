@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
-from kd2_rules_mcp.validation.address import pks_address, pkz_address, rule_address, walk_pks
-from kd2_rules_mcp.validation.report import Level, ValidationReport
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.validation.address import pks_address, pkz_address, rule_address, walk_pks
+from kd_rules_mcp.validation.report import Level, ValidationReport
 
 DATA = Path(__file__).parent / "data"
 
@@ -41,7 +41,7 @@ def test_skipped_checks_make_result_incomplete() -> None:
 
 
 def test_information_does_not_count_as_warning_or_error() -> None:
-    from kd2_rules_mcp.service.views import report_summary
+    from kd_rules_mcp.service.views import report_summary
 
     report = ValidationReport()
     report.info("ed.schema.value_range", "ПКО/Тест/ПКС/Код", "Проверьте длину значений")

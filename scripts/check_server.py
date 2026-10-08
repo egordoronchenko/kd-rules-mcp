@@ -15,8 +15,8 @@ from typing import Any
 from mcp import Client
 from mcp.types import ListToolsResult
 
-from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.projects import LocalSettings, load_local
+from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.projects import LocalSettings, load_local
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,7 +97,7 @@ def main() -> None:
         code = asyncio.run(check(url))
     except Exception as error:  # сеть, контейнер не запущен, неверный адрес
         print(f"Сервер {url} недоступен: {error}")
-        print("Проверьте: docker compose ps; docker compose logs kd2-rules-mcp --tail 30")
+        print("Проверьте: docker compose ps; docker compose logs kd-rules-mcp --tail 30")
         code = 2
     sys.exit(code)
 

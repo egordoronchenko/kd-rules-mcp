@@ -2,8 +2,8 @@
 
 import pytest
 
-from kd2_rules_mcp.ed import EdFormatError, read_manager_text
-from kd2_rules_mcp.ed.lexer import lex, split_arguments, tokenize
+from kd_rules_mcp.ed import EdFormatError, read_manager_text
+from kd_rules_mcp.ed.lexer import lex, split_arguments, tokenize
 
 
 def test_arguments_strings_comments_and_nested_calls():
@@ -81,7 +81,7 @@ def test_regions_tags_and_directives_do_not_leak_from_literals():
 
 
 def test_lex_reuses_parsed_file_with_the_same_bytes():
-    from kd2_rules_mcp.ed.model import SourceFile
+    from kd_rules_mcp.ed.model import SourceFile
 
     text = "Процедура П()\nКонецПроцедуры\n"
     same = SourceFile("модуль", "модуль.bsl", text, "sha-same", (0, 14, 29))

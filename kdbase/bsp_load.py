@@ -12,7 +12,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from kd2_rules_mcp.projects import data_endpoint, load_catalog, load_local
+from kd_rules_mcp.projects import data_endpoint, load_catalog, load_local
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = "vcexecutecode"

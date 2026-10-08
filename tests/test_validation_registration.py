@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.kd2.model import ExchangeRules, Node
-from kd2_rules_mcp.kd2.rules_io import load_registration_rules
-from kd2_rules_mcp.kd2.xmlstyle import KD_STYLE
-from kd2_rules_mcp.structures.store import StructureStore
-from kd2_rules_mcp.validation.registration import QUERY_PARAMETERS, _sample, check_registration
-from kd2_rules_mcp.validation.report import Level, ValidationReport
+from kd_rules_mcp.kd2.model import ExchangeRules, Node
+from kd_rules_mcp.kd2.rules_io import load_registration_rules
+from kd_rules_mcp.kd2.xmlstyle import KD_STYLE
+from kd_rules_mcp.structures.store import StructureStore
+from kd_rules_mcp.validation.registration import QUERY_PARAMETERS, _sample, check_registration
+from kd_rules_mcp.validation.report import Level, ValidationReport
 
 DUMP = Path(__file__).parent / "data" / "registration" / "dump"
 RULES = Path(__file__).parent / "data" / "registration"
@@ -104,7 +104,7 @@ def test_missing_object_does_not_search_similar_names(
     structure: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Промах объекта не строит подсказки: отчёт их не содержит, а поиск по всем именам дорогой."""
-    import kd2_rules_mcp.validation.registration as registration_module
+    import kd_rules_mcp.validation.registration as registration_module
 
     registration_module._OBJECTS.clear()
     registration_module._PLANS.clear()
@@ -112,7 +112,7 @@ def test_missing_object_does_not_search_similar_names(
     def forbidden(*_args: object, **_kwargs: object) -> list[str]:
         raise AssertionError("проверка регистрации не ищет похожие имена")
 
-    monkeypatch.setattr("kd2_rules_mcp.structures.queries.get_close_matches", forbidden)
+    monkeypatch.setattr("kd_rules_mcp.structures.queries.get_close_matches", forbidden)
     report = _issues("issues.xml", structure)
     assert (
         "Правило «Удалённый документ»: объект «Документ.НетОбъекта» не найден в структуре"

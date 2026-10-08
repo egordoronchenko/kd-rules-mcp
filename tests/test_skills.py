@@ -94,6 +94,6 @@ def test_relative_links_stay_in_skills(skill: str) -> None:
 
 def test_skill_texts_are_portable() -> None:
     """В `kd2-rules-build` и `kd2-exchange-pitfalls` нет путей этого репозитория (`setup_local.py`,
-    `scripts/`, `workspace/`, `docs/`, `src/kd2_rules_mcp`), а скрипты `kdbase` — с оговоркой
+    `scripts/`, `workspace/`, `docs/`, `src/kd_rules_mcp`), а скрипты `kdbase` — с оговоркой
     «из клона сервера»: в чужом проекте репозитория нет."""
     assert build_packs.portability_hits(build_packs.pack_files("claude")) == []

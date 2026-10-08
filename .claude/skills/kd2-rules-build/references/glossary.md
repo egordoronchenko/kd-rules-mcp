@@ -1,12 +1,12 @@
-> Копия справочника из репозитория сервера kd2-rules-mcp
-> (https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/docs/glossary.md), собирается вместе со скиллом — правится источник.
+> Копия справочника из репозитория сервера kd-rules-mcp
+> (https://github.com/egordoronchenko/kd-rules-mcp/blob/main/docs/glossary.md), собирается вместе со скиллом — правится источник.
 > Пути вида `kdbase\…`, `projects.yaml`, `src/…` в тексте — от папки клона сервера.
 
 # Словарь
 
 Термины «Конвертации данных», БСП и этого сервера — коротко, с тем, где термин живёт в XML правил (тег) и в
 инструментах (раздел `rules_list`, вид `rule_create`). Инструменты — [tools.md](tools.md), проверки —
-[checks.md](checks.md), устройство — [architecture.md](https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/docs/architecture.md).
+[checks.md](checks.md), устройство — [architecture.md](https://github.com/egordoronchenko/kd-rules-mcp/blob/main/docs/architecture.md).
 
 ## Схема формата EnterpriseData
 
@@ -86,7 +86,7 @@
 | **Непрозрачный код** (`opaque_code`) | тело принятого обработчика, алгоритма или служебной процедуры; границы распознаны, понимание семантики BSL не заявляется |
 | **Неизвестный фрагмент** (`unknown`) | корректно ограниченный фрагмент вне принятого структурного подмножества; доступен по адресу и исходному тексту, делает разбор `partial` |
 
-## Сервер kd2-rules-mcp
+## Сервер kd-rules-mcp
 
 | Термин | Что это |
 |---|---|
@@ -101,7 +101,7 @@
 | **Проект** (1С) | запись в `projects.yaml`: конфигурации, базы, серверы кода, обмены; папка на машине — в `projects.local.yaml` (`project_list`) |
 | **Кандидат** | предложенная сервером пара объектов, свойств или значений двух структур (`match_*`) с классом уверенности и признаком `auto` |
 | **Класс уверенности** | «точно» (имя и вид совпадают), «синоним КД» (`Номер↔НомерДок`, `Дата↔ДатаДок`), «по синониму» (совпадает синоним, имена разные — только подсказка), «нет пары» |
-| **Рабочий проект правил** | правила, открытые на сервере (`rules_open`, `rules_create`, `registration_build`, `correspondent_draft`) и изменяемые инструментами; снимок в рабочей папке переживает перезапуск, закрывает проект `rules_close` ([workflow.md](https://github.com/egordoronchenko/kd2-rules-mcp/blob/main/docs/workflow.md)) |
+| **Рабочий проект правил** | правила, открытые на сервере (`rules_open`, `rules_create`, `registration_build`, `correspondent_draft`) и изменяемые инструментами; снимок в рабочей папке переживает перезапуск, закрывает проект `rules_close` ([workflow.md](https://github.com/egordoronchenko/kd-rules-mcp/blob/main/docs/workflow.md)) |
 | **Рабочая папка** | `workspace\` репозитория сервера — куда сервер пишет правила, обёртки и архивы, кроме `rules_dir` |
 | **`rules_dir`** | папка живых правил проекта в его репозитории; сервер может в неё писать |
 | **Обёртка обработчика** | `.bsl`-файл с процедурой обработчика и объявленными переменными его события для синтакс-чекера (`handlers_export`); строка ошибки переводится в правило через `handlers_locate` |

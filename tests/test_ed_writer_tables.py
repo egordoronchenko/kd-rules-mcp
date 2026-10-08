@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     ManagerOperation,
     ManagerOperationError,
     PkoPatch,
@@ -15,15 +15,15 @@ from kd2_rules_mcp.authoring.ed.manager_operations import (
     parse_operation,
     preview,
 )
-from kd2_rules_mcp.ed.canonical import model_addresses
-from kd2_rules_mcp.ed.executor_profile import BSP_3_1_12_XDTO
-from kd2_rules_mcp.ed.forms import helper_forms
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import Reference, TextStyle
-from kd2_rules_mcp.validation.ed_writer import _declarative_checks, validate_writer
-from kd2_rules_mcp.validation.report import ValidationReport
+from kd_rules_mcp.ed.canonical import model_addresses
+from kd_rules_mcp.ed.executor_profile import BSP_3_1_12_XDTO
+from kd_rules_mcp.ed.forms import helper_forms
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import Reference, TextStyle
+from kd_rules_mcp.validation.ed_writer import _declarative_checks, validate_writer
+from kd_rules_mcp.validation.report import ValidationReport
 from tests.test_ed_writer_code import execute, round_trip
 
 

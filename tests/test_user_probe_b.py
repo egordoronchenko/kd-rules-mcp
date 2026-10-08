@@ -4,15 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.correspondent import CONVERSION_NOTE, mirror_rules
-from kd2_rules_mcp.authoring.edits import find_rule
-from kd2_rules_mcp.authoring.registration import registration_losses, snapshot_registration
-from kd2_rules_mcp.errors import AmbiguousAddressError, Kd2Error
-from kd2_rules_mcp.kd2.diff import diff_rules
-from kd2_rules_mcp.kd2.model import Node, RegistrationRules
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_registration_rules
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.validation.address import pks_candidates, pks_segments
+from kd_rules_mcp.authoring.correspondent import CONVERSION_NOTE, mirror_rules
+from kd_rules_mcp.authoring.edits import find_rule
+from kd_rules_mcp.authoring.registration import registration_losses, snapshot_registration
+from kd_rules_mcp.errors import AmbiguousAddressError, Kd2Error
+from kd_rules_mcp.kd2.diff import diff_rules
+from kd_rules_mcp.kd2.model import Node, RegistrationRules
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_registration_rules
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.validation.address import pks_candidates, pks_segments
 from tests.test_authoring_correspondent import _DOCUMENT, _rules
 
 DATA = Path(__file__).parent / "data"

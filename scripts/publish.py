@@ -9,7 +9,7 @@
 Если каталога `publish/` нет (скрипт запущен в самой открытой копии), публиковать нечего.
 
 Запуск: `uv run python scripts/publish.py -m "сообщение" [--target КАТАЛОГ] [--push] [--no-checks]`;
-каталог по умолчанию — `KD2_PUBLISH_DIR` или соседний `kd2-rules-mcp-public`.
+каталог по умолчанию — `KD2_PUBLISH_DIR` или соседний `kd-rules-mcp-public`.
 """
 
 import argparse
@@ -20,7 +20,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from kd2_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.console import utf8_stdout
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "publish"
@@ -76,7 +76,7 @@ def main() -> None:
 
 def _default_target() -> Path:
     configured = os.environ.get("KD2_PUBLISH_DIR")
-    return Path(configured) if configured else ROOT.parent / "kd2-rules-mcp-public"
+    return Path(configured) if configured else ROOT.parent / "kd-rules-mcp-public"
 
 
 def _published_files() -> list[str]:

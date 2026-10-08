@@ -11,9 +11,9 @@
    `--check` — копии совпадают со сборкой (иначе код выхода 1).
 2. `--dest <папка проекта> --client claude|agents` — ставит скиллы сервера в проект:
    `claude` — `.claude/skills/` (Claude Code, Cursor, OpenCode), `agents` — `.agents/skills/` и
-   `KD2-RULES.md` в корень (Codex и клиенты, которые `.claude/skills` не читают). Обе сразу
+   `KD-RULES.md` в корень (Codex и клиенты, которые `.claude/skills` не читают). Обе сразу
    нельзя: Cursor и OpenCode увидели бы каждый скилл дважды. В `.mcp.json` проекта добавляется
-   сервер `kd2-rules-mcp`, другие серверы не трогаются. `--cursor` создаёт `.cursor/mcp.json`,
+   сервер `kd-rules-mcp`, другие серверы не трогаются. `--cursor` создаёт `.cursor/mcp.json`,
    если файла нет, и дописывает туда недостающие HTTP-серверы из `.mcp.json` (существующие
    записи не меняет; stdio с `command` не переносит). Без флага существующий файл серверами 1С
    не пополняется: скрипт называет, каких нет. Без флага и без файла скрипт сообщает, что сервер
@@ -36,15 +36,15 @@ from typing import Any
 
 import our_skills
 
-from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.projects import DEFAULT_SERVER_URL, bearer_auth, load_local
+from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.projects import DEFAULT_SERVER_URL, bearer_auth, load_local
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / ".claude" / "skills"
 REFERENCES = SKILLS / "kd2-rules-build" / "references"
-RULES_ENTRY = ROOT / "docs" / "rules" / "KD2-RULES.md"
-REPO_URL = "https://github.com/egordoronchenko/kd2-rules-mcp"
-SERVER = "kd2-rules-mcp"
+RULES_ENTRY = ROOT / "docs" / "rules" / "KD-RULES.md"
+REPO_URL = "https://github.com/egordoronchenko/kd-rules-mcp"
+SERVER = "kd-rules-mcp"
 # Прежние имена поставки. Строки с LEGACY_ скрипт переименования не меняет.
 LEGACY_SKILL_NAMES = ("kd2-ed-rules", "kd2-install")
 LEGACY_RULES_FILE = "KD2-RULES.md"
@@ -62,9 +62,9 @@ CLIENT_ROOTS = {"claude": ".claude/skills", "agents": ".agents/skills"}
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 SKIP_PARTS = {"__pycache__"}
 # Тексты, которые работают в папке проекта 1С без этого репозитория: его путей в них быть не должно.
-# kd2-install не входит — он ведёт установку из клона сервера. Копии справочников сервера
+# kd-install не входит — он ведёт установку из клона сервера. Копии справочников сервера
 # (checks, tools, glossary) описывают сам сервер и оговаривают в шапке, что пути — от клона.
-PORTABLE_SKILLS = {"kd2-rules-build", "kd2-exchange-pitfalls", "kd2-ed-rules"}
+PORTABLE_SKILLS = {"kd2-rules-build", "kd2-exchange-pitfalls", "kd3-rules"}
 SERVER_DOCS = {"checks.md", "tools.md", "glossary.md"}
 REPO_PATHS = {
     "setup_local.py": re.compile(r"setup_local"),
@@ -72,12 +72,12 @@ REPO_PATHS = {
     "scripts/": re.compile(r"(?<![\w.\\/-])scripts[/\\]"),
     "workspace/": re.compile(r"(?<![\w.\\/-])workspace[/\\]"),
     "docs/": re.compile(r"(?<![\w.\\/-])docs[/\\]"),
-    "src/kd2_rules_mcp": re.compile(r"src[/\\]kd2_rules_mcp"),
+    "src/kd_rules_mcp": re.compile(r"src[/\\]kd_rules_mcp"),
     "mcp-1c.mdc": re.compile(r"mcp-1c\.mdc"),
 }
 URL = re.compile(r"https?://\S+")
 HEADER = (
-    "> Копия справочника из репозитория сервера kd2-rules-mcp\n"
+    "> Копия справочника из репозитория сервера kd-rules-mcp\n"
     "> ({url}), собирается вместе со скиллом — правится источник.\n"
     "> Пути вида `kdbase\\…`, `projects.yaml`, `src/…` в тексте — от папки клона сервера.\n\n"
 )
@@ -131,8 +131,8 @@ def pack_files(client: str) -> dict[str, bytes]:
         files[f"{root}/{path.relative_to(SKILLS).as_posix()}"] = content
     if client == "agents":
         if not RULES_ENTRY.is_file():
-            raise SystemExit("Нет docs/rules/KD2-RULES.md — упаковку agents не собрать")
-        files["KD2-RULES.md"] = RULES_ENTRY.read_bytes()
+            raise SystemExit("Нет docs/rules/KD-RULES.md — упаковку agents не собрать")
+        files["KD-RULES.md"] = RULES_ENTRY.read_bytes()
     return dict(sorted(files.items()))
 
 
@@ -195,7 +195,7 @@ def install(
         written += 1
     report.append(f"упаковка {client}: файлов {len(files)}, записано {written}")
     # Перенос дописывает серверы в тот же словарь, что потом пишет add_server. Если запись
-    # kd2-rules-mcp уже совпадает, add_server файл не переписывает — тогда пишем сами.
+    # kd-rules-mcp уже совпадает, add_server файл не переписывает — тогда пишем сами.
     added_servers: list[str] = []
     cursor_target: dict[str, Any] | None = None
     if cursor:
@@ -237,8 +237,8 @@ def install(
             )
     if client == "agents":
         report.append(
-            "добавьте в AGENTS.md проекта строку «Правила обмена КД 2 и сервер kd2-rules-mcp — "
-            "прочитай KD2-RULES.md перед работой с ними»"
+            "добавьте в AGENTS.md проекта строку «Правила обмена КД 2 и сервер kd-rules-mcp — "
+            "прочитай KD-RULES.md перед работой с ними»"
         )
     return report
 
@@ -290,7 +290,7 @@ def _http_server_names(data: dict[str, Any]) -> list[str]:
 
 
 def _missing_http_servers(source: dict[str, Any], target: dict[str, Any]) -> list[str]:
-    """HTTP-серверы `.mcp.json`, которых нет в конфиге Cursor, кроме `kd2-rules-mcp`."""
+    """HTTP-серверы `.mcp.json`, которых нет в конфиге Cursor, кроме `kd-rules-mcp`."""
     present = target.get("mcpServers") or {}
     if not isinstance(present, dict):
         present = {}
@@ -335,7 +335,7 @@ def add_server(
     typed: bool,
     headers: dict[str, str] | None = None,
 ) -> str:
-    """Добавляет или обновляет `kd2-rules-mcp` в `mcpServers`, не трогая остальные серверы.
+    """Добавляет или обновляет `kd-rules-mcp` в `mcpServers`, не трогая остальные серверы.
 
     Сравнение «уже подключён» — по всей записи, включая `headers`.
     """
@@ -458,7 +458,7 @@ def _remove_stale(dest: Path, root: str, wanted: set[Path]) -> list[str]:
 
 def _is_portable(name: str) -> bool:
     """Файл упаковки (путь от папки проекта) должен работать без этого репозитория."""
-    if name == "KD2-RULES.md":
+    if name == "KD-RULES.md":
         return True
     _, _, inner = name.partition("skills/")
     skill, _, rest = inner.partition("/")
@@ -481,7 +481,7 @@ def _relink(source: Path, target: str) -> str:
 
 def main() -> None:
     utf8_stdout()
-    parser = argparse.ArgumentParser(description="Упаковки знаний агента kd2-rules-mcp")
+    parser = argparse.ArgumentParser(description="Упаковки знаний агента kd-rules-mcp")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="копии справочников актуальны")
     mode.add_argument("--write", action="store_true", help="пересобрать копии справочников")

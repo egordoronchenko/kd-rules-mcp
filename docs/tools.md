@@ -1,6 +1,6 @@
 # MCP tools reference
 
-All tools of `kd2-rules-mcp`: groups, purpose, parameter types/defaults and error codes.
+All tools of `kd-rules-mcp`: groups, purpose, parameter types/defaults and error codes.
 Use the `kd2-rules-build` skill for the workflow and [architecture.md](architecture.md) for server internals.
 
 Rule abbreviations retain the names used by «Конвертация данных»: ПКО (object conversion rule),
@@ -10,7 +10,7 @@ rule in EnterpriseData), ПКПД (predefined data conversion rule), ПКЗ (val
 conversion rule. 1C tags, object/procedure names and literal parameter values stay unchanged.
 
 `scripts/dump_tools.py` generates the marked section from tool docstrings and `Field` descriptions
-in `src/kd2_rules_mcp/server.py`. Run `uv run python scripts/dump_tools.py --write` after editing them;
+in `src/kd_rules_mcp/server.py`. Run `uv run python scripts/dump_tools.py --write` after editing them;
 it also refreshes `.claude/skills/kd2-rules-build/references/tools.md`. `tests/test_tools_doc.py`
 checks freshness and the context budget. The manual section below the markers preserves response
 details, examples and constraints; update it when the corresponding tool changes.
@@ -452,7 +452,7 @@ Copy registration rules.
 | `exchange_plan` | string | required | Plan |
 | `node_properties` | object | required | Rename/null/{name,value}/list |
 | `source` | object | required | Dump |
-| `structure_id` | any | `null` | Structure ID |
+| `structure_id` | any | `null` | ID |
 | `own_attributes` | any | `null` | name,type,synonym |
 | `node_values` | any | `null` | source,target,instruction |
 | `extension` | any | `null` | name,prefix |
@@ -461,7 +461,8 @@ Copy registration rules.
 | `acknowledged_notices` | any | `null` | Notices |
 | `offset` | integer | `0` | Skip |
 | `limit` | integer | `50` | Size |
-| `deletion_mark_filter` | boolean | `false` | Exclude marked |
+| `deletion_mark_filter` | boolean | `false` | Marked |
+| `delivery` | any | `null` | mode,extension |
 
 ### `correspondent_draft`
 
@@ -666,7 +667,7 @@ arguments or null with reason. Live compatibility is unverified.
 | `right_plan` | string \| null | `null` | Right plan; required if several |
 | `context` | string | `"plan"` | Context: plan or without_node |
 | `section` | string | `"issues"` | Section: issues, versions, schema_diff, skipped |
-| `level` | string \| null | `null` | Severity: ошибка or предупреждение |
+| `level` | string \| null | `null` | ошибка or предупреждение |
 | `check_prefix` | string \| null | `null` | Check ID prefix |
 | `offset` | integer ≥ 0 | `0` | Page offset |
 | `limit` | integer 1…200 | `50` | Page size |
@@ -737,33 +738,35 @@ Typical ПКС: merged references or reference_module conflicts, no code. Use ne
 
 ### `ed_authoring_build`
 
-Preview/write overlay or manager kits in workspace with current hash and required
-acknowledgements. Manager refuses legacy operations. Install/verify runtime separately.
+Preview/write overlay or manager kits. Write requires current build_hash and notice IDs.
+Install and verify runtime separately.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `project` | string \| null | `null` | Overlay host from project_list |
-| `configuration` | string \| null | `null` | Overlay host configuration |
-| `extension` | object \| null | `null` | Overlay kit identity; see docs/tools.md |
-| `operations` | array of object \| null | `null` | Overlay operations (max 100); targets/fields: docs/tools.md. Forbidden with scope=manager |
-| `version_scope` | string \| null | `null` | Explicit manager scope consent |
-| `mode` | string | `"preview"` | Mode: preview or write |
-| `delivery` | string | `"extension"` | Kit form: extension or manual |
-| `output_dir` | string \| null | `null` | Computed kit directory; normally omit |
-| `expected_preview_hash` | string \| null | `null` | Current preview build_hash for write |
-| `acknowledged_notices` | array of string \| null | `null` | Current required_acknowledgements IDs |
+| `project` | string \| null | `null` | Overlay host |
+| `configuration` | string \| null | `null` | Overlay config |
+| `extension` | object \| null | `null` | Overlay identity |
+| `operations` | array of object \| null | `null` | Overlay packet; fields: docs/tools.md |
+| `version_scope` | string \| null | `null` | Manager consent |
+| `mode` | string | `"preview"` | preview or write |
+| `delivery` | any | `"extension"` | Overlay: extension/manual; manager: {mode,extension} |
+| `output_dir` | string \| null | `null` | Kit directory |
+| `expected_preview_hash` | string \| null | `null` | build_hash of preview |
+| `acknowledged_notices` | array of string \| null | `null` | required_acknowledgements IDs |
 | `offset` | integer ≥ 0 | `0` | Page offset |
 | `limit` | integer 1…200 | `50` | Page size |
-| `section` | string | `"summary"` | summary, operations, issues_before, issues_after, scopes, skipped; manager also notices, files |
+| `section` | string | `"summary"` | summary, operations, issues_before/after, scopes, skipped; manager: notices, files |
 | `level` | string \| null | `null` | Severity: ошибка or предупреждение |
 | `check_prefix` | string \| null | `null` | Check ID prefix |
-| `address_prefix` | string \| null | `null` | Address prefix, case-insensitive |
-| `drop_operations` | array of string \| null | `null` | Previous operation IDs to remove |
+| `address_prefix` | string \| null | `null` | Address prefix |
+| `drop_operations` | array of string \| null | `null` | Operation IDs to remove |
 | `scope` | string \| null | `null` | overlay (default) or manager |
-| `project_id` | string \| null | `null` | Manager project from ed_create |
-| `expected_revision` | string \| null | `null` | Current manager revision |
-| `route` | object \| null | `null` | Manager route: plan, format_version; defaults to project |
-| `registration_objects` | array of string \| null | `null` | Manager: Kind.Name objects without PKO; registration only |
+| `project_id` | string \| null | `null` | Manager project |
+| `expected_revision` | string \| null | `null` | Manager revision; omitted = current |
+| `route` | object \| null | `null` | Manager plan, format_version |
+| `registration_objects` | array of string \| null | `null` | Manager: Kind.Name, PRO only |
+| `registered_objects` | array of string \| null | `null` | Manager: Kind.Name with PRO |
+| `plan_stubs` | boolean | `true` | Manager: sender POD stubs |
 
 ## Error codes
 
@@ -817,12 +820,12 @@ Tool errors contain JSON `{"code", "message", …}` in the MCP error text. The f
 ## Tool responses
 
 Responses are JSON objects in MCP `structuredContent`. The keys below follow `Kd2Service`
-(`src/kd2_rules_mcp/service/`); nested fields appear here or in the response.
+(`src/kd_rules_mcp/service/`); nested fields appear here or in the response.
 
-**List page** (`slice_rows`, `page_view`, `src/kd2_rules_mcp/service/views.py:54-75`):
+**List page** (`slice_rows`, `page_view`, `src/kd_rules_mcp/service/views.py:54-75`):
 `items`, `total`, `offset`, `limit` (up to 200), `has_more`.
 
-**Rules project** (`_project_view`, `src/kd2_rules_mcp/service/base.py:188`):
+**Rules project** (`_project_view`, `src/kd_rules_mcp/service/base.py:188`):
 `project_id`, `kind` (`exchange` or `registration`), `source_path`, `saved_path`,
 `modified` (changed since open/create/last save), `counts`, `name`.
 Exchange rules add `source` and `target`; registration rules add `exchange_plan`.
@@ -833,7 +836,7 @@ shared projects omit that key. `rules_open` adds `reused`; reused projects add
 `source_changed` (disk mtime or size changed since opening). Reread with `rules_close` and
 `rules_open`. Private copies always have `reused: false` and omit `source_changed`.
 
-**Edit result** (`edit_view`, `src/kd2_rules_mcp/service/views.py:273`):
+**Edit result** (`edit_view`, `src/kd_rules_mcp/service/views.py:273`):
 `address` and nonempty `warnings`, `skipped`, `not_applied`, `unresolved`, `disabled` lists.
 Each list contains up to 200 rows; larger lists add `<key>_total`.
 
@@ -1648,9 +1651,12 @@ It follows direct reads, literal subscripts, `ДанныеXDTO.Свойство`
 passed to local algorithms. Imported preserved bodies are exempt; without a schema it skips with
 `schema_required`. Both warnings require build acknowledgement. See pitfalls 22–23.
 
-The kit's “Проверьте данные перед первым обменом” block provides read-only queries for declared
-sources of mandatory reference-type keys, including attributes with `ShowError`: data-exchange
-loading mode can bypass fill checking. Unmapped algorithmic sources cannot be inferred.
+The kit's “Проверьте данные перед первым обменом” block is a single section. Subheading
+“Обязательные незаполненные свойства” lists count queries for sources whose `FillChecking`
+is not `ShowError`. Subheading “Ключевые свойства ссылочных типов” lists read-only queries
+for declared sources of mandatory reference-type keys, including attributes with `ShowError`:
+data-exchange loading mode can bypass fill checking. The same object and attribute appears
+in one query. Unmapped algorithmic sources cannot be inferred.
 
 1. Load the host structure and open its XDTO schema with `ed_schema_open`.
 2. Call `ed_create` with an explicit `project_id`, host (`project,configuration` from
@@ -2128,14 +2134,23 @@ reopening the schema does not resolve this case.
 ```
 
 Call this as `ed_authoring_build`; omit `route` to use the project's plan/version.
-Manager delivery is `extension` only. Passing overlay `operations`, host/extension fields,
+Omit `expected_revision` to build the project's current revision; a different revision
+refuses with `ed_authoring_stale`.
+Manager delivery defaults to a new extension (`"extension"` or `{"mode":"new_extension"}`).
+Use `{"mode":"user_extension","extension":"Name"}` to merge into an existing dump listed in
+the host configuration's `extensions` and `writable_extensions` in projects.yaml.
+`extension` matches the dump's configuration name or final directory name; ambiguous names refuse.
+Passing overlay `operations`, host/extension fields,
 `version_scope` or `drop_operations` with manager scope refuses.
 The response contains `scope,project_id,revision,document_id,build_hash,status,written,output_dir,
 counts,runtime_verified=false,validation,required_acknowledgements,acknowledgement_count` and a page.
 Sections: `summary,operations,notices,files,issues_after,skipped`. No section contains module text.
 Summary shows notices and file sizes/hashes; operation pages show recorded decision IDs/hashes.
 `level,check_prefix,address_prefix` filter notices and issues; acknowledgement IDs stay complete.
-The header exposes up to twenty acknowledgement IDs; notice pages contain the remaining IDs.
+The header exposes up to twenty acknowledgement IDs. `section="notices"` pages the rest
+with `offset` and `limit` (default 50, maximum 200). That page uses a 64 KiB JSON budget
+so a default page holds 50 typical acknowledgements; other build sections stay at 4 KiB.
+Continue with `next_offset`. `truncated_by="size"` means a row was dropped to stay in budget.
 Writer errors and delivery failures refuse. Profile mismatch and writer warnings require
 acknowledgements before writing. With `mode="write"`, pass current `expected_preview_hash=build_hash`
 and `acknowledged_notices` containing all required IDs. Only `section="summary"` is accepted.
@@ -2172,7 +2187,10 @@ to the plan but lack event coverage, with the same registration-only object advi
 has a non-algorithmic source without `FillChecking=ShowError`; declarative ПКПД/ПКО conversion
 does not protect empty values. Writing requires acknowledgement. The instruction includes
 source-data count queries to run before exchange; the server does not execute them. Missing
-structure/FillChecking yields an explicit skip; reload old XML structures, then rebind affected
+structure yields an explicit skip. Missing `FillChecking` is a skip only when the check
+found no warnings; otherwise `ed.schema.required_unfilled.partial` (`info`) names the skipped
+objects (at most ten, then “и ещё N”) and the check is not listed as skipped. Reload old XML
+structures, then rebind affected
 manager projects to refresh input fingerprints. MD83Exp lacks this field.
 Common validators retain data preflight on direct, cached and layered paths.
 Overlay delivery reports omit it; the data-check instruction belongs to manager kits.
@@ -2197,3 +2215,33 @@ failures (including `receipt_corrupt` for a damaged applied-packet receipt);
 revisions/hashes, changed input hashes or concurrent modifications; `ed_authoring_ack_required`
 for unconfirmed notices; `ed_authoring_path`, `ed_authoring_resource_limit`, `ed_authoring_io`
 for workspace safety, bounds and I/O failures. An unsupported interface never creates a project.
+
+### Delivery into a user extension
+
+`ed_authoring_build(scope="manager")` and `registration_retarget` accept
+`delivery={"mode":"new_extension"}` (default) or
+`delivery={"mode":"user_extension","extension":"Name"}`. For registration, the existing
+`own_attributes` and `extension={name,prefix}` decisions remain required; the delivery name
+selects the destination dump rather than the generated kit identity. The destination must be
+listed in the host configuration's `extensions` and `writable_extensions` in projects.yaml.
+
+Preview returns `delivery.files`: relative `path`, `action` (`create`, `change`, `unchanged`),
+`size`, `sha256_before` (null for new files), `sha256_after`, and `changes` (added entries).
+It writes nothing. Write requires the current preview hash and all ordinary acknowledgements.
+The manifest, `instruction.md` and copies remain in `workspace/ed-authoring/<kit>`.
+The manifest's `delivery` records the destination and file hashes before/after; original writer
+decisions remain available. Rebuilds preserve prior entities and refuse changed own modules.
+The extension's UTF-8 BOM and newline style come from its `Configuration.xml`.
+
+The merger adds missing ChildObjects, PropertyState, plan content, Source types and node attributes;
+it preserves existing entries and shared code. A foreign manager route for the same format version,
+an occupied common module or an edited owned file causes `delivery_conflict`.
+Other refusal codes: `delivery_unknown_extension`, `delivery_not_writable`,
+`delivery_invalid_extension`, `delivery_compatibility`, `delivery_missing_object`, `delivery_stale`.
+All files are staged before replacement; an exception rolls back replacements, including kit copies.
+Installation and runtime verification follow the team's normal repository/storage workflow.
+
+When the target is also an input layer of the manager or registration project, `delivery_inputs` records the
+exact input fingerprint after writing. Only that recorded state is accepted without rebind;
+later input changes retain the normal stale-input refusal. The receipt is published with the
+same rollback transaction. It does not refresh the structure cache or prove runtime behavior.

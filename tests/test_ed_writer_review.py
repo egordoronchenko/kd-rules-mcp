@@ -4,7 +4,7 @@ from itertools import permutations
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     ManagerOperation,
     ManagerOperationError,
     ParameterPatch,
@@ -15,13 +15,13 @@ from kd2_rules_mcp.authoring.ed.manager_operations import (
     apply,
     preview,
 )
-from kd2_rules_mcp.authoring.ed.manager_render import _reread
-from kd2_rules_mcp.ed.canonical import canonicalize, model_addresses
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import Reference, Value, dump_model, load_model
-from kd2_rules_mcp.validation.ed_writer import validate_writer
+from kd_rules_mcp.authoring.ed.manager_render import _reread
+from kd_rules_mcp.ed.canonical import canonicalize, model_addresses
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import Reference, Value, dump_model, load_model
+from kd_rules_mcp.validation.ed_writer import validate_writer
 from tests.test_ed_writer_values import commit_batch, value_model
 
 

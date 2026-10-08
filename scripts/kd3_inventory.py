@@ -10,11 +10,11 @@ from pathlib import Path
 
 from lxml import etree
 
-from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.errors import RulesFormatError
-from kd2_rules_mcp.kd2.canonical import parse_xml
-from kd2_rules_mcp.kd2.rules_io import load_registration_rules
-from kd2_rules_mcp.projects import load_catalog, load_local, resolve
+from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.errors import RulesFormatError
+from kd_rules_mcp.kd2.canonical import parse_xml
+from kd_rules_mcp.kd2.rules_io import load_registration_rules
+from kd_rules_mcp.projects import load_catalog, load_local, resolve
 
 ROOT = Path(__file__).resolve().parents[1]
 MANAGER_PREFIX = "МенеджерОбменаЧерезУниверсальныйФормат"

@@ -5,17 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.ed.address import escape_segment
-from kd2_rules_mcp.ed.route_model import RouteProfile
-from kd2_rules_mcp.ed.routes import read_routes
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.validation.ed_routes import (
+from kd_rules_mcp.ed.address import escape_segment
+from kd_rules_mcp.ed.route_model import RouteProfile
+from kd_rules_mcp.ed.routes import read_routes
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.validation.ed_routes import (
     EXCHANGE_MESSAGE,
     RouteSelectionError,
     compare_routes,
     select_route,
 )
-from kd2_rules_mcp.validation.report import Level
+from kd_rules_mcp.validation.report import Level
 
 SCHEMAS = Path(__file__).parent / "data" / "ed" / "routes" / "schemas"
 MESSAGE = SCHEMAS / "message.bin"

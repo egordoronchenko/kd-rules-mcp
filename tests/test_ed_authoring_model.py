@@ -9,8 +9,8 @@ from typing import Any, cast
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.candidates import candidates, compatibility, target_objects
-from kd2_rules_mcp.authoring.ed.model import (
+from kd_rules_mcp.authoring.ed.candidates import candidates, compatibility, target_objects
+from kd_rules_mcp.authoring.ed.model import (
     FILLER,
     AddHeaderProperty,
     AttributeDraft,
@@ -24,15 +24,15 @@ from kd2_rules_mcp.authoring.ed.model import (
     order_operations,
     runtime_verified,
 )
-from kd2_rules_mcp.authoring.ed.operations import (
+from kd_rules_mcp.authoring.ed.operations import (
     copy_structure_with_attributes,
     draft_property,
     validate_owned_content,
     validate_preconditions,
 )
-from kd2_rules_mcp.ed import read_manager_text
-from kd2_rules_mcp.ed.model import Expr, Field, UnknownFragment
-from kd2_rules_mcp.ed.route_model import (
+from kd_rules_mcp.ed import read_manager_text
+from kd_rules_mcp.ed.model import Expr, Field, UnknownFragment
+from kd_rules_mcp.ed.route_model import (
     ManagerInfo,
     PlanRoute,
     RegistrationProfile,
@@ -41,9 +41,9 @@ from kd2_rules_mcp.ed.route_model import (
     RouteReading,
     RouteSource,
 )
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.structures import db, md83exp
-from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.structures import db, md83exp
+from kd_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 
 DATA = Path(__file__).parent / "data/ed/authoring"
 IDENTITY = ExtensionIdentity("ДоработкаОбмена", "доп_")
@@ -58,7 +58,7 @@ OPERATION = AddHeaderProperty(
 
 def test_legacy_ids_and_canonical_bytes_without_kind_are_unchanged():
     """Все сохранённые данные v1 закрепляют байты, а не заново вычисленный эталон."""
-    from kd2_rules_mcp.authoring.ed.handlers import canonical_operations_bytes, operation_from_input
+    from kd_rules_mcp.authoring.ed.handlers import canonical_operations_bytes, operation_from_input
 
     paths = sorted((DATA / "expected").glob("*/manifest.json"))
     assert len(paths) == 6

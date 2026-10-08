@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from kd2_rules_mcp.kd2.model import Node
-from kd2_rules_mcp.kd2.rules_io import load_exchange_rules
-from kd2_rules_mcp.validation.address import pks_address, walk_pks
+from kd_rules_mcp.kd2.model import Node
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.validation.address import pks_address, walk_pks
 
 DATA = Path(__file__).parent / "data"
 

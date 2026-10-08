@@ -33,8 +33,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.projects import load_local
+from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.projects import load_local
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / "base"
@@ -156,8 +156,8 @@ def precheck(rules: Path) -> str:
     """
     from lxml import etree
 
-    from kd2_rules_mcp.errors import RulesFormatError
-    from kd2_rules_mcp.kd2.canonical import parse_xml
+    from kd_rules_mcp.errors import RulesFormatError
+    from kd_rules_mcp.kd2.canonical import parse_xml
 
     if not rules.is_file():
         return f"Нет файла правил: {rules}"

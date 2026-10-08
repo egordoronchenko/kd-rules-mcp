@@ -9,13 +9,13 @@ from typing import Any
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manifest import json_bytes, sha256
-from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.kd2.model import Node, RegistrationRules
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_registration_rules
-from kd2_rules_mcp.server import error_payload
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.service import registration_retarget as module
+from kd_rules_mcp.authoring.ed.manifest import json_bytes, sha256
+from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.kd2.model import Node, RegistrationRules
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_registration_rules
+from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service import registration_retarget as module
 
 DATA = Path(__file__).parent / "data/ed/registration/delivery"
 ATTRIBUTES = [{"name": "reg_Flag", "type": "Булево", "synonym": "Не выгружать данные"}]
@@ -1710,7 +1710,7 @@ def test_review_all_active_rules_protected_no_partial_notice(tmp_path: Path) -> 
 def test_review_manual_disabled_parameter_preserves_all_notices(tmp_path: Path) -> None:
     from dataclasses import asdict
 
-    from kd2_rules_mcp.authoring.ed.registration_delivery import read_plan_host
+    from kd_rules_mcp.authoring.ed.registration_delivery import read_plan_host
 
     service, args = setup(tmp_path)
     doc = service._document(args["project_id"])
@@ -1733,7 +1733,7 @@ def test_review_manual_disabled_parameter_preserves_all_notices(tmp_path: Path) 
 
 
 def test_review_published_kit_needs_ack_when_plan_content_is_unchecked(tmp_path: Path) -> None:
-    from kd2_rules_mcp.authoring.ed.registration_delivery import read_plan_host
+    from kd_rules_mcp.authoring.ed.registration_delivery import read_plan_host
 
     service, args = setup(tmp_path)
     args.update(

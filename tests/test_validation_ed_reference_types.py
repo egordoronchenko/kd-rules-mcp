@@ -5,10 +5,10 @@ from types import MappingProxyType
 
 import pytest
 
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.ed.schema.profile import ValidationProfile
-from kd2_rules_mcp.validation.ed_schema import validate_schema
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.ed.schema.profile import ValidationProfile
+from kd_rules_mcp.validation.ed_schema import validate_schema
 from tests.test_ed_profile import BASE, DATA, document
 from tests.test_validation_ed_structure import snapshot
 
@@ -32,7 +32,7 @@ def reference_case(*, algorithm=0, target="ТолькоФизлицо", types=No
     owner = replace(owner, properties={**owner.properties, ("код", ""): (updated,)})
     person = replace(owner, id=100, type_name="СправочникСсылка.ФизическиеЛица")
     # Цель использует тот же адрес метаданных, но отдельный ПКО и тип снимка цели.
-    from kd2_rules_mcp.ed.model import Expr, Field
+    from kd_rules_mcp.ed.model import Expr, Field
 
     target_rule = replace(
         target_rule,

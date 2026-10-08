@@ -11,17 +11,17 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.manifest import sha256
-from kd2_rules_mcp.authoring.ed.registration_delivery import (
+from kd_rules_mcp.authoring.ed.manifest import sha256
+from kd_rules_mcp.authoring.ed.registration_delivery import (
     NodeValueHint,
     OwnNodeAttribute,
     RegistrationManifest,
     read_plan_host,
     render_registration_kit,
 )
-from kd2_rules_mcp.authoring.ed.xml_dump import M
-from kd2_rules_mcp.authoring.registration_retarget import RetargetRemark, retarget_registration
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.authoring.ed.xml_dump import M
+from kd_rules_mcp.authoring.registration_retarget import RetargetRemark, retarget_registration
+from kd_rules_mcp.errors import (
     RegistrationAttributeClashError,
     RegistrationAttributePrefixError,
     RegistrationDeliveryError,
@@ -30,8 +30,8 @@ from kd2_rules_mcp.errors import (
     RegistrationMissingAttributeError,
     RegistrationPlanNotFoundError,
 )
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_registration_rules
-from kd2_rules_mcp.structures.queries import ObjectCard, ObjectProperty
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_registration_rules
+from kd_rules_mcp.structures.queries import ObjectCard, ObjectProperty
 from kdbase.ed_registration_kit_check import check_registration_kit, compare_extension, main
 
 DATA = Path(__file__).parent / "data/ed/registration/delivery"

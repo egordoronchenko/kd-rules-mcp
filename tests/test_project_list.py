@@ -8,9 +8,9 @@ import pytest
 import yaml
 from mcp import Client
 
-from kd2_rules_mcp.projects import LocalSettings, load_catalog, load_local
-from kd2_rules_mcp.server import create_server
-from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
+from kd_rules_mcp.projects import LocalSettings, load_catalog, load_local
+from kd_rules_mcp.server import create_server
+from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))

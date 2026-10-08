@@ -26,7 +26,7 @@ from live_checks import (
     text_line,
 )
 
-from kd2_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.console import utf8_stdout
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "kdbase" / "run"

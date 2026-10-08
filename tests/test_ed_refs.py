@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from kd2_rules_mcp.ed import forms, read_manager_text
-from kd2_rules_mcp.ed.refs import build_references
+from kd_rules_mcp.ed import forms, read_manager_text
+from kd_rules_mcp.ed.refs import build_references
 
 DATA = Path(__file__).parent / "data" / "ed"
 BASE = (DATA / "checks_base.bsl").read_text(encoding="utf-8")

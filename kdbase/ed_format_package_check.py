@@ -23,7 +23,7 @@ from pathlib import Path
 
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.format_package import (
+from kd_rules_mcp.authoring.ed.format_package import (
     FORMAT_OVERRIDE_MODULE,
     FormatDeclaration,
     FormatPackage,
@@ -32,12 +32,12 @@ from kd2_rules_mcp.authoring.ed.format_package import (
     read_format_host,
     render_format_extension,
 )
-from kd2_rules_mcp.authoring.ed.manifest import json_bytes, sha256
-from kd2_rules_mcp.authoring.ed.xml_dump import read_description
-from kd2_rules_mcp.ed.routes import read_routes
-from kd2_rules_mcp.ed.schema import QName, load_schema
-from kd2_rules_mcp.ed.schema.xdto import XS, XSI, parse_qname
-from kd2_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.authoring.ed.manifest import json_bytes, sha256
+from kd_rules_mcp.authoring.ed.xml_dump import read_description
+from kd_rules_mcp.ed.routes import read_routes
+from kd_rules_mcp.ed.schema import QName, load_schema
+from kd_rules_mcp.ed.schema.xdto import XS, XSI, parse_qname
+from kd_rules_mcp.errors import Kd2Error
 
 Runner = Callable[[Sequence[str]], int]
 RUN_ROOT = Path(__file__).resolve().parent / "run"

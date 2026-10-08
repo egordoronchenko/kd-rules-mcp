@@ -18,12 +18,13 @@ import pytest
 from lxml import etree
 from mcp import Client
 
-from kd2_rules_mcp.authoring.ed import manager_operations as writer_operations
-from kd2_rules_mcp.authoring.ed.manager_render import ManagerRoute, render_manager_kit
-from kd2_rules_mcp.ed import executor_profile
-from kd2_rules_mcp.ed.writer import render
-from kd2_rules_mcp.ed.writer_model import json_value, logical_id
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.authoring.ed import manager_operations as writer_operations
+from kd_rules_mcp.authoring.ed.manager_render import ManagerRoute, render_manager_kit
+from kd_rules_mcp.authoring.ed.manifest import manager_decision_hash
+from kd_rules_mcp.ed import executor_profile
+from kd_rules_mcp.ed.writer import render
+from kd_rules_mcp.ed.writer_model import json_value, logical_id
+from kd_rules_mcp.errors import (
     EdAuthoringAckRequiredError,
     EdAuthoringIoError,
     EdAuthoringPathError,
@@ -31,8 +32,9 @@ from kd2_rules_mcp.errors import (
     EdAuthoringStaleError,
     ProjectNotFoundError,
 )
-from kd2_rules_mcp.server import INSTRUCTIONS, create_server, error_payload
-from kd2_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.server import INSTRUCTIONS, create_server, error_payload
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.validation.report import ValidationReport
 from tests.test_ed_writer_candidates import add_prop, structure
 from tests.test_ed_writer_model import SYNTHETIC
 from tests.test_ed_writer_profiles import verified_detection
@@ -41,6 +43,64 @@ from tests.test_service_ed_authoring import setup as setup
 
 DATA = Path(__file__).parent / "data/ed/writer"
 PLAN = "ПланФормата"
+
+
+@pytest.mark.parametrize("guarded", [False, True])
+def test_sender_outside_plan_in_validate_and_manager_build(writer_setup, guarded):
+    from tests.test_ed_plan_subscriptions import prepare_service
+
+    check = "ed.handler.sender_outside_plan"
+    service, args, host = writer_setup
+    prepare_service(service, host, True)
+    body = "Набор = РегистрыСведений.История.СоздатьНаборЗаписей();\n"
+    assignment = "Набор.ОбменДанными.Отправитель = КомпонентыОбмена.УзелКорреспондента;"
+    body += (
+        "Если КомпонентыОбмена.УзелКорреспондента.Метаданные().Состав.Содержит"
+        "(Набор.Метаданные()) Тогда\n" + assignment + "\nКонецЕсли;"
+        if guarded
+        else assignment
+    )
+    created = service.ed_create(**args)
+    _, _, applied = apply_packet(
+        service,
+        created,
+        [
+            {
+                "client_id": "receive",
+                "kind": "pod",
+                "action": "create",
+                "patch": {
+                    "name": "Получение",
+                    "directions": ["receive"],
+                    "format_selection": string_value("Справочник.Должности"),
+                },
+            },
+            {
+                "client_id": "history",
+                "kind": "handler",
+                "action": "create",
+                "owner_id": {"client_id": "receive"},
+                "patch": {"event": "ПриОбработке", "body": body},
+            },
+        ],
+    )
+    result = service.ed_validate(
+        applied["document_id"], schema_id=args["schema_id"], structure_id="host", check_prefix=check
+    )
+    assert result["issues"]["total"] == (0 if guarded else 1)
+    skipped = service.ed_validate(applied["document_id"], section="skipped", check_prefix=check)
+    assert skipped["skipped"]["total"] == 1
+    assert skipped["skipped"]["items"][0]["reason"].startswith("structure_required")
+    notices = build(service, applied, section="notices")["items"]
+    assert sum(n.get("check") == check for n in notices) == (0 if guarded else 1)
+    if not guarded:
+        preview = build(service, applied)
+        with pytest.raises(EdAuthoringAckRequiredError):
+            build(service, applied, mode="write", expected_preview_hash=preview["build_hash"])
+        notices = build(
+            service, applied, section="notices", registration_objects=["РегистрСведений.История"]
+        )["items"]
+        assert not any(n.get("check") == check for n in notices)
 
 
 def test_live_receive_pod_unknown_name_refuses_build_and_suggests_parameter(writer_setup):
@@ -844,7 +904,7 @@ def test_apply_replay_and_build_pages_advance_through_all_rows(writer_setup):
 
 
 def test_rebind_notice_pages_keep_all_long_diagnostics(writer_setup, monkeypatch):
-    from kd2_rules_mcp.validation.report import ValidationReport
+    from kd_rules_mcp.validation.report import ValidationReport
 
     service, args, _ = writer_setup
     service.ed_create(**args)
@@ -1125,7 +1185,7 @@ def test_end_to_end_restart_navigation_delivery_and_close(writer_setup):
         executor_profile_id=model.executor_profile.profile_id,
         creation_fingerprint=metadata["creation_fingerprint"],
     )
-    from kd2_rules_mcp.service.ed_preflight import with_key_data_instruction
+    from kd_rules_mcp.service.ed_preflight import with_key_data_instruction
 
     direct = with_key_data_instruction(
         direct, service._manager_key_instruction(model, metadata), None, {}
@@ -2296,8 +2356,8 @@ def test_apply_rejects_project_bindings_r2(writer_setup, field, mode):
 def test_rebind_recovers_each_write_r2(
     writer_setup, tmp_path, monkeypatch, fault, apply_first, restart
 ):
-    import kd2_rules_mcp.authoring.ed.workspace as workspace_module
-    import kd2_rules_mcp.service.ed_writer as service_module
+    import kd_rules_mcp.authoring.ed.workspace as workspace_module
+    import kd_rules_mcp.service.ed_writer as service_module
 
     service, args, root = writer_setup
     created = service.ed_create(**args)
@@ -2629,3 +2689,127 @@ def test_stale_reader_can_close_without_removing_current_manager(writer_setup):
     _, _, applied = apply_packet(other, created, manager_operations())
     assert service.ed_close(created["document_id"])["closed"]
     assert service.ed_create(**args)["revision"] == applied["revision"]
+
+
+def test_preflight_heading_once_when_unfilled_and_key_queries_meet(writer_setup):
+    service, args, root = writer_setup
+    schema_path = root / "Schemas/format-keys.bin"
+    tree = etree.parse(str(root / "Schemas/format.bin"))
+    for node in tree.iter("{http://v8.1c.ru/8.1/xdto}property"):
+        if node.get("name") in ("КлючевыеСвойства", "Код"):
+            node.set("lowerBound", "1")
+    tree.write(str(schema_path), encoding="utf-8")
+    opened = service.ed_schema_open(
+        "1.20",
+        path=str(schema_path),
+        imports={"urn:test:writer-message": str(DATA / "message.bin")},
+    )
+    with sqlite3.connect(service.store.path("host")) as connection:
+        connection.execute("UPDATE properties SET fill_checking='ShowError'")
+        connection.execute(
+            "UPDATE properties SET fill_checking='DontCheck' "
+            "WHERE name IN ('НаименованиеКраткое', 'Код')"
+        )
+        connection.execute("UPDATE meta SET value='merged-preflight' WHERE key='input_hash'")
+    created = service.ed_create(**{**args, "schema_id": opened["schema_id"]})
+    operations = manager_operations()
+    operations.append(
+        {
+            "client_id": "pko-both-Код",
+            "kind": "property",
+            "action": "create",
+            "owner_id": logical_id("positions", "pko-both"),
+            "container_id": logical_id("positions", "pko-both"),
+            "after_id": logical_id("positions", "pko-both-НаименованиеКраткое"),
+            "patch": {"configuration_property": "Код", "format_property": "Код"},
+        }
+    )
+    _, _, applied = apply_packet(service, created, operations)
+    preview = build(service, applied)
+    written = build(
+        service,
+        applied,
+        mode="write",
+        expected_preview_hash=preview["build_hash"],
+        acknowledged_notices=preview["required_acknowledgements"],
+    )
+    instruction = (Path(written["output_dir"]) / "instruction.md").read_text(encoding="utf-8")
+    assert instruction.count("## Проверьте данные перед первым обменом") == 1
+    assert "### Обязательные незаполненные свойства" in instruction
+    assert "### Ключевые свойства ссылочных типов" in instruction
+    assert instruction.count("Объект.Код") == 1
+    assert "Данные.Код" not in instruction
+    assert "Данные.Наименование" in instruction
+    assert "Объект.НаименованиеКраткое" in instruction
+    manifest = json.loads((Path(written["output_dir"]) / "manifest.json").read_text("utf-8"))
+    assert manager_decision_hash(manifest["inputs"]) == manifest["decision_hash"]
+    assert "Ключевые свойства ссылочных типов" not in json.dumps(
+        manifest["inputs"], ensure_ascii=False
+    )
+
+
+def test_manager_build_without_expected_revision_uses_current(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    _, _, applied = apply_packet(service, created, manager_operations())
+    preview = service.ed_authoring_build(scope="manager", project_id=applied["project_id"])
+    assert preview["revision"] == applied["revision"]
+    assert preview["build_hash"]
+    with pytest.raises(EdAuthoringStaleError) as caught:
+        service.ed_authoring_build(
+            scope="manager",
+            project_id=applied["project_id"],
+            expected_revision="чужая-ревизия",
+        )
+    assert error_payload(caught.value)["code"] == "ed_authoring_stale"
+
+
+def test_manager_notices_default_to_fifty_per_page(writer_setup, monkeypatch):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    monkeypatch.setattr(
+        "kd_rules_mcp.service.ed_writer.validate_writer",
+        lambda *args, **kwargs: ValidationReport(),
+    )
+
+    def schema_checks(model, metadata, required_unfilled=None):
+        report = ValidationReport()
+        for number in range(60):
+            report.warning(
+                "ed.schema.required_unfilled",
+                f"ПКО/Объект{number:02d}/ПКС/Реквизит",
+                "Заполните реквизит перед первым обменом. " + ("а" * 400),
+            )
+        return report
+
+    monkeypatch.setattr(service, "_manager_schema_checks", schema_checks)
+    monkeypatch.setattr(
+        service,
+        "_manager_plan_delivery",
+        lambda model, metadata, registration_objects=(), plan_name=None, **kwargs: (
+            ValidationReport(),
+            (),
+            (),
+            (),
+        ),
+    )
+    first = service.ed_authoring_build(
+        scope="manager", project_id=created["project_id"], section="notices"
+    )
+    assert first["total"] == 60
+    assert len(first["items"]) == 50
+    assert first["has_more"] is True
+    assert first["next_offset"] == 50
+    assert first["limit"] == 50
+    assert "truncated_by" not in first
+    second = service.ed_authoring_build(
+        scope="manager",
+        project_id=created["project_id"],
+        section="notices",
+        offset=50,
+    )
+    assert second["total"] == 60
+    assert len(second["items"]) == 10
+    assert second["has_more"] is False
+    assert second["next_offset"] == 60
+    assert "truncated_by" not in second

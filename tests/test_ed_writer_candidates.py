@@ -6,17 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_candidates import (
+from kd_rules_mcp.authoring.ed.manager_candidates import (
     CandidateLookupError,
     StaleCandidateError,
     check_candidate,
     object_candidates,
     property_candidates,
 )
-from kd2_rules_mcp.ed import read_manager
-from kd2_rules_mcp.ed.model import PredefinedRule
-from kd2_rules_mcp.ed.schema import load_schema
-from kd2_rules_mcp.structures import db
+from kd_rules_mcp.ed import read_manager
+from kd_rules_mcp.ed.model import PredefinedRule
+from kd_rules_mcp.ed.schema import load_schema
+from kd_rules_mcp.structures import db
 
 DATA = Path(__file__).parent / "data/ed/writer"
 _TYPE_PREFIX = {"Справочник": "СправочникСсылка.", "Документ": "ДокументСсылка."}

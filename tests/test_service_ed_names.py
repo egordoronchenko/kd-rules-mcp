@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from kd2_rules_mcp.service.ed_names import common_module_names
-from kd2_rules_mcp.validation.ed_names import unknown_names
+from kd_rules_mcp.service.ed_names import common_module_names
+from kd_rules_mcp.validation.ed_names import unknown_names
 
 
 def test_xml_inventory_includes_extension_and_global_exports(tmp_path):

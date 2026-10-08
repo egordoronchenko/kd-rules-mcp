@@ -4,19 +4,19 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     ManagerOperation,
     PkoPatch,
     PropertyPatch,
     TablePartPatch,
     preview,
 )
-from kd2_rules_mcp.ed.canonical import canonicalize
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import Reference
-from kd2_rules_mcp.validation.ed_writer import validate_writer
+from kd_rules_mcp.ed.canonical import canonicalize
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import Reference
+from kd_rules_mcp.validation.ed_writer import validate_writer
 from tests.test_ed_writer_code import execute, round_trip
 from tests.test_ed_writer_tables import legacy_model, table, table_model
 

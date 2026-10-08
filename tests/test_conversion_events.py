@@ -5,13 +5,13 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.errors import Kd2Error, RuleEditError, RuleNotFoundError
-from kd2_rules_mcp.kd2.diff import TEXT_LIMIT
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules
-from kd2_rules_mcp.kd2.schema import CONVERSION_EVENTS
-from kd2_rules_mcp.server import error_payload
-from kd2_rules_mcp.service import Kd2Service, Settings
-from kd2_rules_mcp.validation.address import CONVERSION_ADDRESS
+from kd_rules_mcp.errors import Kd2Error, RuleEditError, RuleNotFoundError
+from kd_rules_mcp.kd2.diff import TEXT_LIMIT
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules
+from kd_rules_mcp.kd2.schema import CONVERSION_EVENTS
+from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.validation.address import CONVERSION_ADDRESS
 
 DATA = Path(__file__).parent / "data"
 EXCHANGE = DATA / "exchange_rules.xml"

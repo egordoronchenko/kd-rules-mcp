@@ -20,10 +20,10 @@ from pathlib import Path
 
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.manifest import json_bytes, sha256
-from kd2_rules_mcp.authoring.ed.registration_delivery import RegistrationManifest
-from kd2_rules_mcp.authoring.ed.xml_dump import M
-from kd2_rules_mcp.errors import RegistrationDeliveryError
+from kd_rules_mcp.authoring.ed.manifest import json_bytes, sha256
+from kd_rules_mcp.authoring.ed.registration_delivery import RegistrationManifest
+from kd_rules_mcp.authoring.ed.xml_dump import M
+from kd_rules_mcp.errors import RegistrationDeliveryError
 
 Runner = Callable[[Sequence[str]], int]
 RUN_ROOT = Path(__file__).resolve().parent / "run"

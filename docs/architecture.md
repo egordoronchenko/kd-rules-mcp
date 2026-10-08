@@ -1,4 +1,4 @@
-# Архитектура kd2-rules-mcp
+# Архитектура kd-rules-mcp
 
 Обзор для разработчика и агента, который впервые открывает репозиторий: из каких частей состоит сервер, как
 через них идут данные, на каких правилах всё держится, чего сервер не делает и как его развёртывать. Инструкция
@@ -79,7 +79,7 @@
 | Корпус КД 3 | `scripts/kd3_inventory.py` | Повторяемый перечень модулей менеджеров, планов обмена, пакетов EnterpriseData и читателей БСП по выгрузкам проектов и расширений | |
 | Знания агента | `.claude/skills/` (имена `kd-`, `kd2-` или `kd3-`), `docs/rules/mcp-1c.md`; сборка — `scripts/build_packs.py` | Порядок построения правил и справочники, грабли живых обменов, установка; правило работы с серверами MCP для 1С. Источник один (Cursor и OpenCode читают `.claude/skills`); копии справочников `docs/` в `references/` и установку в проект 1С делает `build_packs.py` | |
 
-Пути модулей — от `src/kd2_rules_mcp/`, кроме `kdbase/`, `scripts/` и знаний агента.
+Пути модулей — от `src/kd_rules_mcp/`, кроме `kdbase/`, `scripts/` и знаний агента.
 
 Связность модуля менеджера: снимок `ed_open` → индекс ссылок `ed/refs.py` (один раз на проект, рядом со снимком)
 → отчёт `validation/ed_links.py` в `ed_validate`. Снимок документа остаётся тем же. `ed_close` освобождает снимок
@@ -162,9 +162,9 @@ server.py (MCP, streamable HTTP /mcp) ──→ service/ (Kd2Service, PathMap, S
 ```
 
 Вызов инструмента: клиент → `server.py` (схема параметров, `call` в рабочем потоке,
-`src/kd2_rules_mcp/server.py:144`) → метод `Kd2Service` → модули слоёв → словарь ответа. Любое исключение
+`src/kd_rules_mcp/server.py:144`) → метод `Kd2Service` → модули слоёв → словарь ответа. Любое исключение
 превращается в JSON с полем `code`: `Kd2Error` и `ValueError` — по таблице `ERROR_CODES`
-(`src/kd2_rules_mcp/server.py:49`, `:126`), прочие — код `internal`, трассировка в логгер `kd2_rules_mcp`.
+(`src/kd_rules_mcp/server.py:49`, `:126`), прочие — код `internal`, трассировка в логгер `kd_rules_mcp`.
 Каждый вызов даёт строку лога INFO (инструмент, миллисекунды, итог); уровень — `KD2_LOG_LEVEL`.
 
 ## 4. Инварианты
@@ -178,28 +178,28 @@ server.py (MCP, streamable HTTP /mcp) ──→ service/ (Kd2Service, PathMap, S
   только подсказка; ПКС без пары создаются выключенными, как в КД.
 - **Схема из писателей КД.** Порядок тегов и политика «выводить только не-дефолт» выписаны из строк
   `ВыгрузкаКонвертации` и `ВыгрузкаРегистрации`, у каждого слота схемы — ссылка `ВК:N`/`ВР:N`
-  (`src/kd2_rules_mcp/kd2/schema.py:1-8`). Новый тег без ссылки на эталон не добавляется.
+  (`src/kd_rules_mcp/kd2/schema.py:1-8`). Новый тег без ссылки на эталон не добавляется.
 - **Смысловое равенство, не побайтовое.** Round-trip проверяется канонической формой К1–К8
-  (`src/kd2_rules_mcp/kd2/canonical.py:8-30`), каждое правило канонизации покрыто тестом
+  (`src/kd_rules_mcp/kd2/canonical.py:8-30`), каждое правило канонизации покрыто тестом
   (`tests/test_canonical.py`); стиль исходника (BOM, объявление, отступы, концы строк) хранится отдельно
   (`kd2/xmlstyle.py`). Смысловой дифф (`kd2/diff.py`) пользуется теми же правилами нормализации:
   концы строк, пустые и дефолтные значения не становятся изменениями.
 - **Неизвестное не теряется.** Теги вне схемы хранятся как lxml-элементы и выводятся обратно
-  (`src/kd2_rules_mcp/kd2/model.py:1-5`); их судьбу у читателя БСП оценивает `validation/format.py`.
+  (`src/kd_rules_mcp/kd2/model.py:1-5`); их судьбу у читателя БСП оценивает `validation/format.py`.
 - **Каждый факт о формате — со ссылкой** `reference/kd2-cfg/…:N` или `БСП:N`; без неё — пометка «(вывод)».
   Это пункт 4 «Когда задача готова» в `AGENTS.md`.
 - **Источник правды — файл.** Проекты правил — временное состояние в памяти; запись — только в рабочую папку и
   в `rules_dir` проектов, всё остальное смонтировано на чтение. Пути агента переводятся `PathMap`
-  (`src/kd2_rules_mcp/service/paths.py:13`).
+  (`src/kd_rules_mcp/service/paths.py:13`).
 - **Кэш структур самоинвалидируется.** Ключ — отпечаток выгрузки (`Configuration.xml` и `ConfigDumpInfo.xml`,
   без него — полный обход) плюс хеш исходников загрузчика: `LOADER_VERSION` и `BUILDER_VERSION`
-  (`src/kd2_rules_mcp/structures/store.py:36-37`). Изменился код загрузчика — структура пересобирается при
+  (`src/kd_rules_mcp/structures/store.py:36-37`). Изменился код загрузчика — структура пересобирается при
   следующей загрузке.
 - **Отказ правки — с откатом.** Правка, после которой правило ссылается на отсутствующее правило, объект или
   свойство, отклоняется целиком; полуприменённых правил нет (`authoring/edits.py`).
 - **Компактные ответы.** Списки постраничные (`offset`, `limit` ≤ 200, `has_more`); XML правил в ответ не
   попадает, тексты обработчиков в `rules_get` обрезаются до 2000 символов (`TEXT_LIMIT`,
-  `src/kd2_rules_mcp/kd2/diff.py`; сервис импортирует предел оттуда).
+  `src/kd_rules_mcp/kd2/diff.py`; сервис импортирует предел оттуда).
 - **Лестница проверок.** Каждая следующая проверка доказывает то, чего не может предыдущая: `rules_validate` →
   синтакс-чекер → `kd_check` → `bsp_check` → `exchange_check`. Подробно — [checks.md](checks.md).
 - **Статус маршрута не повышается.** `ed_route_compare` отдаёт статус, который посчитали проверки.
@@ -216,25 +216,25 @@ server.py (MCP, streamable HTTP /mcp) ──→ service/ (Kd2Service, PathMap, S
 | Что | Где живёт | Переживает перезапуск контейнера |
 |---|---|---|
 | Структуры метаданных | SQLite-файлы в каталоге кэша (`KD2_CACHE_DIR`, в контейнере — том `kd2_structures_cache`) | да |
-| Рабочие проекты правил | память `RulesWorkspace` и снимок `<рабочая папка>/.projects/<id>/` (`rules.xml`, `meta.json`; `src/kd2_rules_mcp/authoring/workspace.py:245`) | да, пока не `rules_close` |
+| Рабочие проекты правил | память `RulesWorkspace` и снимок `<рабочая папка>/.projects/<id>/` (`rules.xml`, `meta.json`; `src/kd_rules_mcp/authoring/workspace.py:245`) | да, пока не `rules_close` |
 | Проекты ED | неизменяемые снимки, индексы адресов и индекс ссылок в памяти `EdMixin`, под той же блокировкой сервиса | нет; после перезапуска нужен `ed_open` |
 | Схемы формата ED | неизменяемые снимки замыкания импортов в памяти `EdSchemaMixin`, реестр и публикация под общей блокировкой сервиса, разбор вне неё | нет; после перезапуска нужен `ed_schema_open` |
 | Профили маршрутов ED | снимки выгрузок в памяти `EdRoutesMixin`; разбор вне общей блокировки | нет; после перезапуска нужен `ed_routes`. До 32 снимков и 128 МиБ, вытеснение по давности, отдельного закрытия нет |
 | Входы авторинга ED | кэш прочитанных входов по хешам в `EdAuthoringMixin`, до 32 записей и 128 МиБ исходных текстов; отдельного хранимого проекта авторинга нет | нет; прежние решения читаются из manifest комплекта |
 | Комплект доработки ED | XML/BSL, инструкция, manifest и полный отчёт в рабочей папке | да; обновляется только собственное неизменённое содержимое |
-| Карта строк обёрток обработчиков (`handlers_locate`) | поле проекта и `handlers.json` снимка (`src/kd2_rules_mcp/authoring/workspace.py:239`, `src/kd2_rules_mcp/service/checks.py:72`) | да |
+| Карта строк обёрток обработчиков (`handlers_locate`) | поле проекта и `handlers.json` снимка (`src/kd_rules_mcp/authoring/workspace.py:239`, `src/kd_rules_mcp/service/checks.py:72`) | да |
 | Сохранённые правила, обёртки, архивы | файлы в рабочей папке (`KD2_WORKSPACE`) и `rules_dir` проектов | да |
 
 При старте рабочая папка читает только `meta.json` снимков
-(`src/kd2_rules_mcp/authoring/workspace.py:376`): проекты сразу есть в списке, `rules.xml` разбирается при
-первом `get` (`src/kd2_rules_mcp/authoring/workspace.py:161`). Битый снимок даёт ошибку формата с путём снимка и исходного файла только
+(`src/kd_rules_mcp/authoring/workspace.py:376`): проекты сразу есть в списке, `rules.xml` разбирается при
+первом `get` (`src/kd_rules_mcp/authoring/workspace.py:161`). Битый снимок даёт ошибку формата с путём снимка и исходного файла только
 при обращении к этому проекту. Снимок пишется после открытия, создания, успешной правки
-(`src/kd2_rules_mcp/service/base.py:65`), сохранения и экспорта обработчиков: во временный файл того же каталога и
+(`src/kd_rules_mcp/service/base.py:65`), сохранения и экспорта обработчиков: во временный файл того же каталога и
 `os.replace`, под той же блокировкой, что и правки. `rules_close` удаляет проект из памяти и каталог снимка,
-файлы `rules_save` не трогает (`src/kd2_rules_mcp/authoring/workspace.py:262`).
+файлы `rules_save` не трогает (`src/kd_rules_mcp/authoring/workspace.py:262`).
 
 Вызовы, которые трогают проекты правил, сериализованы одной блокировкой `threading.RLock`
-(`src/kd2_rules_mcp/service/base.py:34`): правки идут по одному, загрузка большой структуры параллельно им не мешает.
+(`src/kd_rules_mcp/service/base.py:34`): правки идут по одному, загрузка большой структуры параллельно им не мешает.
 Все клиенты одного сервера видят общий список проектов. Как с этим работать — [workflow.md](workflow.md).
 
 Схемы XDTO не записываются в SQLite или рабочую папку. Повторный `ed_schema_open` возвращает
@@ -316,21 +316,21 @@ uid 1000, корень нужен только точке входа, чтобы
 |---|---|---|
 | `KD2_BIND` | задан `bind` | `127.0.0.1` |
 | `KD2_PUBLISHED_PORT` | задан `port` | `8060` |
-| `KD2_CONTAINER` | задан `instance` | `kd2_rules_mcp` |
+| `KD2_CONTAINER` | задан `instance` | `kd_rules_mcp` |
 | `KD2_CACHE_VOLUME` | задан `instance` | `kd2_structures_cache` |
-| `COMPOSE_PROJECT_NAME` | задан `instance` | `kd2-rules-mcp` |
+| `COMPOSE_PROJECT_NAME` | задан `instance` | `kd-rules-mcp` |
 
-`instance` — суффикс второго экземпляра (`[A-Za-z0-9_-]+`): контейнер `kd2_rules_mcp_<instance>`, том
-`kd2_structures_cache_<instance>`, проект `kd2-rules-mcp-<instance>`. Имя проекта в файле —
-`${COMPOSE_PROJECT_NAME:-kd2-rules-mcp}`; заданная переменная его перекрывает. `port` — целое 1…65535.
+`instance` — суффикс второго экземпляра (`[A-Za-z0-9_-]+`): контейнер `kd_rules_mcp_<instance>`, том
+`kd2_structures_cache_<instance>`, проект `kd-rules-mcp-<instance>`. Имя проекта в файле —
+`${COMPOSE_PROJECT_NAME:-kd-rules-mcp}`; заданная переменная его перекрывает. `port` — целое 1…65535.
 После правки — снова `setup_local.py` и `docker compose up -d`.
 
-Переменные окружения (`Settings.from_env`, `src/kd2_rules_mcp/service/paths.py:88-114`): `KD2_HOST`, `KD2_PORT`,
+Переменные окружения (`Settings.from_env`, `src/kd_rules_mcp/service/paths.py:88-114`): `KD2_HOST`, `KD2_PORT`,
 `KD2_TOKEN` (общий секрет; пусто — заголовок не проверяется), `KD2_CACHE_DIR`, `KD2_WORKSPACE`,
 `KD2_PATH_MAP` (`путь_агента=путь_сервера;…`), `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`,
 `KD2_LOG_LEVEL` (уровень лога, по умолчанию `INFO`). `KD2_IN_CONTAINER` читает `main()`
-(`src/kd2_rules_mcp/server.py:798`): её ставит образ, см. §8.2. Без Docker сервер запускается
-`uv run kd2-rules-mcp`; тогда папки проектов берутся из
+(`src/kd_rules_mcp/server.py:798`): её ставит образ, см. §8.2. Без Docker сервер запускается
+`uv run kd-rules-mcp`; тогда папки проектов берутся из
 `projects.local.yaml` рядом с `projects.yaml`, а `rules_dir` — от них.
 
 ### 8.2 Сеть и авторизация
@@ -343,7 +343,7 @@ uid 1000, корень нужен только точке входа, чтобы
   не процесс. Образ ставит `KD2_IN_CONTAINER=1` (`Dockerfile:39`).
 - Проверка «хост вне петли без токена» в `main()` смотрит `KD2_HOST` только когда `KD2_IN_CONTAINER` **не**
   задана (`server.py:798`). Иначе контейнер с `KD2_HOST=0.0.0.0` не стартовал бы никогда, хотя снаружи порт
-  закрыт петлёй. Без Docker `uv run kd2-rules-mcp` слушает `127.0.0.1` (значение по умолчанию `Settings.host`,
+  закрыт петлёй. Без Docker `uv run kd-rules-mcp` слушает `127.0.0.1` (значение по умолчанию `Settings.host`,
   `service/paths.py:77`) и этой переменной нет: хост не петлевой (петля — `127.0.0.1`, `localhost`, `::1`)
   без `KD2_TOKEN` — `SystemExit`. Это вторая линия; `setup_local.py` такую конфигурацию не создаёт.
 - Командный сервер: в `projects.local.yaml` поля `bind` (адрес интерфейса) и `token`. `bind` вне петли без
@@ -371,10 +371,10 @@ uid 1000, корень нужен только точке входа, чтобы
 
 ### 9.1 Новый инструмент
 
-Метод в нужном миксине пакета `service/` (`src/kd2_rules_mcp/service/<модуль>.py`) — логика без транспорта:
+Метод в нужном миксине пакета `service/` (`src/kd_rules_mcp/service/<модуль>.py`) — логика без транспорта:
 принимает пути агента, переводит их через `_read_path` / `_writable` (`service/base.py`), правки проектов —
 под `self._lock`, ответ — компактный словарь (списки — через `slice_rows`/`page_view` в `service/views.py`).
-Затем функция с `@server.tool()` в `create_server` (`src/kd2_rules_mcp/server.py:128`):
+Затем функция с `@server.tool()` в `create_server` (`src/kd_rules_mcp/server.py:128`):
 каждый параметр — `Annotated[…, Field(description=…)]`, docstring — описание инструмента для агента; вызов —
 `await call(service.<метод>, …)`. Новый вид отказа — подкласс `Kd2Error` в `errors.py` и строка в
 `ERROR_CODES` (подклассы раньше базовых). Тесты: имя — в `EXPECTED_TOOLS` и вызов в `tests/test_server.py`
@@ -395,7 +395,7 @@ scripts/dump_tools.py` обновляет [tools.md](tools.md), а ключи о
 проверки — константа вида `"<группа>.<суть>"` (`format.*`, `structure.*`, `algorithm.*`, `search.*`,
 `registration.*`), адрес — через `validation/address.py`. В docstring модуля — обоснование уровня (ошибка или
 предупреждение) строкой читателя БСП (`БСП:N`); без строки — «(вывод)». Подключение — в
-`Kd2Service.rules_validate` (`src/kd2_rules_mcp/service/checks.py:21`). Тесты: синтетические нарушения и «чистый»
+`Kd2Service.rules_validate` (`src/kd_rules_mcp/service/checks.py:21`). Тесты: синтетические нарушения и «чистый»
 случай в `tests/test_validation_<группа>.py`, прогон без исключений на корпусе (`corpus_params`), строка в
 таблице идентификаторов [checks.md](checks.md).
 

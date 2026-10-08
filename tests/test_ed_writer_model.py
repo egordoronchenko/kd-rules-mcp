@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     Action,
     IdentificationPatch,
     ManagerOperation,
@@ -18,14 +18,14 @@ from kd2_rules_mcp.authoring.ed.manager_operations import (
     parse_operation,
     preview,
 )
-from kd2_rules_mcp.authoring.ed.workspace import ManagerWorkspace
-from kd2_rules_mcp.ed.canonical import canonical_model, canonicalize, model_addresses
-from kd2_rules_mcp.ed.diff import compare_models
-from kd2_rules_mcp.ed.forms import HELPER_PKS
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.writer import render
-from kd2_rules_mcp.ed.writer_import import import_manager
-from kd2_rules_mcp.ed.writer_model import (
+from kd_rules_mcp.authoring.ed.workspace import ManagerWorkspace
+from kd_rules_mcp.ed.canonical import canonical_model, canonicalize, model_addresses
+from kd_rules_mcp.ed.diff import compare_models
+from kd_rules_mcp.ed.forms import HELPER_PKS
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.writer import render
+from kd_rules_mcp.ed.writer_import import import_manager
+from kd_rules_mcp.ed.writer_model import (
     ExecutorProfile,
     Formal,
     LayoutElement,
@@ -40,7 +40,7 @@ from kd2_rules_mcp.ed.writer_model import (
     text_hash,
     validate_model,
 )
-from kd2_rules_mcp.errors import EdAuthoringResourceLimitError, EdAuthoringStaleError
+from kd_rules_mcp.errors import EdAuthoringResourceLimitError, EdAuthoringStaleError
 
 # Формы: reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Templates/
 # ШаблоныТекстовМодулей/Ext/Template.txt:1,19–72,109,151,175–199.
@@ -664,7 +664,7 @@ def test_operation_limits_and_same_name_collision():
 
 
 def test_snapshot_failure_rolls_back_memory_and_manifest(tmp_path: Path, monkeypatch):
-    import kd2_rules_mcp.authoring.ed.workspace as storage
+    import kd_rules_mcp.authoring.ed.workspace as storage
 
     model, _ = imported()
     workspace = ManagerWorkspace(tmp_path)
@@ -923,7 +923,7 @@ def test_review_missing_reference_address_retry_and_event_text():
     model, _ = imported(text)
     event = model.pko[0].events[0]
     assert event.state == "editable" and event.target.resolution == "missing"
-    from kd2_rules_mcp.ed.writer import render
+    from kd_rules_mcp.ed.writer import render
 
     assert 'ПриОтправкеДанных = "Handler"' in render(model).text
 
@@ -969,7 +969,7 @@ def test_review_workspace_isolates_damage_case_and_dead_locks(tmp_path):
 
 
 def test_review_cache_eviction_does_not_rehash_bodies_or_mask_revision(monkeypatch):
-    import kd2_rules_mcp.ed.writer_model as dto
+    import kd_rules_mcp.ed.writer_model as dto
 
     model, _ = imported()
     dump_model(model)
@@ -1004,7 +1004,7 @@ def test_review_source_alias_cannot_restore_deleted_rule():
 
 
 def test_review_unverified_helper_creation_is_refused_and_unused_bodies_cleaned(tmp_path):
-    from kd2_rules_mcp.ed.writer_model import CodeUnit, Signature
+    from kd_rules_mcp.ed.writer_model import CodeUnit, Signature
 
     helper = HELPER_PKS.format(parameter="", check="").replace("НоваяСтрока =", "ДругаяСтрока =")
     model, _ = imported(probe_module("", extra=helper))
@@ -1340,7 +1340,7 @@ def test_layout_operations_have_explicit_sequences_and_preserve_text():
 
 
 def test_layout_refusals_and_computed_dependency_scope():
-    from kd2_rules_mcp.ed.writer_model import CodeUnit, Signature
+    from kd_rules_mcp.ed.writer_model import CodeUnit, Signature
 
     model, _ = imported(layout_input().replace('0, "Other");', '0, "Other", "urn:w4");'))
     rule = model.pko[0]
@@ -1421,8 +1421,8 @@ def test_layout_positional_addresses_are_refused_and_id_delete_replays():
 def test_layout_workspace_isolates_all_load_exceptions(tmp_path, monkeypatch, damage):
     import json
 
-    import kd2_rules_mcp.authoring.ed.workspace as workspace_module
-    from kd2_rules_mcp.ed.writer_model import json_bytes, pack_json, unpack_json
+    import kd_rules_mcp.authoring.ed.workspace as workspace_module
+    from kd_rules_mcp.ed.writer_model import json_bytes, pack_json, unpack_json
 
     workspace = ManagerWorkspace(tmp_path)
     for project in ("good", "bad"):
@@ -1456,7 +1456,7 @@ def test_layout_workspace_isolates_all_load_exceptions(tmp_path, monkeypatch, da
 
 
 def test_layout_bom_only_and_header_slots():
-    from kd2_rules_mcp.ed.errors import EdFormatError
+    from kd_rules_mcp.ed.errors import EdFormatError
 
     with pytest.raises(EdFormatError):
         imported("\ufeff")
@@ -1487,7 +1487,7 @@ def test_layout_bom_only_and_header_slots():
 
 
 def test_third_review_single_rule_regions_and_retained_event_refusals():
-    from kd2_rules_mcp.ed.writer import render
+    from kd_rules_mcp.ed.writer import render
 
     text = SYNTHETIC.replace(
         "Процедура ДобавитьПКО_Send", "#область Single\nПроцедура ДобавитьПКО_Send"

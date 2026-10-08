@@ -20,11 +20,11 @@
 # и KD2_WORKSPACE заданы в образе. Для команды setup_local.py задаёт KD2_TOKEN в override
 # и KD2_BIND в .env. Клиент на этой машине: http://localhost:8060/mcp
 
-name: "${COMPOSE_PROJECT_NAME:-kd2-rules-mcp}"
+name: "${COMPOSE_PROJECT_NAME:-kd-rules-mcp}"
 
 services:
-  kd2-rules-mcp:
-    container_name: ${KD2_CONTAINER:-kd2_rules_mcp}
+  kd-rules-mcp:
+    container_name: ${KD2_CONTAINER:-kd_rules_mcp}
     build: .
     ports:
       - "${KD2_BIND:-127.0.0.1}:${KD2_PUBLISHED_PORT:-8060}:8060"

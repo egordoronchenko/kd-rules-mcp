@@ -7,15 +7,15 @@ from time import perf_counter
 
 import pytest
 
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.layers import compose_manager, read_layers
-from kd2_rules_mcp.ed.model import ObjectRule
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.refs import build_references
-from kd2_rules_mcp.ed.route_model import FormatExtension
-from kd2_rules_mcp.service import Kd2Service, Settings, ed_layers
-from kd2_rules_mcp.validation.ed_layers import validate_effective_links, validate_layers
-from kd2_rules_mcp.validation.ed_links import validate_links
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.layers import compose_manager, read_layers
+from kd_rules_mcp.ed.model import ObjectRule
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.refs import build_references
+from kd_rules_mcp.ed.route_model import FormatExtension
+from kd_rules_mcp.service import Kd2Service, Settings, ed_layers
+from kd_rules_mcp.validation.ed_layers import validate_effective_links, validate_layers
+from kd_rules_mcp.validation.ed_links import validate_links
 from tests import session_inputs
 from tests.test_ed_layers import ROOT, _overlay, _send
 from tests.test_validation_ed_links import _pko_procedure, _pod_handler, analyze, module_text, put
@@ -249,7 +249,7 @@ def route_profile(root, layered):
 
 
 def test_route_format_extensions_have_summary_and_section_without_hooks():
-    from kd2_rules_mcp.service.ed_routes_views import route_rows, route_summary
+    from kd_rules_mcp.service.ed_routes_views import route_rows, route_summary
 
     assert session_inputs._orig_read_routes is not None
     profile = session_inputs._orig_read_routes(ROOT / "base")
@@ -312,7 +312,7 @@ def test_settings_format_map_keeps_versions_and_is_visible(service, tmp_path, lo
     assert profile.plans[0].effective_map() == {"1.20": "МенеджерДемо", "1.21": "МенеджерДемо"}
     assert profile.status == "complete"
     assert len(profile.plans[0].declared_plan_extensions) == 1
-    from kd2_rules_mcp.service.ed_routes_views import route_rows, route_summary
+    from kd_rules_mcp.service.ed_routes_views import route_rows, route_summary
 
     rows = route_rows(profile, "format_extensions", None)
     assert {r["context"] for r in rows} == {"plan", "without_node"}

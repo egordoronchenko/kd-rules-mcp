@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.service import Kd2Service, PathMap, Settings
+from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 
 DATA = Path(__file__).parent / "data"
 

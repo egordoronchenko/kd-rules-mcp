@@ -5,12 +5,12 @@ from shutil import copytree
 
 import pytest
 
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.reader import read_manager_text
-from kd2_rules_mcp.ed.refs import build_references
-from kd2_rules_mcp.service import Kd2Service, Settings, ed_layers
-from kd2_rules_mcp.validation.ed_layers import validate_effective_links
-from kd2_rules_mcp.validation.ed_links import validate_links
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.reader import read_manager_text
+from kd_rules_mcp.ed.refs import build_references
+from kd_rules_mcp.service import Kd2Service, Settings, ed_layers
+from kd_rules_mcp.validation.ed_layers import validate_effective_links
+from kd_rules_mcp.validation.ed_links import validate_links
 from tests.test_ed_layers import ROOT, _overlay
 from tests.test_validation_ed_links import _pod_handler
 

@@ -4,15 +4,15 @@ from dataclasses import replace
 
 import pytest
 
-from kd2_rules_mcp.ed.address import build_addresses
-from kd2_rules_mcp.ed.forms import EVENT_INVOCATIONS
-from kd2_rules_mcp.ed.layer_model import LayerDescriptor, rule_view
-from kd2_rules_mcp.ed.layer_reader import read_extension_text
-from kd2_rules_mcp.ed.layers import compose_manager
-from kd2_rules_mcp.ed.refs import binding_owners, build_references
-from kd2_rules_mcp.validation.ed_layers import validate_effective_links, validate_layers
-from kd2_rules_mcp.validation.ed_links import validate_links
-from kd2_rules_mcp.validation.ed_projection import effective_document, select_context
+from kd_rules_mcp.ed.address import build_addresses
+from kd_rules_mcp.ed.forms import EVENT_INVOCATIONS
+from kd_rules_mcp.ed.layer_model import LayerDescriptor, rule_view
+from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.layers import compose_manager
+from kd_rules_mcp.ed.refs import binding_owners, build_references
+from kd_rules_mcp.validation.ed_layers import validate_effective_links, validate_layers
+from kd_rules_mcp.validation.ed_links import validate_links
+from kd_rules_mcp.validation.ed_projection import effective_document, select_context
 from tests.test_ed_layers_handlers import (
     EXTENSION,
     SEND_BODY,

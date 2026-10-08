@@ -13,7 +13,7 @@
 - `.mcp.json` (Claude Code) и `.cursor/mcp.json` (Cursor) — наш сервер, общие серверы 1С и серверы
   поиска по коду каждого проекта с префиксом `<проект>-` и серверы данных песочниц (с
   Basic-авторизацией логином базы, если он есть); адреса берутся из `.mcp.json` проектов.
-  При `token` у `kd2-rules-mcp` — заголовок `Authorization: Bearer`.
+  При `token` у `kd-rules-mcp` — заголовок `Authorization: Bearer`.
 
 Запуск: `uv run python scripts/setup_local.py`, затем `docker compose up -d`.
 Если имена контейнера и проекта compose уже не прежние, а старый контейнер или проект
@@ -30,8 +30,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.projects import (
+from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.projects import (
     DEFAULT_COMPOSE_PROJECT,
     DEFAULT_CONTAINER_NAME,
     DEFAULT_PUBLISHED_PORT,
@@ -50,7 +50,7 @@ from kd2_rules_mcp.projects import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
-SERVER = "kd2-rules-mcp"
+SERVER = "kd-rules-mcp"
 # Прежние имена. Строки с LEGACY_ скрипт переименования не меняет: после смены имён
 # setup предупреждает, что старый контейнер ещё занимает порт.
 LEGACY_CONTAINER = "kd2_rules_mcp"
@@ -124,6 +124,18 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
         rules.append(f"{project_id}={target}")
         path_map.append(f"{folder}={target}")
     workspace = local.workspace or ROOT / "workspace"
+    extensions: list[str] = []
+    for project_id, folder in local.project_dirs.items():
+        for configuration in catalog.project(project_id).configurations.values():
+            for index, relative in enumerate(configuration.writable_extensions):
+                path = resolve(folder, relative)
+                if not path.is_dir():
+                    continue
+                key = f"{project_id}.{configuration.id}.{index}"
+                target = f"/extensions/{key}"
+                volumes.append(f"{_posix(path)}:{target}")
+                extensions.append(f"{key}={target}")
+                path_map.append(f"{path}={target}")
     path_map.append(f"{workspace}=/data/workspace")
     path_map.append(f"{ROOT / 'structures'}=/structures")
     if local.workspace is not None:
@@ -133,6 +145,7 @@ def compose_override(catalog: Catalog, local: LocalSettings) -> str:
             "KD2_PROJECT_DIRS": ";".join(dirs),
             "KD2_RULES_DIRS": ";".join(rules),
             "KD2_PATH_MAP": ";".join(path_map),
+            "KD2_EXTENSION_DIRS": ";".join(extensions),
         }
     }
     if local.token:

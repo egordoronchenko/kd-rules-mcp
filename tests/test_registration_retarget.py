@@ -6,21 +6,21 @@ from typing import cast
 
 import pytest
 
-from kd2_rules_mcp.authoring.registration_retarget import (
+from kd_rules_mcp.authoring.registration_retarget import (
     retarget_registration,
 )
-from kd2_rules_mcp.errors import (
+from kd_rules_mcp.errors import (
     DuplicateTargetPropertyError,
     InvalidRegistrationNameError,
     NotRegistrationRulesError,
     PropertyNameClashError,
     RegistrationRetargetError,
 )
-from kd2_rules_mcp.kd2.diff import diff_rules
-from kd2_rules_mcp.kd2.model import Node, RegistrationRules
-from kd2_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_registration_rules
-from kd2_rules_mcp.kd2.xmlstyle import BOM, preserve_line_endings
-from kd2_rules_mcp.structures.queries import ObjectCard, ObjectProperty
+from kd_rules_mcp.kd2.diff import diff_rules
+from kd_rules_mcp.kd2.model import Node, RegistrationRules
+from kd_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_registration_rules
+from kd_rules_mcp.kd2.xmlstyle import BOM, preserve_line_endings
+from kd_rules_mcp.structures.queries import ObjectCard, ObjectProperty
 
 FIXTURE = Path(__file__).parent / "data" / "registration" / "retarget.xml"
 EXCHANGE = Path(__file__).parent / "data" / "exchange_rules.xml"
@@ -798,8 +798,8 @@ def test_review_missing_valid_attribute_skips_rule() -> None:
 
 
 def test_review_on_demand_mode_explained_and_counted() -> None:
-    from kd2_rules_mcp.authoring.ed.registration_delivery import deletion_mark_instruction
-    from kd2_rules_mcp.authoring.registration_retarget import deletion_filter_summary
+    from kd_rules_mcp.authoring.ed.registration_delivery import deletion_mark_instruction
+    from kd_rules_mcp.authoring.registration_retarget import deletion_filter_summary
 
     rules = _tiny(_rule("Справочник.Sample", "DateA", unload="РежимВыгрузкиПриНеобходимости"))
     card = ObjectCard(

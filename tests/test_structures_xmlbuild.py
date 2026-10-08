@@ -14,17 +14,17 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.errors import Kd2Error
-from kd2_rules_mcp.structures import db
-from kd2_rules_mcp.structures.queries import (
+from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.structures import db
+from kd_rules_mcp.structures.queries import (
     NotFound,
     Page,
     describe_object,
     exchange_plan_content,
     object_values,
 )
-from kd2_rules_mcp.structures.store import LoadResult, StructureStore
-from kd2_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
+from kd_rules_mcp.structures.store import LoadResult, StructureStore
+from kd_rules_mcp.validation.ed_structure_snapshot import StructureSnapshot
 
 DUMP = Path(__file__).parent / "data" / "xmldump"
 MAIN = DUMP / "main"

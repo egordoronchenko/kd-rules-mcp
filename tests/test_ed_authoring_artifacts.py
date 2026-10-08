@@ -5,15 +5,15 @@ from dataclasses import replace
 import pytest
 from lxml import etree
 
-from kd2_rules_mcp.authoring.ed.artifacts import (
+from kd_rules_mcp.authoring.ed.artifacts import (
     artifact_name,
     combine_artifacts,
     previous_artifact,
     with_source_hashes,
 )
-from kd2_rules_mcp.authoring.ed.model import AuthoringPreconditionError
-from kd2_rules_mcp.authoring.ed.render import render_authoring
-from kd2_rules_mcp.authoring.ed.xml_dump import M
+from kd_rules_mcp.authoring.ed.model import AuthoringPreconditionError
+from kd_rules_mcp.authoring.ed.render import render_authoring
+from kd_rules_mcp.authoring.ed.xml_dump import M
 from tests.test_ed_authoring_render import descriptions, prepared
 
 
@@ -35,9 +35,9 @@ def test_artifact_name_and_previous_ownership():
 
 def test_handler_kit_procedure_hash_rejects_a_rewritten_manifest():
     """Согласованный хеш файла не прячет чужой отпечаток тела процедуры."""
-    from kd2_rules_mcp.authoring.ed.model import PreserveMissingHeaderProperty
-    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
-    from kd2_rules_mcp.validation.ed_authoring import prepare_authoring, prepare_handler_operations
+    from kd_rules_mcp.authoring.ed.model import PreserveMissingHeaderProperty
+    from kd_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd_rules_mcp.validation.ed_authoring import prepare_authoring, prepare_handler_operations
     from tests.test_ed_authoring_handlers import handler_inputs
     from tests.test_ed_authoring_model import IDENTITY, OPERATION, TARGET
 
@@ -74,7 +74,7 @@ def test_handler_kit_procedure_hash_rejects_a_rewritten_manifest():
     with pytest.raises(AuthoringPreconditionError) as caught:
         previous_artifact(xml)
     assert caught.value.failures[0].id == "ed.author.owned_content_changed"
-    from kd2_rules_mcp.authoring.ed.manifest import sha256
+    from kd_rules_mcp.authoring.ed.manifest import sha256
 
     module = next(path for path in migrated.files if path.endswith("Module.bsl"))
     rewritten = dict(migrated.files)
@@ -140,7 +140,7 @@ def test_relative_inputs_and_change_groups_preserve_payloads():
 
 
 def test_combine_managers_and_same_owner_attributes():
-    from kd2_rules_mcp.validation.ed_authoring import prepare_authoring
+    from kd_rules_mcp.validation.ed_authoring import prepare_authoring
     from tests.test_ed_authoring_model import IDENTITY
     from tests.test_ed_authoring_render import case_operation, stable_inputs
 
@@ -170,7 +170,7 @@ def test_combine_managers_and_same_owner_attributes():
 
 
 def test_manual_combination_refuses_different_drafts_for_same_attribute():
-    from kd2_rules_mcp.validation.ed_authoring import prepare_authoring
+    from kd_rules_mcp.validation.ed_authoring import prepare_authoring
     from tests.test_ed_authoring_model import IDENTITY, OPERATION
     from tests.test_ed_authoring_render import stable_inputs
 
@@ -190,8 +190,8 @@ def test_manual_combination_refuses_different_drafts_for_same_attribute():
 
 
 def test_combined_view_counts_actual_rules_and_shared_metadata():
-    from kd2_rules_mcp.authoring.ed.model import Notice
-    from kd2_rules_mcp.service.ed_authoring_views import build_view
+    from kd_rules_mcp.authoring.ed.model import Notice
+    from kd_rules_mcp.service.ed_authoring_views import build_view
     from tests.test_ed_authoring_model import OPERATION
 
     first = prepared(

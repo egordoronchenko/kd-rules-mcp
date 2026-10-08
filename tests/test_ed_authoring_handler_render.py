@@ -8,19 +8,19 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.handler_render import (
+from kd_rules_mcp.authoring.ed.handler_render import (
     binding_record,
     procedure_records,
     render_handler_module,
 )
-from kd2_rules_mcp.authoring.ed.handlers import (
+from kd_rules_mcp.authoring.ed.handlers import (
     EVENT_PARAMETERS,
     HandlerBindingPlan,
     handler_name,
     operation_from_input,
 )
-from kd2_rules_mcp.authoring.ed.manifest import GENERATOR_VERSION_V2
-from kd2_rules_mcp.authoring.ed.model import (
+from kd_rules_mcp.authoring.ed.manifest import GENERATOR_VERSION_V2
+from kd_rules_mcp.authoring.ed.model import (
     AddAlgorithmicHeaderProperty,
     AddHeaderProperty,
     AuthoringTarget,
@@ -30,13 +30,13 @@ from kd2_rules_mcp.authoring.ed.model import (
     PreserveMissingHeaderProperty,
     SetObjectHandler,
 )
-from kd2_rules_mcp.ed import read_manager
-from kd2_rules_mcp.ed.layer_model import LayerDescriptor
-from kd2_rules_mcp.ed.layer_reader import read_extension_text
-from kd2_rules_mcp.ed.layers import compose_manager
-from kd2_rules_mcp.ed.model import Classification, ObjectRule
-from kd2_rules_mcp.validation.ed_layers import validate_effective_links, validate_layers
-from kd2_rules_mcp.validation.ed_projection import effective_document, select_context
+from kd_rules_mcp.ed import read_manager
+from kd_rules_mcp.ed.layer_model import LayerDescriptor
+from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.layers import compose_manager
+from kd_rules_mcp.ed.model import Classification, ObjectRule
+from kd_rules_mcp.validation.ed_layers import validate_effective_links, validate_layers
+from kd_rules_mcp.validation.ed_projection import effective_document, select_context
 from tests.test_ed_authoring_handlers import handler_inputs, reference_inputs
 from tests.test_ed_layer_flow import HELPERS
 
@@ -523,9 +523,9 @@ def test_closed_corpus_pilot_modules_match_after_listed_differences():
 
 
 def _dto_plan(path: Path):
-    from kd2_rules_mcp.authoring.ed.canonical import canonicalize_operations
-    from kd2_rules_mcp.authoring.ed.handlers import merge_operations
-    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from kd_rules_mcp.authoring.ed.canonical import canonicalize_operations
+    from kd_rules_mcp.authoring.ed.handlers import merge_operations
+    from kd_rules_mcp.validation.ed_authoring import prepare_handler_operations
     from tests.test_ed_authoring_model import IDENTITY
 
     fixture = json.loads(path.read_text(encoding="utf-8"))
@@ -555,8 +555,8 @@ def _dto_plan(path: Path):
 @pytest.mark.parametrize("path", _scenarios(), ids=lambda path: path.stem)
 def test_dto_kit_roundtrips_from_disk(path):
     """Полный комплект с нуля: золотой модуль, manifest и повтор с диска без изменений."""
-    from kd2_rules_mcp.authoring.ed.artifacts import previous_artifact
-    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd_rules_mcp.authoring.ed.artifacts import previous_artifact
+    from kd_rules_mcp.authoring.ed.render import render_handlers_authoring
     from tests.test_ed_authoring_model import IDENTITY
     from tests.test_ed_authoring_render import descriptions
 
@@ -588,12 +588,12 @@ def test_procedure_fingerprint_covers_a_body_that_mentions_the_terminator():
     """Комментарий и строка «КонецПроцедуры» не обрезают отпечаток; правка хвоста видна."""
     from dataclasses import replace
 
-    from kd2_rules_mcp.authoring.ed.artifacts import previous_artifact
-    from kd2_rules_mcp.authoring.ed.handler_render import procedure_block
-    from kd2_rules_mcp.authoring.ed.manifest import sha256
-    from kd2_rules_mcp.authoring.ed.model import AuthoringPreconditionError
-    from kd2_rules_mcp.authoring.ed.render import render_handlers_authoring
-    from kd2_rules_mcp.validation.ed_authoring import prepare_handler_operations
+    from kd_rules_mcp.authoring.ed.artifacts import previous_artifact
+    from kd_rules_mcp.authoring.ed.handler_render import procedure_block
+    from kd_rules_mcp.authoring.ed.manifest import sha256
+    from kd_rules_mcp.authoring.ed.model import AuthoringPreconditionError
+    from kd_rules_mcp.authoring.ed.render import render_handlers_authoring
+    from kd_rules_mcp.validation.ed_authoring import prepare_handler_operations
     from tests.test_ed_authoring_handlers import handler
     from tests.test_ed_authoring_model import IDENTITY
     from tests.test_ed_authoring_render import descriptions

@@ -8,16 +8,17 @@ from unittest.mock import patch
 
 import pytest
 
-from kd2_rules_mcp.authoring.ed.manager_operations import (
+from kd_rules_mcp.authoring.ed.manager_operations import (
     ManagerOperation,
     PkoPatch,
     apply,
     parse_operation,
     preview,
 )
-from kd2_rules_mcp.authoring.ed.workspace import ManagerWorkspace
-from kd2_rules_mcp.ed.writer import new_manager, render
-from kd2_rules_mcp.ed.writer_model import (
+from kd_rules_mcp.authoring.ed.workspace import ManagerWorkspace
+from kd_rules_mcp.ed.writer import new_manager, render
+from kd_rules_mcp.ed.writer_model import (
+    LEGACY_SNAPSHOT_SCHEMA_SHA256,
     SNAPSHOT_SCHEMA_SHA256,
     SNAPSHOT_STORAGE_VERSION,
     dump_model,
@@ -155,7 +156,7 @@ def test_address_owner_from_previous_packet_accepts_handler_and_property():
 
 
 def test_snapshot_schema_is_pinned_to_version_and_rejects_unknown_schema():
-    known = {5: "ecfb5f2da1648d8ab72be2f0e0b26863bcbc062c5830bab76d366b1f038e3759"}
+    known = {5: "ecacd6013751942c65be263953b85d27f35171288aac9b4c60fb24d89127ce33"}
     assert (
         snapshot_schema_fingerprint() == SNAPSHOT_SCHEMA_SHA256 == known[SNAPSHOT_STORAGE_VERSION]
     )
@@ -164,6 +165,16 @@ def test_snapshot_schema_is_pinned_to_version_and_rejects_unknown_schema():
     payload["schema_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="схема"):
         load_model(json.dumps(payload))
+
+
+def test_snapshot_with_legacy_schema_fingerprint_still_loads():
+    # Снимки, записанные до переименования пакета (08.10.2026), несут прежний отпечаток.
+    payload = json.loads(dump_model(bank_model()))
+    legacy = "ecfb5f2da1648d8ab72be2f0e0b26863bcbc062c5830bab76d366b1f038e3759"
+    assert legacy in LEGACY_SNAPSHOT_SCHEMA_SHA256 and legacy != SNAPSHOT_SCHEMA_SHA256
+    payload["schema_sha256"] = legacy
+    loaded = load_model(json.dumps(payload))
+    assert json.loads(dump_model(loaded))["schema_sha256"] == SNAPSHOT_SCHEMA_SHA256
 
 
 def test_legacy_revision_is_verified_before_migration():
@@ -221,7 +232,7 @@ def test_workspace_reads_legacy_without_writing_and_saves_current_version(tmp_pa
 
 
 def test_snapshot_migration_keeps_nonempty_retained_dispatcher():
-    with patch("kd2_rules_mcp.ed.writer_snapshot.migrate_v3", side_effect=lambda m: m):
+    with patch("kd_rules_mcp.ed.writer_snapshot.migrate_v3", side_effect=lambda m: m):
         model = load_model((DATA / "snapshot-w1.ed.json").read_bytes())
     unit = next(u for u in model.code_units if u.name == "ВыполнитьПроцедуруМодуляМенеджера")
     leaf = next(e for c in model.layouts for e in c.elements if e.entity_id == unit.logical_id)

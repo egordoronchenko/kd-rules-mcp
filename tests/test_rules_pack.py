@@ -9,7 +9,7 @@ import pytest
 from lxml import etree
 from mcp import Client
 
-from kd2_rules_mcp.authoring.pack import (
+from kd_rules_mcp.authoring.pack import (
     CORRESPONDENT,
     EXCHANGE,
     FORM_CONVERSION,
@@ -18,9 +18,9 @@ from kd2_rules_mcp.authoring.pack import (
     collect,
     pack_rules,
 )
-from kd2_rules_mcp.errors import Kd2Error, RulesFormatError
-from kd2_rules_mcp.server import create_server
-from kd2_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.errors import Kd2Error, RulesFormatError
+from kd_rules_mcp.server import create_server
+from kd_rules_mcp.service import Kd2Service, Settings
 
 DATA = Path(__file__).parent / "data"
 

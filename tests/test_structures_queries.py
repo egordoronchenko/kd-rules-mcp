@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from kd2_rules_mcp.structures import db
-from kd2_rules_mcp.structures.queries import (
+from kd_rules_mcp.structures import db
+from kd_rules_mcp.structures.queries import (
     MAX_LIMIT,
     NotFound,
     Page,
@@ -20,7 +20,7 @@ from kd2_rules_mcp.structures.queries import (
     object_values,
     read_object_card,
 )
-from kd2_rules_mcp.structures.store import StructureStore
+from kd_rules_mcp.structures.store import StructureStore
 
 SMALL = Path(__file__).parent / "data" / "md83exp_small.xml"
 NUMBER_TYPE = b"a0000000-0000-0000-0000-000000000002"

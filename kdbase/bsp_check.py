@@ -47,8 +47,8 @@ from bsp_load import (
     short_error,
 )
 
-from kd2_rules_mcp.console import utf8_stdout
-from kd2_rules_mcp.projects import (
+from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.projects import (
     ProjectConfigError,
     base_login,
     load_catalog,
