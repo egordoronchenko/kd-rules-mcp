@@ -1,0 +1,20 @@
+{
+  "metadata_name": "кд3м_Пакет",
+  "namespace": "urn:test:writer-extension",
+  "base_version": "1.20",
+  "base_namespace": "urn:test:writer",
+  "imports": [],
+  "types": [
+    {
+      "name": {"namespace": "urn:test:writer-extension", "local": "ДопСвойства"},
+      "role": "object",
+      "properties": [
+        {
+          "name": {"namespace": "urn:test:writer-extension", "local": "ДопПоле"},
+          "type": {"namespace": "http://www.w3.org/2001/XMLSchema", "local": "string"},
+          "lower": 0
+        }
+      ]
+    }
+  ]
+}

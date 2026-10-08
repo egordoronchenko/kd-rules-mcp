@@ -97,3 +97,50 @@ def test_skill_texts_are_portable() -> None:
     `scripts/`, `workspace/`, `docs/`, `src/kd_rules_mcp`), а скрипты `kdbase` — с оговоркой
     «из клона сервера»: в чужом проекте репозитория нет."""
     assert build_packs.portability_hits(build_packs.pack_files("claude")) == []
+
+
+# Бюджет SKILL.md в байтах UTF-8: клиент кладёт файл в контекст целиком при срабатывании скилла,
+# подробности живут в `references/`. Своё число на каждый скилл сервера; новый скилл без строки
+# здесь тест не пропустит. Точного счётчика токенов Claude офлайн нет: оценка `len(text) / 3`
+# (символов на токен для кириллицы) — только в сообщении об ошибке, не в условии.
+SKILL_MD_BUDGET_BYTES: dict[str, int] = {
+    "kd-install": 9_000,
+    "kd2-rules-build": 9_000,
+    "kd2-exchange-pitfalls": 7_000,
+    "kd3-rules": 9_000,
+}
+DESCRIPTION_LIMIT = 400
+DESCRIPTION = re.compile(r"^description:\s*(.+)$", re.MULTILINE)
+
+
+def _token_estimate(text: str) -> int:
+    """Грубая оценка числа токенов: около трёх символов кириллицы на токен."""
+    return round(len(text) / 3)
+
+
+def test_skill_budget_table_covers_skills() -> None:
+    assert sorted(SKILL_MD_BUDGET_BYTES) == SKILLS
+
+
+@pytest.mark.parametrize("skill", SKILLS)
+def test_skill_md_fits_budget(skill: str) -> None:
+    content = (SKILLS_DIR / skill / "SKILL.md").read_bytes()
+    text = content.decode("utf-8")
+    budget = SKILL_MD_BUDGET_BYTES[skill]
+    assert len(content) <= budget, (
+        f"{skill}/SKILL.md: {len(content)} байт при бюджете {budget} "
+        f"({len(text)} символов, ~{_token_estimate(text)} токенов по оценке len/3); "
+        "подробности — в references/"
+    )
+
+
+@pytest.mark.parametrize("skill", SKILLS)
+def test_skill_description_is_short(skill: str) -> None:
+    text = (SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8")
+    found = DESCRIPTION.search(text)
+    assert found, f"{skill}/SKILL.md: нет description в шапке"
+    description = found.group(1).strip()
+    assert len(description) <= DESCRIPTION_LIMIT, (
+        f"{skill}: description {len(description)} символов при пределе {DESCRIPTION_LIMIT} "
+        f"(~{_token_estimate(description)} токенов по оценке len/3)"
+    )

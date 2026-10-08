@@ -1295,7 +1295,7 @@ class _Importer:
             and (self.helper_variant != "legacy-v2" or len(item.argument_presence) <= 5)
             and (
                 (kind == "direct" and not in_group)
-                or (not item.namespace and not item.condition_name)
+                or ((in_group or not item.namespace) and not item.condition_name)
             )
             and tokenize(item.raw_text)[0].folded == "добавитьпкс"
             else "retained"
@@ -1379,9 +1379,10 @@ class _Importer:
                 and not self.unsafe(group)
                 and not self.unverified_pks
                 and not self.unverified_pktch
-                and not group.namespace
+                and (self.helper_variant != "legacy-v2" or len(presence) <= 3)
                 and not group.condition_name
-                and presence == (True, True, True)
+                and 3 <= len(presence) <= 5
+                and all(presence[:3])
             )
             groups.append(
                 PropertyGroup(

@@ -46,6 +46,35 @@ class Lexed:
 # когда подменяют текст, а позиции в разборе зависят от файла.
 _LEX_CACHE: OrderedDict[tuple[str, str], Lexed] = OrderedDict()
 _LEX_CACHE_MAX = 16
+_DELETION_START = ("#удаление", "#delete")
+_DELETION_END = ("#конецудаления", "#enddelete")
+
+
+def _directive_word(text: str, i: int) -> str:
+    j = i
+    while j < len(text) and (text[j].isalpha() or text[j] == "#"):
+        j += 1
+    return text[i:j].casefold()
+
+
+def _is_deletion_start(text: str, i: int) -> bool:
+    return _directive_word(text, i) in _DELETION_START
+
+
+def _deletion_end(text: str, i: int) -> int:
+    """Индекс конца строки `#КонецУдаления` (без перевода строки) или конец текста."""
+    size = len(text)
+    while True:
+        newline = text.find("\n", i)
+        if newline < 0:
+            return size
+        i = newline + 1
+        j = i
+        while j < size and text[j] in " \t":
+            j += 1
+        if _directive_word(text, j) in _DELETION_END:
+            end = text.find("\n", j)
+            return size if end < 0 else end
 
 
 def tokenize(text: str) -> tuple[Token, ...]:
@@ -62,6 +91,9 @@ def tokenize(text: str) -> tuple[Token, ...]:
         if text.startswith("//", i) or char in "#&":
             end = text.find("\n", i)
             i = size if end < 0 else end
+            if char == "#" and _is_deletion_start(text, start):
+                # Блок #Удаление расширения — не код результата, даже если внутри обрывки литералов.
+                i = _deletion_end(text, i)
             kind = "comment" if char == "/" else "directive"
             result.append(Token(kind, text[start:i].rstrip("\r"), start, i))
         elif char == '"':
@@ -79,14 +111,20 @@ def tokenize(text: str) -> tuple[Token, ...]:
                     if text.startswith("\r\n", i):
                         i += 1
                     i += 1
-                    while i < size and text[i] in " \t":
-                        i += 1
-                    # BSL допускает строки комментариев между продолжениями литерала.
-                    while text.startswith("//", i):
-                        end = text.find("\n", i)
-                        i = size if end < 0 else end + 1
-                        while i < size and text[i] in " \t":
+                    # BSL допускает между продолжениями литерала пустые строки, строки
+                    # комментариев и директивы препроцессора (#Область, #Вставка в расширениях).
+                    while True:
+                        while i < size and text[i] in " \t\r\n":
                             i += 1
+                        if text.startswith("//", i) or text.startswith("#", i):
+                            end = (
+                                _deletion_end(text, i)
+                                if _is_deletion_start(text, i)
+                                else text.find("\n", i)
+                            )
+                            i = size if end < 0 else end + 1
+                            continue
+                        break
                     if i >= size or text[i] != "|":
                         raise EdFormatError(f"Нет маркера продолжения BSL, позиция {i}")
                     value.append("\n")

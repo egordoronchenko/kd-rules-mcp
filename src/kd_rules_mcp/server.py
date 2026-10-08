@@ -1268,8 +1268,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Ordered roots; null = settings, [] = none")),
         ] = None,
     ) -> dict[str, Any]:
-        """Read version routes from project/dump/profile_id. Reuse unchanged snapshots; changed
-        sources require force. Node versions and live settings are unknown."""
+        """Read routes from project/dump/profile_id. Reuse snapshots; changed sources require
+        force. Node versions and live settings are unknown."""
         return await call(
             service.ed_routes,
             project,
@@ -1334,15 +1334,13 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def ed_create(
         project_id: Annotated[str, Field(description="Durable manager ID")],
-        mode: Annotated[str, Field(description="new, import, or rebind to fresh inputs")] = "new",
+        mode: Annotated[str, Field(description="new/import/rebind (fresh inputs)")] = "new",
         project: Annotated[str | None, Field(description="Host from project_list")] = None,
         configuration: Annotated[str, Field(description="Host configuration")] = "full",
-        configuration_path: Annotated[
-            str | None, Field(description="Host dump instead of project")
-        ] = None,
+        configuration_path: Annotated[str | None, Field(description="Host dump path")] = None,
         extensions: Annotated[
             list[str] | None,
-            Field(description="Ordered host extensions; null uses project settings"),
+            Field(description="Ordered host extensions; null=project settings"),
         ] = None,
         plan: Annotated[str | None, Field(description="Exchange plan name")] = None,
         format_version: Annotated[
@@ -1357,21 +1355,18 @@ def create_server(service: Kd2Service) -> MCPServer:
             ),
         ] = None,
         document_id: Annotated[str | None, Field(description="ed_open snapshot to import")] = None,
-        schema_id: Annotated[str | None, Field(description="Optional open XDTO schema")] = None,
-        structure_id: Annotated[
-            str | None, Field(description="Optional loaded host structure")
-        ] = None,
+        schema_id: Annotated[str | None, Field(description="Open XDTO schema")] = None,
+        structure_id: Annotated[str | None, Field(description="Host structure ID")] = None,
         offset: Offset = 0,
         limit: Limit = 20,
         section: Annotated[
             str, Field(description="import_report, notices, differences, plan_candidates")
         ] = "import_report",
     ) -> dict[str, Any]:
-        """Create/reopen durable interface-2 manager; import preserves text. Revision/counts,
-        profile/report, document_id, reference_manager/reason. Different arguments refuse;
-        changed fingerprints warn. Missing inputs refuse quickly with reopen_calls.
-        Atomic rebind keeps rules/receipts, validates and recovers writes.
-        Missing plan: plan_candidates."""
+        """Create/reopen interface-2 manager; import preserves text. Returns revision/counts,
+        document_id, profile/report, reference_manager/reason. Different arguments refuse;
+        changed inputs warn. Missing inputs: reopen_calls. Atomic rebind validates and keeps
+        rules/receipts. Missing plan: plan_candidates."""
         return await call(
             service.ed_create,
             project_id,
@@ -1394,15 +1389,16 @@ def create_server(service: Kd2Service) -> MCPServer:
 
     @server.tool()
     async def ed_apply(
-        project_id: Annotated[str, Field(description="Manager project from ed_create")],
-        expected_revision: Annotated[str, Field(description="Current project revision")],
+        project_id: Annotated[str, Field(description="Manager project")],
+        expected_revision: Annotated[str, Field(description="Current revision")],
         operations: Annotated[
             list[dict[str, Any]] | None,
             Field(
-                description="Up to 100 manager ops; forms: docs/tools.md. "
-                "Algorithm address: Код/ or Алгоритм/. client_id refs; "
-                "after_id omitted=append, null=first. Omit for saved preview. "
-                "Manager: manager_name,title,generated_at,text_style; rebind bindings"
+                description="Up to 100 manager ops: docs/tools.md. "
+                "Код/ or Алгоритм/; client_id refs. "
+                "after_id: omitted=last, null=first. Omit to reuse preview. "
+                "Header: manager_name,title,generated_at,text_style; "
+                "pko.extensions URIs; table_part/property namespace"
             ),
         ] = None,
         mode: Annotated[str, Field(description="preview or apply")] = "preview",
@@ -1418,9 +1414,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             str, Field(description="summary, operations, changes, notices, failures, skipped")
         ] = "summary",
     ) -> dict[str, Any]:
-        """Preview/apply atomically; last 8 previews survive restart. Pages use next_offset;
-        truncated_by=size marks size limits. Apply adds document_id. Replays return replayed=true,
-        current revision and live document_id."""
+        """Atomic preview/apply; 8 durable previews. Pages: next_offset,
+        truncated_by=size. Apply adds document_id; replays return replayed=true,
+        current revision/document_id."""
         return await call(
             service.ed_apply,
             project_id,
@@ -1599,8 +1595,12 @@ def create_server(service: Kd2Service) -> MCPServer:
             bool,
             Field(description="Manager: sender POD stubs"),
         ] = True,
+        format_package: Annotated[
+            str | None,
+            Field(description="Manager only: JSON/XDTO dump path, workspace-relative or absolute"),
+        ] = None,
     ) -> dict[str, Any]:
-        """Preview/write overlay or manager kits. Write requires current build_hash and notice IDs.
+        """Preview/write overlay/manager kits. Write needs current build_hash and notice IDs.
         Install and verify runtime separately."""
         return await call(
             service.ed_authoring_build,
@@ -1628,6 +1628,7 @@ def create_server(service: Kd2Service) -> MCPServer:
             registration_objects,
             registered_objects,
             plan_stubs,
+            format_package,
         )
 
     return server

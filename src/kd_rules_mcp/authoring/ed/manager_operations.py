@@ -138,6 +138,7 @@ class PkoPatch:
     group_flag: Value | None = None
     events: tuple[Event, ...] | None = None
     identification: IdentificationPatch | None = None
+    extensions: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.directions is not None:
@@ -161,6 +162,7 @@ class PropertyPatch:
 class TablePartPatch:
     configuration_property: str | None = None
     format_property: str | None = None
+    namespace: str | None = None
     argument_presence: tuple[bool, ...] | None = None
 
 
@@ -867,7 +869,8 @@ def _property_key(configuration: str, format_name: str, algorithm: int) -> tuple
 
 def _property_arguments(item: Property, address: str) -> Property:
     """Обрезка пустого хвоста по генератору; код из флага не выводится."""
-    # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:2326–2359.
+    # reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:2326–2359,
+    # 2498–2529: та же шестая позиция URI для свойств строки ТЧ.
     if item.algorithm_flag not in (0, 1):
         _fail("model_invalid", address, "Флаг алгоритма должен быть 0 или 1")
     if item.property_kind == "direct" and (
@@ -904,7 +907,12 @@ def _property_arguments(item: Property, address: str) -> Property:
 
 
 def _property_patch(
-    model: ManagerModel, current: Property | None, updates: dict[str, Any], address: str
+    model: ManagerModel,
+    current: Property | None,
+    updates: dict[str, Any],
+    address: str,
+    *,
+    in_group: bool = False,
 ) -> dict[str, Any]:
     if (
         "property_kind" in updates
@@ -922,7 +930,11 @@ def _property_patch(
         if namespace and (len(requested) < 6 or not requested[5]):
             _fail("model_invalid", address, "Пространство имён противоречит наличию аргумента")
     kind = updates.get("property_kind", current.property_kind if current else "direct")
-    if kind != "direct" and updates.get("namespace", current.namespace if current else ""):
+    if (
+        not in_group
+        and kind != "direct"
+        and updates.get("namespace", current.namespace if current else "")
+    ):
         _fail("unsupported_form", address, "Пространство имён новой формы ПКС относится к W4")
     return updates
 
@@ -960,6 +972,11 @@ def _field_layout(model, owner_id, entity_id, values):
                 (i + 1 for i, e in enumerate(rows) if e.field and e.field != "properties_start"),
                 default=0,
             )
+            if name == "extensions":
+                # G:2542–2550; GT:57–60: init URI предшествует заполнению свойств.
+                position = next(
+                    (i for i, e in enumerate(rows) if e.field == "properties_start"), position
+                )
             rows.insert(
                 position,
                 LayoutElement(
@@ -1630,6 +1647,14 @@ def references_to(
 
 
 def _validate_patch(kind: str, updates: dict[str, Any], address: str) -> None:
+    if "extensions" in updates and (
+        len(set(updates["extensions"])) != len(updates["extensions"])
+        or any(
+            not isinstance(uri, str) or not uri.strip() or any(ord(c) < 32 for c in uri)
+            for uri in updates["extensions"]
+        )
+    ):
+        _fail("model_invalid", address, "Ожидался список непустых URI без повторов")
     for key in ("name", "manager_name"):
         if key in updates and not _identifier(updates[key]):
             _fail("model_invalid", address, "Недопустимое имя BSL")
@@ -1718,13 +1743,27 @@ def _apply_table_part(model: ManagerModel, op: ManagerOperation) -> tuple[Manage
             "opaque_context_changed", address, "Нет редактируемой группы либо недопустима очистка"
         )
     updates = _updates(op.patch)
+    namespace = updates.get("namespace", current.namespace if current else "")
+    if not isinstance(namespace, str) or any(ord(c) < 32 for c in namespace):
+        _fail("model_invalid", address, "Некорректный URI группы ТЧ")
+    if namespace and len(helper.signature.parameters) < 4:
+        _fail("unsupported_form", address, "Помощник ДобавитьПКТЧ не принимает URI")
     for name in ("configuration_property", "format_property"):
         if name in updates and (
             not isinstance(updates[name], str) or (updates[name] and not _identifier(updates[name]))
         ):
             _fail("model_invalid", address, "Имя стороны ТЧ — идентификатор либо пустая строка")
-    if "argument_presence" in updates and updates["argument_presence"] != (True, True, True):
-        _fail("unsupported_form", address, "Пространство имён и условие группы — следующий срез")
+    requested = updates.pop("argument_presence", None)
+    if requested is not None and (
+        not 3 <= len(requested) <= 5
+        or not all(requested[:3])
+        or (namespace and (len(requested) < 4 or not requested[3]))
+        or (len(requested) == 5 and requested[4])
+    ):
+        _fail("model_invalid", address, "Аргументы ПКТЧ не соответствуют URI группы")
+    if op.action == "create" or "namespace" in updates or requested is not None:
+        # G:2435–2444: URI занимает четвёртую позицию, пустой хвост обрезается.
+        updates["argument_presence"] = (True, True, True, True) if namespace else (True, True, True)
     if (
         op.action == "create"
         and not {"configuration_property", "format_property"} <= updates.keys()
@@ -1943,13 +1982,15 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
     _validate_patch(op.kind, updates, address)
     allowed_clear = {
         "pod": {"configuration_selection", "format_selection", "clear_data"},
-        "pko": {"configuration_object", "format_object", "group_flag"},
+        "pko": {"configuration_object", "format_object", "group_flag", "extensions"},
         "identification": {"mode", "search_sets", "not_found_policy"},
         "property": set(),
     }.get(op.kind, set())
     if set(op.clear) - allowed_clear or set(op.clear) & set(updates):
         _fail("model_invalid", address, "Некорректный список очистки полей")
-    updates.update({key: () if key == "search_sets" else Value() for key in op.clear})
+    updates.update(
+        {key: () if key in ("search_sets", "extensions") else Value() for key in op.clear}
+    )
     if "used_pko" in updates:
         known_pko = {r.logical_id: r for r in model.pko}
         for reference in updates["used_pko"]:
@@ -2066,12 +2107,6 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
         if owner is None:
             _fail("model_invalid", address, "Требуется владелец ПКО")
         assert owner is not None
-        if isinstance(owner, PropertyGroup) and (
-            updates.get("namespace") or updates.get("condition_name")
-        ):
-            _fail(
-                "unsupported_form", address, "Пространство имён и условие ПКС ТЧ — следующий срез"
-            )
         if owner.state != "editable" or any(
             b.locks_context and b.owner_id in (owner.logical_id, target_id)
             for b in model.retained_blocks
@@ -2216,7 +2251,9 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
         if op.kind == "property":
             if not {"configuration_property", "format_property"} <= updates.keys():
                 _fail("model_invalid", address, "Новая ПКС требует обе стороны")
-            updates = _property_patch(model, None, updates, address)
+            updates = _property_patch(
+                model, None, updates, address, in_group=isinstance(owner, PropertyGroup)
+            )
             item = _property_arguments(
                 Property(
                     logical_id=key,
@@ -2301,7 +2338,9 @@ def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel,
             updates["name"] = updates.get(
                 "format_property", current.format_property
             ) or updates.get("configuration_property", current.configuration_property)
-            updates = _property_patch(model, current, updates, address)
+            updates = _property_patch(
+                model, current, updates, address, in_group=isinstance(owner, PropertyGroup)
+            )
         if "name" in updates and op.kind in ("pko", "pod"):
             assert isinstance(current, ObjectRule | ProcessingRule)
             prefix = "ДобавитьПКО_" if op.kind == "pko" else "ДобавитьПОД_"

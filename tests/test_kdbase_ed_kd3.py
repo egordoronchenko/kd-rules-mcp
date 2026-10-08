@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -10,11 +11,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from lxml import etree
 
+from kd_rules_mcp.authoring.ed.format_package import format_package_data, render_format_package
 from kd_rules_mcp.ed.reader import read_manager_text
 from kd_rules_mcp.ed.writer import render
 from kd_rules_mcp.ed.writer_import import import_manager
 from kdbase import ed_kd3_check as adapter
+from tests.data.ed.format_package.model import BASE, OWN, sample_model
 
 DATA = Path(__file__).parent / "data" / "ed"
 KEYS = {
@@ -533,3 +537,296 @@ def test_cscript_selftest_without_connection(tmp_path: Path) -> None:
     assert not result.read_bytes().startswith(b"\xef\xbb\xbf")
     values = adapter.parse_result(result)
     assert values == {"protocol": "1", "command": "selftest", "echo": value, "status": "OK"}
+
+
+def assert_format_contract(text: str) -> None:
+    """Контракт эталона КД 3 и справки платформы проверяется в исполняемом тексте."""
+    code = re.sub(r"^\s*//.*$", "", text, flags=re.MULTILINE)
+    for expression in (
+        "base.Обработки.ЗагрузкаСтруктурыФормата.Создать()",
+        "processor.ИмяОсновногоПакетаXDTO = uri",
+        "processor.ИмяФайлаРасширенияФормата = extensionPath",
+        "processor.ДобавлятьТолькоНовыеОбъектыСвойстваЗначения = false",
+        'base.Справочники.ВерсииФормата.НайтиПоРеквизиту("ПространствоИмен", uri)',
+        'parameters.Вставить("СпособЗагрузки", ref.Пустая() ? 0 : 1)',
+        'parameters.Вставить("ВерсияФормата", processor.ВерсияФормата)',
+        'parameters.Вставить("ДобавлятьТолькоНовые", false)',
+        'parameters.Вставить("ЭтоРасширение", extensionPath !== "")',
+        'parameters.Вставить("ИмяОсновногоПакетаXDTO", processor.ИмяОсновногоПакетаXDTO)',
+        'parameters.Вставить("РодительВерсии", parent)',
+        'parameters.Вставить("ШаблонПространстваИмен", template)',
+        'parameters.Вставить("НомерВерсииФормата", number)',
+        'parameters.Вставить("ДанныеДляЗагрузки", files)',
+        "base.Обработки.ЗагрузкаСтруктурыФормата.ВыполнитьЗагрузкуФормата(parameters, address)",
+        "!result.Успех",
+        "return result.ВерсияФормата",
+        "base.Обработки.ВыгрузкаСтруктурыФормата.ВыполнитьВыгрузку(parameters, address)",
+        "result.ФлагОшибки",
+        'result.РезультатВыгрузки.Записать(folder + "\\\\returned.xsd")',
+        "base.СоздатьФабрикуXDTO(files)",
+        "base.ФабрикаXDTO.ПрочитатьXML(reader,",
+        'base.ФабрикаXDTO.Тип("http://v8.1c.ru/8.1/xdto", "Package")',
+        'base.ФабрикаXDTO.Тип("http://v8.1c.ru/8.1/xdto", "Model")',
+        "model.package.Добавить(packet)",
+        'base.NewObject("ФабрикаXDTO", model, imported.Пакеты)',
+        "factory.ЭкспортСхемыXML(uris)",
+        "packet.Зависимости",
+        "schema.ПространствоИмен",
+        "schema.ОбновитьЭлементDOM()",
+        'base.NewObject("ЗаписьDOM").Записать(schema.ЭлементDOM, writer)',
+        "if (baseRef.Пустая())",
+        'stageFiles("load-base", "")',
+        'stageFiles("load-extension", extensionPath)',
+        "fso.CopyFile(all[k], target, true)",
+        'record("extension_loaded", true)',
+        'rows.push(key + "\\t" + text)',
+        'text.replace(/\\\\/g, "\\\\\\\\").replace(/\\t/g, "\\\\t")',
+        'text.replace(/\\r/g, "\\\\r").replace(/\\n/g, "\\\\n")',
+    ):
+        assert expression in code
+
+
+def test_format_scenario_contract() -> None:
+    assert_format_contract(adapter.SCENARIO.read_text(encoding="utf-8"))
+
+
+def format_xsd() -> str:
+    """Синтетический ответ платформы: объект, ключ, ТЧ со строкой, перечисление."""
+    return f'''<xs:schema xmlns:xs="{adapter.XS}" xmlns:tns="{OWN}"
+        targetNamespace="{OWN}" elementFormDefault="qualified">
+      <xs:complexType name="Item"><xs:sequence>
+        <xs:element name="Key" type="tns:ItemKey"/>
+        <xs:element name="Rows" type="tns:ItemRows" minOccurs="0"/>
+      </xs:sequence></xs:complexType>
+      <xs:complexType name="ItemKey"><xs:sequence>
+        <xs:element name="Code" type="xs:string"/>
+      </xs:sequence></xs:complexType>
+      <xs:complexType name="ItemRows"><xs:sequence>
+        <xs:element name="Row" type="tns:ItemRowsRow" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence></xs:complexType>
+      <xs:complexType name="ItemRowsRow"><xs:sequence>
+        <xs:element name="Amount" type="xs:decimal"/>
+      </xs:sequence></xs:complexType>
+      <xs:simpleType name="Color"><xs:restriction base="xs:string">
+        <xs:enumeration value="Red"/><xs:enumeration value="Green"/>
+      </xs:restriction></xs:simpleType>
+    </xs:schema>'''
+
+
+class FormatCscript:
+    def __init__(self, bases: list[Path], returned: str, error: str = ""):
+        self.bases = bases
+        self.returned = returned
+        self.error = error
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str], **options: Any) -> subprocess.CompletedProcess[bytes]:
+        assert options == {"capture_output": True, "timeout": adapter.TIMEOUT_S, "check": False}
+        assert argv[:4] == ["cscript.exe", "//nologo", "//E:jscript", "//U"]
+        script = Path(argv[4]).read_bytes()
+        assert script.startswith(b"\xff\xfe")
+        assert_scenario_contract(script[2:].decode("utf-16-le"))
+        assert_format_contract(script[2:].decode("utf-16-le"))
+        assert all(str(source) not in argv for source in self.bases)
+        assert Path(argv[6], "1Cv8.1CD").read_bytes() == b"synthetic-base"
+        self.calls.append(argv)
+        values = {"protocol": "1", "command": argv[5], "status": "OK"}
+        if self.error:
+            values.update(status="ERROR", error=self.error)
+        elif argv[5] == "base-export":
+            assert argv[9] == BASE
+            schema = Path(argv[8]) / "schema-0.xsd"
+            schema.write_text(
+                f'<xs:schema xmlns:xs="{adapter.XS}" targetNamespace="{BASE}"/>', encoding="utf-8"
+            )
+            values.update({"schema_count": "1", "schema.0.path": str(schema)})
+        else:
+            assert argv[5] == "format-load" and argv[9:12] == [OWN, BASE, "1.20"]
+            binary = Path(argv[8])
+            assert binary.name == "Package.bin" and binary.is_file()
+            assert etree.fromstring(binary.read_bytes()).get("targetNamespace") == OWN
+            assert all(Path(p).is_file() for p in argv[13:])
+            run = Path(argv[12])
+            assert run.name.endswith("-format")
+            (run / "extension.xsd").write_text(format_xsd(), encoding="utf-8")
+            (run / "returned.xsd").write_text(self.returned, encoding="utf-8")
+            values.update(extension_loaded="true", base_loaded="false")
+        Path(argv[7]).write_text(
+            "".join(f"{key}\t{escaped(value)}\n" for key, value in values.items()), encoding="utf-8"
+        )
+        return subprocess.CompletedProcess(argv, int(bool(self.error)), b"", b"")
+
+
+@pytest.mark.parametrize("folder", [False, True])
+@pytest.mark.parametrize("from_base", [False, True])
+def test_format_load_inputs_copies_and_report(
+    folder: bool,
+    from_base: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = tmp_path / "kd3 original"
+    bsp = tmp_path / "bsp original"
+    for path in (base, bsp):
+        path.mkdir()
+        (path / "1Cv8.1CD").write_bytes(b"synthetic-base")
+    model = sample_model()
+    source = tmp_path / ("пакет" if folder else "пакет.json")
+    if folder:
+        for name, content in render_format_package(model).items():
+            target = source / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+    else:
+        source.write_text(
+            json.dumps(format_package_data(model), ensure_ascii=False), encoding="utf-8"
+        )
+    snapshot = {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    fake = FormatCscript([base, bsp], format_xsd())
+    monkeypatch.setattr(adapter, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(adapter.subprocess, "run", fake)
+    args = ["format-load", str(source), "--base", str(base)]
+    if folder:
+        args += ["--base-version", "1.20"]
+    if from_base:
+        args += ["--base-from", str(bsp)]
+    else:
+        schema = tmp_path / "base.xsd"
+        schema.write_text(
+            f'<xs:schema xmlns:xs="{adapter.XS}" targetNamespace="{BASE}"/>', encoding="utf-8"
+        )
+        args += ["--base-xsd", str(schema)]
+    assert adapter.main(args) == 0
+    assert [call[5] for call in fake.calls] == (["base-export"] if from_base else []) + [
+        "format-load"
+    ]
+    assert all(Path(path).read_bytes() == content for path, content in snapshot.items())
+    if folder:
+        submitted = Path(fake.calls[-1][8])
+        assert (
+            submitted.read_bytes()
+            == (source / "XDTOPackages" / model.metadata_name / "Ext" / "Package.bin").read_bytes()
+        )
+    assert all(not Path(call[6]).exists() for call in fake.calls)
+    report = json.loads(next(adapter.RUNS.rglob("report.json")).read_text(encoding="utf-8"))
+    assert report["base_checked"] and report["status"] == "OK" and report["losses"] == []
+
+
+@pytest.mark.parametrize(
+    "loss", ["type", "property", "key", "table", "row", "enumeration", "bounds"]
+)
+def test_format_losses_are_structural(loss: str, tmp_path: Path) -> None:
+    root = etree.fromstring(format_xsd().encode())
+    paths = {
+        "type": './/*[@name="Item"]',
+        "property": './/*[@name="Rows"]',
+        "key": './/*[@name="ItemKey"]',
+        "table": './/*[@name="ItemRows"]',
+        "row": './/*[@name="Amount"]',
+        "enumeration": './/*[@value="Green"]',
+        "bounds": './/*[@name="Row"]',
+    }
+    node = root.find(paths[loss])
+    assert node is not None
+    if loss == "bounds":
+        node.set("maxOccurs", "1")
+    else:
+        parent = node.getparent()
+        assert parent is not None
+        parent.remove(node)
+    expected, returned = tmp_path / "expected.xsd", tmp_path / "returned.xsd"
+    expected.write_text(format_xsd(), encoding="utf-8")
+    returned.write_bytes(etree.tostring(root))
+    report = adapter.compare_format(sample_model(), expected, returned)
+    assert report["status"] == "ПОТЕРИ" and report["losses"]
+    if loss in ("key", "table"):
+        assert any(item["role"] == loss for item in report["losses"])
+
+
+def test_format_dry_run_has_no_base_or_files(
+    isolated: tuple[Path, FakeCscript],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, fake = isolated
+    assert adapter.main(["format-load", str(DATA / "writer/format-package.json"), "--dry-run"]) == 0
+    assert not fake.calls and not adapter.RUNS.exists()
+    output = capsys.readouterr().out
+    assert "ПЛАН" in output and "внешние типы и потери не проверены" in output
+
+
+def test_format_empty_returned_is_loss_and_prefix_changes_are_equal(tmp_path: Path) -> None:
+    expected, returned = tmp_path / "expected.xsd", tmp_path / "returned.xsd"
+    expected.write_text(format_xsd(), encoding="utf-8")
+    returned.write_text(format_xsd().replace("tns", "other").replace("xs", "xsd"), encoding="utf-8")
+    assert adapter.compare_format(sample_model(), expected, returned)["status"] == "OK"
+    returned.write_text(
+        f'<xs:schema xmlns:xs="{adapter.XS}" targetNamespace="{OWN}"/>', encoding="utf-8"
+    )
+    assert adapter.compare_format(sample_model(), expected, returned)["status"] == "ПОТЕРИ"
+
+
+def test_format_base_type_loss(tmp_path: Path) -> None:
+    expected, returned = tmp_path / "expected.xsd", tmp_path / "returned.xsd"
+    text = (
+        format_xsd()
+        .replace(
+            '<xs:complexType name="Item"><xs:sequence>',
+            '<xs:complexType name="Item"><xs:complexContent>'
+            '<xs:extension base="tns:ItemKey"><xs:sequence>',
+        )
+        .replace(
+            "</xs:sequence></xs:complexType>",
+            "</xs:sequence></xs:extension></xs:complexContent></xs:complexType>",
+            1,
+        )
+    )
+    expected.write_text(text, encoding="utf-8")
+    returned.write_text(format_xsd(), encoding="utf-8")
+    report = adapter.compare_format(sample_model(), expected, returned)
+    assert report["status"] == "ПОТЕРИ"
+    assert any(item["address"].endswith("/base") for item in report["losses"])
+
+
+@pytest.mark.parametrize("error", [False, True])
+def test_format_exit_codes_and_escaped_exception(
+    error: bool,
+    isolated: tuple[Path, FakeCscript],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base, _ = isolated
+    source = tmp_path / "package.json"
+    source.write_text(json.dumps(format_package_data(sample_model())), encoding="utf-8")
+    schema = tmp_path / "base.xsd"
+    schema.write_text(
+        f'<xs:schema xmlns:xs="{adapter.XS}" targetNamespace="{BASE}"/>', encoding="utf-8"
+    )
+    secret = 'synthetic-password-"secret'
+    monkeypatch.setenv("KD3_PASSWORD", secret)
+    detail = "Ошибка базы\tстрока\r\nпуть\\файл " + secret if error else ""
+    fake = FormatCscript([base], format_xsd().replace('value="Green"', 'value="Blue"'), detail)
+    monkeypatch.setattr(adapter.subprocess, "run", fake)
+    assert adapter.main(["format-load", str(source), "--base-xsd", str(schema)]) == (
+        1 if error else 2
+    )
+    output = capsys.readouterr().out
+    assert secret not in output
+    assert "ИТОГ " + ("ОШИБКА" if error else "ПОТЕРИ") in output
+    report_file = next(adapter.RUNS.rglob("report.json"))
+    assert secret not in report_file.read_text(encoding="utf-8")
+    if error:
+        assert "Ошибка базы" in output and "<скрыто>" in output
+
+
+def test_format_bad_input_never_connects(
+    isolated: tuple[Path, FakeCscript],
+    tmp_path: Path,
+) -> None:
+    _, fake = isolated
+    source = tmp_path / "invalid.json"
+    source.write_text(
+        '{"base_namespace":"urn:base","base_version":"1.0","types":[]}', encoding="utf-8"
+    )
+    assert adapter.main(["format-load", str(source), "--dry-run"]) == 1
+    assert not fake.calls and not adapter.RUNS.exists()

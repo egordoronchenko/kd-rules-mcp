@@ -24,6 +24,27 @@ def test_multiline_with_interleaved_comment_and_crlf():
     assert text[token.start : token.end] == text
 
 
+def test_multiline_with_preprocessor_directives_between_continuations():
+    # Расширения вставляют строки запроса между #Вставка/#КонецВставки; типовые — #Область.
+    text = '"ВЫБРАТЬ\n\t|\tА,\n\t#Вставка\n\t|\tБ,\n\t#КонецВставки\n\n\t|\tВ"'
+    (token,) = tokenize(text)
+    assert token.value == "ВЫБРАТЬ\n\tА,\n\tБ,\n\tВ"
+    assert text[token.start : token.end] == text
+
+
+def test_deletion_block_of_extension_is_one_directive():
+    # Внутри #Удаление лежит прежний код, в том числе обрывки литералов, — он не разбирается.
+    text = (
+        'Т = "А\n\t#Вставка\n\t|Б";\n\t#КонецВставки\n\t#Удаление\n\t// было\n\t|";\n'
+        "\t#КонецУдаления\n\tХ = 1;"
+    )
+    kinds = [t.kind for t in tokenize(text)]
+    assert kinds.count("string") == 1
+    directives = [t.value for t in tokenize(text) if t.kind == "directive"]
+    assert directives[-1].startswith("#Удаление") and directives[-1].endswith("#КонецУдаления")
+    assert [t.value for t in tokenize(text) if t.kind == "identifier"] == ["Т", "Х"]
+
+
 @pytest.mark.parametrize("text", ['"незакрыто', '"a\nwrong"', "'незакрыто"])
 def test_unclosed_literals(text):
     with pytest.raises(EdFormatError):

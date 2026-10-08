@@ -5,6 +5,7 @@
 """
 
 from collections import Counter
+from dataclasses import replace
 
 from kd_rules_mcp.ed import model as ed
 from kd_rules_mcp.ed.address import AddressIndex
@@ -180,6 +181,8 @@ def validate_schema(
             include_required_unfilled=include_required_unfilled,
         )
     checking = CheckContext(document, index, profile)
+    # BX:933–993: URI ПКС выбирает пакет; объявление init не доказывает наличие схемы.
+    known_namespaces = {p.namespace for p in schema.packages} | set(schema.extension_namespaces)
     by_name: dict[str, list[ed.ObjectRule]] = {}
     for rule in document.pko:
         by_name.setdefault(rule.name.casefold(), []).append(rule)
@@ -198,6 +201,27 @@ def validate_schema(
 
     for direction in profile.directions:
         for rule in document.pko:
+            for member in (
+                *rule.properties,
+                *rule.groups,
+                *(p for g in rule.groups for p in g.properties),
+            ):
+                check = "ed.schema.namespace_unknown"
+                # Неизвестный URI отключает прочие проверки применимости; здесь проверяем
+                # само наличие пакета, сохраняя ограничения направления и условий.
+                if member.namespace and checking.start(
+                    check, replace(member, namespace=""), direction, rule
+                ):
+                    checking.checked()
+                    if member.namespace not in known_namespaces:
+                        checking.report.warning(
+                            check,
+                            checking.address(member),
+                            f"URI «{member.namespace}» отсутствует "
+                            "в выбранной схеме. Откройте схему через ed_schema_open с extensions "
+                            "или соберите комплект через ed_authoring_build с format_package "
+                            "и откройте его пакет через ed_schema_open с extensions.",
+                        )
             typ, type_status = owner_type(rule, direction)
             check = "ed.schema.type_missing"
             if checking.start(check, rule, direction):

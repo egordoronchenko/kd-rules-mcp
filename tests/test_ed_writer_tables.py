@@ -239,7 +239,7 @@ def test_preserve_does_not_realign_neighbouring_properties():
     assert render(imported).text == text
 
 
-def test_group_argument_extensions_refuse():
+def test_group_condition_argument_refuses():
     model = table_model()
     plan = preview(
         model,
@@ -252,13 +252,13 @@ def test_group_argument_extensions_refuse():
                 patch=TablePartPatch(
                     configuration_property="Rows",
                     format_property="Rows",
-                    argument_presence=(True, True, True, True),
+                    argument_presence=(True, True, True, False, True),
                 ),
             ),
         ),
         expected_revision=model.revision,
     )
-    assert any(f.reason == "unsupported_form" for f in plan.failures)
+    assert any(f.reason == "model_invalid" for f in plan.failures)
 
 
 def legacy_model():

@@ -5,20 +5,24 @@ EnterpriseData_1_20_2. Пути относительно XDTOPackages; исхо�
 Роли и признак выгружаемого объекта — решения автора, в XML пакета их нет.
 """
 
+import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from lxml import etree
 
-from kd_rules_mcp.ed.errors import EdFormatError
+from kd_rules_mcp.ed.errors import EdFormatError, EdReadError
 from kd_rules_mcp.ed.layer_reader import module_routines, source_from_text
 from kd_rules_mcp.ed.lexer import tokenize
 from kd_rules_mcp.ed.route_model import RouteProfile
+from kd_rules_mcp.ed.schema import load_schema
 from kd_rules_mcp.ed.schema.model import EdSchema, QName, SchemaType
 from kd_rules_mcp.ed.schema.xdto import FACETS, XDTO, XS, XSI
+from kd_rules_mcp.ed.writer_model import decode_dto
 from kd_rules_mcp.errors import (
     EdFormatDuplicateNameError,
     EdFormatEmptyObjectError,
@@ -27,10 +31,11 @@ from kd_rules_mcp.errors import (
     EdFormatNamespaceError,
     EdFormatShapeError,
     EdFormatUnknownTypeError,
+    Kd2Error,
 )
 
 from .hook import bsl_string, valid_identifier
-from .identity import IdentityMap, logical_path, make_identity_map
+from .identity import IdentityMap, logical_path, make_identity_map, refuse
 from .manager_render import ManagerRoute, render_manager_route
 from .model import ExtensionIdentity
 from .xml_dump import (
@@ -374,6 +379,92 @@ def format_package_from_schema(
     )
 
 
+def format_package_data(model: FormatPackage) -> dict[str, Any]:
+    """Поля JSON-файла без схемы хозяина; роли остаются явными решениями автора."""
+
+    def plain(value: Any) -> Any:
+        if is_dataclass(value) and not isinstance(value, type):
+            return {f.name: plain(getattr(value, f.name)) for f in fields(value)}
+        if isinstance(value, frozenset):
+            return sorted(value)
+        if isinstance(value, tuple):
+            return [plain(v) for v in value]
+        return value
+
+    return {f.name: plain(getattr(model, f.name)) for f in fields(model) if f.name != "base_schema"}
+
+
+def load_format_package(path: Path, base_schema: EdSchema, base_version: str) -> FormatPackage:
+    """Отказ чтения или модели имеет единый код format_package_invalid."""
+    try:
+        return _load_format_package(path, base_schema, base_version)
+    except (OSError, ValueError, TypeError, Kd2Error) as error:
+        refuse("format_package_invalid", str(error))
+
+
+def _load_format_package(path: Path, base_schema: EdSchema, base_version: str) -> FormatPackage:
+    """Читает JSON либо ровно один пакет из папки выгрузки; URI не загружаются из сети.
+
+    Для готового пакета роли не восстанавливаются из XML (FP:1–5): они не нужны
+    для доставки уже готовой схемы. Версия и базовый URI берутся из привязки менеджера.
+    """
+    if path.is_dir():
+        folder = path / "XDTOPackages" if (path / "XDTOPackages").is_dir() else path
+        packages = sorted(folder.glob("*.xml"))
+        if len(packages) != 1:
+            raise EdFormatShapeError("Папка должна содержать ровно один пакет XDTO")
+        imports = {p.namespace: Path(p.sources[0].path) for p in base_schema.packages}
+        schema = load_schema(packages[0], locate_import=imports.get)
+        if schema.status != "complete":
+            raise EdFormatShapeError("Пакет или его импорты прочитаны не полностью")
+        package = schema.packages[0]
+        if not package.metadata_name or not any(
+            i.namespace == base_schema.base_namespace for i in package.imports
+        ):
+            raise EdFormatShapeError("Пакет должен импортировать базовый URI менеджера")
+        model = format_package_from_schema(
+            schema,
+            namespace=package.namespace,
+            metadata_name=package.metadata_name,
+            base_version=base_version,
+            base_namespace=base_schema.base_namespace,
+        )
+    else:
+        with path.open("rb") as stream:
+            raw = stream.read(32 * 1024 * 1024 + 1)
+        if len(raw) > 32 * 1024 * 1024:
+            raise EdFormatShapeError("JSON пакета превышает 32 MiB")
+
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result = dict(pairs)
+            if len(result) != len(pairs):
+                raise EdFormatShapeError("Повтор поля JSON пакета")
+            return result
+
+        value = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=unique_object)
+        allowed = {f.name for f in fields(FormatPackage)} - {"base_schema"}
+        if not isinstance(value, dict) or value.keys() - allowed:
+            raise EdFormatShapeError("Неизвестные поля JSON пакета")
+        arguments = {
+            f.name: decode_dto(
+                tuple[FormatType, ...]
+                if f.name == "types"
+                else tuple[str, ...]
+                if f.name == "imports"
+                else str,
+                value[f.name],
+            )
+            for f in fields(FormatPackage)
+            if f.name in value
+        }
+        model = FormatPackage(**arguments, base_schema=base_schema)
+    if model.base_version != base_version or model.base_namespace != base_schema.base_namespace:
+        raise EdFormatShapeError("Версия или базовый URI пакета не совпадает с привязкой менеджера")
+    if not model.types:
+        raise EdFormatShapeError("Пакет не содержит типов")
+    return model
+
+
 def _xdto_xml(model: FormatPackage) -> bytes:
     """Формы EnterpriseData_1_20_2/Ext/Package.bin:
 
@@ -518,10 +609,16 @@ class FormatDeclaration:
     routes: RouteProfile
     plan_name: str | None = None
     extension_sources: tuple[str, ...] = ()
+    extension_source_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "descriptions", MappingProxyType(dict(self.descriptions)))
         object.__setattr__(self, "extension_sources", tuple(self.extension_sources))
+        object.__setattr__(self, "extension_source_paths", tuple(self.extension_source_paths))
+        if self.extension_source_paths and len(self.extension_source_paths) != len(
+            self.extension_sources
+        ):
+            raise EdFormatShapeError("Пути сканируемых модулей не соответствуют текстам")
 
 
 def _declaration_parameter(text: str, procedure: str, expected: str | None = None) -> str:
@@ -534,8 +631,8 @@ def _declaration_parameter(text: str, procedure: str, expected: str | None = Non
     try:
         source = source_from_text(text, "host", "<host>", False, text.encode())
         routines = [r for r in module_routines(source) if r.name == procedure]
-    except EdFormatError as error:
-        raise EdFormatShapeError(message) from error
+    except (EdFormatError, EdReadError) as error:
+        raise EdFormatShapeError(message + ": " + str(error)) from error
     if len(routines) != 1:
         raise EdFormatShapeError(message)
     routine = routines[0]
@@ -552,6 +649,17 @@ def _declaration_parameter(text: str, procedure: str, expected: str | None = Non
     ):
         raise EdFormatShapeError(message)
     return parameter.name
+
+
+def _source_contains_namespace(text: str, namespace: str, path: str) -> bool:
+    """Без полного разбора файла отсутствие коллизии URI не подтверждено."""
+    try:
+        return any(token.kind == "string" and token.value == namespace for token in tokenize(text))
+    except (EdFormatError, EdReadError) as error:
+        raise EdFormatShapeError(
+            f"Не удалось проверить коллизию URI в файле «{path}»: {error}. "
+            "Отсутствие коллизии URI не подтверждено; исправьте файл и повторите сборку."
+        ) from error
 
 
 def _declaration_host(
@@ -583,9 +691,16 @@ def _declaration_host(
     if module.props.get("Server") != "true":
         raise EdFormatShapeError("Модуль объявления недоступен на сервере")
     if any(e.uri == model.namespace for e in declaration.routes.format_extensions) or any(
-        token.kind == "string" and token.value == model.namespace
-        for source in (text, *declaration.extension_sources)
-        for token in tokenize(source)
+        _source_contains_namespace(source, model.namespace, source_path)
+        for source_path, source in (
+            (module.path.removesuffix(".xml") + "/Ext/Module.bsl", text),
+            *zip(
+                declaration.extension_source_paths
+                or tuple(f"<extension/{i}>" for i in range(len(declaration.extension_sources))),
+                declaration.extension_sources,
+                strict=True,
+            ),
+        )
     ):
         raise EdFormatNamespaceError("URI уже объявлен хозяином или переданным расширением")
     plan = None

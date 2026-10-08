@@ -10,6 +10,9 @@ var shell = new ActiveXObject("WScript.Shell");
 var environment = shell.Environment("PROCESS");
 var user = environment("KD3_USER");
 var password = environment("KD3_PASSWORD");
+// База БСП для base-export может иметь другого пользователя: KD3_FROM_USER / KD3_FROM_PASSWORD.
+var fromUser = environment("KD3_FROM_USER");
+var fromPassword = environment("KD3_FROM_PASSWORD");
 
 function redact(text) {
     var values = [user, password];
@@ -172,6 +175,140 @@ function roundtrip(base, all, input, name, sample, output) {
     record("conversion_count", 1);
 }
 
+// XDTOFactory/ctors/ctor118.html, methods/ExportXMLSchema3309.html в shcntx_ru.hbk:
+// модель {http://v8.1c.ru/8.1/xdto}Model и коллекция импортируемых пакетов.
+// Схемы пишет платформа: XMLSchema.UpdateDOMElement, DOMWriter.Write (там же).
+function packageUris(base, factory, requested) {
+    var uris = base.NewObject("Массив");
+    var seen = {};
+    function visit(uri) {
+        if (uri === "http://www.w3.org/2001/XMLSchema" || seen["uri:" + uri]) return;
+        seen["uri:" + uri] = true;
+        var packet = factory.Пакеты.Получить(uri);
+        if (packet === undefined || packet === null) throw new Error("Нет пакета XDTO: " + uri);
+        uris.Добавить(uri);
+        var deps = new Enumerator(packet.Зависимости);
+        for (; !deps.atEnd(); deps.moveNext()) visit(String(deps.item().URIПространстваИмен));
+    }
+    for (var i = 0; i < requested.length; i++) visit(requested[i]);
+    return uris;
+}
+
+function exportSchemas(base, factory, uris, folder, extensionUri) {
+    var schemas = factory.ЭкспортСхемыXML(uris);
+    if (schemas.Количество() === 0) throw new Error("Платформа не вернула XSD");
+    var extensionFound = false;
+    for (var i = 0; i < schemas.Количество(); i++) {
+        var schema = schemas.Получить(i);
+        var uri = String(schema.ПространствоИмен);
+        var path = folder + "\\schema-" + i + ".xsd";
+        if (uri === extensionUri) {
+            path = folder + "\\extension.xsd";
+            extensionFound = true;
+        }
+        schema.ОбновитьЭлементDOM();
+        var writer = base.NewObject("ЗаписьXML");
+        writer.ОткрытьФайл(path);
+        base.NewObject("ЗаписьDOM").Записать(schema.ЭлементDOM, writer);
+        writer.Закрыть();
+        record("schema." + i + ".path", path);
+        record("schema." + i + ".namespace", uri);
+    }
+    if (extensionUri !== "" && !extensionFound) throw new Error("Нет XSD собственного URI");
+    record("schema_count", schemas.Количество());
+}
+
+// reference/kd3-cfg/DataProcessors/ЗагрузкаСтруктурыФормата/Forms/Форма/Ext/Form/Module.bsl:
+// 298-310 — номер и родитель из URI; 322-350 — параметры серверного загрузчика.
+// .../ЗагрузкаСтруктурыФормата/Ext/ManagerModule.bsl:8-12,68-86,311 — вызов и результат.
+function loadFormat(base, files, uri, version, extensionPath) {
+    var processor = base.Обработки.ЗагрузкаСтруктурыФормата.Создать();
+    processor.ИмяОсновногоПакетаXDTO = uri;
+    processor.ИмяФайлаРасширенияФормата = extensionPath;
+    processor.ДобавлятьТолькоНовыеОбъектыСвойстваЗначения = false;
+    var ref = base.Справочники.ВерсииФормата.НайтиПоРеквизиту("ПространствоИмен", uri);
+    processor.ВерсияФормата = ref;
+    var slash = uri.lastIndexOf("/");
+    // У произвольного URI нет номера после '/': группа и номер задаются явно,
+    // чтобы группа не получила то же ПространствоИмен, что и элемент версии.
+    var template = slash >= 0 ? uri.substring(0, slash) : uri + "/versions";
+    var number = slash >= 0 ? uri.substring(slash + 1) : version;
+    var parent = base.Справочники.ВерсииФормата.НайтиПоРеквизиту(
+        "ПространствоИмен", template, base.Справочники.ВерсииФормата.ПустаяСсылка());
+    var parameters = base.NewObject("Структура");
+    parameters.Вставить("СпособЗагрузки", ref.Пустая() ? 0 : 1);
+    parameters.Вставить("ВерсияФормата", processor.ВерсияФормата);
+    parameters.Вставить("ДобавлятьТолькоНовые", false);
+    parameters.Вставить("ЭтоРасширение", extensionPath !== "");
+    parameters.Вставить("ИмяОсновногоПакетаXDTO", processor.ИмяОсновногоПакетаXDTO);
+    parameters.Вставить("РодительВерсии", parent);
+    parameters.Вставить("ШаблонПространстваИмен", template);
+    parameters.Вставить("НомерВерсииФормата", number);
+    parameters.Вставить("ДанныеДляЗагрузки", files);
+    var address = base.ПоместитьВоВременноеХранилище(undefined, base.NewObject("УникальныйИдентификатор"));
+    base.Обработки.ЗагрузкаСтруктурыФормата.ВыполнитьЗагрузкуФормата(parameters, address);
+    var result = base.ПолучитьИзВременногоХранилища(address);
+    if (result === undefined || result === null || !result.Успех) {
+        throw new Error("Загрузка структуры формата КД 3 не выполнена: " + uri);
+    }
+    return result.ВерсияФормата;
+}
+
+function formatLoad(base, input, uri, baseUri, version, folder, filenames) {
+    var files = base.NewObject("Массив");
+    for (var i = 0; i < filenames.length; i++) files.Добавить(filenames[i]);
+    var imported = base.СоздатьФабрикуXDTO(files);
+    // XML Package.bin — объект Package модели типов, а не сама XSD.
+    var reader = base.NewObject("ЧтениеXML");
+    reader.ОткрытьФайл(input);
+    var packet = base.ФабрикаXDTO.ПрочитатьXML(reader,
+        base.ФабрикаXDTO.Тип("http://v8.1c.ru/8.1/xdto", "Package"));
+    reader.Закрыть();
+    var model = base.ФабрикаXDTO.Создать(base.ФабрикаXDTO.Тип("http://v8.1c.ru/8.1/xdto", "Model"));
+    model.package.Добавить(packet);
+    var factory = base.NewObject("ФабрикаXDTO", model, imported.Пакеты);
+    exportSchemas(base, factory, uri, folder, uri);
+    // Загрузчик КД 3 удаляет переданные файлы схем после успешной загрузки
+    // (ЗагрузкаСтруктурыФормата/Ext/ManagerModule.bsl:303-309): каждой загрузке — свои копии,
+    // имена файлов сохраняются (schemaLocation может ссылаться на соседа).
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+    function stageFiles(name, extra) {
+        var stage = folder + "\\" + name;
+        if (!fso.FolderExists(stage)) fso.CreateFolder(stage);
+        var staged = base.NewObject("Массив");
+        var all = filenames.slice(0);
+        if (extra !== "") all.push(extra);
+        for (var k = 0; k < all.length; k++) {
+            var target = stage + "\\" + fso.GetFileName(all[k]);
+            fso.CopyFile(all[k], target, true);
+            staged.Добавить(target);
+        }
+        return staged;
+    }
+    var baseRef = base.Справочники.ВерсииФормата.НайтиПоРеквизиту("ПространствоИмен", baseUri);
+    if (baseRef.Пустая()) {
+        loadFormat(base, stageFiles("load-base", ""), baseUri, version, "");
+        record("base_loaded", true);
+    } else {
+        record("base_loaded", false);
+    }
+    var extensionPath = folder + "\\extension.xsd";
+    var extensionFiles = stageFiles("load-extension", extensionPath);
+    var ref = loadFormat(base, extensionFiles, uri, version,
+        extensionFiles.Получить(extensionFiles.Количество() - 1));
+    record("extension_loaded", true);
+    // reference/kd3-cfg/DataProcessors/ВыгрузкаСтруктурыФормата/Ext/ManagerModule.bsl:7-34.
+    var parameters = base.NewObject("Структура");
+    parameters.Вставить("ВерсияФормата", ref);
+    var address = base.ПоместитьВоВременноеХранилище(undefined, base.NewObject("УникальныйИдентификатор"));
+    base.Обработки.ВыгрузкаСтруктурыФормата.ВыполнитьВыгрузку(parameters, address);
+    var result = base.ПолучитьИзВременногоХранилища(address);
+    if (result === undefined || result === null || result.ФлагОшибки) {
+        throw new Error("Выгрузка структуры формата КД 3 не выполнена");
+    }
+    result.РезультатВыгрузки.Записать(folder + "\\returned.xsd");
+}
+
 var args = [];
 for (var a = 0; a < WScript.Arguments.length; a++) args.push(WScript.Arguments(a));
 var exitCode = 0;
@@ -187,24 +324,39 @@ try {
     } else {
         if ((command === "list" && args.length !== 3) ||
             (command === "export" && args.length !== 5) ||
-            (command === "roundtrip" && args.length !== 7)) {
+            (command === "roundtrip" && args.length !== 7) ||
+            (command === "format-load" && args.length < 9) ||
+            (command === "base-export" && args.length < 5)) {
             throw new Error("Неверное число аргументов");
         }
-        if (command !== "list" && command !== "export" && command !== "roundtrip") {
+        if (command !== "list" && command !== "export" && command !== "roundtrip" &&
+            command !== "format-load" && command !== "base-export") {
             throw new Error("Неизвестная команда");
         }
+        if (command === "base-export" && (fromUser !== "" || fromPassword !== "")) {
+            user = fromUser;
+            password = fromPassword;
+        }
         var base = connect(args[1]); // Единственное внешнее соединение на запуск.
-        var all = conversions(base);
-        if (command === "list") {
-            for (var c = 0; c < all.length; c++) describe(base, all[c].ref, c);
-            record("conversion_count", all.length);
-        } else if (command === "export") {
-            var ref = findConversion(base, all, args[3]);
-            exportModule(base, ref, args[4]);
-            describe(base, ref, 0);
-            record("conversion_count", 1);
+        if (command === "base-export") {
+            var requested = args.slice(4);
+            exportSchemas(base, base.ФабрикаXDTO,
+                packageUris(base, base.ФабрикаXDTO, requested), args[3], "");
+        } else if (command === "format-load") {
+            formatLoad(base, args[3], args[4], args[5], args[6], args[7], args.slice(8));
         } else {
-            roundtrip(base, all, args[3], args[4], args[5], args[6]);
+            var all = conversions(base);
+            if (command === "list") {
+                for (var c = 0; c < all.length; c++) describe(base, all[c].ref, c);
+                record("conversion_count", all.length);
+            } else if (command === "export") {
+                var ref = findConversion(base, all, args[3]);
+                exportModule(base, ref, args[4]);
+                describe(base, ref, 0);
+                record("conversion_count", 1);
+            } else {
+                roundtrip(base, all, args[3], args[4], args[5], args[6]);
+            }
         }
     }
     record("status", "OK");

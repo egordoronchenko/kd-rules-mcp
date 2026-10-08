@@ -379,11 +379,12 @@ def test_json_schema_and_idempotent_code_operations():
 
 
 def test_repeated_rule_rename_changes_only_reference_token_in_retained_group():
+    # URI теперь редактируется; невалидное имя стороны ТЧ сохраняет непрозрачную группу.
     model = code_model()
     text = render(model).text.replace(
         "\tСвойстваШапки = ПравилоКонвертации.Свойства;",
         "\tСвойстваШапки = ПравилоКонвертации.Свойства;\n"
-        '\tСвойстваТЧ = ДобавитьПКТЧ(ПравилоКонвертации, "Rows", "Rows", "urn:extension");\n'
+        '\tСвойстваТЧ = ДобавитьПКТЧ(ПравилоКонвертации, "Rows.Path", "Rows", "urn:extension");\n'
         '\tДобавитьПКС(СвойстваТЧ, "Ref", "Ref", 0, "Item");\n'
         '\tДобавитьПКС(СвойстваТЧ, "Other", "Other", , "Item");',
     )

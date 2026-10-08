@@ -339,27 +339,18 @@ def render(
             index = [e.logical_id for e in owner.elements if e.field == name].index(
                 element.logical_id
             )
-            # Template.txt:57: табуляция после последнего расширения формы получения.
-            style = entity_style(owner)
+            # ШаблоныТекстовМодулей/Ext/Template.txt:55 сохраняет табуляцию после
+            # подстановки ВыгрузкаМодуля/Ext/ObjectModule.bsl:2541–2550.
+            # Суффикс исходного листа добавляется ниже при use_source_style;
+            # новые строки следуют генератору, а не моде style.line_suffixes.
             suffix = (
-                ""
-                if use_source_style and element.source
-                else dict(style.line_suffixes).get(name)
-                if style
-                else None
-            )
-            suffix = (
-                suffix
-                if suffix is not None
-                else (
-                    "\t"
-                    if (
-                        (not use_source_style or element.source is None)
-                        and any(d in ("receive", "both") for d in member.directions)
-                        and index == len(member.extensions) - 1
-                    )
-                    else ""
+                "\t"
+                if (
+                    (not use_source_style or element.source is None)
+                    and any(d in ("receive", "both") for d in member.directions)
+                    and index == len(member.extensions) - 1
                 )
+                else ""
             )
             return (
                 "ОбменДаннымиXDTOСервер.ИнициализироватьРасширениеПравилаКонвертацииОбъекта("
@@ -502,6 +493,15 @@ def render(
                 + ", "
                 + " " * (maximum - len(group.configuration_property))
                 + forms.literal(Value("string", group.format_property))
+                # G:2435–2444: URI в четвёртой позиции; пустые позиции не сдвигаются.
+                + "".join(
+                    ", " + (forms.literal(Value("string", value)) if present else "")
+                    for present, value in zip(
+                        group.argument_presence[3:],
+                        (group.namespace, group.condition_name),
+                        strict=False,
+                    )
+                )
                 + ");"
             )
             if group.trailing_comment:

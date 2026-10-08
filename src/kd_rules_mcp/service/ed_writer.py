@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from kd_rules_mcp.authoring.ed.artifacts import artifact_name, validate_manager_files
+from kd_rules_mcp.authoring.ed.format_package import format_package_data
 from kd_rules_mcp.authoring.ed.hook import valid_identifier
 from kd_rules_mcp.authoring.ed.instruction import render_data_preflight
 from kd_rules_mcp.authoring.ed.manager_candidates import object_candidates, property_candidates
@@ -1965,6 +1966,7 @@ class EdWriterMixin(EdAuthoringMixin):
         registration_objects=None,
         registered_objects=None,
         plan_stubs=True,
+        format_package: str | None = None,
     ):
         validate_page(offset, limit)
         if section not in ("summary", "operations", "notices", "files", "issues_after", "skipped"):
@@ -2005,6 +2007,35 @@ class EdWriterMixin(EdAuthoringMixin):
                 _refuse("route_scope_conflict", "Недопустимое имя плана")
             try:
                 inputs = self._manager_inputs(model, metadata)
+                schema = self._manager_bound_schema(metadata)
+                package = None
+                declaration = None
+                package_fingerprint = None
+
+                def package_inputs(source: str):
+                    loaded = self._authoring_format_package(
+                        source,
+                        self._manager_bound_schema(metadata),
+                        str(selected.version_key),
+                    )
+                    try:
+                        declared = self._authoring_format_declaration(metadata, selected)
+                    except (OSError, UnicodeError, ValueError, Kd2Error) as error:
+                        _refuse("format_package_invalid", str(error))
+                    return (
+                        loaded,
+                        declared,
+                        digest(
+                            (
+                                format_package_data(loaded),
+                                dict(declared.descriptions),
+                                declared.extension_sources,
+                            )
+                        ),
+                    )
+
+                if format_package is not None:
+                    package, declaration, package_fingerprint = package_inputs(format_package)
                 detection = self._manager_detection(metadata, model.executor_profile.profile_id)
                 rendered = render(model, "preserve" if model.source_files else "canonical")
                 report = validate_writer(
@@ -2160,6 +2191,16 @@ class EdWriterMixin(EdAuthoringMixin):
                     registered_objects=tuple(sorted(set(registered_objects or ()))),
                     pod_stubs=pod_stubs,
                     data_preflight=render_data_preflight(required_unfilled),
+                    format_package=package,
+                    format_declaration=declaration,
+                    schema_namespaces=tuple(
+                        sorted(
+                            {p.namespace for p in schema.packages}
+                            | set(schema.extension_namespaces)
+                        )
+                    )
+                    if schema
+                    else (),
                 )
                 kit = with_key_data_instruction(
                     kit, self._manager_key_instruction(model, metadata), previous, previous_files
@@ -2247,6 +2288,13 @@ class EdWriterMixin(EdAuthoringMixin):
                             metadata, model.executor_profile.profile_id
                         )
                         _, current_host_hash = self._manager_host(metadata, selected)
+                        if (
+                            format_package is not None
+                            and package_inputs(format_package)[2] != package_fingerprint
+                        ):
+                            raise EdAuthoringStaleError(
+                                "Пакет или объявление URI изменились во время записи", {}
+                            )
                         if (current_inputs, current_detection, current_host_hash) != (
                             inputs,
                             detection,

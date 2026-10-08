@@ -3,8 +3,9 @@
 Хеши посчитаны по `git show main:.claude/skills/kd2-exchange-pitfalls/SKILL.md`:
 sha256 строки без перевода строки, кодировка utf-8. В множество не входят пустые
 строки, 28 строк заголовков (начинаются с `#`: при переносе меняется
-уровень) и строки `CHANGED_INTERNAL_LINKS` — внутренние ссылки, поправленные на
-файл справочника.
+уровень), строки `CHANGED_INTERNAL_LINKS` — внутренние ссылки, поправленные на
+файл справочника, — и строка `description` шапки: #66 сократил её до 400 знаков
+(бюджет описаний — `tests/test_skills.py`).
 """
 
 import hashlib
@@ -18,7 +19,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import build_packs  # noqa: E402 — скрипт из scripts/, не пакет
 
 SKILL = ROOT / ".claude" / "skills" / "kd2-exchange-pitfalls"
-SKILL_MD_LIMIT = 12_000
+SKILL_MD_LIMIT = 12_000  # общий бюджет скиллов — tests/test_skills.py
 
 
 CHANGED_INTERNAL_LINKS: dict[str, str] = {
@@ -250,7 +251,6 @@ OLD_LINE_HASHES: frozenset[str] = frozenset(
         "afe1a64a1a7c04ca368129e590ccf29b942e69846b8f002a4ce20076c69a16a2",
         "b0ee4ce0b7bec41bf4be2c0163e07eae345beab346e54b6faa4787ce88a95d33",
         "b1cf1f56a8c938ef498af07c80536703a33702df6906d6b447c6ea056e402a2d",
-        "b300b768735a03b43ee00b02a133c603a0238b43554dfd9c7cbbc681483d5390",
         "b5a1b560e5dfd4987aa5f17e29c1a35f8438941665b27ea772527208e3a18376",
         "b9d2e7e062b6e829fa0d86cbfdc8ae05e142706f99f7c95a2f02b2a8345a0f80",
         "ba1d43fa1a17f601a3ec9f26d52166edf87954b7bdb46e580d274718eb4d13f0",

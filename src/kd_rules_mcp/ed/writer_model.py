@@ -1051,6 +1051,10 @@ def decode_dto(kind: Any, value: Any) -> Any:
         if len(arguments) != len(value):
             raise ValueError("Неверная длина массива DTO")
         return tuple(decode_dto(typ, item) for typ, item in zip(arguments, value, strict=True))
+    if origin is frozenset:
+        if not isinstance(value, list | tuple):
+            raise ValueError("Ожидался массив")
+        return frozenset(decode_dto(arguments[0], item) for item in value)
     if isinstance(kind, type) and is_dataclass(kind):
         if not isinstance(value, dict):
             raise ValueError("Ожидался объект DTO")
@@ -1395,6 +1399,16 @@ def validate_model(model: ManagerModel) -> None:
                 "Представление должно принадлежать живому листу и не входить в раскладку"
             )
     for rule in model.pko:
+        for group in rule.groups:
+            if group.state == "editable" and (
+                not 3 <= len(group.argument_presence) <= 5
+                or not all(group.argument_presence[:3])
+                or (
+                    group.namespace
+                    and (len(group.argument_presence) < 4 or not group.argument_presence[3])
+                )
+            ):
+                raise ValueError("Аргументы ПКТЧ не соответствуют URI группы")
         if any(g.update_policy != Value() for g in rule.groups):
             raise ValueError(
                 "Политика обновления ТЧ не выбирается: исполнитель заменяет её целиком"

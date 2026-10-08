@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from importlib.resources import files
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from kd_rules_mcp.ed.canonical import canonical_value, canonicalize, model_addresses
@@ -28,6 +28,7 @@ from kd_rules_mcp.ed.writer_model import (
     validate_model,
 )
 from kd_rules_mcp.ed.writer_readback import check_readback
+from kd_rules_mcp.errors import Kd2Error
 
 from .artifacts import validate_manager_files
 from .hook import bsl_string, valid_identifier
@@ -36,14 +37,21 @@ from .instruction import render_manager_instruction
 from .manifest import json_bytes, manager_changes, manager_decision_hash, sha256
 from .model import AuthoringPreconditionError, ExtensionIdentity
 from .xml_dump import (
+    _CHILD_KIND_INDEX,
     Description,
     ManagerHost,
     SubscriptionAddition,
     check_subscription_sources,
     dump_manager_extension,
     manager_identity_roles,
+    node,
+    parse_xml,
     profile_template,
+    serialize,
 )
+
+if TYPE_CHECKING:
+    from .format_package import FormatDeclaration, FormatPackage
 
 MANAGER_GENERATOR_VERSION = "ed-manager/1"
 MANAGER_TEMPLATE_VERSION = "ed-manager-delivery/2"
@@ -122,6 +130,9 @@ class ManagerManifest:
                 result[key] = self.inputs[key]
         if "pod_stubs" in self.inputs:
             result["pod_stubs"] = self.inputs["pod_stubs"]
+        if "format_package" in self.inputs:
+            result["format_package"] = self.inputs["format_package"]
+            result["format_extensions"] = self.inputs["format_extensions"]
         return result
 
     def to_bytes(self) -> bytes:
@@ -189,6 +200,10 @@ def render_manager_route(
     if format_namespace is not None:
         if not valid_identifier(settings_parameter):
             refuse("identifier_conflict", "Недопустимое имя параметра настроек")
+        if module_name is not None:
+            # Имя локального параметра перехвата независимо от имени в хозяине:
+            # общий с комплектом без пакета маршрут сохраняется побайтно.
+            settings_parameter = "Настройки"
         body = ""
         if module_name is not None:
             body += (
@@ -205,7 +220,13 @@ def render_manager_route(
         )
         return (
             "#Если Сервер Или ТолстыйКлиентОбычноеПриложение Или ВнешнееСоединение Тогда\n\n"
-            '&После("ПриПолученииНастроек")\n'
+            + (
+                "// Подмена маршрута: ключ версии формата этого плана "
+                "ведёт на собственный менеджер обмена.\n"
+                if module_name is not None
+                else ""
+            )
+            + '&После("ПриПолученииНастроек")\n'
             f"Процедура {prefix}ПриПолученииНастроек({settings_parameter})\n"
             + body
             + "КонецПроцедуры\n\n#КонецЕсли\n"
@@ -504,6 +525,9 @@ def render_manager_kit(
     previous_files: Mapping[str, bytes] | None = None,
     keep_version: bool = False,
     creation_fingerprint: str = "",
+    format_package: FormatPackage | None = None,
+    format_declaration: FormatDeclaration | None = None,
+    schema_namespaces: tuple[str, ...] = (),
 ) -> ManagerKit:
     """Порождает байты, ничего не записывает. Профильные ed.writer.* проверяет сервис.
 
@@ -604,6 +628,54 @@ def render_manager_kit(
     paths, borrowed = manager_identity_roles(
         host, module_name, content_objects, subscription_additions, subscription_objects
     )
+    from .format_package import (
+        FORMAT_OVERRIDE_MODULE,
+        _declaration_host,
+        format_package_data,
+        render_format_extension,
+    )
+
+    carrier: dict[str, bytes] = {}
+    settings_parameter = "Настройки"
+    known_namespaces = set(schema_namespaces)
+    if format_package is not None:
+        known_namespaces.update(p.namespace for p in format_package.base_schema.packages)
+        known_namespaces.update(format_package.base_schema.extension_namespaces)
+        known_namespaces.add(format_package.namespace)
+    for rule in model.pko:
+        for member in (
+            *rule.properties,
+            *rule.groups,
+            *(p for g in rule.groups for p in g.properties),
+        ):
+            if member.namespace and member.namespace not in known_namespaces:
+                refuse(
+                    "format_uri_unknown",
+                    "URI свойства отсутствует в пакете и схеме корреспондента: " + member.namespace,
+                    address=model_addresses(model).get(member.logical_id, "Конвертация"),
+                )
+    if format_package is not None:
+        if format_declaration is None or format_declaration.plan_name != route.plan_name:
+            refuse("format_package_invalid", "Для пакета нужны объявления хозяина и план маршрута")
+        if key != format_package.base_version:
+            refuse("format_package_invalid", "Версия пакета не совпадает с ключом маршрута")
+        try:
+            override, _, _, settings_parameter = _declaration_host(
+                format_package, format_declaration, host
+            )
+            carrier = render_format_extension(
+                format_package,
+                host,
+                extension_name=host.identity.name,
+                prefix=prefix,
+                declaration=format_declaration,
+            )
+        except (Kd2Error, ValueError, TypeError) as error:
+            refuse("format_package_invalid", str(error))
+        if module_name.casefold() == override.name.casefold():
+            refuse("identifier_conflict", "Менеджер совпадает с заимствованным модулем объявления")
+        paths += ("CommonModule/" + override.name, "XDTOPackage/" + format_package.metadata_name)
+        borrowed["CommonModule/" + override.name] = override.uuid
     ids = make_identity_map(host.configuration_uuid, host.identity.name, paths, borrowed)
     model_bytes = dump_model(model)
     template = (
@@ -645,6 +717,36 @@ def render_manager_kit(
     if registered_objects:
         inputs["registered_objects"] = list(registered_objects)
     inputs["pod_stubs"] = list(pod_stubs)
+    if format_package is not None:
+        package_path = "XDTOPackages/" + format_package.metadata_name + "/Ext/Package.bin"
+        imported = {p.namespace: p for p in format_package.base_schema.packages}
+        dependencies: set[str] = set()
+
+        def collect(uri: str) -> None:
+            if uri in dependencies:
+                return
+            if uri not in imported:
+                refuse("format_package_invalid", "Импорт пакета отсутствует в схеме: " + uri)
+            dependencies.add(uri)
+            for dependency in imported[uri].imports:
+                collect(dependency.namespace)
+
+        for uri in (format_package.base_namespace, *format_package.imports):
+            collect(uri)
+        inputs["format_package"] = {
+            "metadata_name": format_package.metadata_name,
+            "namespace": format_package.namespace,
+            "base_version": format_package.base_version,
+            "base_namespace": format_package.base_namespace,
+            "sha256": sha256(carrier[package_path]),
+            "model_sha256": sha256(json_bytes(format_package_data(format_package))),
+            "imports": {uri: imported[uri].sources[0].sha256 for uri in sorted(dependencies)},
+        }
+        inputs["format_extensions"] = {format_package.namespace: key}
+        assert format_declaration is not None
+        inputs["format_declaration_sha256"] = sha256(
+            json_bytes(dict(format_declaration.descriptions))
+        )
     decision_hash = manager_decision_hash(inputs)
     if keep_version and previous_manifest and previous_manifest.decision_hash != decision_hash:
         refuse(
@@ -672,9 +774,38 @@ def render_manager_kit(
             address="Конфигурация",
         )
     result = {"extension/" + path: payload for path, payload in xml.items()}
+    if format_package is not None:
+        # FP:767–769, проба 05.10: ChildObjects упорядочены по видам платформы.
+        configuration = parse_xml("Configuration.xml", xml["Configuration.xml"].decode())
+        children = configuration.find("{*}Configuration/{*}ChildObjects")
+        assert children is not None
+        node(children, "CommonModule", FORMAT_OVERRIDE_MODULE)
+        node(children, "XDTOPackage", format_package.metadata_name)
+        children[:] = sorted(
+            children,
+            key=lambda child: (
+                _CHILD_KIND_INDEX.get(child.tag.rsplit("}", 1)[-1], len(_CHILD_KIND_INDEX)),
+                child.tag,
+                (child.text or "").casefold(),
+            ),
+        )
+        result["extension/Configuration.xml"] = serialize(configuration)
+        result.update(
+            {
+                "extension/" + p: b
+                for p, b in carrier.items()
+                if p.startswith(("CommonModules/", "XDTOPackages/"))
+            }
+        )
     result[module_path] = rendered.data
     result["extension/ExchangePlans/" + route.plan_name + "/Ext/ManagerModule.bsl"] = (
-        render_manager_route(route, module_name=module_name, prefix=prefix).encode("utf-8")
+        render_manager_route(
+            route,
+            module_name=module_name,
+            prefix=prefix,
+            format_namespace=format_package.namespace if format_package else None,
+            settings_parameter=settings_parameter,
+        ).encode("utf-8")
     )
     result["manager.ed.json"] = model_bytes
     result["source-map.json"] = json_bytes(source_map)
@@ -695,6 +826,7 @@ def render_manager_kit(
         ),
         registration_objects=registration_objects,
         subscription_objects=tuple(obj.kind + "." + obj.name for obj in subscription_objects),
+        format_namespace=format_package.namespace if format_package else None,
     )
     # Заглушки — до раздела проверки данных: сервис дополняет «Проверьте данные перед первым
     # обменом» по последнему заголовку и считает всё после него частью раздела (Д-П3).

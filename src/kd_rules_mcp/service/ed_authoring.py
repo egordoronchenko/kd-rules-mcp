@@ -25,6 +25,11 @@ from kd_rules_mcp.authoring.ed.artifacts import (
 from kd_rules_mcp.authoring.ed.candidates import candidates, target_objects
 from kd_rules_mcp.authoring.ed.canonical import canonical_property
 from kd_rules_mcp.authoring.ed.context import AuthoringContext
+from kd_rules_mcp.authoring.ed.format_package import (
+    FormatDeclaration,
+    FormatPackage,
+    load_format_package,
+)
 from kd_rules_mcp.authoring.ed.handler_render import procedure_block
 from kd_rules_mcp.authoring.ed.handlers import (
     HandlerOperationsPlan,
@@ -73,6 +78,7 @@ from kd_rules_mcp.errors import (
     EdAuthoringPreconditionError,
     EdAuthoringResourceLimitError,
     EdAuthoringStaleError,
+    Kd2Error,
 )
 from kd_rules_mcp.projects import resolve
 from kd_rules_mcp.service import ed_authoring_views as views
@@ -86,7 +92,7 @@ from kd_rules_mcp.service.ed_routes import (
 )
 from kd_rules_mcp.service.ed_schema import EdSchemaMixin
 from kd_rules_mcp.service.ed_views import validate_page
-from kd_rules_mcp.service.paths import Settings
+from kd_rules_mcp.service.paths import Settings, _is_absolute
 from kd_rules_mcp.validation.ed_authoring import (
     check_profile,
     compare_reports,
@@ -215,7 +221,9 @@ def _failure(error: AuthoringPreconditionError) -> EdAuthoringPreconditionError:
         {
             "failures": [
                 {
-                    "id": f.id,
+                    "id": f.id.removeprefix("ed.author.")
+                    if f.id in {"ed.author.format_package_invalid", "ed.author.format_uri_unknown"}
+                    else f.id,
                     "address": f.address,
                     "message": f.message,
                     "source": {"file": f.file, "line": f.line},
@@ -229,6 +237,67 @@ def _failure(error: AuthoringPreconditionError) -> EdAuthoringPreconditionError:
 
 class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
     """Входы кэшируются, проекта авторинга и draft_id в хранилище нет."""
+
+    def _authoring_format_package(
+        self, path: str, schema: EdSchema | None, version: str
+    ) -> FormatPackage:
+        """Пакет читается при каждом preview/write, в проект менеджера не записывается."""
+        if schema is None:
+            raise EdAuthoringPreconditionError(
+                "Для пакета требуется привязанная схема формата",
+                {"failures": [{"id": "format_package_invalid", "message": "Схема не привязана"}]},
+            )
+        try:
+            source = _text(path, "format_package")
+            if not _is_absolute(source):
+                source = self._host(self.workspace.root / source)
+            return load_format_package(self._read_path(source), schema, version)
+        except AuthoringPreconditionError as error:
+            raise _failure(error) from error
+        except (OSError, ValueError, TypeError, Kd2Error) as error:
+            raise EdAuthoringPreconditionError(
+                "Не удалось прочитать пакет формата",
+                {"failures": [{"id": "format_package_invalid", "message": str(error)}]},
+            ) from error
+
+    def _authoring_format_declaration(self, metadata: dict, route) -> FormatDeclaration:
+        """Читает объявление и точную карту хозяина, включая явно выбранные расширения."""
+        args = metadata["arguments"]
+        root = self._read_path(args["configuration_path"])
+        snapshot, _, _ = self._open_snapshot(
+            root,
+            None,
+            None,
+            False,
+            extensions=tuple(self._read_path(p) for p in args["extensions"]),
+            read_files_only=True,
+        )
+        config = read_description(
+            "Configuration.xml",
+            (root / "Configuration.xml").read_text("utf-8-sig"),
+            "Configuration",
+        )
+        language = config.props.get("DefaultLanguage", "").removeprefix("Language.")
+        names = (
+            "Configuration.xml",
+            "Languages/" + language + ".xml",
+            "CommonModules/ОбменДаннымиПереопределяемый.xml",
+            "CommonModules/ОбменДаннымиПереопределяемый/Ext/Module.bsl",
+            "ExchangePlans/" + route.plan_name + ".xml",
+            "ExchangePlans/" + route.plan_name + "/Ext/ManagerModule.bsl",
+        )
+        descriptions = {
+            name: self._read_path(self._host(root / name)).read_text("utf-8-sig") for name in names
+        }
+        paths = tuple(
+            self._host(path)
+            for folder in snapshot.extension_roots
+            for path in sorted(folder.rglob("*.bsl"))
+        )
+        sources = tuple(self._read_path(path).read_text("utf-8-sig") for path in paths)
+        return FormatDeclaration(
+            str(route.version_key), descriptions, snapshot.profile, route.plan_name, sources, paths
+        )
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
@@ -1723,6 +1792,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         registration_objects: list[str] | None = None,
         registered_objects: list[str] | None = None,
         plan_stubs: bool = True,
+        format_package: str | None = None,
     ) -> dict[str, Any]:
         if scope == "manager":
             if any(
@@ -1755,6 +1825,16 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                 registration_objects,
                 registered_objects,
                 plan_stubs,
+                format_package,
+            )
+        if format_package is not None:
+            raise EdAuthoringPreconditionError(
+                "format_package поддерживается только для scope=manager",
+                {
+                    "failures": [
+                        {"id": "format_package_unsupported", "message": "Нужен scope=manager"}
+                    ]
+                },
             )
         if (
             scope not in (None, "overlay")

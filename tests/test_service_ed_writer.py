@@ -354,6 +354,236 @@ def files_at(path):
     return {p.relative_to(path).as_posix(): p.read_bytes() for p in path.rglob("*") if p.is_file()}
 
 
+def format_package_source(service, root):
+    """Добавляет вымышленное объявление БСП и копирует JSON из корпуса в workspace."""
+    from kd_rules_mcp.authoring.ed.format_package import (
+        FORMAT_DECLARE_PROCEDURE,
+        FORMAT_OVERRIDE_MODULE,
+    )
+
+    tree = etree.parse(str(root / "CommonModules/Менеджер2.xml"))
+    tree.getroot()[0].set("uuid", "00000000-0000-0000-0000-000000000049")
+    name_node = tree.getroot().find("{*}CommonModule/{*}Properties/{*}Name")
+    assert name_node is not None
+    name_node.text = FORMAT_OVERRIDE_MODULE
+    tree.write(str(root / ("CommonModules/" + FORMAT_OVERRIDE_MODULE + ".xml")), encoding="utf-8")
+    body = root / ("CommonModules/" + FORMAT_OVERRIDE_MODULE + "/Ext/Module.bsl")
+    body.parent.mkdir(parents=True, exist_ok=True)
+    body.write_text(
+        f"Процедура {FORMAT_DECLARE_PROCEDURE}(РасширенияФормата) Экспорт\nКонецПроцедуры\n",
+        encoding="utf-8",
+    )
+    tree = etree.parse(str(root / "Configuration.xml"))
+    children = tree.getroot().find("{*}Configuration/{*}ChildObjects")
+    assert children is not None
+    etree.SubElement(
+        children, children.tag.replace("ChildObjects", "CommonModule")
+    ).text = FORMAT_OVERRIDE_MODULE
+    tree.write(str(root / "Configuration.xml"), encoding="utf-8")
+    path = service.workspace.root / "format-package.json"
+    path.write_bytes((DATA / "format-package.json").read_bytes())
+    return path
+
+
+@pytest.mark.parametrize("source_kind", ["relative", "absolute", "dump"])
+def test_manager_build_format_package_files_manifest_repeat(writer_setup, source_kind):
+    from kd_rules_mcp.authoring.ed.format_package import render_format_package
+    from kd_rules_mcp.authoring.ed.manifest import sha256
+
+    service, args, root = writer_setup
+    path = format_package_source(service, root)
+    created = service.ed_create(**args)
+    if source_kind == "dump":
+        package = service._authoring_format_package(
+            str(path), service._manager_bound_schema(service._manager_metadata("positions")), "1.20"
+        )
+        path = path.parent / "package-dump"
+        for name, data in render_format_package(package).items():
+            target = path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+    source = path.name if source_kind == "relative" else str(path)
+    preview = build(service, created, format_package=source)
+    written = build(
+        service,
+        created,
+        format_package=source,
+        mode="write",
+        expected_preview_hash=preview["build_hash"],
+        acknowledged_notices=preview["required_acknowledgements"],
+    )
+    destination = Path(written["output_dir"])
+    before = files_at(destination)
+    package_path = "extension/XDTOPackages/кд3м_Пакет/Ext/Package.bin"
+    assert package_path in before and "extension/XDTOPackages/кд3м_Пакет.xml" in before
+    assert "extension/CommonModules/ОбменДаннымиПереопределяемый/Ext/Module.bsl" in before
+    route = before[f"extension/ExchangePlans/{PLAN}/Ext/ManagerModule.bsl"].decode()
+    assert route.count('&После("ПриПолученииНастроек")') == 1
+    assert "ВерсииФорматаОбмена.Вставить" in route and "РасширенияФорматаОбмена.Вставить" in route
+    manifest = json.loads(before["manifest.json"])
+    assert manifest["format_package"]["sha256"] == sha256(before[package_path])
+    assert set(manifest["format_package"]["imports"]) == {
+        "urn:test:writer",
+        "urn:test:writer-message",
+    }
+    assert manifest["format_extensions"] == {"urn:test:writer-extension": "1.20"}
+    assert "на обе стороны" in before["instruction.md"].decode()
+    repeated = build(service, created, format_package=source)
+    assert repeated["status"] == "unchanged"
+    build(
+        service,
+        created,
+        format_package=source,
+        mode="write",
+        expected_preview_hash=repeated["build_hash"],
+        acknowledged_notices=repeated["required_acknowledgements"],
+    )
+    assert files_at(destination) == before
+
+
+@pytest.mark.parametrize("bad_source", ["missing", "json", "folder", "encoding"])
+def test_manager_build_format_package_invalid(writer_setup, bad_source):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    path = service.workspace.root / "invalid-package"
+    if bad_source == "json":
+        path.write_text("{", encoding="utf-8")
+    elif bad_source == "folder":
+        path.mkdir()
+    elif bad_source == "encoding":
+        path.write_bytes(b"\xff")
+    with pytest.raises(EdAuthoringPreconditionError) as caught:
+        build(service, created, format_package=str(path))
+    failure = caught.value.details["failures"][0]
+    assert failure["id"] == "format_package_invalid" and failure["message"]
+
+
+@pytest.mark.parametrize("read_error", [False, True])
+def test_format_scan_broken_extension_refuses_with_path_over_transport(
+    writer_setup, monkeypatch, read_error
+):
+    from kd_rules_mcp.authoring.ed import format_package
+    from kd_rules_mcp.ed.errors import EdReadError
+
+    service, args, root = writer_setup
+    path = format_package_source(service, root)
+    extension = root.parent / "other-extension"
+    extension.mkdir()
+    (extension / "Configuration.xml").write_text(
+        "<MetaDataObject><Configuration><Properties><Name>OtherExtension</Name>"
+        "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+        "</Properties><ChildObjects/></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    body = extension / "Catalogs/Unrelated/Forms/Item/Ext/Form/Module.bsl"
+    body.parent.mkdir(parents=True)
+    body.write_text('Значение = "сломанная\nстрока";', encoding="utf-8")
+    args["extensions"] = [str(extension)]
+    args["structure_id"] = None
+    created = service.ed_create(**args)
+    if read_error:
+        original = format_package.tokenize
+
+        def unreadable(text):
+            if "сломанная" in text:
+                raise EdReadError("Невозможно прочитать BSL, позиция 11")
+            return original(text)
+
+        monkeypatch.setattr(format_package, "tokenize", unreadable)
+    with pytest.raises(EdAuthoringPreconditionError) as caught:
+        build(service, created, format_package=str(path))
+    failure = caught.value.details["failures"][0]
+    assert failure["id"] == "format_package_invalid"
+    assert str(body) in failure["message"]
+    assert "позиция" in failure["message"]
+    assert "Отсутствие коллизии URI не подтверждено" in failure["message"]
+    assert error_payload(caught.value)["code"] != "internal"
+    assert not (service.workspace.root / "kits").exists()
+
+
+def test_overlay_format_package_unsupported(writer_setup):
+    service, _, _ = writer_setup
+    with pytest.raises(EdAuthoringPreconditionError) as caught:
+        service.ed_authoring_build(scope="overlay", format_package="format-package.json")
+    assert caught.value.details["failures"][0]["id"] == "format_package_unsupported"
+
+
+@pytest.mark.parametrize(
+    "namespace,has_package,unknown",
+    [
+        ("urn:test:writer-extension", True, False),
+        ("urn:test:writer", False, False),
+        ("urn:test:writer", True, False),
+        ("urn:unknown", True, True),
+        ("urn:unknown", False, True),
+    ],
+)
+def test_service_namespace_validate_and_build(writer_setup, namespace, has_package, unknown):
+    service, args, root = writer_setup
+    path = format_package_source(service, root)
+    created = service.ed_create(**args)
+    operations = manager_operations()
+    operations[0]["patch"]["extensions"] = [namespace]
+    operations[1]["patch"]["namespace"] = namespace
+    _, _, applied = apply_packet(service, created, operations)
+    report = service.ed_validate(
+        applied["document_id"],
+        schema_id=args["schema_id"],
+        check_prefix="ed.schema.namespace_unknown",
+    )
+    assert report["issues"]["total"] == (0 if namespace == "urn:test:writer" else 1)
+    if report["issues"]["total"]:
+        assert report["issues"]["items"][0]["level"] == "предупреждение"
+    arguments = {"format_package": str(path)} if has_package else {}
+    if unknown:
+        with pytest.raises(EdAuthoringPreconditionError) as caught:
+            build(service, applied, **arguments)
+        assert caught.value.details["failures"][0]["id"] == "format_uri_unknown"
+        assert "/ПКС/" in caught.value.details["failures"][0]["address"]
+    else:
+        assert build(service, applied, **arguments)["validation"]["errors"] == 0
+
+
+def test_format_package_over_transport(writer_setup):
+    service, args, root = writer_setup
+    path = format_package_source(service, root)
+    created = service.ed_create(**args)
+
+    async def scenario():
+        async with Client(create_server(service)) as client:
+            result = await client.call_tool(
+                "ed_authoring_build",
+                {
+                    "scope": "manager",
+                    "project_id": created["project_id"],
+                    "format_package": str(path),
+                },
+            )
+            assert not result.is_error, result.content
+            assert result.structured_content and result.structured_content["scope"] == "manager"
+
+    anyio.run(scenario)
+
+
+def test_changed_format_package_invalidates_build_hash(writer_setup):
+    service, args, root = writer_setup
+    path = format_package_source(service, root)
+    created = service.ed_create(**args)
+    preview = build(service, created, format_package=str(path))
+    model = json.loads(path.read_text("utf-8"))
+    model["types"][0]["properties"][0]["name"]["local"] = "ИноеПоле"
+    path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
+    assert build(service, created, format_package=str(path))["build_hash"] != preview["build_hash"]
+    with pytest.raises(EdAuthoringStaleError):
+        build(
+            service,
+            created,
+            format_package=str(path),
+            mode="write",
+            expected_preview_hash=preview["build_hash"],
+        )
+
+
 @pytest.mark.parametrize(
     "missing_schema,missing_structure", [(True, False), (True, True), (False, True)]
 )
@@ -1196,6 +1426,7 @@ def test_end_to_end_restart_navigation_delivery_and_close(writer_setup):
     assert files_at(destination) == dict(direct.files)
     repeated = build(service, applied)
     assert repeated["status"] == "unchanged"
+    assert build(service, applied, format_package=None)["build_hash"] == repeated["build_hash"]
     assert service.ed_close("positions") == {"project_id": "positions", "closed": True}
     assert not (service.manager_workspace.directory / "positions").exists()
     assert files_at(destination) == dict(direct.files)

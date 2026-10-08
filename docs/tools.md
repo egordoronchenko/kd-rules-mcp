@@ -638,8 +638,8 @@ reread changed packages.
 
 ### `ed_routes`
 
-Read version routes from project/dump/profile_id. Reuse unchanged snapshots; changed
-sources require force. Node versions and live settings are unknown.
+Read routes from project/dump/profile_id. Reuse snapshots; changed sources require
+force. Node versions and live settings are unknown.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -676,42 +676,41 @@ arguments or null with reason. Live compatibility is unverified.
 
 ### `ed_create`
 
-Create/reopen durable interface-2 manager; import preserves text. Revision/counts,
-profile/report, document_id, reference_manager/reason. Different arguments refuse;
-changed fingerprints warn. Missing inputs refuse quickly with reopen_calls.
-Atomic rebind keeps rules/receipts, validates and recovers writes.
-Missing plan: plan_candidates.
+Create/reopen interface-2 manager; import preserves text. Returns revision/counts,
+document_id, profile/report, reference_manager/reason. Different arguments refuse;
+changed inputs warn. Missing inputs: reopen_calls. Atomic rebind validates and keeps
+rules/receipts. Missing plan: plan_candidates.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | Durable manager ID |
-| `mode` | string | `"new"` | new, import, or rebind to fresh inputs |
+| `mode` | string | `"new"` | new/import/rebind (fresh inputs) |
 | `project` | string \| null | `null` | Host from project_list |
 | `configuration` | string | `"full"` | Host configuration |
-| `configuration_path` | string \| null | `null` | Host dump instead of project |
-| `extensions` | array of string \| null | `null` | Ordered host extensions; null uses project settings |
+| `configuration_path` | string \| null | `null` | Host dump path |
+| `extensions` | array of string \| null | `null` | Ordered host extensions; null=project settings |
 | `plan` | string \| null | `null` | Exchange plan name |
 | `format_version` | string \| null | `null` | One exact route version key |
 | `interface_version` | integer | `2` | 2 only |
 | `identity` | object \| null | `null` | name, prefix, module_name, synonym, version, compatibility_mode; default name includes project_id |
 | `document_id` | string \| null | `null` | ed_open snapshot to import |
-| `schema_id` | string \| null | `null` | Optional open XDTO schema |
-| `structure_id` | string \| null | `null` | Optional loaded host structure |
+| `schema_id` | string \| null | `null` | Open XDTO schema |
+| `structure_id` | string \| null | `null` | Host structure ID |
 | `offset` | integer ≥ 0 | `0` | Page offset |
 | `limit` | integer 1…200 | `20` | Page size |
 | `section` | string | `"import_report"` | import_report, notices, differences, plan_candidates |
 
 ### `ed_apply`
 
-Preview/apply atomically; last 8 previews survive restart. Pages use next_offset;
-truncated_by=size marks size limits. Apply adds document_id. Replays return replayed=true,
-current revision and live document_id.
+Atomic preview/apply; 8 durable previews. Pages: next_offset,
+truncated_by=size. Apply adds document_id; replays return replayed=true,
+current revision/document_id.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `project_id` | string | required | Manager project from ed_create |
-| `expected_revision` | string | required | Current project revision |
-| `operations` | array of object \| null | `null` | Up to 100 manager ops; forms: docs/tools.md. Algorithm address: Код/ or Алгоритм/. client_id refs; after_id omitted=append, null=first. Omit for saved preview. Manager: manager_name,title,generated_at,text_style; rebind bindings |
+| `project_id` | string | required | Manager project |
+| `expected_revision` | string | required | Current revision |
+| `operations` | array of object \| null | `null` | Up to 100 manager ops: docs/tools.md. Код/ or Алгоритм/; client_id refs. after_id: omitted=last, null=first. Omit to reuse preview. Header: manager_name,title,generated_at,text_style; pko.extensions URIs; table_part/property namespace |
 | `mode` | string | `"preview"` | preview or apply |
 | `expected_preview_hash` | string \| null | `null` | Current preview_hash for apply |
 | `confirmations` | array of object \| null | `null` | Preview notices: code, notice_hash |
@@ -738,7 +737,7 @@ Typical ПКС: merged references or reference_module conflicts, no code. Use ne
 
 ### `ed_authoring_build`
 
-Preview/write overlay or manager kits. Write requires current build_hash and notice IDs.
+Preview/write overlay/manager kits. Write needs current build_hash and notice IDs.
 Install and verify runtime separately.
 
 | Parameter | Type | Default | Description |
@@ -767,6 +766,7 @@ Install and verify runtime separately.
 | `registration_objects` | array of string \| null | `null` | Manager: Kind.Name, PRO only |
 | `registered_objects` | array of string \| null | `null` | Manager: Kind.Name with PRO |
 | `plan_stubs` | boolean | `true` | Manager: sender POD stubs |
+| `format_package` | string \| null | `null` | Manager only: JSON/XDTO dump path, workspace-relative or absolute |
 
 ## Error codes
 
@@ -1844,10 +1844,10 @@ Directions: `["send"]`, `["receive"]`, `["send","receive"]`, `["both"]`; no dupl
 | `kind` | `patch` fields: type, defaults and restrictions | `clear` |
 |---|---|---|
 | `manager` | `manager_name`: Identifier; `title`, `generated_at`: S/V?, single line, date needs title; `text_style`: `{encoding:"utf-8",newline:"\n"/"\r\n"/"mixed",bom:boolean,indent:string}` (defaults UTF-8/CRLF/BOM/tab). Retained text blocks EOL/indent changes. Public `interface_version`, `host`, `format_bindings`, `executor_profile` rejected; rebind for bindings. Interface 2. | None; title/date accept V? |
-| `pko` | `name`!: Identifier; `directions`!; `configuration_object`: R/V?; `format_object`: S/V?; `group_flag`: B/V?; `identification`: IdentificationPatch, create only; `events`: Event DTO array, default `[]`, unchanged-only (edit via `handler`). Values default unset. | `configuration_object`, `format_object`, `group_flag` |
+| `pko` | `name`!: Identifier; `directions`!; `configuration_object`: R/V?; `format_object`: S/V?; `group_flag`: B/V?; `extensions`: unique nonempty URI strings, default `[]`, replace with `[]` or clear to remove init; `identification`: IdentificationPatch, create only; `events`: Event DTO array, default `[]`, unchanged-only (edit via `handler`). Values default unset. | `configuration_object`, `format_object`, `group_flag`, `extensions` |
 | `pod` | `name`!: Identifier; `directions`!; `configuration_selection`: R/V?; `format_selection`: S/V?; `clear_data`: B/V?; `used_pko`: references, default `[]`; `events`: unchanged-only as ПКО. Values default unset. | `configuration_selection`, `format_selection`, `clear_data` |
-| `property` | `configuration_property`!, `format_property`!: strings, one may be empty; `property_kind`: `direct` (default)/`reference`/`pkpd`/`algorithm`; `algorithm_flag`: integer 0 (default)/1; `conversion`: reference, default empty; `namespace`: string `""`, direct only; `argument_presence`: 3–7 booleans, first three true (default), helper-limited, empty tail trimmed. | None |
-| `table_part` | `configuration_property`!, `format_property`!: identifiers (one may be empty); `argument_presence`: `[true,true,true]` only, default. Namespace/condition and interface 1 unsupported. Create for receive/both requires confirmation of `table_part_replace`: receiving replaces the entire table part; send-only creates need none. Each notice names its full `ПКО/<owner>/ПКТЧ/<group>` address; confirm every group in the packet. Duplicate names ignore case: send format refuses, receive configuration requires confirmation, including rename/move and owner direction changes. Existing imported duplicates stay diagnosed. Invalid imported names stay retained with a reason. Imported groups keep order; new groups use generator keys; preserve never realigns neighbours or adds an imported group's missing separator. | None |
+| `property` | `configuration_property`!, `format_property`!: strings, one may be empty; `property_kind`: `direct` (default)/`reference`/`pkpd`/`algorithm`; `algorithm_flag`: integer 0 (default)/1; `conversion`: reference, default empty; `namespace`: string `""`, sixth argument; header supports direct, table rows support all property kinds; `argument_presence`: 3–7 booleans, first three true (default), helper-limited, empty tail trimmed. | None |
+| `table_part` | `configuration_property`!, `format_property`!: identifiers (one may be empty); `namespace`: string `""`, fourth argument; `argument_presence`: first three true, URI needs fourth true, empty tail trimmed. Condition and interface 1 unsupported. Create for receive/both requires confirmation of `table_part_replace`: receiving replaces the entire table part; send-only creates need none. Each notice names its full `ПКО/<owner>/ПКТЧ/<group>` address; confirm every group in the packet. Duplicate names ignore case: send format refuses, receive configuration requires confirmation, including rename/move and owner direction changes. Existing imported duplicates stay diagnosed. Invalid imported names stay retained with a reason. Imported groups keep order; new groups use generator keys; preserve never realigns neighbours or adds an imported group's missing separator. | None |
 | `identification` | `mode`: S/V?, one of `ПоУникальномуИдентификатору`, `ПоПолямПоиска`, `СначалаПоУникальномуИдентификаторуПотомПоПолямПоиска`; `search_sets`: nonempty string arrays, default `[]`; `not_found_policy`: V? only. Receive required; field-search modes need search sets. No "no search" enum. | `mode`, `search_sets`, `not_found_policy` |
 | `pkpd` | `name`!: Identifier; `directions`!; `configuration_type`!: R; `format_type`!: S; `data_kind`: `enumeration` (default)/`predefined`. R path: `["Метаданные","Перечисления",name]` / `["Метаданные","Справочники",name]` respectively. | None |
 | `value_mapping` | `direction`!: `send`/`receive`, allowed by owner; `configuration_value`!: R `["Перечисления" or "Справочники",ownerType,value]`; `format_value`!: S. Unique send key = configuration value; receive key = format string. | None |
@@ -2215,6 +2215,70 @@ failures (including `receipt_corrupt` for a damaged applied-packet receipt);
 revisions/hashes, changed input hashes or concurrent modifications; `ed_authoring_ack_required`
 for unconfirmed notices; `ed_authoring_path`, `ed_authoring_resource_limit`, `ed_authoring_io`
 for workspace safety, bounds and I/O failures. An unsupported interface never creates a project.
+
+### Format package file
+
+`ed_authoring_build(scope="manager", project_id="positions", format_package="format-package.json")`
+reads a package on every preview/write. Relative paths start at the server workspace; absolute paths
+use the ordinary path map. Write also requires the current `build_hash` and notice acknowledgements.
+Overlay scope refuses with `format_package_unsupported`; unreadable/invalid sources refuse with
+`format_package_invalid` and a reason. No package model is saved in the manager project.
+
+The package model is read from a UTF-8 JSON file or a dump folder containing exactly one
+`XDTOPackages/<Name>.xml` and `XDTOPackages/<Name>/Ext/Package.bin` pair. The base schema resolves imports
+locally. The JSON fields mirror `FormatPackage`, excluding the internal `base_schema`:
+`metadata_name`, `namespace`, `base_version`, `base_namespace`, `imports` (default `[]`), `types`.
+QName fields are objects with `namespace` and `local`, never guessed from a local name.
+
+```json
+{
+  "metadata_name": "fmt_Package",
+  "namespace": "urn:example:ed-extension",
+  "base_version": "1.20",
+  "base_namespace": "http://v8.1c.ru/edi/edi_stnd/EnterpriseData/1.20",
+  "imports": [],
+  "types": [
+    {
+      "name": {"namespace": "urn:example:ed-extension", "local": "Справочник.Контрагенты"},
+      "role": "object",
+      "properties": [
+        {
+          "name": {"namespace": "urn:example:ed-extension", "local": "ВнешнийКод"},
+          "type": {"namespace": "http://www.w3.org/2001/XMLSchema", "local": "string"},
+          "lower": 0
+        }
+      ]
+    }
+  ]
+}
+```
+
+Type roles: `object`, `key`, `reference`, `row`, `table`, `enumeration`, `value`. Optional type
+fields: `base` (QName), `facets` (`kind`, `lexical`, optional `value_type`, `fixed`, `attribute`),
+`open`, `abstract`, `ordered`, `sequenced`, `variety`, `members`, `exported`, `key_property`.
+Exported objects require `key_property` pointing to an object key type. Property fields:
+`name`, `type`, `lower` (default 1), `upper` (default 1, null means unlimited), `nillable`
+(default false), `form` (`element`, `attribute`, `text`), optional `inline_type`,
+`explicit_attributes`. Namespace and base version must match the selected binding exactly;
+the metadata name must start with the extension prefix. Unknown fields, duplicate names,
+unresolved QName/imports and incompatible shapes are rejected as `format_package_invalid`
+(`ed.author.format_package_invalid` in the core renderer).
+
+The manager kit renderer delivers one extension containing the manager, XDTO package,
+borrowed `ОбменДаннымиПереопределяемый` and a single `ПриПолученииНастроек` hook for both maps.
+The manifest records the package/model/import hashes and `format_extensions` (URI → base version).
+Changing the package or imported bytes changes `decision_hash`. A property/group URI absent from
+both the supplied package and the bound correspondent schema refuses with `format_uri_unknown`
+(`ed.author.format_uri_unknown` in the core renderer). Without a package, delivery bytes
+are unchanged. The package model is not stored in the manager project.
+`ed_validate(schema_id=...)` warns with `ed.schema.namespace_unknown` for a URI absent from the
+opened schema, including its explicitly loaded extensions; a build file is not an implicit schema.
+
+Install compatible kits on both sides before exchange, disable extension safe mode, and verify
+that each node's negotiated format version equals the package binding version. If the peer lacks
+the extension, stop the pair until package installation and URI declaration are verified.
+The generated instruction describes installation, the version check and rollback; live exchange
+and installation remain separate checks.
 
 ### Delivery into a user extension
 
