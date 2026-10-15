@@ -21,6 +21,7 @@ from kd_rules_mcp.authoring.ed.manager_operations import parse_operation
 from kd_rules_mcp.authoring.ed.manager_render import (
     ManagerManifest,
     ManagerRoute,
+    format_receive_notices,
     render_manager_kit,
     render_manager_route,
 )
@@ -61,7 +62,7 @@ from kd_rules_mcp.errors import (
 )
 from kd_rules_mcp.projects import resolve
 from kd_rules_mcp.service.ed import EdProject
-from kd_rules_mcp.service.ed_authoring import EdAuthoringMixin, _failure, _mapping, _text
+from kd_rules_mcp.service.ed_authoring import EdAuthoringMixin, _failure, _mapping, _phase, _text
 from kd_rules_mcp.service.ed_authoring_views import (
     MANAGER_NOTICES_BYTES,
     PAGE_BYTES,
@@ -918,13 +919,20 @@ class EdWriterMixin(EdAuthoringMixin):
         if not rebinding and (mode == "import") != (document_id is not None):
             raise ValueError("document_id нужен только для mode=import")
         if project is not None:
-            if configuration_path is not None:
-                raise ValueError("Укажите project либо configuration_path")
             config = self._catalog().configuration(project, configuration)
             folder = self.settings.project_dirs.get(project)
             if folder is None:
                 raise ValueError("Папка проекта не подключена")
-            configuration_path = self._host(resolve(folder, config.dump))
+            resolved_path = self._host(resolve(folder, config.dump))
+            # creation.json хранит и project, и уже разрешённый configuration_path.
+            # Повтор с этими аргументами — тот же хозяин, а не два разных источника.
+            if configuration_path is not None:
+                supplied = configuration_path
+                with suppress(Kd2Error):
+                    supplied = self._host(self._read_path(configuration_path).resolve())
+                if supplied != resolved_path:
+                    raise ValueError("Укажите project либо configuration_path")
+            configuration_path = resolved_path
             if extensions is None:
                 extensions = [self._host(resolve(folder, p)) for p in config.extensions]
             extensions_checked = True
@@ -1966,7 +1974,7 @@ class EdWriterMixin(EdAuthoringMixin):
         registration_objects=None,
         registered_objects=None,
         plan_stubs=True,
-        format_package: str | None = None,
+        format_package: str | list[str] | None = None,
     ):
         validate_page(offset, limit)
         if section not in ("summary", "operations", "notices", "files", "issues_after", "skipped"):
@@ -2006,61 +2014,95 @@ class EdWriterMixin(EdAuthoringMixin):
             if not isinstance(selected.plan_name, str) or not valid_identifier(selected.plan_name):
                 _refuse("route_scope_conflict", "Недопустимое имя плана")
             try:
-                inputs = self._manager_inputs(model, metadata)
-                schema = self._manager_bound_schema(metadata)
-                package = None
+                with _phase("inputs"):
+                    inputs = self._manager_inputs(model, metadata)
+                    schema = self._manager_bound_schema(metadata)
+                packages = ()
                 declaration = None
                 package_fingerprint = None
 
-                def package_inputs(source: str):
-                    loaded = self._authoring_format_package(
-                        source,
-                        self._manager_bound_schema(metadata),
-                        str(selected.version_key),
-                    )
+                def package_inputs(source: str | list[str]):
+                    sources = [source] if isinstance(source, str) else source
+                    if (
+                        not isinstance(sources, list)
+                        or not sources
+                        or any(not isinstance(path, str) or not path.strip() for path in sources)
+                    ):
+                        _refuse("format_package_invalid", "Нужен путь или непустой список путей")
+                    loaded = []
+                    uris = {}
+                    names = {}
+                    with _phase("format_read"):
+                        for path in sources:
+                            package = self._authoring_format_package(
+                                path, schema, str(selected.version_key)
+                            )
+                            for seen, value in (
+                                (uris, package.namespace),
+                                (names, package.metadata_name.casefold()),
+                            ):
+                                if value in seen:
+                                    _refuse(
+                                        "format_package_invalid",
+                                        f"Повтор URI или metadata_name «{value}»: "
+                                        f"«{seen[value]}» и «{path}»",
+                                    )
+                                seen[value] = path
+                            loaded.append(package)
+                    loaded.sort(key=lambda p: (p.metadata_name.casefold(), p.namespace))
                     try:
-                        declared = self._authoring_format_declaration(metadata, selected)
+                        with _phase("format_uri"):
+                            declared = self._authoring_format_declaration(metadata, selected)
                     except (OSError, UnicodeError, ValueError, Kd2Error) as error:
                         _refuse("format_package_invalid", str(error))
                     return (
-                        loaded,
+                        tuple(loaded),
                         declared,
                         digest(
                             (
-                                format_package_data(loaded),
+                                [format_package_data(p) for p in loaded],
                                 dict(declared.descriptions),
                                 declared.extension_sources,
+                                declared.extension_source_hashes,
                             )
                         ),
                     )
 
                 if format_package is not None:
-                    package, declaration, package_fingerprint = package_inputs(format_package)
-                detection = self._manager_detection(metadata, model.executor_profile.profile_id)
-                rendered = render(model, "preserve" if model.source_files else "canonical")
-                report = validate_writer(
-                    model, rendered.data, detection=detection, **self._manager_name_scope(metadata)
-                )
-                required_unfilled: list[RequiredUnfilled] = []
-                report.extend(
-                    self._manager_schema_checks(
-                        model, metadata, required_unfilled=required_unfilled
+                    packages, declaration, package_fingerprint = package_inputs(format_package)
+                with _phase("prepare"):
+                    detection = self._manager_detection(metadata, model.executor_profile.profile_id)
+                    rendered = render(model, "preserve" if model.source_files else "canonical")
+                    report = validate_writer(
+                        model,
+                        rendered.data,
+                        detection=detection,
+                        **self._manager_name_scope(metadata),
                     )
-                )
+                    report.issues.extend(format_receive_notices(model))
+                    report.issues.extend(notice for p in packages for notice in p.notices)
+                required_unfilled: list[RequiredUnfilled] = []
+                with _phase("schemas"):
+                    report.extend(
+                        self._manager_schema_checks(
+                            model, metadata, required_unfilled=required_unfilled
+                        )
+                    )
                 registration_objects = (
                     registration_objects if registration_objects is not None else []
                 )
                 registered_objects = registered_objects if registered_objects is not None else []
-                content_report, missing_content, missing_subscriptions, registration_names = (
-                    self._manager_plan_delivery(
-                        model,
-                        metadata,
-                        registration_objects,
-                        selected.plan_name,
-                        registered_objects=registered_objects,
-                        plan_stubs=plan_stubs,
+                with _phase("prepare"):
+                    content_report, missing_content, missing_subscriptions, registration_names = (
+                        self._manager_plan_delivery(
+                            model,
+                            metadata,
+                            registration_objects,
+                            selected.plan_name,
+                            registered_objects=registered_objects,
+                            plan_stubs=plan_stubs,
+                        )
                     )
-                )
                 report.extend(content_report)
                 _, snapshot = self._manager_snapshot(model, publish=False)
                 structure = (
@@ -2068,19 +2110,20 @@ class EdWriterMixin(EdAuthoringMixin):
                     if args["structure_id"]
                     else None
                 )
-                report.extend(
-                    validate_sender_handlers(
-                        model,
-                        snapshot.document,
-                        ValidationProfile.build(
-                            self._manager_bound_schema(metadata), str(selected.version_key)
-                        ),
-                        structure,
-                        selected.plan_name,
-                        missing_content,
-                        registration_names,
+                with _phase("prepare"):
+                    report.extend(
+                        validate_sender_handlers(
+                            model,
+                            snapshot.document,
+                            ValidationProfile.build(
+                                self._manager_bound_schema(metadata), str(selected.version_key)
+                            ),
+                            structure,
+                            selected.plan_name,
+                            missing_content,
+                            registration_names,
+                        )
                     )
-                )
                 structure = (
                     self._ed_structure_snapshot(model.host.structure_id)[0]
                     if model.host.structure_id
@@ -2093,9 +2136,10 @@ class EdWriterMixin(EdAuthoringMixin):
                     model, stub_objects if plan_stubs else ()
                 )
                 if pod_stubs:
-                    rendered = render(
-                        delivery_model, "preserve" if model.source_files else "canonical"
-                    )
+                    with _phase("render"):
+                        rendered = render(
+                            delivery_model, "preserve" if model.source_files else "canonical"
+                        )
                     report.extend(
                         validate_writer(
                             delivery_model,
@@ -2155,7 +2199,8 @@ class EdWriterMixin(EdAuthoringMixin):
                     raise EdAuthoringPreconditionError(
                         "Менеджер не прошёл проверки", {"failures": errors}
                     )
-                host, host_hash = self._manager_host(metadata, selected)
+                with _phase("inputs"):
+                    host, host_hash = self._manager_host(metadata, selected)
                 destination = self._destination(
                     artifact_name(host.identity.name, host.configuration_uuid), output_dir
                 )
@@ -2173,38 +2218,45 @@ class EdWriterMixin(EdAuthoringMixin):
                         owner_project_id=previous.project_id,
                         project_id=project_id,
                     )
-                kit = render_manager_kit(
-                    delivery_model,
-                    rendered,
-                    host,
-                    selected,
-                    executor_profile_id=model.executor_profile.profile_id,
-                    previous_manifest=previous,
-                    previous_files=previous_files if previous else None,
-                    creation_fingerprint=metadata["creation_fingerprint"],
-                    content_objects=self._manager_content_descriptions(metadata, missing_content),
-                    subscription_additions=tuple(subscriptions),
-                    subscription_objects=self._manager_content_descriptions(
-                        metadata, subscription_objects
-                    ),
-                    registration_objects=registration_names,
-                    registered_objects=tuple(sorted(set(registered_objects or ()))),
-                    pod_stubs=pod_stubs,
-                    data_preflight=render_data_preflight(required_unfilled),
-                    format_package=package,
-                    format_declaration=declaration,
-                    schema_namespaces=tuple(
-                        sorted(
-                            {p.namespace for p in schema.packages}
-                            | set(schema.extension_namespaces)
+                with _phase("render"):
+                    kit = render_manager_kit(
+                        delivery_model,
+                        rendered,
+                        host,
+                        selected,
+                        executor_profile_id=model.executor_profile.profile_id,
+                        previous_manifest=previous,
+                        previous_files=previous_files if previous else None,
+                        creation_fingerprint=metadata["creation_fingerprint"],
+                        content_objects=self._manager_content_descriptions(
+                            metadata, missing_content
+                        ),
+                        subscription_additions=tuple(subscriptions),
+                        subscription_objects=self._manager_content_descriptions(
+                            metadata, subscription_objects
+                        ),
+                        registration_objects=registration_names,
+                        registered_objects=tuple(sorted(set(registered_objects or ()))),
+                        pod_stubs=pod_stubs,
+                        data_preflight=render_data_preflight(required_unfilled),
+                        format_package=packages,
+                        format_declaration=declaration,
+                        schema_namespaces=tuple(
+                            sorted(
+                                {p.namespace for p in schema.packages}
+                                | set(schema.extension_namespaces)
+                            )
                         )
+                        if schema
+                        else (),
+                        phase=_phase,
                     )
-                    if schema
-                    else (),
-                )
-                kit = with_key_data_instruction(
-                    kit, self._manager_key_instruction(model, metadata), previous, previous_files
-                )
+                    kit = with_key_data_instruction(
+                        kit,
+                        self._manager_key_instruction(model, metadata),
+                        previous,
+                        previous_files,
+                    )
                 user_delivery = (
                     prepare_user_delivery(
                         self,

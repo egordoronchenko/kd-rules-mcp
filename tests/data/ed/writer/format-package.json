@@ -13,6 +13,11 @@
           "name": {"namespace": "urn:test:writer-extension", "local": "ДопПоле"},
           "type": {"namespace": "http://www.w3.org/2001/XMLSchema", "local": "string"},
           "lower": 0
+        },
+        {
+          "name": {"namespace": "urn:test:writer-extension", "local": "ВтороеПоле"},
+          "type": {"namespace": "http://www.w3.org/2001/XMLSchema", "local": "string"},
+          "lower": 0
         }
       ]
     }

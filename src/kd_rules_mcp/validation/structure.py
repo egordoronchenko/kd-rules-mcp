@@ -9,19 +9,25 @@
 `Реквизит`, `ТабличнаяЧасть` …), поэтому сравниваются напрямую.
 """
 
-import re
 import sqlite3
 from dataclasses import dataclass, field
 
 from kd_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
-from kd_rules_mcp.kd2.schema import CONVERSION_EVENTS
 from kd_rules_mcp.validation.address import (
     pks_address,
     pks_segments,
     pkz_address,
     rule_address,
     side_name,
-    walk_pks,
+)
+from kd_rules_mcp.validation.call_graph import PKO_HANDLERS as PKO_HANDLERS
+from kd_rules_mcp.validation.call_graph import PKS_HANDLERS as PKS_HANDLERS
+from kd_rules_mcp.validation.call_graph import (
+    CallGraph,
+    _conversion_code,
+    _disabled,
+    _pks_references,
+    build_call_graph,
 )
 from kd_rules_mcp.validation.report import Issue, ValidationReport
 
@@ -41,42 +47,6 @@ REF_PREFIXES = (
     "ТочкаМаршрутаБизнесПроцессаСсылка.",
     "ЗадачаСсылка.",
 )
-# Обработчики ПКС: значение может быть вычислено или заменено кодом, типы не проверяются.
-PKS_HANDLERS = ("ПередВыгрузкой", "ПриВыгрузке", "ПослеВыгрузки")
-PKO_HANDLERS = (
-    "ПередВыгрузкой",
-    "ПриВыгрузке",
-    "ПослеВыгрузки",
-    "ПослеВыгрузкиВФайл",
-    "ПередЗагрузкой",
-    "ПриЗагрузке",
-    "ПослеЗагрузки",
-)
-# Тексты, где упоминание кода ПКО считается вызовом: обработчики ПКО, ПКС, ПВД, ПОД
-# и события конвертации. Текст алгоритма смотрится отдельно — у запроса тег тоже `Текст`.
-_CALL_TEXTS = frozenset(
-    {
-        *PKO_HANDLERS,
-        "ПоследовательностьПолейПоиска",
-        *PKS_HANDLERS,
-        "ПередОбработкойВыгрузки",
-        "ПослеОбработкиВыгрузки",
-        "ПередОбработкойПравила",
-        "ПередВыгрузкойОбъекта",
-        "ПослеВыгрузкиОбъекта",
-        "ПослеОбработкиПравила",
-        "ПередУдалениемОбъекта",
-        "ПослеЗагрузкиПараметра",
-        *CONVERSION_EVENTS,
-    }
-)
-# Упоминание кода вне обработчиков ПКС — вызов `ВыгрузитьПоПравилу`, объект уходит целиком.
-# Те же имена у ПКО остаются в `_CALL_TEXTS`: это обработчик правила, а не ПКС.
-_WHOLE_EXPORT_TEXTS = _CALL_TEXTS - frozenset(PKS_HANDLERS)
-_PKS_KINDS = frozenset({"pks", "pks_group"})
-# `ВыгрузитьОбъект = Истина` в `ПередВыгрузкой` ПКС (БСП:12924, БСП:12949):
-# пробелы вокруг `=` и регистр не учитываются.
-_EXPORT_OBJECT_TRUE = re.compile(r"ВыгрузитьОбъект\s*=\s*Истина", re.IGNORECASE)
 # Сколько адресов ПКС попадает в текст замечания.
 _REF_ONLY_SHOWN = 3
 # Ссылочные типы объектов: значение может уйти целиком или только узлом `<Ссылка>`.
@@ -183,18 +153,21 @@ class _Context:
     # ПКО по коду и типы источника, для которых есть ПКО (поиск ПКО по типу, Исп:7080-7085).
     pko_by_code: dict[str, Node] = field(default_factory=dict)
     pko_sources: set[str] = field(default_factory=set)
+    graph: CallGraph | None = None
 
 
 def check_structures(
     rules: ExchangeRules,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
+    graph: CallGraph | None = None,
 ) -> ValidationReport:
     """Проверяет ПКО, ПКС, ПКЗ, ПВД и ПОД против структур источника и приёмника.
 
     Без структуры стороны проверки по ней не выполняются и перечисляются в отчёте отдельно.
     """
     context = _prepare(rules, source, target)
+    context.graph = graph
     for pko in rules.pko():
         _check_pko(context, pko)
     for pvd in rules.pvd():
@@ -686,68 +659,6 @@ def _check_pod(context: _Context, pod: Node) -> None:
         )
 
 
-def _disabled(node: Node) -> bool:
-    """`Отключить`: у ПВД булево, у ПКО атрибута нет в схеме — остаётся строка `true`."""
-    flag = node.attrs.get("Отключить")
-    return flag is True or flag == "true"
-
-
-def _conversion_code(node: Node) -> str:
-    """Код ПКО из `КодПравилаКонвертации` (ПКС, группа ПКС, ПКЗ, ПВД)."""
-    return rule_code(node.get("КодПравилаКонвертации"))
-
-
-def _pvd_pko_codes(rules: ExchangeRules) -> set[str]:
-    """Коды ПКО из `КодПравилаКонвертации` включённых ПВД."""
-    codes: set[str] = set()
-    for pvd in rules.pvd():
-        if _disabled(pvd):
-            continue
-        code = _conversion_code(pvd)
-        if code:
-            codes.add(code)
-    return codes
-
-
-def _property_pko_codes(rules: ExchangeRules) -> set[str]:
-    """Коды ПКО из `КодПравилаКонвертации` ПКС, групп ПКС и ПКЗ."""
-    codes: set[str] = set()
-    for pko in rules.pko():
-        for container_tag in ("Свойства", "Значения"):
-            container = pko.child(container_tag)
-            if container is None:
-                continue
-            # `walk()` раскрывает группы и не возвращает их; `walk_all` отдаёт и группы,
-            # у которых поле тоже `КодПравилаКонвертации`.
-            for node in container.walk_all():
-                code = _conversion_code(node)
-                if code:
-                    codes.add(code)
-    return codes
-
-
-def _referenced_pko_codes(rules: ExchangeRules) -> set[str]:
-    """Коды ПКО, на которые есть ссылка из включённого ПВД, ПКС, группы ПКС или ПКЗ."""
-    return _pvd_pko_codes(rules) | _property_pko_codes(rules)
-
-
-def _handler_corpus(rules: ExchangeRules) -> str:
-    """Тексты обработчиков и алгоритмов: подстрока кода ПКО считается вызовом."""
-    chunks: list[str] = []
-    for node in rules.root.walk_all():
-        if node.kind.name == "algorithm":
-            text = node.get("Текст")
-            if text:
-                chunks.append(str(text))
-        for tag, value in node.values.items():
-            if tag in _CALL_TEXTS and value:
-                chunks.append(str(value))
-        loaded = node.attrs.get("ПослеЗагрузкиПараметра")
-        if loaded:
-            chunks.append(str(loaded))
-    return "\n".join(chunks)
-
-
 # Добавка к замечаниям об обработчиках загрузки ПКО, которое уходит только ссылкой.
 # Узел «Ссылка» читает свойство через поиск (БСП:7984–8010) и не вызывает
 # ПередЗагрузкой / ПриЗагрузке / ПослеЗагрузки этого ПКО; «ПослеЗагрузки» исполнитель
@@ -760,25 +671,24 @@ REF_ONLY_LOAD_NOTE = (
 PKO_LOAD_EVENTS = frozenset({"ПередЗагрузкой", "ПриЗагрузке", "ПослеЗагрузки"})
 
 
-def unreachable_pko_codes(rules: ExchangeRules) -> set[str]:
+def unreachable_pko_codes(rules: ExchangeRules, graph: CallGraph | None = None) -> set[str]:
     """Коды ПКО, на которые `structure.pko_unreachable` ставит предупреждение."""
-    called = _referenced_pko_codes(rules)
-    handlers = _handler_corpus(rules)
+    called = (graph or build_call_graph(rules)).targets
     found: set[str] = set()
     for pko in rules.pko():
         if _disabled(pko) or not str(pko.get(SOURCE)).strip():
             continue
         code = rule_code(pko.code)
-        if code and code not in called and code not in handlers:
+        if code and code.casefold() not in called:
             found.add(code)
     return found
 
 
-def ref_only_pko_codes(rules: ExchangeRules) -> set[str]:
+def ref_only_pko_codes(rules: ExchangeRules, graph: CallGraph | None = None) -> set[str]:
     """Коды ПКО, которые `structure.pko_ref_only` считает достижимыми только ссылкой."""
-    pvd_codes = _pvd_pko_codes(rules)
-    references = _pks_references(rules)
-    whole = _whole_export_corpus(rules)
+    graph = graph or build_call_graph(rules)
+    references = {code.casefold(): linked for code, linked in _pks_references(rules, graph).items()}
+    whole = {edge.target.casefold() for edge in graph.edges if edge.whole and edge.target}
     found: set[str] = set()
     for pko in rules.pko():
         if _disabled(pko):
@@ -787,9 +697,9 @@ def ref_only_pko_codes(rules: ExchangeRules) -> set[str]:
         if not source.startswith(_OBJECT_REF_PREFIXES):
             continue
         code = rule_code(pko.code)
-        if not code or code in pvd_codes or code in whole:
+        if not code or code.casefold() in whole:
             continue
-        linked = references.get(code, [])
+        linked = references.get(code.casefold(), [])
         if not linked or any(item.exports_whole for item in linked):
             continue
         found.add(code)
@@ -806,11 +716,14 @@ def _check_unreachable_pko(context: _Context) -> None:
     """ПКО, которое ничем не вызывается.
 
     Исполнитель берёт ПКО из ПВД, по коду у свойства или подбором по типу значения
-    (БСП:13152-13161). Подбор по типу ещё возможен, поэтому это предупреждение.
-    Пустой источник — выгрузка из обработчиков; выключенное ПКО не исполняется.
+    (БСП:13131–13161). Статический Тип ПКС уже учтён графом; вычисляемый тип без
+    описания ещё неизвестен, поэтому это предупреждение.
+    Пустой источник — выгрузка из обработчиков. ПКО с Отключить исключаются из этого
+    предупреждения для совместимости; загрузчик сам атрибут не читает (БСП:5667–5860).
     От загруженных структур не зависит.
     """
-    unreachable = unreachable_pko_codes(context.rules)
+    context.graph = context.graph or build_call_graph(context.rules)
+    unreachable = unreachable_pko_codes(context.rules, context.graph)
     for pko in context.rules.pko():
         if rule_code(pko.code) not in unreachable:
             continue
@@ -820,71 +733,6 @@ def _check_unreachable_pko(context: _Context) -> None:
             f"ПКО «{pko.code}» не вызывается ни из ПВД, ни из ПКС: проверьте состав"
             " плана обмена (structure_plan_content) и добавьте ПВД или ссылку из ПКС",
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _PksReference:
-    """ПКС или группа ПКС, которая ссылается на код ПКО."""
-
-    address: str
-    exports_whole: bool
-
-
-def _exports_whole_object(text: str) -> bool:
-    """Текст содержит `ВыгрузитьОбъект = Истина` без учёта пробелов вокруг `=` и регистра."""
-    return _EXPORT_OBJECT_TRUE.search(text) is not None
-
-
-def _pks_handler_text(node: Node) -> str:
-    """Тексты обработчиков выгрузки ПКС или группы ПКС."""
-    return "\n".join(str(node.get(tag)) for tag in PKS_HANDLERS if node.get(tag))
-
-
-def _pks_references(rules: ExchangeRules) -> dict[str, list[_PksReference]]:
-    """ПКС и группы ПКС, ссылающиеся на код: полем `КодПравилаКонвертации` или обработчиком."""
-    codes = list(dict.fromkeys(rule_code(pko.code) for pko in rules.pko() if rule_code(pko.code)))
-    found: dict[str, list[_PksReference]] = {}
-    for owner in rules.pko():
-        properties = owner.child("Свойства")
-        if properties is None:
-            continue
-        for path, node in walk_pks(properties):
-            handlers = _pks_handler_text(node)
-            field_code = _conversion_code(node)
-            reference = _PksReference(
-                pks_address(owner.code, path),
-                _exports_whole_object(str(node.get("ПередВыгрузкой"))),
-            )
-            linked: set[str] = set()
-            if field_code:
-                linked.add(field_code)
-            if handlers:
-                linked.update(code for code in codes if code in handlers)
-            for code in linked:
-                found.setdefault(code, []).append(reference)
-    return found
-
-
-def _whole_export_corpus(rules: ExchangeRules) -> str:
-    """Тексты, откуда `ВыгрузитьПоПравилу` выгружает объект целиком.
-
-    Обработчики ПКС (`PKS_HANDLERS`) не входят: упоминание кода там — выгрузка значения
-    свойства. У ПКО те же имена тегов остаются.
-    """
-    chunks: list[str] = []
-    for node in rules.root.walk_all():
-        if node.kind.name == "algorithm":
-            text = node.get("Текст")
-            if text:
-                chunks.append(str(text))
-        tags = _WHOLE_EXPORT_TEXTS if node.kind.name in _PKS_KINDS else _CALL_TEXTS
-        for tag, value in node.values.items():
-            if tag in tags and value:
-                chunks.append(str(value))
-        loaded = node.attrs.get("ПослеЗагрузкиПараметра")
-        if loaded:
-            chunks.append(str(loaded))
-    return "\n".join(chunks)
 
 
 def _ref_only_message(code: str, addresses: str) -> str:
@@ -906,12 +754,13 @@ def _check_ref_only_pko(context: _Context) -> None:
     ПКС по умолчанию ставит выгрузку ссылкой (БСП:12784, БСП:12822): в сообщение попадает
     узел `<Ссылка>` со свойствами поиска, остальные ПКС этого ПКО не исполняются
     (БСП:13170-13196). Целиком объект уходит, если `ПередВыгрузкой` ссылающейся ПКС ставит
-    `ВыгрузитьОбъект = Истина` (БСП:12924, БСП:12949) или код упомянут вне обработчиков ПКС.
+    `ВыгрузитьОбъект = Истина` (БСП:12924, БСП:12949) или граф содержит вызов целого объекта.
     Флаг узла «при необходимости» задаётся правилами регистрации (БСП:3393-3437) и отсюда
     не виден. От загруженных структур не зависит; при правке одного правила не считается.
     """
-    references = _pks_references(context.rules)
-    ref_only = ref_only_pko_codes(context.rules)
+    context.graph = context.graph or build_call_graph(context.rules)
+    references = _pks_references(context.rules, context.graph)
+    ref_only = ref_only_pko_codes(context.rules, context.graph)
     for pko in context.rules.pko():
         code = rule_code(pko.code)
         if code not in ref_only:

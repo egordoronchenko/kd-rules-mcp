@@ -333,7 +333,6 @@ def test_unknown_objects(sides: tuple[sqlite3.Connection, ...]) -> None:
         ("structure.pko_target", "ПКО «Нет»"),
         ("structure.pvd_object", "ПВД «В»"),
         ("structure.pod_object", "ПОД «О»"),
-        ("structure.pko_unreachable", "ПКО «Нет»"),
     ]
 
 
@@ -494,7 +493,9 @@ def test_handler_mention_makes_pko_reachable(sides: tuple[sqlite3.Connection, ..
     assert only(check(sides, xml), "structure.pko_unreachable") == []
 
 
-def test_algorithm_mention_makes_pko_reachable(sides: tuple[sqlite3.Connection, ...]) -> None:
+def test_algorithm_object_argument_does_not_prove_pko_call(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
     pko = pko_xml("Лишний", NOMENCLATURE, NOMENCLATURE)
     xml = (
         "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>"
@@ -503,7 +504,13 @@ def test_algorithm_mention_makes_pko_reachable(sides: tuple[sqlite3.Connection, 
         "<Текст>ВыгрузитьПоПравилу(Лишний);</Текст></Алгоритм></Алгоритмы>"
         "</ПравилаОбмена>"
     ).encode()
-    assert only(check(sides, xml), "structure.pko_unreachable") == []
+    assert [i.address for i in only(check(sides, xml), "structure.pko_unreachable")] == [
+        "ПКО «Лишний»"
+    ]
+    explicit = xml.replace(
+        "ВыгрузитьПоПравилу(Лишний);".encode(), 'ВыгрузитьПоПравилу(Объект,,,, "Лишний");'.encode()
+    )
+    assert only(check(sides, explicit), "structure.pko_unreachable") == []
 
 
 def test_unreachable_pko_does_not_need_structures() -> None:
@@ -595,18 +602,18 @@ def test_pks_handler_name_without_code_is_ref_only(sides: tuple[sqlite3.Connecti
 
 
 @pytest.mark.parametrize("event", ["ПередВыгрузкой", "ПослеЗагрузки"])
-def test_pko_handler_mention_is_not_ref_only(
+def test_pko_handler_literal_call_is_not_ref_only(
     sides: tuple[sqlite3.Connection, ...], event: str
 ) -> None:
-    handler = f"<{event}>ВыгрузитьПоПравилу(Контрагенты);</{event}>"
+    handler = f'<{event}>ВыгрузитьПоПравилу(Объект,,,, "Контрагенты");</{event}>'
     xml = _ref_rules(carrier_handler=handler)
     assert only(check(sides, xml), "structure.pko_ref_only") == []
 
 
-def test_algorithm_mention_is_not_ref_only(sides: tuple[sqlite3.Connection, ...]) -> None:
+def test_algorithm_literal_call_is_not_ref_only(sides: tuple[sqlite3.Connection, ...]) -> None:
     algorithms = (
         '<Алгоритмы><Алгоритм Имя="Вызов">'
-        "<Текст>ВыгрузитьПоПравилу(Контрагенты);</Текст></Алгоритм></Алгоритмы>"
+        '<Текст>ВыгрузитьПоПравилу(Объект,,,, "Контрагенты");</Текст></Алгоритм></Алгоритмы>'
     )
     assert only(check(sides, _ref_rules(algorithms=algorithms)), "structure.pko_ref_only") == []
 

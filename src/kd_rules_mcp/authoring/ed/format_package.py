@@ -33,6 +33,7 @@ from kd_rules_mcp.errors import (
     EdFormatUnknownTypeError,
     Kd2Error,
 )
+from kd_rules_mcp.validation.report import Issue, Level
 
 from .hook import bsl_string, valid_identifier
 from .identity import IdentityMap, logical_path, make_identity_map, refuse
@@ -229,6 +230,47 @@ class FormatPackage:
     types: tuple[FormatType, ...]
     base_schema: EdSchema = field(repr=False, compare=False)
     imports: tuple[str, ...] = ()
+
+    @property
+    def notices(self) -> tuple[Issue, ...]:
+        """Загрузчик КД 3 ожидает объектный тип у единственного свойства.
+
+        reference/kd3-cfg/DataProcessors/ЗагрузкаСтруктурыФормата/Ext/ManagerModule.bsl:182–183.
+        Замечания вычисляются из модели и не меняют прежний JSON и хеш пакета.
+        """
+        own: dict[QName, FormatType] = {}
+
+        def collect(typ: FormatType) -> None:
+            own[typ.name] = typ
+            for prop in typ.properties:
+                if prop.inline_type:
+                    collect(prop.inline_type)
+
+        for typ in self.types:
+            collect(typ)
+        result = []
+        for typ in own.values():
+            if len(typ.properties) != 1:
+                continue
+            name = typ.properties[0].type
+            simple = (
+                (name.namespace == XS and name.local != "anyType")
+                or (name in own and own[name].role in VALUE_ROLES)
+                or (name in self.base_schema.types and self.base_schema.types[name].kind == "value")
+            )
+            if simple:
+                result.append(
+                    Issue(
+                        Level.WARNING,
+                        "ed.format.single_property_type",
+                        "Пакет/" + self.metadata_name + "/Тип/" + typ.name.local,
+                        f"Тип {typ.name} содержит единственное простое свойство: обмену БСП это "
+                        "не мешает. Загрузка пакета в «Конвертацию данных 3» завершится "
+                        "ошибкой. Чтобы пакет загрузился в КД 3, добавьте второе свойство "
+                        "или сделайте свойство объектным.",
+                    )
+                )
+        return tuple(result)
 
     def __post_init__(self) -> None:
         if not valid_identifier(self.metadata_name):
@@ -601,6 +643,8 @@ class FormatDeclaration:
 
     extension_sources содержит тексты явно переданных расширений. Литеральное
     упоминание URI в них считается коллизией консервативно: BSL не исполняется.
+    Сервис вместо текстов передаёт кэшированные extension_namespace_literals
+    и extension_source_hashes; хеши проверяют неизменность до записи.
     Карта routes читается read_routes из той же выгрузки, что descriptions.
     """
 
@@ -610,13 +654,15 @@ class FormatDeclaration:
     plan_name: str | None = None
     extension_sources: tuple[str, ...] = ()
     extension_source_paths: tuple[str, ...] = ()
+    extension_namespace_literals: tuple[frozenset[str], ...] = ()
+    extension_source_hashes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "descriptions", MappingProxyType(dict(self.descriptions)))
         object.__setattr__(self, "extension_sources", tuple(self.extension_sources))
         object.__setattr__(self, "extension_source_paths", tuple(self.extension_source_paths))
         if self.extension_source_paths and len(self.extension_source_paths) != len(
-            self.extension_sources
+            self.extension_namespace_literals or self.extension_sources
         ):
             raise EdFormatShapeError("Пути сканируемых модулей не соответствуют текстам")
 
@@ -651,15 +697,24 @@ def _declaration_parameter(text: str, procedure: str, expected: str | None = Non
     return parameter.name
 
 
-def _source_contains_namespace(text: str, namespace: str, path: str) -> bool:
+def source_namespace_literals(text: str, path: str) -> frozenset[str]:
     """Без полного разбора файла отсутствие коллизии URI не подтверждено."""
     try:
-        return any(token.kind == "string" and token.value == namespace for token in tokenize(text))
+        return frozenset(
+            token.value
+            for token in tokenize(text)
+            if token.kind == "string" and (":" in token.value or "/" in token.value)
+        )
     except (EdFormatError, EdReadError) as error:
         raise EdFormatShapeError(
             f"Не удалось проверить коллизию URI в файле «{path}»: {error}. "
             "Отсутствие коллизии URI не подтверждено; исправьте файл и повторите сборку."
         ) from error
+
+
+def _source_contains_namespace(text: str, namespace: str, path: str) -> bool:
+    """Проверяет литерал URI, не исполняя BSL."""
+    return namespace in source_namespace_literals(text, path)
 
 
 def _declaration_host(
@@ -690,16 +745,20 @@ def _declaration_host(
             raise EdFormatShapeError("Не задан флаг модуля хозяина: " + flag)
     if module.props.get("Server") != "true":
         raise EdFormatShapeError("Модуль объявления недоступен на сервере")
-    if any(e.uri == model.namespace for e in declaration.routes.format_extensions) or any(
-        _source_contains_namespace(source, model.namespace, source_path)
-        for source_path, source in (
-            (module.path.removesuffix(".xml") + "/Ext/Module.bsl", text),
-            *zip(
-                declaration.extension_source_paths
-                or tuple(f"<extension/{i}>" for i in range(len(declaration.extension_sources))),
-                declaration.extension_sources,
-                strict=True,
-            ),
+    if (
+        any(e.uri == model.namespace for e in declaration.routes.format_extensions)
+        or any(model.namespace in values for values in declaration.extension_namespace_literals)
+        or any(
+            _source_contains_namespace(source, model.namespace, source_path)
+            for source_path, source in (
+                (module.path.removesuffix(".xml") + "/Ext/Module.bsl", text),
+                *zip(
+                    (declaration.extension_source_paths if declaration.extension_sources else ())
+                    or tuple(f"<extension/{i}>" for i in range(len(declaration.extension_sources))),
+                    declaration.extension_sources,
+                    strict=True,
+                ),
+            )
         )
     ):
         raise EdFormatNamespaceError("URI уже объявлен хозяином или переданным расширением")
@@ -754,7 +813,7 @@ def read_format_host(descriptions: Mapping[str, str]) -> FormatHost:
 
 
 def render_format_extension(
-    model: FormatPackage,
+    model: FormatPackage | tuple[FormatPackage, ...],
     host: FormatHost | ManagerHost,
     *,
     extension_name: str,
@@ -769,9 +828,19 @@ def render_format_extension(
     ExtendedConfigurationObject — UUID хозяина, флаги контекстов — как у хозяина.
     Режимы совместимости — обязательные сведения хозяина, без подмены версией сборщика.
     """
+    models = (model,) if isinstance(model, FormatPackage) else model
+    if not models:
+        raise EdFormatShapeError("Не переданы пакеты формата")
+    model = models[0]
+    if len({p.namespace for p in models}) != len(models) or len(
+        {p.metadata_name.casefold() for p in models}
+    ) != len(models):
+        raise EdFormatShapeError("Повтор URI или имени пакета")
+    if any(p.base_version != model.base_version for p in models):
+        raise EdFormatShapeError("Версии пакетов не совпадают")
     if not all(valid_identifier(s) for s in (extension_name, prefix)):
         raise EdFormatIdentifierError("Недопустимые имя или префикс расширения")
-    if not model.metadata_name.startswith(prefix):
+    if any(not p.metadata_name.startswith(prefix) for p in models):
         raise EdFormatIdentifierError("Имя собственного пакета должно начинаться с префикса")
     if not host.compatibility_mode.strip() or not host.interface_compatibility_mode.strip():
         raise EdFormatShapeError("Не переданы режимы совместимости хозяина")
@@ -782,6 +851,8 @@ def render_format_extension(
     module = None
     parameter = settings = ""
     if declaration is not None:
+        for package in models[1:]:
+            _declaration_host(package, declaration, host)
         module, parameter, plan, settings = _declaration_host(model, declaration, host)
         module_key = "CommonModule/" + module.name
         borrowed[module_key] = module.uuid
@@ -802,7 +873,7 @@ def render_format_extension(
         "Configuration",
         *("Contained/" + c for c in profile_template()["class_ids"]),
         language_key,
-        "XDTOPackage/" + model.metadata_name,
+        *("XDTOPackage/" + p.metadata_name for p in models),
         *additional_paths,
     )
     identity = make_identity_map(
@@ -851,7 +922,11 @@ def render_format_extension(
     language, _ = adopted_xml(host.language, identity)
     result = {
         "Languages/" + host.language.name + ".xml": serialize(language),
-        **render_format_package(model, identity=identity),
+        **{
+            path: data
+            for p in models
+            for path, data in render_format_package(p, identity=identity).items()
+        },
     }
     if declaration is not None:
         assert module is not None
@@ -862,9 +937,12 @@ def render_format_extension(
             "#Если Сервер Или ТолстыйКлиентОбычноеПриложение Или ВнешнееСоединение Тогда\n\n"
             f'&После("{FORMAT_DECLARE_PROCEDURE}")\n'
             f"Процедура {prefix}{FORMAT_DECLARE_PROCEDURE}({parameter})\n"
-            f"\t{parameter}.Вставить({bsl_string(model.namespace)}, "
-            f"{bsl_string(declaration.version_key)});\n"
-            "КонецПроцедуры\n\n#КонецЕсли\n"
+            + "".join(
+                f"\t{parameter}.Вставить({bsl_string(p.namespace)}, "
+                f"{bsl_string(declaration.version_key)});\n"
+                for p in models
+            )
+            + "КонецПроцедуры\n\n#КонецЕсли\n"
         ).encode()
         if plan_host is not None:
             plan_name = plan_host.exchange_plan.name
@@ -876,11 +954,12 @@ def render_format_extension(
             result[plan_path + "/Ext/ManagerModule.bsl"] = render_manager_route(
                 ManagerRoute(plan_name, declaration.version_key),
                 prefix=prefix,
-                format_namespace=model.namespace,
+                format_namespace=tuple(p.namespace for p in models),
                 settings_parameter=settings,
             ).encode("utf-8")
     # Порядок состава — как его выгружает платформа: общий модуль, план обмена, затем пакет XDTO
     # (проба на файловой базе, docs/plans/evals/2026-10-05-ed-format-declare-probe.md).
-    node(children, "XDTOPackage", model.metadata_name)
+    for package in models:
+        node(children, "XDTOPackage", package.metadata_name)
     result["Configuration.xml"] = serialize(root)
     return result

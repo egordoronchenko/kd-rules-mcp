@@ -8,6 +8,7 @@ from kd_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
 from kd_rules_mcp.service.base import ServiceBase
 from kd_rules_mcp.service.views import page_limit, parse_level, report_view
 from kd_rules_mcp.validation.algorithms import check_algorithm_refs
+from kd_rules_mcp.validation.call_graph import build_call_graph
 from kd_rules_mcp.validation.exchange_plan import check_exchange_plan, plan_name_from_path
 from kd_rules_mcp.validation.format import check_format
 from kd_rules_mcp.validation.handlers import export_handlers, locate
@@ -36,7 +37,8 @@ class ChecksMixin(ServiceBase):
             document = self._document(project_id)
             report = check_format(document)
             if isinstance(document, ExchangeRules):
-                report.extend(check_structures(document, source, target))
+                graph = build_call_graph(document)
+                report.extend(check_structures(document, source, target, graph))
                 report.extend(check_algorithm_refs(document))
                 report.extend(check_search_params(document))
                 report.extend(check_search_objects(document, target))
@@ -48,6 +50,7 @@ class ChecksMixin(ServiceBase):
                         target,
                         plan_name_from_path(rules_path),
                         Path(rules_path).parts[:-1] if rules_path else (),
+                        graph,
                     )
                 )
             elif isinstance(document, RegistrationRules):
@@ -57,7 +60,9 @@ class ChecksMixin(ServiceBase):
 
     def handlers_export(self, project_id: str, folder: str, limit: int) -> dict[str, Any]:
         with self._lock:
-            rules = self._exchange(project_id)
+            rules = self._document(project_id)
+            if not isinstance(rules, ExchangeRules | RegistrationRules):
+                raise Kd2Error("Нужны правила обмена или регистрации")
             out_dir = self._writable(folder)
             export = export_handlers(rules, out_dir)
             self.workspace.remember_handlers(project_id, export)

@@ -27,6 +27,103 @@ URI = "urn:fiction:extension"
 
 
 @pytest.mark.parametrize("kind", ["header", "table", "row"])
+@pytest.mark.parametrize("direction", ["send", "receive", "both"])
+def test_receive_notice_for_each_namespaced_member(kind, direction):
+    from kd_rules_mcp.authoring.ed.manager_render import format_receive_notices
+
+    model = table_model()
+    model = execute(
+        model,
+        ManagerOperation(
+            "direction",
+            "pko",
+            "update",
+            target_id=model.pko[0].logical_id,
+            patch=PkoPatch(directions=(direction,)),
+        ),
+    )
+    owner = model.pko[0].logical_id
+    if kind in ("table", "row"):
+        model = execute(
+            model,
+            ManagerOperation(
+                "table",
+                "table_part",
+                "create",
+                owner_id=owner,
+                patch=TablePartPatch(
+                    configuration_property="Rows",
+                    format_property="Rows",
+                    namespace=URI if kind == "table" else "",
+                ),
+            ),
+        )
+        owner = model.pko[0].groups[-1].logical_id
+    if kind != "table":
+        model = execute(
+            model,
+            ManagerOperation(
+                "property",
+                "property",
+                "create",
+                owner_id=owner,
+                patch=PropertyPatch(configuration_property="A", format_property="A", namespace=URI),
+            ),
+        )
+    notices = format_receive_notices(model)
+    assert len(notices) == (0 if direction == "send" else 1)
+    if notices:
+        notice = notices[0]
+        assert notice.check == "ed.format.receive_unconfirmed"
+        assert notice.level.value == "предупреждение" and URI in notice.message
+        assert notice.address.startswith("ПКО/")
+
+
+def test_deleted_entity_keeps_client_id_after_snapshot_round_trip():
+    from kd_rules_mcp.authoring.ed.manager_operations import ParameterPatch
+    from kd_rules_mcp.ed.writer_model import dump_model, load_model
+
+    model = new_manager()
+    model = execute(
+        model,
+        ManagerOperation(
+            "reserved",
+            "parameter",
+            "create",
+            patch=ParameterPatch(name="First"),
+        ),
+    )
+    operation_hash = model.decisions[-1].operation_hash
+    model = execute(
+        model,
+        ManagerOperation(
+            "remove",
+            "parameter",
+            "delete",
+            target_id=model.parameters[0].logical_id,
+        ),
+    )
+    model = load_model(dump_model(model))
+    plan = preview(
+        model,
+        (
+            ManagerOperation(
+                "reserved",
+                "parameter",
+                "create",
+                patch=ParameterPatch(name="Second"),
+            ),
+        ),
+        expected_revision=model.revision,
+    )
+    (failure,) = plan.failures
+    assert failure.reason == "client_id_taken"
+    assert operation_hash in failure.message and "First" in failure.message
+    assert "возьмите новый" in failure.message
+    assert not model.parameters
+
+
+@pytest.mark.parametrize("kind", ["header", "table", "row"])
 def test_uri_forms_are_editable_and_round_trip_bytes(kind):
     model = table_model()
     model = execute(

@@ -544,7 +544,8 @@ def test_service_namespace_validate_and_build(writer_setup, namespace, has_packa
         assert build(service, applied, **arguments)["validation"]["errors"] == 0
 
 
-def test_format_package_over_transport(writer_setup):
+@pytest.mark.parametrize("as_list", [False, True])
+def test_format_package_over_transport(writer_setup, as_list):
     service, args, root = writer_setup
     path = format_package_source(service, root)
     created = service.ed_create(**args)
@@ -556,7 +557,7 @@ def test_format_package_over_transport(writer_setup):
                 {
                     "scope": "manager",
                     "project_id": created["project_id"],
-                    "format_package": str(path),
+                    "format_package": [str(path)] if as_list else str(path),
                 },
             )
             assert not result.is_error, result.content
@@ -582,6 +583,228 @@ def test_changed_format_package_invalidates_build_hash(writer_setup):
             mode="write",
             expected_preview_hash=preview["build_hash"],
         )
+
+
+@pytest.mark.parametrize("duplicate", [None, "namespace", "metadata_name"])
+def test_manager_multiple_package_paths(writer_setup, duplicate):
+    service, args, root = writer_setup
+    first = format_package_source(service, root)
+    data = json.loads(first.read_text("utf-8"))
+    second = first.with_name("second-package.json")
+    if duplicate != "metadata_name":
+        data["metadata_name"] += "Второй"
+    else:
+        data["metadata_name"] = data["metadata_name"].upper()
+    if duplicate != "namespace":
+        old_uri = data["namespace"]
+        new_uri = old_uri + ":second"
+        data = json.loads(json.dumps(data, ensure_ascii=False).replace(old_uri, new_uri))
+    second.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    created = service.ed_create(**args)
+    if duplicate:
+        with pytest.raises(EdAuthoringPreconditionError) as caught:
+            build(service, created, format_package=[str(first), str(second)])
+        failure = caught.value.details["failures"][0]
+        assert failure["id"] == "format_package_invalid"
+        assert str(first) in failure["message"] and str(second) in failure["message"]
+        return
+    # Второй пакет передан папкой, URI правил разрешается именно в нём.
+    from kd_rules_mcp.authoring.ed.format_package import render_format_package
+
+    package = service._authoring_format_package(
+        str(second), service._manager_bound_schema(service._manager_metadata("positions")), "1.20"
+    )
+    dump = second.with_suffix("")
+    for name, payload in render_format_package(package).items():
+        target = dump / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    operations = manager_operations()
+    operations[0]["patch"]["extensions"] = [data["namespace"]]
+    operations[1]["patch"]["namespace"] = data["namespace"]
+    _, _, applied = apply_packet(service, created, operations)
+    sources = [str(first), str(dump)]
+    preview = build(service, applied, format_package=sources)
+    assert (
+        preview["build_hash"] == build(service, applied, format_package=sources[::-1])["build_hash"]
+    )
+    written = build(
+        service,
+        applied,
+        format_package=sources,
+        mode="write",
+        expected_preview_hash=preview["build_hash"],
+        acknowledged_notices=preview["required_acknowledgements"],
+    )
+    manifest = json.loads((Path(written["output_dir"]) / "manifest.json").read_bytes())
+    assert len(manifest["format_packages"]) == len(manifest["format_extensions"]) == 2
+
+
+@pytest.mark.parametrize("notice_kind", ["receive", "single_property"])
+def test_format_notices_require_build_acknowledgement(writer_setup, notice_kind):
+    service, args, root = writer_setup
+    path = format_package_source(service, root)
+    created = service.ed_create(**args)
+    package = service._authoring_format_package(
+        str(path), service._manager_bound_schema(service._manager_metadata("positions")), "1.20"
+    )
+    assert not package.notices  # У основной фикстуры два простых свойства.
+    if notice_kind == "receive":
+        operations = manager_operations()
+        operations[0]["patch"]["extensions"] = ["urn:test:writer-extension"]
+        operations[1]["patch"]["namespace"] = "urn:test:writer-extension"
+        _, _, created = apply_packet(service, created, operations)
+        check = "ed.format.receive_unconfirmed"
+    else:
+        data = json.loads(path.read_text("utf-8"))
+        data["types"][0]["properties"] = data["types"][0]["properties"][:1]
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        check = "ed.format.single_property_type"
+    preview = build(service, created, format_package=str(path))
+    notices = build(service, created, format_package=str(path), section="notices")
+    notice = next(n for n in notices["items"] if n.get("check") == check)
+    assert notice["level"] == "предупреждение"
+    acknowledgements = [n for n in preview["required_acknowledgements"] if n != notice["id"]]
+    with pytest.raises(EdAuthoringAckRequiredError):
+        build(
+            service,
+            created,
+            format_package=str(path),
+            mode="write",
+            expected_preview_hash=preview["build_hash"],
+            acknowledged_notices=acknowledgements,
+        )
+    written = build(
+        service,
+        created,
+        format_package=str(path),
+        mode="write",
+        expected_preview_hash=preview["build_hash"],
+        acknowledged_notices=preview["required_acknowledgements"],
+    )
+    assert written["written"]
+    if notice_kind == "receive":
+        assert check in (Path(written["output_dir"]) / "instruction.md").read_text("utf-8")
+
+
+def test_format_uri_scan_cache_stat_and_preview_write(writer_setup, monkeypatch):
+    from kd_rules_mcp.service import ed_authoring
+
+    service, args, root = writer_setup
+    package_path = format_package_source(service, root)
+    extension = root.parent / "scan-extension"
+    extension.mkdir()
+    (extension / "Configuration.xml").write_text(
+        "<MetaDataObject><Configuration><Properties><Name>ScanExtension</Name>"
+        "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+        "</Properties><ChildObjects/></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    modules = [extension / name for name in ("First.bsl", "Second.bsl")]
+    for module in modules:
+        module.write_text('Значение = "urn:test:unrelated";', encoding="utf-8")
+    args["extensions"] = [str(extension)]
+    args["structure_id"] = None
+    created = service.ed_create(**args)
+    parsed = []
+    original = ed_authoring.source_namespace_literals
+
+    def counted(text, path):
+        parsed.append(path)
+        return original(text, path)
+
+    monkeypatch.setattr(ed_authoring, "source_namespace_literals", counted)
+    preview = build(service, created, format_package=str(package_path))
+    assert set(parsed) == {str(p) for p in modules}
+    parsed.clear()
+    reads = []
+    read_text = Path.read_text
+
+    def counted_read(path, *args, **kwargs):
+        if path in modules:
+            reads.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read)
+    assert (
+        build(service, created, format_package=str(package_path))["build_hash"]
+        == preview["build_hash"]
+    )
+    build(
+        service,
+        created,
+        format_package=str(package_path),
+        mode="write",
+        expected_preview_hash=preview["build_hash"],
+        acknowledged_notices=preview["required_acknowledgements"],
+    )
+    assert not parsed and not reads
+    modules[0].write_text('Значение = "urn:test:changed-module";', encoding="utf-8")
+    metadata = service._manager_metadata(created["project_id"])
+    # Прямой вызов изолирует сканирование коллизий от обязательного rebind дерева.
+    service._authoring_format_declaration(metadata, ManagerRoute(PLAN, "1.20"))
+    assert parsed == [str(modules[0])] and reads == [modules[0]]
+    assert len(service._format_namespace_cache) == 2
+
+
+def test_manager_build_logs_format_phases_for_injected_delays(writer_setup, monkeypatch, caplog):
+    import logging
+    import re
+    from time import sleep
+
+    from kd_rules_mcp.authoring.ed import format_package as format_package_module
+    from kd_rules_mcp.service import ed_authoring
+    from kd_rules_mcp.service import ed_writer as writer_module
+
+    service, args, root = writer_setup
+    package_path = format_package_source(service, root)
+    extension = root.parent / "phase-extension"
+    extension.mkdir()
+    (extension / "Configuration.xml").write_text(
+        "<MetaDataObject><Configuration><Properties><Name>PhaseExtension</Name>"
+        "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+        "</Properties><ChildObjects/></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    module = extension / "Scan.bsl"
+    module.write_text('Значение = "urn:test:unrelated";', encoding="utf-8")
+    args = args | {"extensions": [str(extension)], "structure_id": None}
+    created = service.ed_create(**args)
+
+    def delayed(original):
+        def call(*call_args, **call_kwargs):
+            sleep(0.03)
+            return original(*call_args, **call_kwargs)
+
+        return call
+
+    monkeypatch.setattr(
+        ed_authoring, "load_format_package", delayed(ed_authoring.load_format_package)
+    )
+    monkeypatch.setattr(
+        ed_authoring,
+        "source_namespace_literals",
+        delayed(ed_authoring.source_namespace_literals),
+    )
+    monkeypatch.setattr(
+        format_package_module,
+        "render_format_extension",
+        delayed(format_package_module.render_format_extension),
+    )
+    monkeypatch.setattr(writer_module, "render", delayed(writer_module.render))
+    caplog.set_level(logging.INFO, logger=ed_authoring.__name__)
+    build(service, created, format_package=str(package_path))
+    message = next(
+        record.message
+        for record in caplog.records
+        if record.message.startswith("ed_authoring_build")
+    )
+    for name in ("format_read", "format_uri", "format_kit", "prepare"):
+        match = re.search(rf"{name}=([0-9.]+)s", message)
+        assert match is not None, message
+        assert float(match.group(1)) >= 0.02, message
+    assert re.search(r"uri_parsed=([1-9]\d*)", message)
+    assert "uri_cached=" in message
 
 
 @pytest.mark.parametrize(
@@ -655,6 +878,44 @@ def test_migration_missing_project_inputs_return_catalog_reopen_calls(writer_set
             },
         },
     ]
+
+
+def test_creation_json_arguments_reopen_after_restart(writer_setup, tmp_path):
+    original, args, root = writer_setup
+    catalog = tmp_path / "catalog.yaml"
+    catalog.write_text(
+        "projects:\n  Example:\n    configurations:\n      Main:\n        dump: .\n",
+        encoding="utf-8",
+    )
+    service = Kd2Service(
+        Settings(
+            cache_dir=original.settings.cache_dir,
+            workspace=original.settings.workspace,
+            projects_file=catalog,
+            project_dirs={"Example": root},
+        )
+    )
+    opened = reopen_writer_schema(service, root)
+    created = service.ed_create(
+        project_id=args["project_id"],
+        project="Example",
+        configuration="Main",
+        plan=args["plan"],
+        format_version=args["format_version"],
+        schema_id=opened["schema_id"],
+        structure_id=args["structure_id"],
+    )
+    stored = json.loads(
+        (service.manager_workspace.directory / args["project_id"] / "creation.json").read_bytes()
+    )
+    arguments = stored["arguments"]
+    assert arguments["project"] and arguments["configuration_path"]
+    arguments = {key: value for key, value in arguments.items() if key != "extensions_checked"}
+    restarted = Kd2Service(service.settings)
+    reopen_writer_schema(restarted, root)
+    reopened = restarted.ed_create(project_id=args["project_id"], **arguments)
+    assert reopened["existing"]
+    assert reopened["revision"] == created["revision"]
 
 
 @pytest.mark.parametrize("reference", ["auto", "explicit"])

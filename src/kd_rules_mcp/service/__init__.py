@@ -17,6 +17,7 @@ from kd_rules_mcp.service.generate import GenerateMixin
 from kd_rules_mcp.service.matching import MatchingMixin
 from kd_rules_mcp.service.paths import PathMap, Settings
 from kd_rules_mcp.service.registration_retarget import RegistrationRetargetMixin
+from kd_rules_mcp.service.review import ReviewMixin
 from kd_rules_mcp.service.rules import RulesMixin
 from kd_rules_mcp.service.structures import StructuresMixin
 
@@ -24,6 +25,7 @@ __all__ = ["Kd2Service", "PathMap", "Settings"]
 
 
 class Kd2Service(
+    ReviewMixin,
     EdWriterMixin,
     RegistrationRetargetMixin,
     StructuresMixin,

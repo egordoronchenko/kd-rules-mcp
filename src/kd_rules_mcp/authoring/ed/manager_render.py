@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from bisect import bisect_right
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict, dataclass, fields, replace
 from importlib.resources import files
 from types import MappingProxyType
@@ -29,6 +30,7 @@ from kd_rules_mcp.ed.writer_model import (
 )
 from kd_rules_mcp.ed.writer_readback import check_readback
 from kd_rules_mcp.errors import Kd2Error
+from kd_rules_mcp.validation.report import Issue, Level
 
 from .artifacts import validate_manager_files
 from .hook import bsl_string, valid_identifier
@@ -130,8 +132,10 @@ class ManagerManifest:
                 result[key] = self.inputs[key]
         if "pod_stubs" in self.inputs:
             result["pod_stubs"] = self.inputs["pod_stubs"]
-        if "format_package" in self.inputs:
-            result["format_package"] = self.inputs["format_package"]
+        for key in ("format_package", "format_packages"):
+            if key in self.inputs:
+                result[key] = self.inputs[key]
+        if "format_extensions" in self.inputs:
             result["format_extensions"] = self.inputs["format_extensions"]
         return result
 
@@ -187,12 +191,19 @@ class ManagerKit:
         object.__setattr__(self, "files", MappingProxyType(dict(sorted(self.files.items()))))
 
 
+def _span(phase: Callable[[str], AbstractContextManager[Any]] | None, name: str):
+    """Сервис передаёт замер фазы; ядро комплекта сервис не импортирует."""
+    if phase is None:
+        return nullcontext()
+    return phase(name)
+
+
 def render_manager_route(
     route: ManagerRoute,
     *,
     module_name: str | None = None,
     prefix: str,
-    format_namespace: str | None = None,
+    format_namespace: str | tuple[str, ...] | None = None,
     settings_parameter: str = "Настройки",
 ) -> str:
     """Точная форма (б) пилота; путь без узла этим перехватом не обслуживается."""
@@ -212,11 +223,16 @@ def render_manager_route(
                 f"\t\t{settings_parameter}.ВерсииФорматаОбмена.Вставить({bsl_string(key)}, "
                 f"{module_name});\n\tКонецЕсли;\n"
             )
+        namespaces = (format_namespace,) if isinstance(format_namespace, str) else format_namespace
         body += (
             f"\tЕсли ТипЗнч({settings_parameter}.РасширенияФорматаОбмена) "
             '= Тип("Соответствие") Тогда\n'
-            f"\t\t{settings_parameter}.РасширенияФорматаОбмена.Вставить("
-            f"{bsl_string(format_namespace)}, {bsl_string(key)});\n\tКонецЕсли;\n"
+            + "".join(
+                f"\t\t{settings_parameter}.РасширенияФорматаОбмена.Вставить("
+                f"{bsl_string(uri)}, {bsl_string(key)});\n"
+                for uri in namespaces
+            )
+            + "\tКонецЕсли;\n"
         )
         return (
             "#Если Сервер Или ТолстыйКлиентОбычноеПриложение Или ВнешнееСоединение Тогда\n\n"
@@ -473,7 +489,8 @@ def _delivery_changed(
     form_evidence: Mapping[str, bool],
 ) -> bool:
     if any(
-        previous.inputs.get(key) != inputs[key] for key in ("template_version", "templates_sha256")
+        previous.inputs.get(key) != inputs[key]
+        for key in ("template_version", "templates_sha256", "instruction_template_sha256")
     ):
         return True
     if (
@@ -506,6 +523,32 @@ def _adopted_input(obj: Description) -> dict[str, str]:
     }
 
 
+def format_receive_notices(model: ManagerModel) -> tuple[Issue, ...]:
+    """Риск очистки прямой ПКС: XDTO:6188–6196, Н-8.2/Н-9.4 живой приёмки.
+
+    Свойства отправляются независимо от пакета корреспондента (XDTO:10054–10061).
+    Подтверждение установки на обеих сторонах принимает автор сборки.
+    """
+    addresses = model_addresses(model)
+    return tuple(
+        Issue(
+            Level.WARNING,
+            "ed.format.receive_unconfirmed",
+            addresses[member.logical_id],
+            f"URI {member.namespace}: пока у корреспондента нет пакета, пустое свойство очистит "
+            "реквизит; подтвердите, что пакет стоит на обеих сторонах.",
+        )
+        for rule in model.pko
+        if any(direction in ("receive", "both") for direction in rule.directions)
+        for member in (
+            *rule.properties,
+            *rule.groups,
+            *(prop for group in rule.groups for prop in group.properties),
+        )
+        if member.namespace
+    )
+
+
 def render_manager_kit(
     model: ManagerModel,
     rendered: RenderResult,
@@ -525,9 +568,10 @@ def render_manager_kit(
     previous_files: Mapping[str, bytes] | None = None,
     keep_version: bool = False,
     creation_fingerprint: str = "",
-    format_package: FormatPackage | None = None,
+    format_package: FormatPackage | tuple[FormatPackage, ...] | None = None,
     format_declaration: FormatDeclaration | None = None,
     schema_namespaces: tuple[str, ...] = (),
+    phase: Callable[[str], AbstractContextManager[Any]] | None = None,
 ) -> ManagerKit:
     """Порождает байты, ничего не записывает. Профильные ed.writer.* проверяет сервис.
 
@@ -630,18 +674,23 @@ def render_manager_kit(
     )
     from .format_package import (
         FORMAT_OVERRIDE_MODULE,
+        FormatPackage,
         _declaration_host,
         format_package_data,
         render_format_extension,
     )
 
     carrier: dict[str, bytes] = {}
+    packages = (
+        (format_package,) if isinstance(format_package, FormatPackage) else format_package or ()
+    )
+    packages = tuple(sorted(packages, key=lambda p: (p.metadata_name.casefold(), p.namespace)))
     settings_parameter = "Настройки"
     known_namespaces = set(schema_namespaces)
-    if format_package is not None:
-        known_namespaces.update(p.namespace for p in format_package.base_schema.packages)
-        known_namespaces.update(format_package.base_schema.extension_namespaces)
-        known_namespaces.add(format_package.namespace)
+    for package in packages:
+        known_namespaces.update(p.namespace for p in package.base_schema.packages)
+        known_namespaces.update(package.base_schema.extension_namespaces)
+        known_namespaces.add(package.namespace)
     for rule in model.pko:
         for member in (
             *rule.properties,
@@ -654,27 +703,31 @@ def render_manager_kit(
                     "URI свойства отсутствует в пакете и схеме корреспондента: " + member.namespace,
                     address=model_addresses(model).get(member.logical_id, "Конвертация"),
                 )
-    if format_package is not None:
+    if packages:
         if format_declaration is None or format_declaration.plan_name != route.plan_name:
             refuse("format_package_invalid", "Для пакета нужны объявления хозяина и план маршрута")
-        if key != format_package.base_version:
+        if any(key != p.base_version for p in packages):
             refuse("format_package_invalid", "Версия пакета не совпадает с ключом маршрута")
         try:
-            override, _, _, settings_parameter = _declaration_host(
-                format_package, format_declaration, host
-            )
-            carrier = render_format_extension(
-                format_package,
-                host,
-                extension_name=host.identity.name,
-                prefix=prefix,
-                declaration=format_declaration,
-            )
+            with _span(phase, "format_kit"):
+                override, _, _, settings_parameter = _declaration_host(
+                    packages[0], format_declaration, host
+                )
+                carrier = render_format_extension(
+                    packages,
+                    host,
+                    extension_name=host.identity.name,
+                    prefix=prefix,
+                    declaration=format_declaration,
+                )
         except (Kd2Error, ValueError, TypeError) as error:
             refuse("format_package_invalid", str(error))
         if module_name.casefold() == override.name.casefold():
             refuse("identifier_conflict", "Менеджер совпадает с заимствованным модулем объявления")
-        paths += ("CommonModule/" + override.name, "XDTOPackage/" + format_package.metadata_name)
+        paths += (
+            "CommonModule/" + override.name,
+            *("XDTOPackage/" + p.metadata_name for p in packages),
+        )
         borrowed["CommonModule/" + override.name] = override.uuid
     ids = make_identity_map(host.configuration_uuid, host.identity.name, paths, borrowed)
     model_bytes = dump_model(model)
@@ -688,7 +741,9 @@ def render_manager_kit(
         "executor_profile_id": executor_profile_id,
         "host": _host_dict(host),
         "template_version": MANAGER_TEMPLATE_VERSION,
-        "templates_sha256": sha256(json_bytes(profile_template()) + template),
+        # Профиль XML меняет файлы расширения — входит в версию; шаблон инструкции — нет.
+        "templates_sha256": sha256(json_bytes(profile_template())),
+        "instruction_template_sha256": sha256(template),
         "rendering": {
             "mode": rendered.report.mode,
             "use_source_style": rendered.report.use_source_style,
@@ -717,32 +772,38 @@ def render_manager_kit(
     if registered_objects:
         inputs["registered_objects"] = list(registered_objects)
     inputs["pod_stubs"] = list(pod_stubs)
-    if format_package is not None:
-        package_path = "XDTOPackages/" + format_package.metadata_name + "/Ext/Package.bin"
-        imported = {p.namespace: p for p in format_package.base_schema.packages}
+    package_inputs = []
+    for package in packages:
+        package_path = "XDTOPackages/" + package.metadata_name + "/Ext/Package.bin"
+        imported = {p.namespace: p for p in package.base_schema.packages}
         dependencies: set[str] = set()
 
-        def collect(uri: str) -> None:
+        pending = [package.base_namespace, *package.imports]
+        while pending:
+            uri = pending.pop()
             if uri in dependencies:
-                return
+                continue
             if uri not in imported:
                 refuse("format_package_invalid", "Импорт пакета отсутствует в схеме: " + uri)
             dependencies.add(uri)
-            for dependency in imported[uri].imports:
-                collect(dependency.namespace)
-
-        for uri in (format_package.base_namespace, *format_package.imports):
-            collect(uri)
-        inputs["format_package"] = {
-            "metadata_name": format_package.metadata_name,
-            "namespace": format_package.namespace,
-            "base_version": format_package.base_version,
-            "base_namespace": format_package.base_namespace,
-            "sha256": sha256(carrier[package_path]),
-            "model_sha256": sha256(json_bytes(format_package_data(format_package))),
-            "imports": {uri: imported[uri].sources[0].sha256 for uri in sorted(dependencies)},
-        }
-        inputs["format_extensions"] = {format_package.namespace: key}
+            pending.extend(dependency.namespace for dependency in imported[uri].imports)
+        package_inputs.append(
+            {
+                "metadata_name": package.metadata_name,
+                "namespace": package.namespace,
+                "base_version": package.base_version,
+                "base_namespace": package.base_namespace,
+                "sha256": sha256(carrier[package_path]),
+                "model_sha256": sha256(json_bytes(format_package_data(package))),
+                "imports": {uri: imported[uri].sources[0].sha256 for uri in sorted(dependencies)},
+            }
+        )
+    if packages:
+        if len(packages) == 1:
+            inputs["format_package"] = package_inputs[0]
+        else:
+            inputs["format_packages"] = package_inputs
+        inputs["format_extensions"] = {p.namespace: key for p in packages}
         assert format_declaration is not None
         inputs["format_declaration_sha256"] = sha256(
             json_bytes(dict(format_declaration.descriptions))
@@ -774,39 +835,42 @@ def render_manager_kit(
             address="Конфигурация",
         )
     result = {"extension/" + path: payload for path, payload in xml.items()}
-    if format_package is not None:
+    if packages:
         # FP:767–769, проба 05.10: ChildObjects упорядочены по видам платформы.
-        configuration = parse_xml("Configuration.xml", xml["Configuration.xml"].decode())
-        children = configuration.find("{*}Configuration/{*}ChildObjects")
-        assert children is not None
-        node(children, "CommonModule", FORMAT_OVERRIDE_MODULE)
-        node(children, "XDTOPackage", format_package.metadata_name)
-        children[:] = sorted(
-            children,
-            key=lambda child: (
-                _CHILD_KIND_INDEX.get(child.tag.rsplit("}", 1)[-1], len(_CHILD_KIND_INDEX)),
-                child.tag,
-                (child.text or "").casefold(),
-            ),
-        )
-        result["extension/Configuration.xml"] = serialize(configuration)
-        result.update(
-            {
-                "extension/" + p: b
-                for p, b in carrier.items()
-                if p.startswith(("CommonModules/", "XDTOPackages/"))
-            }
-        )
+        with _span(phase, "format_kit"):
+            configuration = parse_xml("Configuration.xml", xml["Configuration.xml"].decode())
+            children = configuration.find("{*}Configuration/{*}ChildObjects")
+            assert children is not None
+            node(children, "CommonModule", FORMAT_OVERRIDE_MODULE)
+            for package in packages:
+                node(children, "XDTOPackage", package.metadata_name)
+            children[:] = sorted(
+                children,
+                key=lambda child: (
+                    _CHILD_KIND_INDEX.get(child.tag.rsplit("}", 1)[-1], len(_CHILD_KIND_INDEX)),
+                    child.tag,
+                    (child.text or "").casefold(),
+                ),
+            )
+            result["extension/Configuration.xml"] = serialize(configuration)
+            result.update(
+                {
+                    "extension/" + p: b
+                    for p, b in carrier.items()
+                    if p.startswith(("CommonModules/", "XDTOPackages/"))
+                }
+            )
     result[module_path] = rendered.data
-    result["extension/ExchangePlans/" + route.plan_name + "/Ext/ManagerModule.bsl"] = (
-        render_manager_route(
-            route,
-            module_name=module_name,
-            prefix=prefix,
-            format_namespace=format_package.namespace if format_package else None,
-            settings_parameter=settings_parameter,
-        ).encode("utf-8")
-    )
+    with _span(phase, "format_kit") if packages else nullcontext():
+        result["extension/ExchangePlans/" + route.plan_name + "/Ext/ManagerModule.bsl"] = (
+            render_manager_route(
+                route,
+                module_name=module_name,
+                prefix=prefix,
+                format_namespace=tuple(p.namespace for p in packages) or None,
+                settings_parameter=settings_parameter,
+            ).encode("utf-8")
+        )
     result["manager.ed.json"] = model_bytes
     result["source-map.json"] = json_bytes(source_map)
     instruction = render_manager_instruction(
@@ -826,8 +890,14 @@ def render_manager_kit(
         ),
         registration_objects=registration_objects,
         subscription_objects=tuple(obj.kind + "." + obj.name for obj in subscription_objects),
-        format_namespace=format_package.namespace if format_package else None,
+        format_namespace=tuple(p.namespace for p in packages) or None,
+        format_packages=tuple((p.metadata_name, p.namespace) for p in packages),
     )
+    if format_receive_notices(model):
+        instruction += (
+            "\nЗамечание `ed.format.receive_unconfirmed`: перед получением подтвердите установку "
+            "пакетов на обеих сторонах, иначе пустое свойство очистит реквизит.\n"
+        )
     # Заглушки — до раздела проверки данных: сервис дополняет «Проверьте данные перед первым
     # обменом» по последнему заголовку и считает всё после него частью раздела (Д-П3).
     if pod_stubs:

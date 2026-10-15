@@ -5313,24 +5313,23 @@ def preview(
         previous = next((d for d in result.decisions if d.client_id == op.client_id), None)
         if previous:
             if not _matches_decision(previous, op, fingerprint):
+                previous_address = model_addresses(result).get(previous.result_ids[0]) or next(
+                    (
+                        address
+                        for decision in reversed(result.decisions)
+                        if previous.result_ids[0] in decision.result_ids
+                        for address in reversed(decision.address_aliases)
+                        if address != "Конвертация"
+                    ),
+                    "ID/" + previous.result_ids[0],
+                )
                 failures.append(
                     ManagerFailure(
-                        "model_invalid",
-                        op.address
-                        or model_addresses(result).get(
-                            op.target_id or previous.result_ids[0],
-                            previous.address_aliases[-1]
-                            if previous.address_aliases
-                            else "Конвертация",
-                        ),
-                        f"Конфликт client_id «{op.client_id}»: id закреплён за "
-                        + model_addresses(result).get(previous.result_ids[0], "удалённой сущностью")
-                        + "; используйте новый client_id для другого решения",
-                        (
-                            model_addresses(result).get(
-                                previous.result_ids[0], "удалённая сущность"
-                            ),
-                        ),
+                        "client_id_taken",
+                        previous_address,
+                        f"client_id «{op.client_id}» уже использован операцией "
+                        f"{previous.operation_hash} для " + previous_address + "; возьмите новый",
+                        (previous_address,),
                     )
                 )
                 canonical.append(CanonicalOperation(op, fingerprint, previous.result_ids[0]))

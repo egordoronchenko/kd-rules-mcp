@@ -64,7 +64,16 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "rule_delete",
         "pko_create_from_candidates",
     ),
-    "Checks": ("rules_validate", "rules_diff", "handlers_export", "handlers_locate"),
+    "Checks": (
+        "rules_validate",
+        "rules_diff",
+        "handlers_export",
+        "handlers_locate",
+        "rules_trace",
+        "handlers_queries",
+        "handlers_search",
+        "handlers_read",
+    ),
     "Registration and correspondent rules": (
         "registration_build",
         "registration_retarget",
@@ -128,6 +137,8 @@ def _type(schema: dict[str, Any]) -> str:
     if "anyOf" in schema:
         return " | ".join(_type(item) for item in schema["anyOf"])
     kind = schema.get("type", "any")
+    if isinstance(kind, list):
+        return " | ".join(map(str, kind))
     if kind == "array":
         return f"array of {_type(schema.get('items', {}))}"
     low, high = schema.get("minimum"), schema.get("maximum")

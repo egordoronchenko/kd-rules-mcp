@@ -153,6 +153,10 @@ StructureId = Annotated[str, Field(description="Cached structure ID")]
 ProjectId = Annotated[str, Field(description="Rules project ID")]
 Offset = Annotated[int, Field(description="Page offset", ge=0)]
 Limit = Annotated[int, Field(description="Page size", ge=1, le=200)]
+ReviewProject = Annotated[str, Field(description="Project")]
+ReviewOffset = Annotated[int, Field(description="Offset")]
+ReviewLimit = Annotated[int, Field(description="Limit")]
+ReviewAddress = Annotated[str, Field(description="Address")]
 ObjectName = Annotated[
     str,
     Field(description=("Вид.Имя or KD type name")),
@@ -222,8 +226,11 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
 
 
 def _without_schema_titles(schema: dict[str, Any]) -> dict[str, Any]:
-    """Убирает заголовки схем, сохраняя имена полей и содержимое значений/примеров."""
+    """Убирает заголовки, сокращает простые union-типы; значения и примеры не меняет."""
     result = {key: value for key, value in schema.items() if key != "title"}
+    # true — значение JSON Schema по умолчанию; ограничения false сохраняются.
+    if result.get("additionalProperties") is True:
+        del result["additionalProperties"]
     for key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas"):
         value = result.get(key)
         if isinstance(value, dict):
@@ -256,6 +263,17 @@ def _without_schema_titles(schema: dict[str, Any]) -> dict[str, Any]:
                 _without_schema_titles(child) if isinstance(child, dict) else child
                 for child in value
             ]
+    variants = result.get("anyOf")
+    if (
+        isinstance(variants, list)
+        and variants
+        and all(
+            isinstance(child, dict) and set(child) == {"type"} and isinstance(child["type"], str)
+            for child in variants
+        )
+    ):
+        result["type"] = [child["type"] for child in variants]
+        del result["anyOf"]
     return result
 
 
@@ -867,6 +885,58 @@ def create_server(service: Kd2Service) -> MCPServer:
         """Map an exported syntax-checker wrapper line to rule/event/handler. Use the filename
         from handlers_export."""
         return await call(service.handlers_locate, project_id, file_name, line)
+
+    @server.tool()
+    async def rules_trace(
+        project_id: ReviewProject,
+        object: Annotated[str, Field(description="Object or code")],
+        direction: Annotated[str, Field(description="export/import")] = "export",
+        depth: Annotated[int, Field(description="Depth 0..10")] = 2,
+        offset: ReviewOffset = 0,
+        limit: ReviewLimit = 50,
+    ) -> dict[str, Any]:
+        """Trace an object or rule code. Details: docs/tools.md."""
+        return await call(service.rules_trace, project_id, object, direction, depth, offset, limit)
+
+    @server.tool()
+    async def handlers_queries(
+        project_id: ReviewProject,
+        address: ReviewAddress = "",
+        file: Annotated[str, Field(description="Wrapper")] = "",
+        handler: Annotated[str | None, Field(description="Event")] = None,
+        offset: ReviewOffset = 0,
+        limit: ReviewLimit = 50,
+    ) -> dict[str, Any]:
+        """Inspect queries at an address or wrapper file."""
+        return await call(
+            service.handlers_queries, project_id, address, file, handler, offset, limit
+        )
+
+    @server.tool()
+    async def handlers_search(
+        project_id: ReviewProject,
+        query: Annotated[str, Field(description="Text or regex")],
+        kind: Annotated[str, Field(description="substring/regex")] = "substring",
+        rule: Annotated[str | None, Field(description="Address")] = None,
+        handler: Annotated[str | None, Field(description="Event")] = None,
+        offset: ReviewOffset = 0,
+        limit: ReviewLimit = 50,
+    ) -> dict[str, Any]:
+        """Search handler lines: substring or regex."""
+        return await call(
+            service.handlers_search, project_id, query, kind, rule, handler, offset, limit
+        )
+
+    @server.tool()
+    async def handlers_read(
+        project_id: ReviewProject,
+        address: ReviewAddress,
+        handler: Annotated[str, Field(description="Event")],
+        offset: ReviewOffset = 0,
+        limit: ReviewLimit = 50,
+    ) -> dict[str, Any]:
+        """Read numbered handler lines."""
+        return await call(service.handlers_read, project_id, address, handler, offset, limit)
 
     # --- Регистрация и корреспондент -----------------------------------------------------
 
@@ -1596,8 +1666,8 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description="Manager: sender POD stubs"),
         ] = True,
         format_package: Annotated[
-            str | None,
-            Field(description="Manager only: JSON/XDTO dump path, workspace-relative or absolute"),
+            str | list[str] | None,
+            Field(description="Manager: JSON/XDTO path(s), workspace-relative or absolute"),
         ] = None,
     ) -> dict[str, Any]:
         """Preview/write overlay/manager kits. Write needs current build_hash and notice IDs.

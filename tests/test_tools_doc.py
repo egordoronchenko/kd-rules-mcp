@@ -108,7 +108,7 @@ def test_schema_titles_keep_named_properties_and_literal_values() -> None:
         "properties": {
             "title": {"type": "string"},
             "payload": {
-                "anyOf": [{"type": "object", "additionalProperties": True}, {"type": "null"}],
+                "type": ["object", "null"],
                 "default": literal,
                 "examples": [literal],
                 "enum": [literal],
@@ -118,6 +118,16 @@ def test_schema_titles_keep_named_properties_and_literal_values() -> None:
         "required": ["title"],
     }
     assert json.dumps(schema) == original
+    assert _without_schema_titles({"anyOf": [{"type": "string"}, {"type": "null"}]}) == {
+        "type": ["string", "null"]
+    }
+    # Ограниченные ветви нельзя заменять простым списком типов.
+    bounded = {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}
+    assert _without_schema_titles(bounded) == bounded
+    assert _without_schema_titles({"type": "object", "additionalProperties": False}) == {
+        "type": "object",
+        "additionalProperties": False,
+    }
 
 
 def test_public_schemas_preserve_calls_and_argument_errors(
@@ -164,10 +174,27 @@ def test_public_schemas_preserve_calls_and_argument_errors(
     after, after_errors, after_valid = anyio.run(exercise, compact_server)
     for tool in before:
         tool["description"] = inspect.cleandoc(tool["description"] or "")
+
+    # Восстанавливаем простые union-типы для сравнения листьев с исходной схемой SDK.
+    def expand_types(value: Any) -> Any:
+        if isinstance(value, list):
+            return [expand_types(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: expand_types(item) for key, item in value.items()}
+        if isinstance(result.get("type"), list):
+            result["anyOf"] = [{"type": item} for item in result.pop("type")]
+        return result
+
+    after = expand_types(after)
     before_leaves, after_leaves = leaves(before), leaves(after)
     removed = before_leaves.keys() - after_leaves.keys()
     assert removed
-    assert all(path[-1] == "title" and path[-2] != "properties" for path in removed)
+    assert all(
+        (path[-1] == "title" and path[-2] != "properties")
+        or (path[-1] == "additionalProperties" and before_leaves[path] is True)
+        for path in removed
+    )
     assert not after_leaves.keys() - before_leaves.keys()
     assert all(before_leaves[path] == value for path, value in after_leaves.items())
     assert before_errors == after_errors

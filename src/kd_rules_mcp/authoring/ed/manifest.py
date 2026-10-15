@@ -38,9 +38,15 @@ def json_bytes(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
+# Входы, которые меняют только инструкцию, а не то, что ставится в базу. Версия расширения
+# (decision_hash[:12]) от них не зависит: правка текста инструкции на сервере не сдвигает
+# версию при том же модуле; изменение инструкции видно по хешу файла instruction.md.
+DOCUMENTATION_INPUTS = frozenset({"instruction_template_sha256", "data_preflight_sha256"})
+
+
 def manager_decision_hash(inputs: Mapping[str, object]) -> str:
     """Отдельный контракт ed-manager/1; хеш не зависит от прежней сборки и времени."""
-    return sha256(json_bytes(dict(inputs)))
+    return sha256(json_bytes({k: v for k, v in inputs.items() if k not in DOCUMENTATION_INPUTS}))
 
 
 def manager_changes(

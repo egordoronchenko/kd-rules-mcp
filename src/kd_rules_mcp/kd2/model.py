@@ -23,6 +23,26 @@ def rule_code(value: object) -> str:
     return str(value).rstrip()
 
 
+def object_name(value: object) -> str:
+    """Общий ключ полного имени для ПКО, ПВД и ПРО, включая записи регистров и константы."""
+    head, dot, tail = str(value).strip().partition(".")
+    head = head.casefold()
+    if head in ("константынабор", "константы"):
+        head = "константа"
+    for suffix in (
+        "МенеджерЗначения",
+        "МенеджерЗаписи",
+        "НаборЗаписей",
+        "Ссылка",
+        "Объект",
+        "Запись",
+    ):
+        if head.endswith(suffix.casefold()):
+            head = head.removesuffix(suffix.casefold())
+            break
+    return f"{head}{dot}{tail}".casefold()
+
+
 @dataclass(eq=False, slots=True)
 class Node:
     """Элемент правил: атрибуты, простые значения, вложенные элементы и список правил/групп."""

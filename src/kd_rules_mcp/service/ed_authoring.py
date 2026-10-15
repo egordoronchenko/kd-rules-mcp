@@ -29,6 +29,7 @@ from kd_rules_mcp.authoring.ed.format_package import (
     FormatDeclaration,
     FormatPackage,
     load_format_package,
+    source_namespace_literals,
 )
 from kd_rules_mcp.authoring.ed.handler_render import procedure_block
 from kd_rules_mcp.authoring.ed.handlers import (
@@ -125,14 +126,27 @@ MAX_HANDLER_BODY_BYTES = 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
+# format_read / format_uri / format_kit — сборка менеджера с пакетом.
+# Сборка scope=manager раньше возвращалась до единственных вызовов _phase,
+# и журнал печатал нули при ненулевом total.
+_LOG_PHASES = (
+    "inputs",
+    "routes",
+    "schemas",
+    "prepare",
+    "render",
+    "format_read",
+    "format_uri",
+    "format_kit",
+)
+
+
 @dataclass
 class _Timing:
-    phases: dict[str, float] = field(
-        default_factory=lambda: dict.fromkeys(
-            ("inputs", "routes", "schemas", "prepare", "render"), 0.0
-        )
-    )
+    phases: dict[str, float] = field(default_factory=lambda: dict.fromkeys(_LOG_PHASES, 0.0))
     files_read: int = 0
+    uri_cached: int = 0
+    uri_parsed: int = 0
     routes_checked: set[int] = field(default_factory=set)
     catalogs: dict[Path, Any] = field(default_factory=dict)
     catalog_stamps: dict[Path, tuple[int, int] | None] = field(default_factory=dict)
@@ -172,9 +186,12 @@ def _timed_build(function):
         finally:
             logger.info(
                 "ed_authoring_build total=%.3fs inputs=%.3fs routes=%.3fs schemas=%.3fs "
-                "prepare=%.3fs render=%.3fs files_read=%d",
+                "prepare=%.3fs render=%.3fs format_read=%.3fs format_uri=%.3fs "
+                "format_kit=%.3fs uri_cached=%d uri_parsed=%d files_read=%d",
                 perf_counter() - start,
-                *(timing.phases[k] for k in timing.phases),
+                *(timing.phases[name] for name in _LOG_PHASES),
+                timing.uri_cached,
+                timing.uri_parsed,
                 timing.files_read,
             )
             _timing.reset(token)
@@ -264,14 +281,16 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         """Читает объявление и точную карту хозяина, включая явно выбранные расширения."""
         args = metadata["arguments"]
         root = self._read_path(args["configuration_path"])
-        snapshot, _, _ = self._open_snapshot(
-            root,
-            None,
-            None,
-            False,
-            extensions=tuple(self._read_path(p) for p in args["extensions"]),
-            read_files_only=True,
-        )
+        # Чтение карты маршрутов отдельно от разбора модулей: иначе оно теряется в format_uri.
+        with _phase("routes"):
+            snapshot, _, _ = self._open_snapshot(
+                root,
+                None,
+                None,
+                False,
+                extensions=tuple(self._read_path(p) for p in args["extensions"]),
+                read_files_only=True,
+            )
         config = read_description(
             "Configuration.xml",
             (root / "Configuration.xml").read_text("utf-8-sig"),
@@ -294,13 +313,51 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             for folder in snapshot.extension_roots
             for path in sorted(folder.rglob("*.bsl"))
         )
-        sources = tuple(self._read_path(path).read_text("utf-8-sig") for path in paths)
+        literals = []
+        hashes = []
+        for path in paths:
+            resolved = self._read_path(path)
+            stat = resolved.stat()
+            stamp = (stat.st_size, stat.st_mtime_ns)
+            cached = self._format_namespace_cache.get(path)
+            if cached is None or cached[0] != stamp:
+                text = resolved.read_text("utf-8-sig")
+                values = source_namespace_literals(text, path)
+                size = sum(len(uri.encode("utf-8")) for uri in values)
+                self._format_namespace_cache_bytes += size - (cached[3] if cached else 0)
+                cached = (stamp, sha256(text.encode("utf-8")), values, size)
+                self._format_namespace_cache[path] = cached
+                if timing := _timing.get():
+                    timing.uri_parsed += 1
+            elif timing := _timing.get():
+                timing.uri_cached += 1
+            self._format_namespace_cache.move_to_end(path)
+            literals.append(cached[2])
+            hashes.append(cached[1])
+            # Кэш хранит только URI и хеши, тексты BSL не удерживаются. LRU ограничен
+            # числом модулей и размером литералов; перезапуск сервиса очищает его.
+            while (
+                len(self._format_namespace_cache) > 4096
+                or self._format_namespace_cache_bytes > 16 * 1024 * 1024
+            ):
+                _, evicted = self._format_namespace_cache.popitem(last=False)
+                self._format_namespace_cache_bytes -= evicted[3]
         return FormatDeclaration(
-            str(route.version_key), descriptions, snapshot.profile, route.plan_name, sources, paths
+            str(route.version_key),
+            descriptions,
+            snapshot.profile,
+            route.plan_name,
+            extension_source_paths=paths,
+            extension_namespace_literals=tuple(literals),
+            extension_source_hashes=tuple(hashes),
         )
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
+        self._format_namespace_cache: OrderedDict[
+            str, tuple[tuple[int, int], str, frozenset[str], int]
+        ] = OrderedDict()
+        self._format_namespace_cache_bytes = 0
         self._authoring_inputs: OrderedDict[tuple, _Inputs] = OrderedDict()
         self._authoring_input_bytes = 0
         self._authoring_schemas: OrderedDict[tuple[str, str], _CachedSchema] = OrderedDict()
@@ -1792,7 +1849,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
         registration_objects: list[str] | None = None,
         registered_objects: list[str] | None = None,
         plan_stubs: bool = True,
-        format_package: str | None = None,
+        format_package: str | list[str] | None = None,
     ) -> dict[str, Any]:
         if scope == "manager":
             if any(

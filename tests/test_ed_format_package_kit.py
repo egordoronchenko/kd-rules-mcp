@@ -21,9 +21,9 @@ from kd_rules_mcp.authoring.ed.manager_render import (
     render_manager_kit,
     render_manager_route,
 )
-from kd_rules_mcp.authoring.ed.manifest import sha256
+from kd_rules_mcp.authoring.ed.manifest import json_bytes, manager_decision_hash, sha256
 from kd_rules_mcp.authoring.ed.model import AuthoringPreconditionError, ExtensionIdentity
-from kd_rules_mcp.authoring.ed.xml_dump import ManagerHost, read_description
+from kd_rules_mcp.authoring.ed.xml_dump import ManagerHost, profile_template, read_description
 from kd_rules_mcp.ed.writer import new_manager, render
 from tests.data.ed.format_package.model import OWN, sample_model
 from tests.test_ed_format_package import declaration_model, write_files
@@ -61,7 +61,7 @@ def combined_kit(declaration, *, package=None, model=None, **kwargs):
 
 
 def test_without_format_package_baseline_after_install_instruction_fix():
-    # Способ Б меняет инструкцию, её хеш и печать версии; прочие файлы прежние.
+    # Версия без шаблона инструкции (15.10): сдвинулись Configuration.xml, инструкция, manifest.
     assert {p: sha256(b) for p, b in build_kit().files.items()} == {
         "extension/CommonModules/кд3м_PilotManager.xml": (
             "055835b7f0ed63ecead337cf4139d8c31839314f9ba8ed9c717ec8fe105aba80"
@@ -70,7 +70,7 @@ def test_without_format_package_baseline_after_install_instruction_fix():
             "b750ee0643ccb57a89ae4c3e5854e1dd6a1ce78af91220888c170d5edf3ea45c"
         ),
         "extension/Configuration.xml": (
-            "f2dd67ed7d3121bbbe8ea4bf37901437c94764b2703eae43729b61e9cf2f2fa0"
+            "38e5ac87844684c7f87b7e00685936ab2203f41a8a50bf791af1d67ad7816ad6"
         ),
         "extension/ExchangePlans/"
         + PLAN
@@ -81,11 +81,29 @@ def test_without_format_package_baseline_after_install_instruction_fix():
         "extension/Languages/Русский.xml": (
             "16594f5fedd17f8010f7f1ad55990eaf9d4a4f2cdacd4d10f3b00f7ba87d163d"
         ),
-        "instruction.md": "35a85deb0f36281852119745f42c9eb18b1189c53e5d396fb28e2d06240680bf",
+        "instruction.md": "29d35e970be6c5122f84e041578a65e40aa8e5f0c47b0c08ce4083da791a93f5",
         "manager.ed.json": "9b6e7cc4924401cf51e5565e6eb0acf63919b82d23c109f3333aa5716a421b4a",
-        "manifest.json": "d023c5d8f06f292c9cb088bd51ba5d9755f8ffafe9ed95c3de9071d1ab8f56aa",
+        "manifest.json": "7116cc743fc564cfc42b604ddee995def73f290081b4272d76bb91d69a61dc79",
         "source-map.json": "9106acf4b1a88b5bbfe9aa30fc774a839a465b79003b5fc12c2962f6ca7eb88e",
     }
+
+
+def test_instruction_text_does_not_move_extension_version():
+    # Версия расширения — только то, что ставится в базу; шаблон инструкции и раздел
+    # проверки данных её не сдвигают (решение владельца 15.10.2026).
+    kit = build_kit()
+    inputs = dict(kit.manifest.inputs)
+    assert "instruction_template_sha256" in inputs
+    assert inputs["templates_sha256"] == sha256(json_bytes(profile_template()))
+    changed = {
+        **inputs,
+        "instruction_template_sha256": "0" * 64,
+        "data_preflight_sha256": "1" * 64,
+    }
+    assert manager_decision_hash(changed) == kit.manifest.decision_hash
+    assert manager_decision_hash({**inputs, "module_sha256": "2" * 64}) != (
+        kit.manifest.decision_hash
+    )
 
 
 def test_package_json_round_trip(tmp_path: Path):
@@ -95,6 +113,103 @@ def test_package_json_round_trip(tmp_path: Path):
     back = load_format_package(path, model.base_schema, "1.20")
     assert back == model
     assert render_format_package(back) == render_format_package(model)
+
+
+def test_multiple_packages_hooks_hashes_and_singleton_compatibility(tmp_path: Path):
+    from kd_rules_mcp.authoring.ed.format_package import FormatProperty, FormatType
+    from kd_rules_mcp.ed.schema.model import QName
+    from kd_rules_mcp.ed.schema.xdto import XS
+
+    declaration = declaration_model(tmp_path)
+    first = sample_model()
+    uri = "urn:test:second-extension"
+    prop = FormatProperty(QName(uri, "Text"), QName(XS, "string"))
+    second = replace(
+        first,
+        metadata_name="fmt_Second",
+        namespace=uri,
+        types=(
+            FormatType(
+                QName(uri, "Extra"), "object", (prop, replace(prop, name=QName(uri, "Other")))
+            ),
+        ),
+    )
+    singleton = combined_kit(declaration, package=first)
+    from kd_rules_mcp.authoring.ed.manifest import json_bytes
+
+    # Все байты комплекта до #76 (версия без шаблона инструкции, 15.10), включая manifest.
+    assert sha256(json_bytes({p: sha256(b) for p, b in singleton.files.items()})) == (
+        "605dabe0676c957c9edfab23e1ae0e919e7fe4aa38e094bd008e262039ebd09d"
+    )
+    assert singleton.files == combined_kit(declaration, package=(first,)).files
+    kit = combined_kit(declaration, package=(first, second))
+    assert kit.files == combined_kit(declaration, package=(second, first)).files
+    assert kit.manifest.decision_hash != singleton.manifest.decision_hash
+    assert kit.manifest.inputs["format_extensions"] == {OWN: "1.20", uri: "1.20"}
+    records = kit.manifest.to_dict()["format_packages"]
+    for package, record in zip((first, second), records, strict=True):
+        path = "extension/XDTOPackages/" + package.metadata_name
+        assert path + ".xml" in kit.files
+        assert record["sha256"] == sha256(kit.files[path + "/Ext/Package.bin"])
+        assert record["model_sha256"] and record["imports"]
+        for module in (
+            "CommonModules/" + FORMAT_OVERRIDE_MODULE + "/Ext/Module.bsl",
+            "ExchangePlans/TargetPlan/Ext/ManagerModule.bsl",
+        ):
+            assert (
+                kit.files["extension/" + module]
+                .decode()
+                .count(f'Вставить("{package.namespace}", "1.20")')
+                == 1
+            )
+        assert f'URIПакетов.Добавить("{package.namespace}")' in kit.instruction
+    changed = replace(second, types=(replace(second.types[0], open=False),))
+    assert (
+        combined_kit(declaration, package=(first, changed)).manifest.decision_hash
+        != kit.manifest.decision_hash
+    )
+    children = etree.fromstring(kit.files["extension/Configuration.xml"]).find(
+        "{*}Configuration/{*}ChildObjects"
+    )
+    assert children is not None
+    assert [etree.QName(c).localname for c in children] == [
+        "Language",
+        "CommonModule",
+        "CommonModule",
+        "ExchangePlan",
+        "XDTOPackage",
+        "XDTOPackage",
+    ]
+
+
+@pytest.mark.parametrize("source_kind", ["json", "dump"])
+def test_single_simple_property_load_notice(tmp_path: Path, source_kind):
+    from kd_rules_mcp.authoring.ed.format_package import FormatProperty, FormatType
+    from kd_rules_mcp.ed.schema.model import QName
+    from kd_rules_mcp.ed.schema.xdto import XS
+
+    # Форма падения из docs/plans/evals/2026-10-08-kd3-format-extension-load.md, прогон 3.
+    base = sample_model()
+    prop = FormatProperty(QName(OWN, "Text"), QName(XS, "string"))
+    package = replace(base, types=(FormatType(QName(OWN, "Single"), "object", (prop,)),))
+    if source_kind == "json":
+        path = tmp_path / "single.json"
+        path.write_text(json.dumps(format_package_data(package)), encoding="utf-8")
+    else:
+        path = write_files(tmp_path / "dump", render_format_package(package))
+    loaded = load_format_package(path, base.base_schema, "1.20")
+    (notice,) = loaded.notices
+    assert notice.check == "ed.format.single_property_type"
+    assert notice.level.value == "предупреждение" and "Single" in notice.address
+    assert "второе свойство" in notice.message and "объектным" in notice.message
+    assert "не мешает" in notice.message and "Конвертацию данных 3" in notice.message
+    nested = FormatType(
+        QName(OWN, "Nested"), "object", (prop, replace(prop, name=QName(OWN, "Other")))
+    )
+    object_property = replace(prop, type=nested.name)
+    assert not replace(
+        package, types=(nested, FormatType(QName(OWN, "Wrapper"), "object", (object_property,)))
+    ).notices
 
 
 def test_package_dump_folder_round_trip(tmp_path: Path):
@@ -155,6 +270,46 @@ def test_combined_extension_order_hooks_manifest_repeat(tmp_path: Path):
     assert "Если у корреспондента расширения нет" in kit.instruction
     borrowed = kit.manifest.identity_map.borrowed
     assert "commonmodule/" + FORMAT_OVERRIDE_MODULE.casefold() in borrowed
+
+
+def test_two_packages_share_one_probe_block(tmp_path: Path):
+    from kd_rules_mcp.authoring.ed.format_package import FormatProperty, FormatType
+    from kd_rules_mcp.ed.schema.model import QName
+    from kd_rules_mcp.ed.schema.xdto import XS
+
+    declaration = declaration_model(tmp_path)
+    first = sample_model()
+    uri = "urn:test:second-extension"
+    prop = FormatProperty(QName(uri, "Text"), QName(XS, "string"))
+    second = replace(
+        first,
+        metadata_name="fmt_Second",
+        namespace=uri,
+        types=(
+            FormatType(
+                QName(uri, "Extra"), "object", (prop, replace(prop, name=QName(uri, "Other")))
+            ),
+        ),
+    )
+    instruction = combined_kit(declaration, package=(first, second)).instruction
+    section = instruction.split("## Шаг 5.1", 1)[1].split("## Шаг 6", 1)[0]
+    probes = [
+        block.split("```", 1)[0] for block in section.split("```bsl\n")[1:] if "URIПакетов" in block
+    ]
+    assert len(probes) == 2
+    for probe in probes:
+        assert probe.count("Для Каждого URI Из URIПакетов Цикл") == 1
+        assert f'URIПакетов.Добавить("{first.namespace}")' in probe
+        assert f'URIПакетов.Добавить("{second.namespace}")' in probe
+        assert "ФабрикаXDTO.Пакеты.Получить(URI)" in probe
+    assert f"URI `{first.namespace}`, `{second.namespace}`" not in instruction
+    assert "привязан строго" not in section
+    assert f"`{first.metadata_name}` — URI `{first.namespace}`" in section
+    assert f"`{second.metadata_name}` — URI `{uri}`" in section
+    manual = instruction.split("## Если переносите руками", 1)[1]
+    assert "**Пакеты XDTO**" in manual
+    assert f"extension/XDTOPackages/{first.metadata_name}/" in manual
+    assert f"extension/XDTOPackages/{second.metadata_name}/" in manual
 
 
 def test_package_instruction_installation_checks_order_and_manual_parts(tmp_path: Path):

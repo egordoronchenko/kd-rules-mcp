@@ -27,7 +27,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from kd_rules_mcp.kd2.model import ExchangeRules, Node
+from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
 from kd_rules_mcp.kd2.schema import CONVERSION_EVENTS
 from kd_rules_mcp.validation.address import pks_address, rule_address, side_name, walk_pks
 
@@ -630,7 +630,7 @@ class Handler:
     file_prefix: str
 
 
-def export_handlers(rules: ExchangeRules, out_dir: Path) -> HandlerExport:
+def export_handlers(rules: ExchangeRules | RegistrationRules, out_dir: Path) -> HandlerExport:
     """Пишет непустые обработчики и алгоритмы в ``out_dir`` и возвращает карту строк.
 
     Пустой текст (пробелы и переводы строк) файл не даёт. Перед записью из папки удаляются
@@ -643,8 +643,7 @@ def export_handlers(rules: ExchangeRules, out_dir: Path) -> HandlerExport:
     previous = [path.name for path in _own_wrappers(out_dir)]
     for name in previous:
         (out_dir / name).unlink()
-    used: set[str] = set()
-    files = tuple(_write(out_dir, item, used) for item in collect_handlers(rules))
+    files = tuple(_write(item, location) for item, location in handler_sources(rules, out_dir))
     written = {item.name for item in files}
     removed = tuple(sorted(name for name in previous if name not in written))
     return HandlerExport(files, removed)
@@ -688,9 +687,28 @@ def locate(export: HandlerExport, file_name: str, line: int) -> HandlerLocation 
     return None
 
 
-def collect_handlers(rules: ExchangeRules) -> list[Handler]:
+def collect_handlers(rules: ExchangeRules | RegistrationRules) -> list[Handler]:
     """Непустые обработчики и алгоритмы в порядке файла; модель правил не изменяет."""
     found: list[Handler] = []
+    if isinstance(rules, RegistrationRules):
+        from kd_rules_mcp.validation.address import pro_addresses
+
+        nodes = rules.rules()
+        for node, address in zip(nodes, pro_addresses(nodes), strict=True):
+            for event in (
+                "ПередОбработкой",
+                "ПриОбработке",
+                "ПриОбработкеДополнительный",
+                "ПослеОбработки",
+            ):
+                text = _string(node.get(event))
+                if text.strip():
+                    found.append(
+                        Handler(
+                            address, event, text, f"ПРО_{_required(node.code)}_{event}", "", "ПРО"
+                        )
+                    )
+        return found
     _add_node(found, rules.root, "exchange_rules", rule_address(rules.root), "Конвертация")
     parameters = rules.root.child("Параметры")
     if parameters is not None:
@@ -838,7 +856,29 @@ def _string(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _write(out_dir: Path, item: Handler, used: set[str]) -> HandlerFile:
+def handler_sources(
+    rules: ExchangeRules | RegistrationRules, out_dir: Path = Path()
+) -> list[tuple[Handler, HandlerFile]]:
+    """Обработчики и карта обёрток без записи файлов; одна нумерация для всех инструментов."""
+    used: set[str] = set()
+    found: list[tuple[Handler, HandlerFile]] = []
+    for item in collect_handlers(rules):
+        signature = f"Процедура {item.procedure}({item.params}) Экспорт".splitlines()
+        start = len(_MODULE_VARIABLES) + 1 + len(signature) + 1
+        stem = _unique_stem(_file_stem(item.procedure, item.file_prefix), used)
+        location = HandlerFile(
+            out_dir / f"{stem}.bsl",
+            item.address,
+            item.event,
+            start,
+            start + len(item.text.splitlines()) - 1,
+            start - 1,
+        )
+        found.append((item, location))
+    return found
+
+
+def _write(item: Handler, location: HandlerFile) -> HandlerFile:
     signature = f"Процедура {item.procedure}({item.params}) Экспорт".splitlines()
     body = item.text.splitlines()
     lines = [*_MODULE_VARIABLES, "", *signature, *body, "КонецПроцедуры", ""]
@@ -846,12 +886,8 @@ def _write(out_dir: Path, item: Handler, used: set[str]) -> HandlerFile:
         if name != item.procedure:
             lines.extend(block)
             lines.append("")
-    body_start = len(_MODULE_VARIABLES) + 1 + len(signature) + 1
-    body_end = body_start + len(body) - 1
-    stem = _unique_stem(_file_stem(item.procedure, item.file_prefix), used)
-    path = out_dir / f"{stem}.bsl"
-    path.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8-sig"))
-    return HandlerFile(path, item.address, item.event, body_start, body_end, body_start - 1)
+    location.path.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8-sig"))
+    return location
 
 
 def _file_stem(procedure: str, prefix: str) -> str:

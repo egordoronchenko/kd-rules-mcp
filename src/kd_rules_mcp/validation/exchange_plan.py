@@ -82,7 +82,6 @@
 import re
 import sqlite3
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 from kd_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
@@ -94,6 +93,22 @@ from kd_rules_mcp.validation.address import (
     rule_address,
     side_name,
     walk_pks,
+)
+from kd_rules_mcp.validation.call_graph import (
+    _ALGORITHM,
+    _ALGORITHM_EXECUTE,
+    _EXECUTE_OPAQUE,
+    CallGraph,
+    _algorithms,
+    _disabled,
+    _event,
+    _expand,
+    _export_calls,
+    _literals,
+    _mask,
+    _strip_comments,
+    _Text,
+    build_call_graph,
 )
 from kd_rules_mcp.validation.handlers import EVENT_AREAS
 from kd_rules_mcp.validation.report import ValidationReport
@@ -139,21 +154,6 @@ _PREDEFINED_PREFIXES = (
 _PREDEFINED_NAME = "имяпредопределенныхданных"
 _SHOWN = 12
 
-_STRING = re.compile(r'"(?:[^"]|"")*"')
-_ALGORITHM = re.compile(
-    r"(?<![\w.])Алгоритмы\s*\.\s*([^\W\d]\w*)\b(?!\s*\()",
-    re.IGNORECASE,
-)
-_EXECUTE_OPAQUE = re.compile(r'(?<![\w.])Выполнить\s*\(\s*(?!")', re.IGNORECASE)
-# Штатный вызов алгоритма: тело подставляется, само `Выполнить` код не прячет.
-_ALGORITHM_EXECUTE = re.compile(
-    r"(?<![\w.])Выполнить\s*\(\s*Алгоритмы\s*\.\s*([^\W\d]\w*)\b\s*\)",
-    re.IGNORECASE,
-)
-_EXECUTE_STRING = re.compile(
-    r'(?<![\w.])Выполнить\s*\(\s*("(?:[^"]|"")*")\s*\)',
-    re.IGNORECASE,
-)
 _POSTED_ASSIGN = re.compile(r"(?<![\w.])Объект\s*\.\s*Проведен\s*=", re.IGNORECASE)
 _MODE_ASSIGN = re.compile(r"(?<![\w.])РежимЗаписи\s*=\s*([^\n]*)", re.IGNORECASE)
 _OBJECT_WRITE = re.compile(r"(?<![\w.])Объект\s*\.\s*Записать\s*\(", re.IGNORECASE)
@@ -189,17 +189,6 @@ _PREDEFINED_ASSIGN = re.compile(
     r"(?<![\w.])ИмяПредопределенногоЭлемента\s*=\s*([^\n]*)",
     re.IGNORECASE,
 )
-_PKO_NAME_ASSIGN = re.compile(r'(?<![\w.])ИмяПКО\s*=\s*"([^"]*)"', re.IGNORECASE)
-# Вызов выгрузки с аргументом входящих данных и кодом ПКО: (позиция входящих, позиция кода), с 1.
-_EXPORT_CALL = re.compile(
-    r"(?<![\w.])(ВыгрузитьПоПравилу|ВыгрузитьРегистр|ВыгрузкаОбъектаВыборки)\s*\(",
-    re.IGNORECASE,
-)
-_EXPORT_ARGUMENTS = {
-    "выгрузитьпоправилу": (3, 5),
-    "выгрузитьрегистр": (3, 5),
-    "выгрузкаобъектавыборки": (4, 9),
-}
 _LOAD_MODE_EVENTS = (
     "ПередКонвертациейОбъекта",
     "ПередЗагрузкойОбъекта",
@@ -217,20 +206,13 @@ _COLLECTION_ASSIGN = re.compile(r"(?<![\w.])КоллекцияОбъектов\s
 _STRUCTURE_NEW = re.compile(r"Новый\s+(?:Структура|Соответствие)\b", re.IGNORECASE)
 
 
-@dataclass(frozen=True, slots=True)
-class _Text:
-    """Развёрнутый текст обработчиков и признак непрозрачности."""
-
-    code: str
-    opaque: bool
-
-
 def check_exchange_plan(
     rules: ExchangeRules,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
     plan_name: str | None = None,
     plan_hints: Sequence[str] = (),
+    graph: CallGraph | None = None,
 ) -> ValidationReport:
     """Проверки обмена через план обмена. Без нужной структуры — запись в `skipped`.
 
@@ -245,21 +227,22 @@ def check_exchange_plan(
     source_structure = Structure.load(source) if source is not None else None
     target_structure = Structure.load(target) if target is not None else None
     algorithms = _algorithms(rules)
+    graph = graph or build_call_graph(rules)
     plan_content = _rules_plan_content(source, plan_name, plan_hints)
     _check_header(report, rules, source)
-    _check_values(report, rules, source_structure, target_structure, algorithms)
+    _check_values(report, rules, source_structure, target_structure, algorithms, graph)
     _check_posting(report, rules, target_structure, algorithms)
     _check_object_write(report, rules)
     _check_modified_flag(report, rules, algorithms)
     _check_table_clear(report, rules, target_structure, algorithms)
     _check_repeated_table(report, rules, target_structure)
     _check_ambiguous_pko(report, rules, source_structure, algorithms)
-    _check_multiple_pvd(report, rules, plan_content)
-    _check_pvd(report, rules, algorithms)
+    _check_multiple_pvd(report, rules, plan_content, graph)
+    _check_pvd(report, rules, algorithms, graph)
     _check_pvd_refusal(report, rules, algorithms, plan_content)
     _check_export_key(report, rules, algorithms)
     _check_attached(report, rules)
-    _check_incoming(report, rules, algorithms)
+    _check_incoming(report, rules, algorithms, graph)
     return report
 
 
@@ -372,6 +355,7 @@ def _check_values(
     source: Structure | None,
     target: Structure | None,
     algorithms: dict[str, str],
+    graph: CallGraph,
 ) -> None:
     if source is None:
         report.skip(ENUM_PKZ, "нет структуры источника — не видно, перечисление ли ПКО")
@@ -387,7 +371,7 @@ def _check_values(
         if source is not None:
             _check_enum(report, pko, source)
         if source is not None and target is not None:
-            _check_predefined(report, pko, source, target, rules, algorithms)
+            _check_predefined(report, pko, source, target, rules, algorithms, graph)
 
 
 def _check_enum(report: ValidationReport, pko: Node, source: Structure) -> None:
@@ -414,6 +398,7 @@ def _check_predefined(
     target: Structure,
     rules: ExchangeRules,
     algorithms: dict[str, str],
+    graph: CallGraph,
 ) -> None:
     source_type = str(pko.get("Источник"))
     target_type = str(pko.get("Приемник"))
@@ -453,7 +438,7 @@ def _check_predefined(
         return
     if found:
         return
-    creates = _creates_predefined_copy(rules, pko)
+    creates = _creates_predefined_copy(rules, pko, graph)
     if creates is None:
         report.skip(
             PREDEFINED_PKZ,
@@ -555,9 +540,12 @@ def _check_object_write(report: ValidationReport, rules: ExchangeRules) -> None:
         )
 
 
-def _check_pvd(report: ValidationReport, rules: ExchangeRules, algorithms: dict[str, str]) -> None:
-    for pvd in rules.pvd():
-        if _disabled(pvd):
+def _check_pvd(
+    report: ValidationReport, rules: ExchangeRules, algorithms: dict[str, str], graph: CallGraph
+) -> None:
+    for branch in graph.branches:
+        pvd = branch.node
+        if branch.disabled:
             continue
         if str(pvd.get("СпособОтбораДанных")).casefold() == "произвольныйалгоритм":
             report.warning(
@@ -927,7 +915,10 @@ def _implicit_node(
 
 
 def _check_multiple_pvd(
-    report: ValidationReport, rules: ExchangeRules, plan_content: dict[str, bool] | None
+    report: ValidationReport,
+    rules: ExchangeRules,
+    plan_content: dict[str, bool] | None,
+    graph: CallGraph,
 ) -> None:
     """Обмен через план берёт одно ПВД на объект метаданных — первое включённое.
 
@@ -936,8 +927,9 @@ def _check_multiple_pvd(
     не регистрируется и до этой выборки не доходит — замечания нет.
     """
     grouped: dict[str, list[Node]] = {}
-    for pvd in rules.pvd():
-        if _disabled(pvd):
+    for branch in graph.branches:
+        pvd = branch.node
+        if branch.disabled:
             continue
         selection = str(pvd.get("ОбъектВыборки")).strip()
         if selection:
@@ -1353,10 +1345,10 @@ def _skip_ws(text: str, index: int) -> int:
 
 
 def _check_incoming(
-    report: ValidationReport, rules: ExchangeRules, algorithms: dict[str, str]
+    report: ValidationReport, rules: ExchangeRules, algorithms: dict[str, str], graph: CallGraph
 ) -> None:
-    parents = _parent_index(rules)
-    calls = _export_calls(rules, algorithms)
+    parents = _parent_index(rules, graph)
+    calls = _export_calls(rules, algorithms, graph)
     for pko in rules.pko():
         if _disabled(pko):
             continue
@@ -1399,7 +1391,7 @@ def _check_incoming(
             # Свойство не из узла «Ссылка» читается только при выгрузке объекта целиком.
             # По ссылке `ВыгрузитьПоПравилу` возвращается раньше (БСП:881–889).
             if not _is_search_pks(node) and not _pko_is_called(calls, pko.code):
-                whole = _exported_as_object(rules, pko)
+                whole = _exported_as_object(rules, pko, graph)
                 if whole is None:
                     report.skip(
                         INCOMING_KEY,
@@ -1560,7 +1552,9 @@ def _predefined_name_assigned(
     return False
 
 
-def _creates_predefined_copy(rules: ExchangeRules, pko: Node) -> bool | None:
+def _creates_predefined_copy(
+    rules: ExchangeRules, pko: Node, graph: CallGraph | None = None
+) -> bool | None:
     """Создаст ли приёмник новый элемент, если имени предопределённого в сообщении нет.
 
     `None` — не видно, уходит ли объект целиком. Ссылка с GUID не создаёт элемент
@@ -1570,7 +1564,7 @@ def _creates_predefined_copy(rules: ExchangeRules, pko: Node) -> bool | None:
     """
     if pko.get("НеСоздаватьЕслиНеНайден") is True:
         return False
-    whole = _exported_as_object(rules, pko)
+    whole = _exported_as_object(rules, pko, graph)
     if whole is None:
         return None
     sync = pko.get("СинхронизироватьПоИдентификатору") is True
@@ -1584,44 +1578,30 @@ def _creates_predefined_copy(rules: ExchangeRules, pko: Node) -> bool | None:
     return whole or not sync
 
 
-def _exported_as_object(rules: ExchangeRules, pko: Node) -> bool | None:
+def _exported_as_object(
+    rules: ExchangeRules, pko: Node, graph: CallGraph | None = None
+) -> bool | None:
     """Уходит ли ПКО узлом `<Объект>`, а не только `<Ссылка>`.
 
     `None` — у ссылающейся ПКС непрозрачный обработчик с `ВыгрузитьОбъект`.
     """
     code = pko.code.strip()
     folded = code.casefold()
-    for pvd in rules.pvd():
-        if _disabled(pvd):
-            continue
-        ref = str(pvd.get("КодПравилаКонвертации")).strip()
-        if ref.casefold() == folded:
-            return True
-        selection = str(pvd.get("ОбъектВыборки")).strip()
-        if not ref and selection and selection == str(pko.get("Источник")).strip():
-            return True
-        choice = "\n".join(
-            (
-                str(pvd.get("ПередОбработкойПравила")),
-                str(pvd.get("ПередВыгрузкойОбъекта")),
-            )
-        )
-        if any(
-            match.group(1).strip().casefold() == folded
-            for match in _PKO_NAME_ASSIGN.finditer(choice)
-        ):
-            return True
+    graph = graph or build_call_graph(rules)
+    if any(edge.target.casefold() == folded and edge.whole for edge in graph.edges):
+        return True
     for owner in rules.pko():
         if _disabled(owner):
             continue
         properties = owner.child("Свойства")
         if properties is None:
             continue
-        for node in properties.walk_all():
-            if node.kind.name not in ("pks", "pks_group"):
+        for edge in graph.edges:
+            if edge.target.casefold() != folded or not edge.address.startswith(
+                f"{rule_address(owner)} / ПКС "
+            ):
                 continue
-            if str(node.get("КодПравилаКонвертации")).strip().casefold() != folded:
-                continue
+            node = graph.index[edge.address][0]
             handlers = "\n".join(str(node.get(name)) for name in ("ПередВыгрузкой", "ПриВыгрузке"))
             masked = _mask(_strip_comments(handlers))
             if _EXPORT_WHOLE.search(masked):
@@ -1691,34 +1671,6 @@ def _filling(
     return _combine(parts, algorithms)
 
 
-def _export_calls(rules: ExchangeRules, algorithms: dict[str, str]) -> list[tuple[str, str, str]]:
-    """Явные вызовы выгрузки: (код ПКО, выражение входящих данных, текст обработчика).
-
-    Учитываются `ВыгрузитьПоПравилу` и `ВыгрузитьРегистр` (входящие — 3-й аргумент, код —
-    5-й; БСП:321, БСП:2289) и `ВыгрузкаОбъектаВыборки` (4-й и 9-й; БСП:13604). Код ПКО —
-    только строковый литерал: переменная не доказывает вызов именно этого правила.
-    """
-    found: list[tuple[str, str, str]] = []
-    for text in _handler_texts(rules):
-        expanded = _expand(text, algorithms)
-        code = _strip_comments(expanded.code)
-        # `Выполнить("ВыгрузитьПоПравилу(...)")` — код внутри строки; кавычки удвоены.
-        scanned = "\n".join(
-            (code, *(_unescape_string(item.group(1)) for item in _EXECUTE_STRING.finditer(code)))
-        )
-        for match in _EXPORT_CALL.finditer(scanned):
-            arguments = _call_arguments(scanned, match.end() - 1)
-            if arguments is None:
-                continue
-            incoming_at, name_at = _EXPORT_ARGUMENTS[match.group(1).casefold()]
-            name = arguments[name_at - 1] if len(arguments) >= name_at else ""
-            incoming = arguments[incoming_at - 1].strip() if len(arguments) >= incoming_at else ""
-            for literal in _quoted_names(name):
-                if literal:
-                    found.append((literal, incoming, code))
-    return found
-
-
 def _pko_is_called(calls: list[tuple[str, str, str]], pko_code: str) -> bool:
     folded = pko_code.strip().casefold()
     return any(name.casefold() == folded for name, _incoming, _handler in calls)
@@ -1743,113 +1695,19 @@ def _incoming_from_call(calls: list[tuple[str, str, str]], pko_code: str, key: s
     return "present" if present else "absent"
 
 
-def _handler_texts(rules: ExchangeRules) -> Iterator[str]:
-    for name in (
-        "ПослеЗагрузкиПравилОбмена",
-        "ПередВыгрузкойДанных",
-        "ПослеВыгрузкиДанных",
-        "ПередВыгрузкойОбъекта",
-        "ПередКонвертациейОбъекта",
-        "ПослеВыгрузкиОбъекта",
-        "ПередЗагрузкойОбъекта",
-        "ПослеЗагрузкиОбъекта",
-        "ПослеЗагрузкиДанных",
-    ):
-        yield _event(rules, name)
-    for pko in rules.pko():
-        if _disabled(pko):
-            continue
-        for name in (
-            "ПередВыгрузкой",
-            "ПриВыгрузке",
-            "ПослеВыгрузки",
-            "ПослеВыгрузкиВФайл",
-            "ПоследовательностьПолейПоиска",
-        ):
-            yield str(pko.get(name))
-        properties = pko.child("Свойства")
-        if properties is None:
-            continue
-        for node in properties.walk_all():
-            if node.kind.name == "pks":
-                names = ("ПередВыгрузкой", "ПриВыгрузке", "ПослеВыгрузки")
-            elif node.kind.name == "pks_group":
-                names = (
-                    "ПередОбработкойВыгрузки",
-                    "ПередВыгрузкой",
-                    "ПриВыгрузке",
-                    "ПослеВыгрузки",
-                    "ПослеОбработкиВыгрузки",
-                )
-            else:
-                continue
-            for name in names:
-                yield str(node.get(name))
-    for pvd in rules.pvd():
-        if _disabled(pvd):
-            continue
-        for name in (
-            "ПередОбработкойПравила",
-            "ПередВыгрузкойОбъекта",
-            "ПослеВыгрузкиОбъекта",
-            "ПослеОбработкиПравила",
-        ):
-            yield str(pvd.get(name))
+def _parent_index(
+    rules: ExchangeRules, graph: CallGraph | None = None
+) -> dict[str, list[tuple[Node, bool]]]:
+    """Родительская ПКС с кодом или статическим типом: исходящие данные станут входящими.
 
-
-def _call_arguments(code: str, open_paren: int) -> list[str] | None:
-    """Аргументы вызова, `open_paren` — индекс «(». `None` — скобка не закрыта."""
-    depth = 0
-    start = open_paren + 1
-    arguments: list[str] = []
-    index = open_paren
-    in_string = False
-    while index < len(code):
-        char = code[index]
-        if in_string:
-            if char == '"':
-                if index + 1 < len(code) and code[index + 1] == '"':
-                    index += 2
-                    continue
-                in_string = False
-            index += 1
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                arguments.append(code[start:index])
-                return arguments
-        elif char == "," and depth == 1:
-            arguments.append(code[start:index])
-            start = index + 1
-        index += 1
-    return None
-
-
-def _quoted_names(expression: str) -> list[str]:
-    """Строковые литералы выражения: код ПКО бывает внутри `?(..., "А", "Б")`."""
-    return [_unescape_string(item.group(0)) for item in _STRING.finditer(expression)]
-
-
-def _unescape_string(literal: str) -> str:
-    text = literal.strip()
-    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
-        text = text[1:-1]
-    return text.replace('""', '"')
-
-
-def _parent_index(rules: ExchangeRules) -> dict[str, list[tuple[Node, bool]]]:
-    """ПКО, чья ПКС ссылается на код: их «ИсходящиеДанные» станут входящими дочернего ПКО.
+    Вызов с ИсходящиеДанные общий для обоих способов выбора ПКО (БСП:13208–13209).
 
     Второй элемент — можно ли читать `ПриВыгрузке` родителя. Свойство поиска выгружается
     до него (БСП:826, `ПриВыгрузке` — БСП:941), поэтому ссылка из такого свойства родителя
     `ПриВыгрузке` не видит.
     """
     index: dict[str, list[tuple[Node, bool]]] = {}
+    graph = graph or build_call_graph(rules)
     for pko in rules.pko():
         if _disabled(pko):
             continue
@@ -1861,10 +1719,13 @@ def _parent_index(rules: ExchangeRules) -> dict[str, list[tuple[Node, bool]]]:
         # Внутри группы «Поиск» в этот список не попадает.
         direct = {id(item) for item in properties.items}
         seen: dict[str, bool] = {}
-        for node in properties.walk_all():
-            if node.kind.name not in ("pks", "pks_group"):
+        for edge in graph.edges:
+            if edge.kind not in ("field", "type_lookup") or not edge.address.startswith(
+                f"{rule_address(pko)} / ПКС "
+            ):
                 continue
-            code = str(node.get("КодПравилаКонвертации")).strip()
+            node = graph.index[edge.address][0]
+            code = edge.target
             if not code or code == own:
                 continue
             search_before = id(node) in direct and _is_search_pks(node)
@@ -2356,52 +2217,6 @@ def _skip_bsl_string(text: str, start: int) -> int:
     return len(text)
 
 
-def _expand(text: str, algorithms: dict[str, str], seen: set[str] | None = None) -> _Text:
-    """Текст с телами вызванных алгоритмов.
-
-    Непрозрачен `Выполнить` не со строкой и алгоритм, которого в правилах нет.
-    """
-    if seen is None:
-        seen = set()
-    if not text.strip():
-        return _Text("", False)
-    code = _strip_comments(text)
-    opaque = _EXECUTE_OPAQUE.search(code) is not None
-    parts = [text]
-    for match in _ALGORITHM.finditer(_mask(code)):
-        key = match.group(1).casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        body = algorithms.get(key)
-        if body is None:
-            opaque = True
-            continue
-        nested = _expand(body, algorithms, seen)
-        parts.append(nested.code)
-        opaque = opaque or nested.opaque
-    return _Text("\n".join(parts), opaque)
-
-
-def _algorithms(rules: ExchangeRules) -> dict[str, str]:
-    found: dict[str, str] = {}
-    for node in rules.algorithms():
-        name = str(node.attrs.get("Имя", "")).strip()
-        if name:
-            found[name.casefold()] = str(node.get("Текст"))
-    return found
-
-
-def _event(rules: ExchangeRules, name: str) -> str:
-    value = rules.root.get(name)
-    return value if isinstance(value, str) else ""
-
-
-def _disabled(node: Node) -> bool:
-    flag = node.attrs.get("Отключить")
-    return flag is True or flag == "true"
-
-
 def _same_configuration(source: Structure, target: Structure) -> bool:
     """Одно и то же имя конфигурации с обеих сторон (как сверка заголовка, без «БАЗОВАЯ»)."""
     left = _config_key(_meta(source.connection, "config_name"), strip_basic=True)
@@ -2453,38 +2268,3 @@ def _sample(names: list[str]) -> str:
 
 def _rhs(raw: str) -> str:
     return raw.strip().rstrip(";").strip()
-
-
-def _strip_comments(text: str) -> str:
-    return "\n".join(_without_comment(line) for line in text.splitlines())
-
-
-def _without_comment(line: str) -> str:
-    """Строка до комментария `//` вне строкового литерала."""
-    quoted = False
-    index = 0
-    chars: list[str] = []
-    while index < len(line):
-        char = line[index]
-        if char == '"':
-            chars.append(char)
-            if quoted and index + 1 < len(line) and line[index + 1] == '"':
-                chars.append('"')
-                index += 2
-                continue
-            quoted = not quoted
-        elif not quoted and line.startswith("//", index):
-            break
-        else:
-            chars.append(char)
-        index += 1
-    return "".join(chars)
-
-
-def _mask(code: str) -> str:
-    """Строковые литералы заменены пустыми кавычками: вызов в тексте сообщения не считается."""
-    return _STRING.sub('""', code)
-
-
-def _literals(code: str) -> list[str]:
-    return [match.group(0)[1:-1].replace('""', '"') for match in _STRING.finditer(code)]
