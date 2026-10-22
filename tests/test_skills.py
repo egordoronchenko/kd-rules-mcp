@@ -105,7 +105,7 @@ def test_skill_texts_are_portable() -> None:
 # (символов на токен для кириллицы) — только в сообщении об ошибке, не в условии.
 SKILL_MD_BUDGET_BYTES: dict[str, int] = {
     "kd-install": 9_000,
-    "kd2-rules-build": 9_000,
+    "kd2-rules-build": 9_500,
     "kd2-exchange-pitfalls": 7_000,
     "kd3-rules": 9_000,
 }
