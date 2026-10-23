@@ -2432,7 +2432,10 @@ findings, including `handlers.pvd_arbitrary` and `handlers.pvd_selection` (БС�
 
 Registration uses open snapshots from the same kit directory, then adjacent
 `RegistrationRules.xml` / `ПравилаРегистрации.xml`, or the sibling registration template.
-Unreadable adjacent rules are reported in `read_errors`. `available=false` means unavailable,
+Unreadable adjacent rules are reported in `read_errors`. Registration rules whose `Конфигурация`
+differs from the exchange rules source are skipped and listed in `skipped`: registration runs in the
+source configuration, so a correspondent copy next to its own base's `RegistrationRules.xml` gets no
+foreign PRO. A file without `Конфигурация` is kept. `available=false` means unavailable,
 not that registration is disabled. PRO filters, `disabled`, `Валидное` and the node mode
 attribute are shown; `node_mode_value="unknown"` requires live node inspection
 (РЕГ:282–293, РЕГ:309–311; notation in checks.md).

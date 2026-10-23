@@ -198,6 +198,12 @@ class RegistrationRules(RulesDocument):
         node = self.root.child("ПланОбмена")
         return str(node.attrs.get("Имя", "")) if node is not None else ""
 
+    @property
+    def configuration_name(self) -> str:
+        """Имя конфигурации, в которой регистрируются изменения (текст тега `Конфигурация`)."""
+        node = self.root.child("Конфигурация")
+        return (node.text or "").strip() if node is not None else ""
+
     def plan_content(self) -> list[Node]:
         """Элементы состава плана обмена."""
         return list(self.section("СоставПланаОбмена").items)

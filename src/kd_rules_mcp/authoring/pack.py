@@ -121,13 +121,8 @@ def _summary(document: ExchangeRules | RegistrationRules) -> dict[str, str]:
     return {
         "name": name,
         "exchange_plan": document.exchange_plan,
-        "configuration": _registration_configuration(document),
+        "configuration": document.configuration_name,
     }
-
-
-def _registration_configuration(document: RegistrationRules) -> str:
-    node = document.root.child("Конфигурация")
-    return (node.text or "").strip() if node is not None else ""
 
 
 def _warnings(documents: Mapping[str, ExchangeRules | RegistrationRules]) -> list[str]:
@@ -143,7 +138,7 @@ def _warnings(documents: Mapping[str, ExchangeRules | RegistrationRules]) -> lis
         )
     registration = documents.get("registration")
     if isinstance(registration, RegistrationRules):
-        configuration = _registration_configuration(registration)
+        configuration = registration.configuration_name
         if configuration and configuration != exchange.source_name:
             warnings.append(
                 f"Правила регистрации — для конфигурации {configuration}, "

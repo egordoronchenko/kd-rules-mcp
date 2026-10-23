@@ -182,7 +182,16 @@ class ReviewMixin(ServiceBase):
                 )
             return slice_rows(rows, offset, limit)
 
-    def _trace_registration(self, project_id: str, object_name: str) -> dict[str, Any]:
+    def _trace_registration(
+        self, project_id: str, object_name: str, source: str = ""
+    ) -> dict[str, Any]:
+        """ПРО объекта из правил регистрации рядом с правилами обмена.
+
+        Правила регистрации работают в конфигурации-источнике (как в `rules_pack`): файл,
+        у которого `Конфигурация` другая, — правила обратного направления. Типично это
+        `CorrespondentExchangeRules.xml` рядом с `RegistrationRules.xml` своей базы. Такой
+        файл пропускается и называется в `skipped`, а не выдаётся за «ПРО нет».
+        """
         project = self.workspace.get(project_id)
         folder = project.source_path.parent if project.source_path else None
         documents: list[tuple[str, RegistrationRules]] = []
@@ -220,6 +229,18 @@ class ReviewMixin(ServiceBase):
                     documents.append((path.name, document))
             except (Kd2Error, OSError, ValueError) as error:
                 errors.append(f"{path.name}: {type(error).__name__}")
+        skipped: list[str] = []
+        matching: list[tuple[str, RegistrationRules]] = []
+        for origin, document in documents:
+            configuration = document.configuration_name
+            if source and configuration and configuration != source:
+                skipped.append(
+                    f"{origin}: правила регистрации конфигурации {configuration}, "
+                    f"а правила обмена выгружают из {source}"
+                )
+                continue
+            matching.append((origin, document))
+        documents = matching
         rows: list[dict[str, Any]] = []
         for origin, document in documents:
             nodes = document.rules()
@@ -232,7 +253,12 @@ class ReviewMixin(ServiceBase):
                             "node_mode_value": "unknown",
                         }
                     )
-        return {"available": bool(documents), "items": rows, "read_errors": errors}
+        return {
+            "available": bool(documents),
+            "items": rows,
+            "read_errors": errors,
+            "skipped": skipped,
+        }
 
     def rules_trace(
         self,
@@ -421,7 +447,8 @@ class ReviewMixin(ServiceBase):
                 )
             ]
             registrations = [
-                self._trace_registration(project_id, name) for name in sorted(object_names)
+                self._trace_registration(project_id, name, rules.source_name)
+                for name in sorted(object_names)
             ]
             unique_calls: dict[tuple[Any, ...], dict[str, Any]] = {}
             roots = {rule_address(by_code[code]) for code in seen}
@@ -453,6 +480,7 @@ class ReviewMixin(ServiceBase):
                     "available": any(r["available"] for r in registrations),
                     **slice_rows([row for r in registrations for row in r["items"]], offset, limit),
                     "read_errors": [e for r in registrations for e in r["read_errors"]],
+                    "skipped": sorted({s for r in registrations for s in r["skipped"]}),
                 },
                 "branches": slice_rows(branches, offset, limit),
                 "pko": slice_rows(

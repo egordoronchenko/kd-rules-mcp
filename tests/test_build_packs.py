@@ -1031,16 +1031,29 @@ def test_exchange_entry_empty_folder(tmp_path: Path, monkeypatch: pytest.MonkeyP
     text = raw.decode("utf-8")
     lines = text.splitlines()
     assert lines[0] == "# Папка обмена: bp ↔ do"
-    assert len(lines) <= 40
+    assert len(lines) <= 50
     assert f"- bp: `{bp.resolve()}`" in lines
     assert f"- do: `{do.resolve()}`" in lines
     assert "| сервер | сторона |" in lines
     assert "| 1c-syntax-checker-mcp | обе |" in lines
     assert "| bp-1c-data-mcp | bp |" in lines
     assert "| do-1c-data-mcp | do |" in lines
-    assert "Правила обмена правятся из этой папки." in lines
-    assert "Код и данные стороны — её серверами (префикс `bp-` или `do-`)." in lines
-    assert "Работа по проекту базы — в папке проекта; папка обмена не внутри проектов." in lines
+    # Выгрузка и регистрация — у источника, загрузка — копия корреспондента у приёмника.
+    assert (
+        "| bp → do | `ExchangeRules.xml` bp | `CorrespondentExchangeRules.xml` do "
+        "| `RegistrationRules.xml` bp |"
+    ) in lines
+    assert (
+        "| do → bp | `ExchangeRules.xml` do | `CorrespondentExchangeRules.xml` bp "
+        "| `RegistrationRules.xml` do |"
+    ) in lines
+    assert (
+        "источника. Совпадение копий проверять `rules_diff`, а не хешем файла: концы строк" in lines
+    )
+    assert "- Правила обмена правятся из этой папки." in lines
+    assert "- Код и данные стороны — её серверами (префикс `bp-` или `do-`)." in lines
+    assert "- Работа по проекту базы — в папке проекта; папка обмена не внутри проектов." in lines
+    assert "- `.mcp.json` этой папки не читать: в нём учётные данные сторон." in lines
     assert (dest / "AGENTS.md").read_bytes() == (
         "Папка обмена правилами kd-rules-mcp — прочитай KD-EXCHANGE.md перед работой.\n"
     ).encode()

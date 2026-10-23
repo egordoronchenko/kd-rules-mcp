@@ -206,6 +206,56 @@ def test_registration_sibling_and_open_snapshot(service: Kd2Service, tmp_path: P
     assert located["address"] == hit["address"]
 
 
+def _registration_xml(configuration: str) -> str:
+    return f"""<ПравилаРегистрации><ВерсияФормата>2.01</ВерсияФормата>
+<Конфигурация>{configuration}</Конфигурация>
+<ПравилаРегистрацииОбъектов><Правило Валидное="true">
+<Код>ПРО1</Код><ОбъектМетаданныхИмя>Справочник.Контрагенты</ОбъектМетаданныхИмя>
+</Правило></ПравилаРегистрацииОбъектов></ПравилаРегистрации>"""
+
+
+@pytest.mark.parametrize(
+    ("configuration", "expected_items", "expected_skipped"),
+    [
+        # Копия правил корреспондента лежит рядом с ПРО своей базы — это ПРО обратного направления.
+        (
+            "Приемник",
+            0,
+            [
+                "RegistrationRules.xml: правила регистрации конфигурации Приемник, "
+                "а правила обмена выгружают из Источник"
+            ],
+        ),
+        ("Источник", 1, []),
+        # Без тега Конфигурация принадлежность неизвестна — файл не отбрасывается.
+        ("", 1, []),
+    ],
+)
+def test_trace_registration_of_other_configuration_is_skipped(
+    tmp_path: Path, configuration: str, expected_items: int, expected_skipped: list[str]
+) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "work"))
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "CorrespondentExchangeRules.xml").write_text(
+        """<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>
+<Источник>Источник</Источник><Приемник>Приемник</Приемник>
+<ПравилаКонвертацииОбъектов><Правило><Код>Контрагенты</Код>
+<Источник>СправочникСсылка.Контрагенты</Источник><Приемник>СправочникСсылка.Контрагенты</Приемник>
+</Правило></ПравилаКонвертацииОбъектов></ПравилаОбмена>""",
+        encoding="utf-8",
+    )
+    xml = _registration_xml(configuration)
+    if not configuration:
+        xml = xml.replace("<Конфигурация></Конфигурация>\n", "")
+    (kit / "RegistrationRules.xml").write_text(xml, encoding="utf-8")
+    pid = service.rules_open(str(kit / "CorrespondentExchangeRules.xml"))["project_id"]
+    registration = service.rules_trace(pid, "Контрагенты")["registration"]
+    assert registration["total"] == expected_items
+    assert registration["available"] is bool(expected_items)
+    assert registration["skipped"] == expected_skipped
+
+
 def test_trace_cache_tracks_unsaved_edits(service: Kd2Service) -> None:
     pid = project_id(service)
     first = service.rules_trace(pid, "Док")
