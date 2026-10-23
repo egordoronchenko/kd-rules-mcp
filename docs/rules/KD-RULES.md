@@ -44,7 +44,9 @@ MCP-сервер `kd-rules-mcp` разбирает, правит и провер
 comol `ai_rules_1c` в папке проекта (`folder`): `.cursor/rules/mcp-policy.mdc` и
 `.cursor/rules/mcp-first-search.mdc` (для Codex — `.codex/rules/`, список — `files` в `.ai-rules.json`) —
 прочитай их перед первым вызовом, затем дельту `references/mcp-1c.md`. Набора нет — скажи человеку, что
-работа с серверами 1С будет хуже (https://github.com/comol/ai_rules_1c).
+работа с серверами 1С будет хуже (https://github.com/comol/ai_rules_1c). В папке обмена (есть `KD-EXCHANGE.md`)
+подключены серверы обеих сторон: чей сервер — по таблице в `KD-EXCHANGE.md`; без неё — вторая сторона по
+`references/second-side.md`.
 
 ## Где остановиться и спросить человека
 

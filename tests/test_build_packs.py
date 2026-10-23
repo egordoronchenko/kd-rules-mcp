@@ -131,7 +131,11 @@ def test_rules_entry_is_short_and_points_into_pack() -> None:
         for name in files
         if name.startswith(".agents/skills/kd2-rules-build/references/")
     }
-    short = set(re.findall(r"`(?:references/)?([\w-]+\.md)`", text)) - {"SKILL.md"}
+    # KD-EXCHANGE.md — не справочник, а файл в корне папки обмена (его пишет установка).
+    short = set(re.findall(r"`(?:references/)?([\w-]+\.md)`", text)) - {
+        "SKILL.md",
+        "KD-EXCHANGE.md",
+    }
     assert sorted(short - references) == []
 
 
