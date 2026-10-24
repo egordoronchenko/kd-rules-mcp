@@ -7,12 +7,13 @@
 import base64
 import http.client
 import json
-import re
-import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from kd_rules_mcp.projects import data_endpoint, load_catalog, load_local
+from kd_rules_mcp.errors import LiveError
+from kd_rules_mcp.live.access import DataMcpAccess
+from kd_rules_mcp.live.response import short_error
+from kd_rules_mcp.projects import base_login, data_endpoint, load_catalog, load_local
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = "vcexecutecode"
@@ -219,79 +220,27 @@ def _take_field(text: str, pos: int, length: int) -> tuple[str, int]:
     return value, end
 
 
-def short_error(text: str) -> str:
-    """Ошибка 1С без эха нашего кода и стека HTTP-сервиса.
-
-    Текст до первой строки стека «{…}». Если в подробном представлении есть
-    «по причине:», к краткому тексту добавляется первая содержательная строка
-    после последнего «по причине:» — сама причина платформы.
-    """
-    text = re.sub(r"[A-Za-z0-9+/=]{200,}", "<base64>", text)
-    body = text.removeprefix("ОШИБКА ")
-    reason = ""
-    marker = "по причине:"
-    if marker in body:
-        tail = body[body.rfind(marker) + len(marker) :]
-        for line in tail.splitlines():
-            stripped = line.strip()
-            if stripped:
-                reason = stripped
-                break
-    kept: list[str] = []
-    for line in body.splitlines():
-        if kept and line.lstrip().startswith("{"):
-            break
-        kept.append(line.strip())
-    head = " ".join(part for part in kept if part)
-    if reason and reason not in head:
-        return f"{head} {reason}".strip()
-    return head
-
-
 @dataclass(frozen=True, slots=True)
 class DataServer:
     """Сервер данных базы-песочницы: `vcexecutecode` по HTTP (JSON-RPC MCP)."""
 
     label: str
-    url: str
-    headers: dict[str, str]
+    url: str = field(repr=False)
+    headers: dict[str, str] = field(repr=False)
+    tool: str = TOOL
+    argument: str = "bslcode"
+    secrets: tuple[str, ...] = field(default=(), repr=False)
+
+    def execute(self, code: str) -> str:
+        return self.call(code)
 
     def call(self, code: str) -> str:
-        """Текст ответа инструмента; ошибка HTTP или JSON-RPC — `ExchangeCheckError`."""
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": TOOL, "arguments": {"bslcode": code}},
-        }
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={
-                **self.headers,
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-        )
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-                raw = response.read().decode("utf-8")
-        except (UnicodeDecodeError, http.client.HTTPException) as error:
-            raise ExchangeCheckError(
-                f"{self.label}: не-JSON ответ или обрыв HTTP: {error}"
-            ) from error
-        except OSError as error:
-            raise ExchangeCheckError(f"{self.label}: сервер данных недоступен: {error}") from error
-        try:
-            answer = json.loads(_sse_data(raw))
-        except json.JSONDecodeError as error:
-            raise ExchangeCheckError(
-                f"{self.label}: не-JSON ответ или обрыв HTTP: {error}"
-            ) from error
-        if "error" in answer:
-            raise ExchangeCheckError(f"{self.label}: {answer['error']}")
-        result = answer.get("result", {})
-        return "".join(part.get("text", "") for part in result.get("content", []))
+            return DataMcpAccess(
+                self.url, self.headers, self.tool, self.argument, secrets=self.secrets
+            ).execute(code)
+        except LiveError as error:
+            raise ExchangeCheckError(f"{self.label}: {error}") from None
 
     def run(self, code: str) -> str:
         """Код из `guarded`: текст после «OK»; «ОШИБКА …» или пустой ответ — ошибка шага.
@@ -331,4 +280,8 @@ def server_for(ref: str, root: Path = ROOT) -> DataServer:
     catalog = load_catalog(root / "projects.yaml")
     local = load_local(root / "projects.local.yaml")
     url, headers = data_endpoint(catalog, local, project_id, base_id)
-    return DataServer(ref, url, headers)
+    base = catalog.base(project_id, base_id)
+    login = base_login(local, project_id, base)
+    return DataServer(
+        ref, url, headers, base.data_access.tool, base.data_access.argument, login or ()
+    )

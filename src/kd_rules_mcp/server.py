@@ -60,6 +60,7 @@ from kd_rules_mcp.errors import (
     EdSchemaResourceLimitError,
     EdSchemaTypeNotFoundError,
     Kd2Error,
+    LiveError,
     ObjectNotFoundError,
     ProjectNotFoundError,
     RegistrationDeliveryError,
@@ -80,6 +81,7 @@ logger = logging.getLogger("kd_rules_mcp")
 
 # Код ошибки по классу; порядок важен — подклассы раньше базовых.
 ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (LiveError, "live_stage"),
     (RegistrationToolError, "registration.precondition"),
     (RegistrationDeliveryError, "registration.delivery"),
     (RegistrationRetargetError, "registration.retarget"),
@@ -203,6 +205,9 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
     """JSON ошибки инструмента: код, текст и сведения для выбора действия."""
     code = next((code for kind, code in ERROR_CODES if isinstance(error, kind)), "internal")
     payload: dict[str, Any] = {"code": code, "message": str(error)}
+    if isinstance(error, LiveError):
+        payload.update(error.details)
+        payload["code"] = error.code
     if isinstance(
         error, (RegistrationRetargetError, RegistrationDeliveryError, RegistrationToolError)
     ):
@@ -316,6 +321,141 @@ def create_server(service: Kd2Service) -> MCPServer:
             raise ToolError(json.dumps(payload, ensure_ascii=False)) from error
         _log_call(name, started, "ok")
         return result
+
+    @server.tool()
+    async def live_status(
+        base: Annotated[str, Field(description="Sandbox project.base")],
+        plan: Annotated[
+            str | None, Field(description="Exchange plan; omit for all BSP plans")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Read exchange nodes, message numbers, registrations and active rules."""
+        return await call(service.live_status, base, plan)
+
+    @server.tool()
+    async def live_rules_dump(
+        base: Annotated[str, Field(description="Sandbox project.base")],
+        plan: Annotated[str, Field(description="Exchange plan")],
+    ) -> dict[str, Any]:
+        """Download active XML rules in verified chunks to workspace/.live for rules_diff."""
+        return await call(service.live_rules_dump, base, plan)
+
+    @server.tool()
+    async def live_rules_check(
+        base: Annotated[str, Field(description="Sandbox project.base")],
+        plan: Annotated[str, Field(description="Exchange plan")],
+        files: Annotated[
+            str | dict[str, str],
+            Field(description="ZIP/folder or exchange,correspondent,registration paths"),
+        ],
+        accept_version_mismatch: Annotated[
+            bool,
+            Field(description="Human-approved BSP version mismatch; wrong config always fails"),
+        ] = False,
+    ) -> dict[str, Any]:
+        """Test BSP loading without writing rule records; return loading flags and messages."""
+        return await call(service.live_rules_check, base, plan, files, accept_version_mismatch)
+
+    @server.tool()
+    async def live_rules_install(
+        base: Annotated[str, Field(description="Sandbox project.base")],
+        plan: Annotated[str, Field(description="Exchange plan")],
+        files: Annotated[
+            str | dict[str, str],
+            Field(description="ZIP/folder or exchange,correspondent,registration paths"),
+        ],
+        mode: Annotated[
+            str, Field(description="preview/apply; obtain human consent before apply")
+        ] = "preview",
+        expected_preview_hash: Annotated[
+            str | None, Field(description="Hash from the latest preview")
+        ] = None,
+        accept_version_mismatch: Annotated[
+            bool,
+            Field(description="Human-approved BSP version mismatch; wrong config always fails"),
+        ] = False,
+    ) -> dict[str, Any]:
+        """Preview/apply rules or restore a manifest snapshot; backs up full register records."""
+        return await call(
+            service.live_rules_install,
+            base,
+            plan,
+            files,
+            mode,
+            expected_preview_hash,
+            accept_version_mismatch,
+        )
+
+    @server.tool()
+    async def live_nodes_setup(
+        source: Annotated[str, Field(description="Source sandbox project.base")],
+        target: Annotated[str, Field(description="Target sandbox project.base")],
+        plan: Annotated[str, Field(description="Exchange plan")],
+        source_code: Annotated[str, Field(description="Source code if empty")] = "KD2S",
+        target_code: Annotated[str, Field(description="Target code if empty")] = "KD2T",
+        mode: Annotated[
+            str, Field(description="preview/apply; obtain human consent before apply")
+        ] = "preview",
+        expected_preview_hash: Annotated[
+            str | None, Field(description="Hash from the latest preview")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Preview/apply synchronization and correspondent nodes in two distinct sandboxes."""
+        return await call(
+            service.live_nodes_setup,
+            source,
+            target,
+            plan,
+            source_code,
+            target_code,
+            mode,
+            expected_preview_hash,
+        )
+
+    @server.tool()
+    async def live_exchange_run(
+        source: Annotated[str, Field(description="Source sandbox project.base")],
+        target: Annotated[str, Field(description="Target sandbox project.base")],
+        plan: Annotated[str, Field(description="Exchange plan")],
+        object: Annotated[str, Field(description="Full metadata name")],
+        ref: Annotated[str, Field(description="Object UUID")],
+        query: Annotated[
+            str | None, Field(description="Optional target verification query")
+        ] = None,
+        expect_rows: Annotated[int | None, Field(description="Expected query row count")] = None,
+        source_rules: Annotated[
+            str | dict[str, str] | None, Field(description="Optional source rule ZIP/folder/paths")
+        ] = None,
+        target_rules: Annotated[
+            str | dict[str, str] | None, Field(description="Optional target rule ZIP/folder/paths")
+        ] = None,
+        mode: Annotated[
+            str, Field(description="preview/apply; obtain human consent before apply")
+        ] = "preview",
+        expected_preview_hash: Annotated[
+            str | None, Field(description="Hash from the latest preview")
+        ] = None,
+        accept_version_mismatch: Annotated[
+            bool,
+            Field(description="Human-approved BSP version mismatch; wrong config always fails"),
+        ] = False,
+    ) -> dict[str, Any]:
+        """Preview/apply one-object exchange. Clears registrations; data cannot be rolled back."""
+        return await call(
+            service.live_exchange_run,
+            source,
+            target,
+            plan,
+            object,
+            ref,
+            query,
+            expect_rows,
+            source_rules,
+            target_rules,
+            mode,
+            expected_preview_hash,
+            accept_version_mismatch,
+        )
 
     # --- Структуры ---------------------------------------------------------------------------
 

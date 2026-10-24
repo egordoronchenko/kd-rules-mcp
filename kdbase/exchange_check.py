@@ -60,6 +60,11 @@ from live_checks import (
 from lxml import etree
 
 from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.errors import LiveError
+from kd_rules_mcp.live.codegen import exchange as live_exchange
+from kd_rules_mcp.live.codegen.rules import load_file_code
+from kd_rules_mcp.live.response import compatibility_error
+from kd_rules_mcp.live.runs import execute, uploaded
 
 __all__ = ["DataServer", "ExchangeCheckError", "server_for", "short_error"]
 
@@ -184,12 +189,12 @@ def query_rows(text: str) -> str:
 
 def setup(plan: str, source: DataServer, target: DataServer, codes: tuple[str, str]) -> list[str]:
     """Коды этих узлов, узлы корреспондентов и сверка идентификаторов; строки протокола."""
-    source_code = source.run(this_node_code(plan, codes[0])).strip()
-    target_code = target.run(this_node_code(plan, codes[1])).strip()
+    source_code = _live_call(source, live_exchange.this_node_code(plan, codes[0]))["code"]
+    target_code = _live_call(target, live_exchange.this_node_code(plan, codes[1]))["code"]
     if source_code == target_code:
         raise ExchangeCheckError(f"Коды этих узлов совпадают ({source_code}): нужны разные")
-    source_id = source.run(correspondent_node(plan, target_code)).strip()
-    target_id = target.run(correspondent_node(plan, source_code)).strip()
+    source_id = _live_call(source, live_exchange.correspondent_node(plan, target_code))["id"]
+    target_id = _live_call(target, live_exchange.correspondent_node(plan, source_code))["id"]
     if (source_id, target_id) != (source_code, target_code):
         # Код «этого узла» до двух символов заменяется префиксом (ИдентификаторЭтогоУзлаДляОбмена).
         raise ExchangeCheckError(
@@ -202,36 +207,75 @@ def setup(plan: str, source: DataServer, target: DataServer, codes: tuple[str, s
     ]
 
 
+def _live_call(server: DataServer, code: str) -> dict:
+    try:
+        return execute(server, code)
+    except LiveError as error:
+        raise ExchangeCheckError(f"{server.label}: {error}") from None
+
+
+def _live_load_rules(
+    server: DataServer,
+    plan: str,
+    archive: Path,
+    lines: list[str],
+    accept_version_mismatch: bool = False,
+) -> None:
+    with uploaded(server, archive.read_bytes(), cleanup=lines) as path:
+        report = _live_call(
+            server,
+            load_file_code(
+                plan,
+                path,
+                archive.name,
+                write=True,
+                accept_version_mismatch=accept_version_mismatch,
+            ),
+        )
+        refusal = compatibility_error(report.get("compatibility"), accept_version_mismatch)
+        compatibility = report.get("compatibility")
+        if compatibility:
+            text = " ".join(compatibility["text"].splitlines())
+            lines.append(f"СОВМЕСТИМОСТЬ {compatibility['kind']}: {text}")
+        if refusal or report.get("loaded") is not True:
+            raise ExchangeCheckError(refusal or "правила не загружены")
+
+
 def run(args: argparse.Namespace, source: DataServer, target: DataServer, lines: list[str]) -> bool:
     """Состав плана, правила, выгрузка, загрузка, запрос; строки — в `lines`, результат — успех."""
     lines.append(f"ПЛАН {args.plan}")
-    source_code = source.run(this_node_code(args.plan, args.source_code)).strip()
-    target_code = target.run(this_node_code(args.plan, args.target_code)).strip()
+    source_code = _live_call(source, live_exchange.this_node_code(args.plan, args.source_code))[
+        "code"
+    ]
+    target_code = _live_call(target, live_exchange.this_node_code(args.plan, args.target_code))[
+        "code"
+    ]
     lines.append(
         f"ИСТОЧНИК {source.label} ({source_code}) → ПРИЕМНИК {target.label} ({target_code})"
     )
     # `call`, не `run`: ответ «НЕТ …» — не ошибка транспорта, а отказ до записи правил.
     # Всё остальное, кроме «OK» (ошибка 1С, пустой ответ), — сбой шага, как у `run`.
-    answer = source.call(plan_content_check(args.plan, args.object)).strip()
-    if answer.startswith("НЕТ"):
+    answer = _live_call(source, live_exchange.plan_content_check(args.plan, args.object))
+    if answer["included"] is False:
         lines.append(
             f"ОШИБКА объект {args.object} не входит в состав плана обмена {args.plan} в "
             f"{source.label}: правила не загружались, базы не менялись"
         )
         return False
-    if answer != "OK":
-        detail = short_error(answer) if answer else "пустой ответ сервера данных"
-        raise ExchangeCheckError(f"{source.label}: проверка состава плана: {detail}")
+    if answer["included"] is not True:
+        raise ExchangeCheckError(f"{source.label}: проверка состава плана: неверный ответ")
     lines.append(f"СОСТАВ {args.object} входит в план обмена {args.plan} в {source.label}")
     for label, server, archive in (
         ("ИСТОЧНИКА", source, args.source_rules),
         ("ПРИЕМНИКА", target, args.target_rules),
     ):
         if archive is not None:
-            server.run(load_rules(args.plan, archive.read_bytes(), archive.name))
+            _live_load_rules(server, args.plan, archive, lines, args.accept_version_mismatch)
             lines.append(f"ПРАВИЛА {label} {archive}: загружены")
     lines.append(f"ОБЪЕКТ {args.object} {args.ref}")
-    exported = source.run(export_object(args.plan, target_code, args.object, args.ref))
+    exported = _live_call(
+        source, live_exchange.export_object(args.plan, target_code, args.object, args.ref)
+    )["message"]
     lines.append(
         f"РЕГИСТРАЦИЯ узла {target_code} в источнике очищена, зарегистрирован {args.object}"
     )
@@ -243,17 +287,28 @@ def run(args: argparse.Namespace, source: DataServer, target: DataServer, lines:
     lines.append(f"ВЫГРУЗКА {message_file} {len(message)} байт")
     ok = True
     try:
-        answer = target.run(import_message(args.plan, source_code, message))
+        with uploaded(target, message, cleanup=lines, extension="xml") as path:
+            report = _live_call(target, live_exchange.import_file(args.plan, source_code, path))
+            if report.get("error"):
+                raise ExchangeCheckError(f"{target.label}: {short_error(report['error'])}")
         lines.append("ЗАГРУЗКА OK")
-        lines += [line for line in answer.splitlines() if line.startswith("СООБЩЕНИЕ")]
-    except ExchangeCheckError as error:
+        lines += [
+            f"СООБЩЕНИЕ {str(message).splitlines()[0] if message else ''}"
+            for message in report["messages"]
+        ]
+    except (ExchangeCheckError, LiveError) as error:
         ok = False
         lines.append(f"ЗАГРУЗКА ОШИБКА {error}")
     if args.query:
-        count_text, _, table = target.run(query_rows(args.query)).partition("\n")
-        count = int(count_text.strip() or 0)
+        report = _live_call(target, live_exchange.query_rows(args.query))
+        count = report["count"]
         lines.append(f"ЗАПРОС {count} строк")
-        lines += [f"  {row}" for row in table.splitlines()]
+
+        def first_line(value):
+            return str(value).splitlines()[0] if value else ""
+
+        lines += ["  " + " | ".join(first_line(v) for v in report["columns"])]
+        lines += ["  " + " | ".join(first_line(v) for v in row) for row in report["rows"]]
         if args.expect_rows is not None and count != args.expect_rows:
             ok = False
             lines.append(f"ОШИБКА ожидалось строк: {args.expect_rows}, получено: {count}")
@@ -281,6 +336,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             command.add_argument("--target-rules", type=Path, help="ZIP правил для приёмника")
             command.add_argument("--query", help="контрольный запрос к приёмнику")
             command.add_argument("--expect-rows", type=int, help="ожидаемое число строк")
+            command.add_argument(
+                "--accept-version-mismatch",
+                action="store_true",
+                help="разрешить несовпадение версии правил БСП; другая конфигурация запрещена",
+            )
         if name == "delete":
             command.add_argument("--mode", required=True, choices=("mark", "delete"))
             command.add_argument("--expect", choices=("marked", "deleted", "kept"))

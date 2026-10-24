@@ -8,6 +8,64 @@ class Kd2Error(Exception):
     """Базовая ошибка сервера правил КД 2."""
 
 
+class LiveError(Kd2Error):
+    """Ошибка живой проверки с безопасными данными протокола."""
+
+    code = "live_stage"
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
+
+class LiveBaseRefusedError(LiveError):
+    """База не разрешена для исполнения кода."""
+
+    code = "live_base_refused"
+
+
+class LiveTransportError(LiveError):
+    """Соединение или полный ответ не получены."""
+
+    code = "live_transport"
+
+
+class LiveProtocolError(LiveError):
+    """Сервер данных отклонил вызов инструмента."""
+
+    code = "live_protocol"
+
+
+class LiveEmptyError(LiveError):
+    """Код не выполнился: ответ пуст."""
+
+    code = "live_empty"
+
+
+class LiveParseError(LiveError):
+    """Ответ не соответствует формату живых проверок."""
+
+    code = "live_parse"
+
+
+class LiveCodeError(LiveError):
+    """Платформа сообщила об ошибке исполнения."""
+
+    code = "live_code"
+
+
+class PreviewMismatchError(LiveError):
+    """Нужен новый предпросмотр с текущими входами и состоянием."""
+
+    code = "preview_mismatch"
+
+
+class LiveStageError(LiveError):
+    """Стадия остановила сценарий."""
+
+    code = "live_stage"
+
+
 class EdAuthoringPreconditionError(Kd2Error):
     """Authoring preconditions failed; see failures and summary."""
 

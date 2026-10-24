@@ -32,6 +32,34 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import setup_local  # noqa: E402 — скрипт из scripts/, не пакет
 
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, None),
+        ([], ()),
+        (
+            ["192.0.2.10", "HOST.Example", "2001:db8:0:0::1"],
+            ("192.0.2.10", "host.example", "2001:db8::1"),
+        ),
+    ],
+)
+def test_local_host_addresses(tmp_path: Path, value, expected):
+    path = tmp_path / "projects.local.yaml"
+    path.write_text(yaml.safe_dump({"host_addresses": value}), encoding="utf-8")
+    assert load_local(path).host_addresses == expected
+
+
+@pytest.mark.parametrize(
+    "value", ["192.0.2.10", [False], [""], ["http://host/base"], ["host:8081"], ["host;other"]]
+)
+def test_local_host_addresses_rejects_non_hosts(tmp_path: Path, value):
+    path = tmp_path / "projects.local.yaml"
+    path.write_text(yaml.safe_dump({"host_addresses": value}), encoding="utf-8")
+    with pytest.raises(ProjectConfigError, match="host_addresses"):
+        load_local(path)
+
+
 CATALOG = """
 projects:
   alpha:

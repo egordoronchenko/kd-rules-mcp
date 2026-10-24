@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import re
 import sys
@@ -223,15 +224,66 @@ class _Scripted(ec.DataServer):
 
     _replies: list[str]
     codes: list[str]
+    _uploaded: bytes
 
     def __init__(self, label: str, replies: list[str]) -> None:
         super().__init__(label, "", {})
         object.__setattr__(self, "_replies", replies)
         object.__setattr__(self, "codes", [])
+        object.__setattr__(self, "_uploaded", b"")
 
     def call(self, code: str) -> str:
         self.codes.append(code)
-        return self._replies.pop(0)
+
+        # Новый протокол стороны базы; ожидания строк CLI остаются прежними.
+        def answer(value: dict) -> str:
+            return "OK " + json.dumps(value, ensure_ascii=False)
+
+        if "РежимОткрытияФайла.Создать" in code:
+            object.__setattr__(self, "_uploaded", b"")
+            return answer({"path": "server-file"})
+        if "РежимОткрытияФайла.Дописать" in code:
+            match = re.search(r'Base64Значение\(\("([A-Za-z0-9+/=]*)"\)\)', code)
+            assert match is not None
+            object.__setattr__(self, "_uploaded", self._uploaded + base64.b64decode(match[1]))
+            return answer({})
+        if '"is_file,size,hash"' in code:
+            return answer(
+                {
+                    "is_file": True,
+                    "size": len(self._uploaded),
+                    "hash": base64.b64encode(hashlib.sha256(self._uploaded).digest()).decode(),
+                }
+            )
+        if "УдалитьФайлы" in code:
+            return answer({})
+        reply = self._replies.pop(0)
+        if not reply.startswith("OK") and not reply.startswith("НЕТ"):
+            return reply
+        payload = reply[2:].lstrip(" \n")
+        if '"included"' in code:
+            return answer({"included": reply == "OK"})
+        if '"code", СокрЛП(Этот.Код)' in code:
+            return answer({"code": payload})
+        if "ЗагрузитьКомплектПравил" in code:
+            return answer({"loaded": True})
+        if '"message", Текст64' in code:
+            return answer({"message": payload})
+        if '"messages,result,warnings", Сообщения' in code:
+            return answer(
+                {"messages": [s.removeprefix("СООБЩЕНИЕ ") for s in payload.splitlines()]}
+            )
+        if '"count,columns,rows"' in code:
+            count, _, table = payload.partition("\n")
+            rows = table.splitlines()
+            return answer(
+                {
+                    "count": int(count),
+                    "columns": rows[0].split(" | "),
+                    "rows": [s.split(" | ") for s in rows[1:]],
+                }
+            )
+        return reply
 
 
 @pytest.mark.parametrize(

@@ -151,6 +151,12 @@ async def test_registration_retarget_deletion_filter_tool(tmp_path: Path) -> Non
 
 
 EXPECTED_TOOLS = {
+    "live_status",
+    "live_rules_dump",
+    "live_rules_check",
+    "live_rules_install",
+    "live_nodes_setup",
+    "live_exchange_run",
     "ed_authoring_candidates",
     "ed_authoring_build",
     "ed_create",

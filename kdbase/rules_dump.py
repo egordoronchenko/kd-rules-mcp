@@ -14,19 +14,18 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from bsp_load import DataServer, ExchangeCheckError, guarded, server_for, short_error
+from bsp_load import DataServer, ExchangeCheckError, server_for, short_error
 from live_checks import (
-    json_code,
-    literal,
-    read_json,
+    read_live_json as read_json,
+)
+from live_checks import (
     rule_description,
-    rule_info_body,
-    rule_record_body,
     stage,
     text_line,
 )
 
 from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.live.codegen.rules import chunk_code, metadata_code
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "kdbase" / "run"
@@ -37,46 +36,6 @@ FILES = {
     "correspondent": "CorrespondentExchangeRules.xml",
     "registration": "RegistrationRules.xml",
 }
-
-
-def binary_body(kind: str) -> str:
-    """Хранилище раскрывается внутри базы; наружу уходит только запрошенная часть."""
-    # БСП: ПравилаДляОбменаДанными/ManagerModule:794, 796, 804 —
-    # ПравилаXML / ПравилаXMLКорреспондента; 363 — .Получить() даёт ДвоичныеДанные.
-    field = "ПравилаXMLКорреспондента" if kind == "correspondent" else "ПравилаXML"
-    return f"""Байты = Неопределено;
-        Если З.{field} <> Неопределено Тогда Байты = З.{field}.Получить(); КонецЕсли;
-        Данные.Вставить("binary", Байты <> Неопределено);
-        Если Байты <> Неопределено Тогда
-        Хеш = Новый ХешированиеДанных(ХешФункция.SHA256); Хеш.Добавить(Байты);
-        Отпечаток = Base64Строка(Хеш.ХешСумма);
-        Текст64 = СтрЗаменить(СтрЗаменить(Base64Строка(Байты), Символы.ПС, ""),
-        Символы.ВК, "");
-        Данные.Вставить("size", Байты.Размер());
-        Данные.Вставить("length", СтрДлина(Текст64));
-        Данные.Вставить("hash", Отпечаток); КонецЕсли;"""
-
-
-def metadata_code(plan: str, kind: str) -> str:
-    return json_code(
-        rule_record_body(plan, kind)
-        + rule_info_body(kind)
-        + f"Если З.Выбран() Тогда {binary_body(kind)} КонецЕсли;"
-    )
-
-
-def chunk_code(plan: str, kind: str, offset: int, size: int, digest: str) -> str:
-    if offset < 0 or size <= 0:
-        raise ValueError("неверная граница части")
-    return guarded(
-        rule_record_body(plan, kind)
-        + f"""Если Не З.Выбран() Тогда ВызватьИсключение "Запись правил исчезла"; КонецЕсли;
-        Данные = Новый Структура; {binary_body(kind)}
-        Если Не Данные.binary Тогда ВызватьИсключение "XML правил исчез"; КонецЕсли;
-        Если Отпечаток <> {literal(digest)} Тогда
-        ВызватьИсключение "Правила изменились во время чтения"; КонецЕсли;
-        Результат = "OK " + Сред(Текст64, {offset + 1}, {size});"""
-    )
 
 
 def dump(args: argparse.Namespace, server: DataServer, lines: list[str]) -> Path:
@@ -106,7 +65,12 @@ def dump(args: argparse.Namespace, server: DataServer, lines: list[str]) -> Path
             for offset in range(0, length, args.chunk_size):
                 count = min(args.chunk_size, length - offset)
                 try:
-                    part = server.run(chunk_code(args.plan, kind, offset, count, info["hash"]))
+                    part_info = read_json(
+                        server, chunk_code(args.plan, kind, offset, count, info["hash"])
+                    )
+                    part = part_info["chunk"]
+                    if part_info["hash"] != info["hash"]:
+                        raise ExchangeCheckError("Правила изменились во время чтения")
                 except ExchangeCheckError as error:
                     raise ExchangeCheckError(f"часть {offset}:{offset + count}: {error}") from error
                 if len(part) != count:

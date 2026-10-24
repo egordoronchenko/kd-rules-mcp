@@ -13,7 +13,7 @@ OUTPUTS = (".env", "docker-compose.override.yml", ".mcp.json", ".cursor/mcp.json
 
 
 @pytest.mark.parametrize("image_tag", [None, "1.2.3"])
-def test_image_setup_matches_local_bytes(
+def test_image_setup_matches_local_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image_tag: str | None
 ) -> None:
     catalog = yaml.safe_load((ROOT / "projects.example.yaml").read_text(encoding="utf-8"))
@@ -44,7 +44,21 @@ def test_image_setup_matches_local_bytes(
     setup_local.main(["--root", str(local)])
     setup_local.main(["--root", str(image), "--host-paths"])
     for name in OUTPUTS:
-        assert (local / name).read_bytes() == (image / name).read_bytes()
+        if name == "docker-compose.override.yml":
+            clone = yaml.safe_load((local / name).read_bytes())
+            container = yaml.safe_load((image / name).read_bytes())
+            clone_map = clone["services"]["kd-rules-mcp"]["environment"].pop("KD2_PATH_MAP")
+            image_map = container["services"]["kd-rules-mcp"]["environment"].pop("KD2_PATH_MAP")
+            clone_paths = dict(item.split("=", 1) for item in clone_map.split(";") if item)
+            image_paths = dict(item.split("=", 1) for item in image_map.split(";") if item)
+            assert image_paths == {
+                source: target
+                for source, target in clone_paths.items()
+                if target not in ("/data/workspace", "/structures")
+            }
+            assert clone == container
+        else:
+            assert (local / name).read_bytes() == (image / name).read_bytes()
         assert b"\r" not in (image / name).read_bytes()
     text = (image / ".env").read_text(encoding="utf-8")
     assert ("KD_IMAGE_TAG=" in text) == (image_tag is not None)

@@ -24,11 +24,14 @@ Docker не установлен или не отвечает — молчит.
 """
 
 import argparse
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -112,7 +115,14 @@ def write_env_file(path: Path, local: LocalSettings, image_tag: str | None = Non
     return False
 
 
-def compose_override(catalog: Catalog, local: LocalSettings, *, host_paths: bool = False) -> str:
+def compose_override(
+    catalog: Catalog,
+    local: LocalSettings,
+    *,
+    host_paths: bool = False,
+    readable: LocalSettings | None = None,
+    warnings: list[str] | None = None,
+) -> str:
     """Подключение папок проектов и перевод путей для контейнера."""
     volumes: list[str] = []
     dirs: list[str] = []
@@ -131,8 +141,21 @@ def compose_override(catalog: Catalog, local: LocalSettings, *, host_paths: bool
         volumes.append(f"{_posix(folder)}:{target}")
         rules.append(f"{project_id}={target}")
         path_map.append(f"{folder}={target}")
-    # Относительные пути относятся к папке compose на машине пользователя, а не к /work.
-    workspace = local.workspace or Path("workspace")
+    workspace = local.workspace
+    if host_paths:
+        if workspace is None or not (
+            workspace.is_absolute() or PureWindowsPath(str(workspace)).is_absolute()
+        ):
+            if warnings is not None:
+                warnings.append(
+                    "задайте абсолютный workspace в projects.local.yaml; "
+                    "путь рабочей папки в KD2_PATH_MAP не записан"
+                )
+            workspace = None
+    else:
+        workspace = workspace or _host_join(ROOT, "workspace")
+        if not (workspace.is_absolute() or PureWindowsPath(str(workspace)).is_absolute()):
+            workspace = _host_join(ROOT, str(workspace))
     extensions: list[str] = []
     for project_id, folder in local.project_dirs.items():
         for configuration in catalog.project(project_id).configurations.values():
@@ -145,10 +168,12 @@ def compose_override(catalog: Catalog, local: LocalSettings, *, host_paths: bool
                 volumes.append(f"{_posix(path)}:{target}")
                 extensions.append(f"{key}={target}")
                 path_map.append(f"{path}={target}")
-    path_map.append(f"{workspace}=/data/workspace")
-    path_map.append("structures=/structures")
-    if local.workspace is not None:
-        volumes.append(f"{_posix(local.workspace)}:/data/workspace")
+    if workspace is not None:
+        path_map.append(f"{workspace}=/data/workspace")
+    if not host_paths:
+        path_map.append(f"{_host_join(ROOT, 'structures')}=/structures")
+    if local.workspace is not None and workspace is not None:
+        volumes.append(f"{_posix(workspace)}:/data/workspace")
     service: dict[str, Any] = {
         "environment": {
             "KD2_PROJECT_DIRS": ";".join(dirs),
@@ -157,6 +182,9 @@ def compose_override(catalog: Catalog, local: LocalSettings, *, host_paths: bool
             "KD2_EXTENSION_DIRS": ";".join(extensions),
         }
     }
+    hosts = data_host_map(catalog, readable or local, host_paths=host_paths, warnings=warnings)
+    if hosts:
+        service["environment"]["KD2_HOST_MAP"] = hosts
     if local.token:
         service["environment"]["KD2_TOKEN"] = local.token
     if volumes:
@@ -168,6 +196,50 @@ def compose_override(catalog: Catalog, local: LocalSettings, *, host_paths: bool
         width=1000,
     )
     return HEADER + body
+
+
+def data_host_map(
+    catalog: Catalog,
+    local: LocalSettings,
+    *,
+    host_paths: bool = False,
+    warnings: list[str] | None = None,
+) -> str:
+    """Только адреса этой машины из URL серверов данных песочниц; без логинов и сети ИБ."""
+    addresses = set(local.host_addresses or ())
+    if not host_paths:
+        addresses.update(("127.0.0.1", "localhost"))
+        with suppress(OSError):
+            addresses.update(
+                str(item[4][0]).lower() for item in socket.getaddrinfo(socket.gethostname(), None)
+            )
+    hosts = set()
+    unknown = set()
+    for project_id in local.project_dirs:
+        servers = project_mcp_servers(catalog, local, project_id) or {}
+        for base in catalog.project(project_id).bases.values():
+            if not base.is_sandbox or not base.data_mcp:
+                continue
+            url = servers.get(base.data_mcp, {}).get("url", "")
+            hostname = urlsplit(url).hostname if isinstance(url, str) else None
+            try:
+                normalized = str(ipaddress.ip_address(hostname or ""))
+            except ValueError:
+                normalized = (hostname or "").lower()
+            if hostname is not None and normalized in addresses:
+                hosts.add(normalized)
+            elif (
+                host_paths
+                and local.host_addresses is None
+                and hostname not in (None, "localhost", "127.0.0.1")
+            ):
+                unknown.add(hostname)
+    if warnings is not None:
+        warnings.extend(
+            f"сервер данных {host} — если это адрес этой машины, добавьте его в host_addresses"
+            for host in sorted(unknown)
+        )
+    return ";".join(f"{host}=host.docker.internal" for host in sorted(hosts))
 
 
 def existing_rules_dirs(
@@ -292,11 +364,15 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("--project-mount: нужен ID=PATH с известным проектом и доступной папкой")
         read_dirs[project_id] = Path(mounted)
     readable = replace(local, project_dirs=read_dirs)
+    setup_warnings: list[str] = []
     (ROOT / "docker-compose.override.yml").write_bytes(
-        compose_override(catalog, local, host_paths=args.host_paths).encode("utf-8")
+        compose_override(
+            catalog, local, host_paths=args.host_paths, readable=readable, warnings=setup_warnings
+        ).encode("utf-8")
     )
     foreign_env = write_env_file(ROOT / ".env", local, image_tag)
     servers, warnings = mcp_servers(catalog, readable)
+    warnings = setup_warnings + warnings
     if args.host_paths:
         warnings.append(
             "Пути проектов сохранены как на хосте; проверьте существование rules_dir и "

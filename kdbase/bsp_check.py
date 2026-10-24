@@ -41,13 +41,14 @@ from bsp_load import (
     TOOL,
     DataServer,
     ExchangeCheckError,
-    load_rules_code,
-    parse_load_report,
     server_for,
-    short_error,
 )
 
 from kd_rules_mcp.console import utf8_stdout
+from kd_rules_mcp.errors import LiveError
+from kd_rules_mcp.live.codegen.rules import load_file_code
+from kd_rules_mcp.live.response import compatibility_error
+from kd_rules_mcp.live.runs import execute, uploaded
 from kd_rules_mcp.projects import (
     ProjectConfigError,
     base_login,
@@ -173,7 +174,9 @@ def check_com(archive: Path, plan: str, connection_string: str) -> int:
     return 0 if loaded else 1
 
 
-def check_data(archive: Path, plan: str, server: DataServer) -> int:
+def check_data(
+    archive: Path, plan: str, server: DataServer, accept_version_mismatch: bool = False
+) -> int:
     """Печатает протокол. Код — `load_rules_code(..., write=False, full_set=...)`.
 
     Ответ берёт `server.call`, не `run`: `run` считает любую строку без префикса `OK`
@@ -183,30 +186,51 @@ def check_data(archive: Path, plan: str, server: DataServer) -> int:
         names = package.namelist()
     full_set = len(names) == 3
     _emit(report_header("сервер данных", plan, archive, names, full_set))
-    code = load_rules_code(plan, archive.read_bytes(), archive.name, write=False, full_set=full_set)
+    cleanup: list[str] = []
     try:
-        text = server.call(code)
-    except ExchangeCheckError as error:
+        with uploaded(server, archive.read_bytes(), cleanup=cleanup) as path:
+            report = execute(
+                server,
+                load_file_code(
+                    plan,
+                    path,
+                    archive.name,
+                    write=False,
+                    full_set=full_set,
+                    include_description=False,
+                    accept_version_mismatch=accept_version_mismatch,
+                ),
+            )
+    except (ExchangeCheckError, LiveError) as error:
+        detail = str(error)
+        if "пустой ответ" in detail:
+            detail = (
+                f"{server.label}: пустой ответ сервера данных "
+                f"(код не выполнился или нет инструмента {TOOL})"
+            )
+        _emit(report_body(detail, [], [], False))
+        _emit(cleanup)
+        return 1
+    except (KeyError, TypeError, ValueError) as error:
         _emit(report_body(str(error), [], [], False))
         return 1
-    if not text:
-        _emit(
-            report_body(
-                f"{server.label}: пустой ответ сервера данных "
-                f"(код не выполнился или нет инструмента {TOOL})",
-                [],
-                [],
-                False,
-            )
-        )
-        return 1
-    if not text.startswith("OK"):
-        detail = short_error(text) if text.startswith("ОШИБКА") else text
-        _emit(report_body(detail, [], [], False))
-        return 1
-    report = parse_load_report(text)
-    loaded = bool(report.flags) and all(report.flags)
-    _emit(report_body(None, list(report.infos), list(report.messages), loaded))
+    entries = report["rules"]
+    refusal = compatibility_error(report.get("compatibility"), accept_version_mismatch)
+    loaded = (
+        not refusal and report["loaded"] and bool(entries) and all(r["loaded"] for r in entries)
+    )
+    body = report_body(
+        refusal,
+        [r["info"] for r in entries if r.get("kind") != "correspondent"],
+        report["messages"],
+        loaded,
+    )
+    compatibility = report.get("compatibility")
+    if compatibility:
+        text = " ".join(compatibility["text"].splitlines())
+        body.insert(-1, f"СОВМЕСТИМОСТЬ {compatibility['kind']}: {text}")
+    _emit(body)
+    _emit(cleanup)
     return 0 if loaded else 1
 
 
@@ -250,12 +274,19 @@ def main() -> None:
     parser.add_argument("--base", help="база-песочница проекта из projects.yaml")
     parser.add_argument("--connection", help="строка соединения вместо --project/--base")
     parser.add_argument(
+        "--accept-version-mismatch",
+        action="store_true",
+        help="разрешить несовпадение версии БСП (сервер данных); другая конфигурация запрещена",
+    )
+    parser.add_argument(
         "--via",
         choices=("data", "com"),
         help="транспорт: сервер данных (data) или внешнее соединение (com)",
     )
     args = parser.parse_args()
     connection, data_ref = _bind(parser, args)
+    if args.accept_version_mismatch and data_ref is None:
+        parser.error("--accept-version-mismatch доступен только через сервер данных (--via data)")
 
     def run(archive: Path) -> int:
         if data_ref is None:
@@ -264,7 +295,7 @@ def main() -> None:
             server = server_for(data_ref, ROOT)
         except ProjectConfigError as error:
             raise SystemExit(str(error)) from error
-        return check_data(archive, args.plan, server)
+        return check_data(archive, args.plan, server, args.accept_version_mismatch)
 
     if args.archive is not None:
         if args.rules is not None:

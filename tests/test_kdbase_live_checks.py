@@ -39,6 +39,10 @@ class Scripted(bsp_load.DataServer):
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
+        if 'Структура("plans", Данные)' in code and reply.startswith("OK "):
+            value = json.loads(reply[3:])
+            if isinstance(value, list):
+                return answer({"plans": value})
         return reply
 
 
@@ -72,7 +76,8 @@ def rules_replies(data: bytes = b"<rules/>", chunk_size: int = 4) -> list[str | 
         )
         result.append(answer(details))
         result.extend(
-            "OK " + encoded[p : p + chunk_size] for p in range(0, len(encoded), chunk_size)
+            answer({"chunk": encoded[p : p + chunk_size], "hash": details["hash"]})
+            for p in range(0, len(encoded), chunk_size)
         )
     return result
 

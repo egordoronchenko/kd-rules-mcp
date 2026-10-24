@@ -12,6 +12,7 @@
 """
 
 import base64
+import ipaddress
 import json
 import re
 from dataclasses import dataclass, field
@@ -52,6 +53,14 @@ class Configuration:
 
 
 @dataclass(frozen=True, slots=True)
+class DataAccess:
+    """Имя инструмента исполнения кода и его строкового аргумента."""
+
+    tool: str = "vcexecutecode"
+    argument: str = "bslcode"
+
+
+@dataclass(frozen=True, slots=True)
 class Base:
     """Информационная база проекта."""
 
@@ -63,6 +72,7 @@ class Base:
     data_mcp: str = ""
     # .dev.env проекта (от папки проекта) с IB_USER / IB_PASSWORD этой базы — логин для проверок.
     dev_env: str = ""
+    data_access: DataAccess = field(default_factory=DataAccess)
 
     @property
     def is_sandbox(self) -> bool:
@@ -152,6 +162,8 @@ class LocalSettings:
     port: int | None = None
     # Суффикс второго экземпляра на машине; None — имена контейнера, тома и проекта по умолчанию.
     instance: str | None = None
+    # None — поле не задано; в образе это повод подсказать про неперечисленные адреса.
+    host_addresses: tuple[str, ...] | None = None
 
     def login(self, project_id: str, base_id: str) -> tuple[str, str] | None:
         """Пользователь и пароль базы, если заданы."""
@@ -328,7 +340,28 @@ def load_local(path: Path) -> LocalSettings:
         token=token,
         port=_optional_port(data.get("port")),
         instance=_instance_name(data.get("instance")),
+        host_addresses=_host_addresses(data.get("host_addresses")),
     )
+
+
+def _host_addresses(value: Any) -> tuple[str, ...] | None:
+    """Явные адреса машины: только хосты, без URL, портов и авторизации."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ProjectConfigError("host_addresses: нужен список адресов или имён хоста")
+    result = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise ProjectConfigError("host_addresses: нужны непустые адреса или имена хоста")
+        try:
+            normalized = str(ipaddress.ip_address(item))
+        except ValueError:
+            if re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", item) is None:
+                raise ProjectConfigError("host_addresses: укажите хост без URL и порта") from None
+            normalized = item.lower()
+        result.append(normalized)
+    return tuple(result)
 
 
 def _optional_text(value: Any) -> str | None:
@@ -422,7 +455,14 @@ def _project(project_id: str, body: Any) -> Project:
             raise ProjectConfigError(f"У базы {project_id}.{base_id} нет «connection»")
         data_mcp = str(item.get("data_mcp") or "").strip()
         dev_env = str(item.get("dev_env") or "").strip()
-        bases[str(base_id)] = Base(str(base_id), role, config_id, connection, data_mcp, dev_env)
+        access = _mapping(item.get("data_access") or {}, "data_access")
+        if set(access) - {"tool", "argument"} or any(
+            not isinstance(v, str) or not v.strip() for v in access.values()
+        ):
+            raise ProjectConfigError("data_access: нужны непустые tool и argument")
+        bases[str(base_id)] = Base(
+            str(base_id), role, config_id, connection, data_mcp, dev_env, DataAccess(**access)
+        )
     return Project(
         id=project_id,
         name=str(data.get("name", project_id)),

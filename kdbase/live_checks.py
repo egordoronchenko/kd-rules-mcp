@@ -1,24 +1,14 @@
 """Общие части живых проверок: безопасные литералы, стадии и чтение регистра БСП."""
 
 import json
-import re
 from collections.abc import Callable
 from typing import Any
 
-from bsp_load import DataServer, ExchangeCheckError, bsl, guarded, short_error
+from bsp_load import DataServer, ExchangeCheckError, guarded, short_error
 
-
-def literal(value: str) -> str:
-    """Сохраняет переводы строк значений, не оставляя их в исполняемом коде."""
-    parts = re.split(r"([\r\n])", value)
-    return (
-        "("
-        + " + ".join(
-            "Символ(13)" if part == "\r" else "Символ(10)" if part == "\n" else bsl(part)
-            for part in parts
-        )
-        + ")"
-    )
+from kd_rules_mcp.errors import LiveError
+from kd_rules_mcp.live.response import literal
+from kd_rules_mcp.live.runs import execute
 
 
 def text_line(value: object) -> str:
@@ -49,6 +39,14 @@ def json_code(body: str, value: str = "Данные") -> str:
 def read_json(server: DataServer, code: str) -> Any:
     """Пустой, оборванный или не-JSON ответ не является успешным результатом."""
     return json.loads(server.run(code))
+
+
+def read_live_json(server: DataServer, code: str) -> dict[str, Any]:
+    """Строгий новый ответ; старые register/delete сохраняют свой read_json."""
+    try:
+        return execute(server, code)
+    except LiveError as error:
+        raise ExchangeCheckError(f"{server.label}: {error}") from None
 
 
 def object_body(full_name: str, ref: str, *, required: bool = True) -> str:

@@ -56,8 +56,8 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
         ensure_ascii=False,
     )
     # Виды правил и синтаксис адресов нужны агенту без локального docs/tools.md.
-    # Перенос регистрации добавляет отдельную схему preview/write (#67).
-    assert len(serialized) <= 48_000, f"Схемы: {len(serialized)} знаков"
+    # Шесть live-инструментов добавляют компактные схемы баз, файлов и preview/apply.
+    assert len(serialized) <= 53_000, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:

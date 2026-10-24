@@ -79,6 +79,14 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "registration_retarget",
         "correspondent_draft",
     ),
+    "Live sandbox checks": (
+        "live_status",
+        "live_rules_dump",
+        "live_rules_check",
+        "live_rules_install",
+        "live_nodes_setup",
+        "live_exchange_run",
+    ),
     "EnterpriseData reader": (
         "ed_open",
         "ed_overview",

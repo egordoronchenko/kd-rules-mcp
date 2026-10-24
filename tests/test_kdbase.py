@@ -10,6 +10,9 @@
 `bsp_check.require_login` проверяется без базы и без `KD2_KDBASE_CHECK`.
 """
 
+import base64
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -236,7 +239,9 @@ def routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         seen["com"] += 1
         return 0
 
-    def check_data(archive: Path, plan: str, server: bsp_load.DataServer) -> int:
+    def check_data(
+        archive: Path, plan: str, server: bsp_load.DataServer, accept_version_mismatch: bool = False
+    ) -> int:
         seen["data"] += 1
         return 0
 
@@ -334,12 +339,46 @@ def test_parse_load_report_reads_lengths_not_lines() -> None:
 class _Scripted(bsp_load.DataServer):
     """Сервер данных с ответами по очереди (без HTTP)."""
 
+    _uploaded: bytes
+
     def __init__(self, label: str, replies: list[str]) -> None:
         super().__init__(label, "", {})
         object.__setattr__(self, "_replies", replies)
+        object.__setattr__(self, "_uploaded", b"")
 
     def call(self, code: str) -> str:
-        return self._replies.pop(0)  # type: ignore[attr-defined]  # задан в __init__
+        if "РежимОткрытияФайла.Создать" in code:
+            object.__setattr__(self, "_uploaded", b"")
+            return 'OK {"path":"server-file"}'
+        if "РежимОткрытияФайла.Дописать" in code:
+            match = re.search(r'Base64Значение\(\("([A-Za-z0-9+/=]*)"\)\)', code)
+            assert match is not None
+            object.__setattr__(self, "_uploaded", self._uploaded + base64.b64decode(match[1]))
+            return "OK {}"
+        if '"is_file,size,hash"' in code:
+            return "OK " + json.dumps(
+                {
+                    "is_file": True,
+                    "size": len(self._uploaded),
+                    "hash": base64.b64encode(hashlib.sha256(self._uploaded).digest()).decode(),
+                }
+            )
+        if "УдалитьФайлы" in code:
+            return "OK {}"
+        reply = self._replies.pop(0)  # type: ignore[attr-defined]  # задан в __init__
+        if reply.startswith("OK\nR\n"):
+            report = bsp_load.parse_load_report(reply)
+            return "OK " + json.dumps(
+                {
+                    "loaded": all(report.flags),
+                    "rules": [
+                        {"loaded": flag, "info": info}
+                        for flag, info in zip(report.flags, report.infos, strict=True)
+                    ],
+                    "messages": report.messages,
+                }
+            )
+        return reply
 
 
 def _rules_zip(path: Path) -> Path:
