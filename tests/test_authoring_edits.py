@@ -97,6 +97,30 @@ def _rules() -> ExchangeRules:
     return document
 
 
+@pytest.mark.parametrize("kind", ["pko", "conversion", "unknown"])
+@pytest.mark.parametrize("fields", [None, {}])
+def test_update_rule_empty_fields_rejected_before_lookup(kind: str, fields: dict | None) -> None:
+    rules = _rules()
+    before = canonical_form(dump_rules(rules))
+    with pytest.raises(
+        RuleEditError, match="Нет полей для правки: передайте в fields хотя бы одно поле"
+    ):
+        update_rule(rules, kind, "", fields)
+    assert canonical_form(dump_rules(rules)) == before
+
+
+@pytest.mark.parametrize("operation", [create_rule, update_rule, delete_rule])
+def test_pro_edit_points_to_registration_build(operation) -> None:
+    rules = _rules()
+    before = canonical_form(dump_rules(rules))
+    with pytest.raises(RuleEditError, match=r"registration_build.*rules_get"):
+        if operation is delete_rule:
+            operation(rules, "pro", "Справочник.Организации")
+        else:
+            operation(rules, "pro", "Справочник.Организации", {"Комментарий": "правка"})
+    assert canonical_form(dump_rules(rules)) == before
+
+
 def _section_with_groups(section: str, body: str) -> ExchangeRules:
     xml = (
         "<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>"

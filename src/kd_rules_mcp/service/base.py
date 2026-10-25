@@ -105,7 +105,10 @@ class ServiceBase:
     def _exchange(self, project_id: str) -> ExchangeRules:
         document = self._document(project_id)
         if not isinstance(document, ExchangeRules):
-            raise Kd2Error(f"Проект «{project_id}» — правила регистрации, а нужны правила обмена")
+            raise Kd2Error(
+                f"Проект «{project_id}» — правила регистрации, а нужны правила обмена. "
+                "Правила регистрации строит registration_build, читает rules_get"
+            )
         return document
 
     def _require_structure(self, structure_id: str) -> None:

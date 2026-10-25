@@ -172,6 +172,13 @@ RuleKind = Annotated[
         "parameter, conversion, pro"
     ),
 ]
+EditRuleKind = Annotated[
+    str,
+    Field(
+        description="Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, "
+        "parameter, conversion"
+    ),
+]
 RuleKey = Annotated[
     str,
     Field(
@@ -198,6 +205,10 @@ OptionalStructure = Annotated[
 ]
 
 ConfidenceFilter = Annotated[
+    str | None,
+    Field(description="Confidence: точно, синоним КД, по синониму, по составу, нет пары"),
+]
+PropertyConfidenceFilter = Annotated[
     str | None,
     Field(description="Confidence: точно, синоним КД, по синониму, нет пары"),
 ]
@@ -615,7 +626,8 @@ def create_server(service: Kd2Service) -> MCPServer:
         limit: Limit = 50,
     ) -> dict[str, Any]:
         """Return ПКО candidates by name/kind plus suggestions; narrow large results with
-        text/kind. Apply auto=false or по синониму pairs only after an agent decision."""
+        text/kind. Apply auto=false, по синониму or по составу pairs only after an agent
+        decision."""
         return await call(
             service.match_objects,
             source_structure,
@@ -633,7 +645,7 @@ def create_server(service: Kd2Service) -> MCPServer:
         target_structure: StructureId,
         source_object: ObjectName,
         target_object: ObjectName,
-        confidence: ConfidenceFilter = None,
+        confidence: PropertyConfidenceFilter = None,
         offset: Offset = 0,
         limit: Limit = 50,
         rules_project_id: Annotated[
@@ -847,7 +859,7 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def rule_create(
         project_id: ProjectId,
-        kind: RuleKind,
+        kind: EditRuleKind,
         key: RuleKey,
         fields: Fields = None,
         owner: Owner = "",
@@ -872,7 +884,7 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def rule_update(
         project_id: ProjectId,
-        kind: RuleKind,
+        kind: EditRuleKind,
         key: RuleKey,
         fields: Fields = None,
         owner: Owner = "",
@@ -932,7 +944,7 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def rule_delete(
         project_id: ProjectId,
-        kind: RuleKind,
+        kind: EditRuleKind,
         key: RuleKey,
         owner: Owner = "",
         source_structure: OptionalStructure = None,

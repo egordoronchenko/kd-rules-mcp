@@ -261,6 +261,8 @@ def update_rule(
     Поля заголовка (версия формата, имена конфигураций, дата и остальные реквизиты)
     этим вызовом не правятся.
     """
+    if not fields:
+        raise RuleEditError("Нет полей для правки: передайте в fields хотя бы одно поле")
     if kind_name == CONVERSION_KIND:
         return _update_conversion(rules, key, fields)
     _require_key(kind_name, key)
@@ -503,6 +505,11 @@ def _apply_conversion_fields(root: Node, fields: Mapping[str, FieldValue]) -> No
 
 
 def _tag(kind_name: str) -> str:
+    if kind_name == "pro":
+        raise RuleEditError(
+            "Вид pro есть только у проекта правил регистрации и правками не меняется: "
+            "правила регистрации строит registration_build, читает rules_get"
+        )
     if kind_name in _TOP:
         return _TOP[kind_name][1]
     if kind_name in _NESTED_TAGS:

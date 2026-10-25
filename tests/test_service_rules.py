@@ -7,6 +7,7 @@ import pytest
 
 from kd_rules_mcp.errors import (
     Kd2Error,
+    RuleEditError,
     RulesSaveErrorsError,
     StructureNotFoundError,
     WorkspacePathError,
@@ -15,6 +16,36 @@ from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 
 DATA = Path(__file__).parent / "data"
 _MISSING_ALGORITHM = "Выполнить(Алгоритмы.НетТакого);"
+
+
+@pytest.mark.parametrize("kind", ["pko", "conversion"])
+@pytest.mark.parametrize("options", [{}, {"fields": None}, {"fields": {}}])
+def test_empty_update_keeps_project_unmodified(tmp_path: Path, kind: str, options: dict) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    opened = service.rules_open(str(DATA / "exchange_rules.xml"))
+    project = opened["project_id"]
+    before = service.rules_projects()
+    assert before["projects"][0]["modified"] is False
+    with pytest.raises(RuleEditError, match="хотя бы одно поле"):
+        service.rule_update(project, kind, "Организации" if kind == "pko" else "", **options)
+    assert service.rules_projects() == before
+
+
+def test_pro_edit_on_registration_project_points_to_registration_build(tmp_path: Path) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    project = service.rules_open(str(DATA / "registration_rules.xml"))["project_id"]
+    with pytest.raises(Kd2Error, match="registration_build"):
+        service.rule_update(project, "pro", "Справочник.Организации", fields={"Комментарий": "1"})
+    with pytest.raises(Kd2Error, match="registration_build"):
+        service.rule_delete(project, "pro", "Справочник.Организации", "", None, None)
+    assert service.rules_projects()["projects"][0]["modified"] is False
+
+
+def test_rules_get_pro_on_exchange_project_names_registration_project(tmp_path: Path) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    project = service.rules_open(str(DATA / "exchange_rules.xml"))["project_id"]
+    with pytest.raises(Kd2Error, match="только у проекта правил регистрации"):
+        service.rules_get(project, "pro", "Справочник.Организации", "", 10)
 
 
 def test_migration_rules_get_property_rows_show_code_parameter_and_incoming(tmp_path):

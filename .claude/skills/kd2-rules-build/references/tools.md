@@ -153,14 +153,15 @@ rules_diff.
 ### `match_objects`
 
 Return ПКО candidates by name/kind plus suggestions; narrow large results with
-text/kind. Apply auto=false or по синониму pairs only after an agent decision.
+text/kind. Apply auto=false, по синониму or по составу pairs only after an agent
+decision.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `source_structure` | string | required | Cached structure ID |
 | `target_structure` | string | required | Cached structure ID |
 | `kind` | string \| null | `null` | Object kind, e.g. Справочник |
-| `confidence` | string \| null | `null` | Confidence: точно, синоним КД, по синониму, нет пары |
+| `confidence` | string \| null | `null` | Confidence: точно, синоним КД, по синониму, по составу, нет пары |
 | `text` | string \| null | `null` | Either side's name/synonym substring |
 | `offset` | integer ≥ 0 | `0` | Page offset |
 | `limit` | integer 1…200 | `50` | Page size |
@@ -312,7 +313,7 @@ Conversion events use rule_update.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | Rules project ID |
-| `kind` | string | required | Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, conversion, pro |
+| `kind` | string | required | Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, conversion |
 | `key` | string | required | ПКО/ПВД/ПОД: code; algorithm/query/parameter: name; ПКС: group/…/target (source if empty, parameter name for parameter ПКС; [поиск], source→target, #N disambiguate); pks_group: group code path; ПКЗ: source value; ПРО: metadata object or code; conversion: empty or Конвертация |
 | `fields` | object \| null | `null` | Tag/attribute → value map |
 | `owner` | string | `""` | Owner ПКО code for pks/pks_group/pkz; otherwise empty |
@@ -328,7 +329,7 @@ deletes an event.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | Rules project ID |
-| `kind` | string | required | Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, conversion, pro |
+| `kind` | string | required | Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, conversion |
 | `key` | string | required | ПКО/ПВД/ПОД: code; algorithm/query/parameter: name; ПКС: group/…/target (source if empty, parameter name for parameter ПКС; [поиск], source→target, #N disambiguate); pks_group: group code path; ПКЗ: source value; ПРО: metadata object or code; conversion: empty or Конвертация |
 | `fields` | object \| null | `null` | Tag/attribute → value map |
 | `owner` | string | `""` | Owner ПКО code for pks/pks_group/pkz; otherwise empty |
@@ -359,7 +360,7 @@ rule_update with empty code.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `project_id` | string | required | Rules project ID |
-| `kind` | string | required | Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, conversion, pro |
+| `kind` | string | required | Kind: pko, pks, pks_group, pkz, pvd, pod, algorithm, query, parameter, conversion |
 | `key` | string | required | ПКО/ПВД/ПОД: code; algorithm/query/parameter: name; ПКС: group/…/target (source if empty, parameter name for parameter ПКС; [поиск], source→target, #N disambiguate); pks_group: group code path; ПКЗ: source value; ПРО: metadata object or code; conversion: empty or Конвертация |
 | `owner` | string | `""` | Owner ПКО code for pks/pks_group/pkz; otherwise empty |
 | `source_structure` | string \| null | `null` | Validation structure |
@@ -1122,7 +1123,7 @@ Each list contains up to 200 rows; larger lists add `<key>_total`.
 | `structure_object` | `name`, `type_name`, `kind`, `synonym`, `attrs`, `properties` page. A bare name (`ФизическиеЛица`) returns its unique match; multiple matches give `object_not_found` with full names. Similarity search uses the bare name. Property qualifier `date_parts` occurs only for `Дата`; `fill_checking` is present when known from XML (`ShowError`/`DontCheck`) |
 | `structure_values`, `structure_plan_content` | List page; plan items contain object types and automatic registration flags |
 | `structure_compare` | `counts`, `limit`, `added_objects`, `removed_objects`, `added_properties`, `removed_properties`, `changed_properties`, `added_values`, `removed_values`; each list is limited to `limit` |
-| `match_objects` | List page: `confidence`, `auto`, `source`, `target` (`Вид.Имя`), `synonym`, `note` |
+| `match_objects` | List page: `confidence`, `auto`, `source`, `target` (`Вид.Имя`), `synonym`, `note`; `по составу` rows add `share` (rounded to 0.01) and `common`; `by_composition` (`pairs`, `ambiguous`) before `text`/`confidence`/page filters, absent when `confidence` selects a name or synonym class |
 | `match_properties`, `match_values` | List page: `confidence`, `auto`, `source`, `target` (`name`, `kind`, `path`, `synonym`, up to five `types`), `path` (ПКС path), `note`. With both `rules_project_id` and `code`, `match_properties` adds `covered` and, for covered pairs, `pks` addresses of that ПКО. `uncovered` returns only uncovered pairs. Without both parameters, coverage keys are absent; supplying only one gives `invalid_argument` |
 | `rules_open` | Rules project, `reused`; reused project adds `source_changed`; private copy adds `private: true` and `reused: false` |
 | `rules_create` | Rules project |
@@ -1153,7 +1154,15 @@ A cached structure ID can be `zup-full`; object names accept `Вид.Имя`, e.
 or a KD type name.
 
 Confidence values stay `точно` (exact), `синоним КД` (KD alias), `по синониму` (synonym suggestion),
-`нет пары` (unmatched). Two standard configurations may contain hundreds of objects.
+`по составу` (composition suggestion, objects only), `нет пары` (unmatched). `по составу` pairs objects of one
+kind left without an exact or synonym pair: header attribute, dimension and resource names (enumeration and
+route point value names), case-insensitive, minus names found in at least 15 % of that kind's objects in either
+structure with 20 or more such objects; Jaccard share at least 0.7 and at least 5 common names; a pair is returned
+only when neither side has another pair above the threshold. Rows carry `share` and `common`; the
+`match_objects` response adds `by_composition` (`pairs`, `ambiguous` — withheld pairs above the threshold) unless
+`confidence` selects `точно`, `синоним КД` or `по синониму`, in which case the class is not computed (the
+`нет пары` filter still computes it, so composition pairs never appear as unmatched). `match_properties` rejects
+`по составу`. Two standard configurations may contain hundreds of objects.
 Matching follows KD automatic rules.
 
 ### Rules projects, addresses and edits
@@ -1170,7 +1179,9 @@ Explicit occupied IDs are rejected. See [workflow.md](https://github.com/egordor
 
 Shared `kind` values are `pko`, `pks`, `pks_group`, `pkz`, `pvd`, `pod`, `algorithm`,
 `query`, `parameter`, `conversion`, `pro`. `conversion` is the one set of conversion events per
-exchange file; creating/deleting it separately is rejected. `pro` applies to registration projects.
+exchange file; creating/deleting it separately is rejected. `pro` is read with `rules_get` on registration
+projects; `rule_create`, `rule_update` and `rule_delete` do not accept it (build registration rules with
+`registration_build`). `rule_update` without fields is rejected.
 
 Shared `key` syntax:
 - ПКО/ПВД/ПОД: rule code; algorithm/query/parameter: name.

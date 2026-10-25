@@ -24,6 +24,7 @@
 """
 
 import sqlite3
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -51,6 +52,14 @@ _OBJECT_REFERENCES = (
 )
 PRIMITIVE_TO_REFERENCE = "примитив → объектная ссылка: автоматически не сопоставляется"
 BY_SYNONYM_HINT = "совпадает только синоним: применять по решению агента"
+BY_COMPOSITION_HINT = "совпадает состав реквизитов: применять по решению агента"
+COMPOSITION_MIN_SHARE = 0.7
+COMPOSITION_MIN_COMMON = 5
+COMPOSITION_NOISE_SHARE = 0.15
+COMPOSITION_NOISE_MIN_OBJECTS = 20
+_VALUE_COMPOSITION_KINDS = frozenset(
+    name.casefold() for name in ("Перечисление", "ТочкаМаршрутаБизнесПроцесса")
+)
 
 
 class Confidence(StrEnum):
@@ -59,6 +68,7 @@ class Confidence(StrEnum):
     EXACT = "точно"
     KD_SYNONYM = "синоним КД"
     BY_SYNONYM = "по синониму"
+    BY_COMPOSITION = "по составу"
     NO_PAIR = "нет пары"
 
 
@@ -86,6 +96,17 @@ class Candidate:
     note: str = ""
     # Кандидаты вложенных свойств (реквизиты табличной части) сопоставленного родителя.
     children: tuple["Candidate", ...] = ()
+    share: float | None = None
+    common: int = 0
+
+
+@dataclass(slots=True)
+class ObjectCandidates:
+    """Кандидаты ПКО и сводка состава до фильтров и страницы."""
+
+    candidates: list[Candidate]
+    composition_pairs: int = 0
+    composition_ambiguous: int = 0
 
 
 @dataclass(slots=True)
@@ -98,13 +119,136 @@ class _Item:
 def object_candidates(
     source: sqlite3.Connection, target: sqlite3.Connection, kind: str | None = None
 ) -> list[Candidate]:
-    """Кандидаты ПКО: пары объектов по имени и виду, подсказки по синониму, объекты без пары.
+    """Кандидаты ПКО с подсказками по синониму и составу, объекты без пары.
 
     `kind` ограничивает вид объектов (`Справочник`, `Документ`…).
     """
+    return object_candidates_report(source, target, kind).candidates
+
+
+def object_candidates_report(
+    source: sqlite3.Connection,
+    target: sqlite3.Connection,
+    kind: str | None = None,
+    *,
+    composition: bool = True,
+) -> ObjectCandidates:
+    """Кандидаты ПКО; состав считается только по запросу и только среди объектов без пары."""
     sources = _objects(source, kind)
     targets = _objects(target, kind)
-    return _match_level(sources, targets, analogs=False, check_types=False, recurse=False)
+    candidates = _match_level(sources, targets, analogs=False, check_types=False, recurse=False)
+    report = ObjectCandidates(candidates)
+    if not composition:
+        return report
+    source_names, source_noise = _composition(source, sources)
+    target_names, target_noise = _composition(target, targets)
+    free = {
+        id(side)
+        for candidate in candidates
+        if candidate.confidence is Confidence.NO_PAIR
+        for side in (candidate.source, candidate.target)
+        if side is not None
+    }
+    pairs, ambiguous = _pair_by_composition(
+        [item for item in sources if id(item.side) in free],
+        [item for item in targets if id(item.side) in free],
+        source_names,
+        target_names,
+        {
+            name: source_noise.get(name, set()) | target_noise.get(name, set())
+            for name in source_noise.keys() | target_noise.keys()
+        },
+    )
+    used = {id(candidate.source) for candidate in pairs.values()}
+    report.candidates = [
+        pairs.get(id(candidate.target), candidate)
+        for candidate in candidates
+        if id(candidate.source) not in used
+    ]
+    report.composition_pairs = len(pairs)
+    report.composition_ambiguous = ambiguous
+    return report
+
+
+def _composition(
+    conn: sqlite3.Connection, objects: Sequence[_Item]
+) -> tuple[dict[int, set[str]], dict[str, set[str]]]:
+    """Состав одним запросом; шум — по всем допустимым объектам каждого вида стороны."""
+    kinds = {item.row_id: item.side.kind.casefold() for item in objects}
+    names: dict[int, set[str]] = {row_id: set() for row_id in kinds}
+    rows = conn.execute(
+        "SELECT object_id, name, 0 FROM properties WHERE parent_id IS NULL "
+        "AND kind IN ('Реквизит', 'Измерение', 'Ресурс') "
+        "UNION ALL SELECT object_id, name, 1 FROM object_values WHERE parent_id IS NULL"
+    )
+    for row_id, name, is_value in rows:
+        kind = kinds.get(row_id)
+        if kind is not None and bool(is_value) == (kind in _VALUE_COMPOSITION_KINDS):
+            names[row_id].add(str(name).strip().casefold())
+    counts = Counter(kinds.values())
+    frequencies: dict[str, Counter[str]] = {}
+    for row_id, kind in kinds.items():
+        frequencies.setdefault(kind, Counter()).update(names[row_id])
+    noise = {
+        kind: {
+            name
+            for name, count in frequencies[kind].items()
+            if count >= COMPOSITION_NOISE_SHARE * count_objects
+        }
+        for kind, count_objects in counts.items()
+        if count_objects >= COMPOSITION_NOISE_MIN_OBJECTS
+    }
+    return names, noise
+
+
+def _pair_by_composition(
+    sources: Sequence[_Item],
+    targets: Sequence[_Item],
+    source_names: dict[int, set[str]],
+    target_names: dict[int, set[str]],
+    noise: dict[str, set[str]],
+) -> tuple[dict[int, Candidate], int]:
+    """Все пары выше порога; выдаются только однозначные с обеих сторон."""
+    by_kind: dict[str, list[tuple[_Item, set[str]]]] = {}
+    for item in targets:
+        kind = item.side.kind.casefold()
+        names = target_names[item.row_id] - noise.get(kind, set())
+        if len(names) >= COMPOSITION_MIN_COMMON:
+            by_kind.setdefault(kind, []).append((item, names))
+    above: list[Candidate] = []
+    source_counts: Counter[int] = Counter()
+    target_counts: Counter[int] = Counter()
+    for item in sources:
+        kind = item.side.kind.casefold()
+        names = source_names[item.row_id] - noise.get(kind, set())
+        if len(names) < COMPOSITION_MIN_COMMON:
+            continue
+        for target, other_names in by_kind.get(kind, []):
+            common = len(names & other_names)
+            if common < COMPOSITION_MIN_COMMON:
+                continue
+            share = common / len(names | other_names)
+            if share < COMPOSITION_MIN_SHARE:
+                continue
+            above.append(
+                Candidate(
+                    item.side,
+                    target.side,
+                    Confidence.BY_COMPOSITION,
+                    auto=False,
+                    note=BY_COMPOSITION_HINT,
+                    share=share,
+                    common=common,
+                )
+            )
+            source_counts[id(item.side)] += 1
+            target_counts[id(target.side)] += 1
+    pairs = {
+        id(candidate.target): candidate
+        for candidate in above
+        if source_counts[id(candidate.source)] == 1 and target_counts[id(candidate.target)] == 1
+    }
+    return pairs, len(above) - len(pairs)
 
 
 def property_candidates(

@@ -60,7 +60,8 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
     # handlers_context (#81) — около 350 знаков при минимальных описаниях.
     # rules_save: acknowledge_errors и тройка структур (схема anyOf string|null) — около 340.
     # live_registration_check (#78) — около 750 знаков (вместо урезания чужих описаний).
-    assert len(serialized) <= 54_500, f"Схемы: {len(serialized)} знаков"
+    # Класс «по составу» (#85) в фильтре и описании match_objects — около 40 знаков.
+    assert len(serialized) <= 54_600, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:

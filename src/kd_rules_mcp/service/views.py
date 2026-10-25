@@ -218,6 +218,9 @@ def object_row(candidate: Candidate) -> dict[str, Any]:
         row["synonym"] = main.synonym
     if candidate.note:
         row["note"] = candidate.note
+    if candidate.share is not None:
+        row["share"] = round(candidate.share, 2)
+        row["common"] = candidate.common
     return row
 
 

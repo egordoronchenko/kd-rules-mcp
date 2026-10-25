@@ -3,7 +3,8 @@
 from typing import Any
 
 from kd_rules_mcp.authoring.candidates import (
-    object_candidates,
+    Confidence,
+    object_candidates_report,
     property_candidates,
     value_candidates,
 )
@@ -20,6 +21,10 @@ from kd_rules_mcp.service.views import (
     slice_rows,
 )
 from kd_rules_mcp.validation.address import pks_address, plain_pks_path, side_name, walk_pks
+
+_NAME_CLASSES = frozenset(
+    item.value for item in (Confidence.EXACT, Confidence.KD_SYNONYM, Confidence.BY_SYNONYM)
+)
 
 
 class MatchingMixin(ServiceBase):
@@ -39,12 +44,22 @@ class MatchingMixin(ServiceBase):
             self._structure(source_structure) as source,
             self._structure(target_structure) as target,
         ):
-            found = object_candidates(source, target, kind or None)
+            wanted = Confidence(confidence).value if confidence else None
+            # Классы по имени и синониму состав не меняет; «нет пары» — меняет.
+            composition = wanted not in _NAME_CLASSES
+            report = object_candidates_report(source, target, kind or None, composition=composition)
+        found = report.candidates
         if text:
             needle = text.casefold()
             found = [item for item in found if mentions(item, needle)]
         rows = [object_row(item) for item in found]
-        return slice_rows(filter_confidence(rows, confidence), offset, limit)
+        result = slice_rows(filter_confidence(rows, confidence), offset, limit)
+        if composition:
+            result["by_composition"] = {
+                "pairs": report.composition_pairs,
+                "ambiguous": report.composition_ambiguous,
+            }
+        return result
 
     def match_properties(
         self,
@@ -63,6 +78,10 @@ class MatchingMixin(ServiceBase):
             self._structure(source_structure) as source,
             self._structure(target_structure) as target,
         ):
+            if confidence == Confidence.BY_COMPOSITION.value:
+                raise ValueError(
+                    "Класс «по составу» есть только у кандидатов объектов (match_objects)"
+                )
             found = require_found(property_candidates(source, target, source_object, target_object))
         rows = filter_confidence(
             [candidate_row(item, path) for path, item in flatten(found)], confidence

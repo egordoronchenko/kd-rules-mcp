@@ -5,16 +5,18 @@ from pathlib import Path
 import pytest
 
 from kd_rules_mcp.authoring.candidates import (
+    BY_COMPOSITION_HINT,
     KD_NAME_ANALOGS,
     PRIMITIVE_TO_REFERENCE,
     Candidate,
     Confidence,
     object_candidates,
+    object_candidates_report,
     property_candidates,
     value_candidates,
 )
 from kd_rules_mcp.structures.queries import NotFound
-from tests.sqlite_structure import StructureBuilder
+from tests.sqlite_structure import Prop, StructureBuilder
 
 
 def _pair(tmp_path: Path) -> tuple[StructureBuilder, StructureBuilder]:
@@ -235,3 +237,197 @@ def test_missing_object_is_not_found(tmp_path: Path) -> None:
     result = property_candidates(source.conn, target.conn, "Документ.Ведомость", "Документ.Нет")
     assert isinstance(result, NotFound)
     assert "Документ.Нет" in result.message
+
+
+def _composition_props(*names: str, kind: str = "Реквизит") -> list[Prop]:
+    return [(kind, name, "", "Строка", []) for name in names]
+
+
+def test_composition_renamed_catalog(tmp_path: Path) -> None:
+    source, target = _pair(tmp_path)
+    names = ("ИНН", "КПП", "ОГРН", "Адрес", "Телефон", "ВидКонтрагента")
+    source.add("Справочник", "Контрагенты", _composition_props(*names), synonym="Контрагенты")
+    target.add("Справочник", "До")
+    target.add("Справочник", "Партнеры", _composition_props(*names, "Сайт"), synonym="Партнеры")
+    target.add("Справочник", "После")
+    found = object_candidates(source.conn, target.conn)
+    assert [_names(item) for item in found] == [
+        (None, "До"),
+        ("Контрагенты", "Партнеры"),
+        (None, "После"),
+    ]
+    pair = found[1]
+    assert pair.confidence is Confidence.BY_COMPOSITION
+    assert pair.auto is False
+    assert pair.share == pytest.approx(6 / 7)
+    assert pair.common == 6
+    assert pair.note == BY_COMPOSITION_HINT
+    disabled = object_candidates_report(source.conn, target.conn, composition=False)
+    assert disabled.composition_pairs == disabled.composition_ambiguous == 0
+    assert all(item.confidence is Confidence.NO_PAIR for item in disabled.candidates)
+
+
+@pytest.mark.parametrize("uppercase", [False, True])
+@pytest.mark.parametrize("kind", ["Перечисление", "ТочкаМаршрутаБизнесПроцесса"])
+def test_composition_renamed_values(tmp_path: Path, uppercase: bool, kind: str) -> None:
+    source, target = _pair(tmp_path)
+    names = [f"Статус{index}" for index in range(8)]
+    source.add(kind, "СтатусыЭД", values=[(name, "") for name in names])
+    target.add(
+        kind,
+        "СтатусыЭДО",
+        values=[(f" {name.upper()} " if uppercase else name, "") for name in names],
+    )
+    [pair] = object_candidates(source.conn, target.conn)
+    assert _names(pair) == ("СтатусыЭД", "СтатусыЭДО")
+    assert pair.confidence is Confidence.BY_COMPOSITION
+    assert pair.share == 1.0 and pair.common == 8
+    assert pair.auto is False
+
+
+@pytest.mark.parametrize(("count", "expected"), [(20, 0), (10, 1)])
+def test_composition_noise_object_count(tmp_path: Path, count: int, expected: int) -> None:
+    source, target = _pair(tmp_path)
+    noise = ("Комментарий", "Организация", "Ответственный", "Сумма", "Валюта")
+    for builder, renamed, own in ((source, "А", "Источник"), (target, "Б", "Приемник")):
+        builder.add("Документ", renamed, _composition_props(*noise, own))
+        # Пары по имени тоже входят в знаменатель и частоты шума.
+        for index in range(count - 1):
+            builder.add("Документ", f"Типовой{index}", _composition_props(*noise))
+    report = object_candidates_report(source.conn, target.conn, "Документ")
+    assert report.composition_pairs == expected
+    assert report.composition_ambiguous == 0
+    found = _by_names(report.candidates)
+    if expected:
+        assert found[("А", "Б")].share == pytest.approx(5 / 7)
+    else:
+        assert found[("А", None)].confidence is Confidence.NO_PAIR
+        assert found[(None, "Б")].confidence is Confidence.NO_PAIR
+
+
+@pytest.mark.parametrize("noisy_side", ["source", "target"])
+def test_composition_noise_union_and_frequency_boundary(tmp_path: Path, noisy_side: str) -> None:
+    source, target = _pair(tmp_path)
+    shared = ("А", "Б", "В", "Г", "Д")
+    source.add("Документ", "Источник", _composition_props(*shared, "СвоёА"))
+    target.add("Документ", "Приемник", _composition_props(*shared, "СвоёБ"))
+    noisy = source if noisy_side == "source" else target
+    for index in range(19):
+        # Ровно 3 из 20 (15 %) содержат общие имена.
+        noisy.add("Документ", f"Шум{index}", _composition_props(*(shared if index < 2 else ())))
+    report = object_candidates_report(source.conn, target.conn)
+    assert report.composition_pairs == report.composition_ambiguous == 0
+    assert all(item.confidence is Confidence.NO_PAIR for item in report.candidates)
+
+
+@pytest.mark.parametrize(
+    ("common", "extra", "expected"), [(3, 0, 0), (5, 3, 0), (5, 2, 1), (7, 3, 1)]
+)
+def test_composition_few_names_and_share_threshold(
+    tmp_path: Path, common: int, extra: int, expected: int
+) -> None:
+    source, target = _pair(tmp_path)
+    values = [(f"Общее{index}", "") for index in range(common)]
+    source.add("Перечисление", "А", values=values)
+    target.add("Перечисление", "Б", values=values + [(f"Своё{i}", "") for i in range(extra)])
+    report = object_candidates_report(source.conn, target.conn)
+    assert report.composition_pairs == expected
+    assert report.composition_ambiguous == 0
+    if expected:
+        [pair] = report.candidates
+        assert pair.common == common
+        assert pair.share == pytest.approx(common / (common + extra))
+    else:
+        assert set(_by_names(report.candidates)) == {("А", None), (None, "Б")}
+
+
+@pytest.mark.parametrize("two_sources", [False, True])
+def test_composition_ambiguous_both_directions(tmp_path: Path, two_sources: bool) -> None:
+    source, target = _pair(tmp_path)
+    props = _composition_props("А", "Б", "В", "Г", "Д")
+    source.add("Справочник", "Источник", props)
+    target.add("Справочник", "Приемник", props)
+    (source if two_sources else target).add("Справочник", "Второй", props)
+    report = object_candidates_report(source.conn, target.conn)
+    assert report.composition_pairs == 0
+    assert report.composition_ambiguous == 2
+    assert len(report.candidates) == 3
+    assert all(item.confidence is Confidence.NO_PAIR for item in report.candidates)
+
+
+@pytest.mark.parametrize("by_synonym", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_composition_exact_or_synonym_pair_wins(
+    tmp_path: Path, by_synonym: bool, reverse: bool
+) -> None:
+    source, target = _pair(tmp_path)
+    props = _composition_props("А", "Б", "В", "Г", "Д")
+    source.add("Справочник", "А", props, synonym="Синоним")
+    target_name = "ДругоеИмя" if by_synonym else "А"
+    target.add("Справочник", target_name, props, synonym="Синоним")
+    target.add("Справочник", "Б", props)
+    if reverse:
+        source, target = target, source
+    report = object_candidates_report(source.conn, target.conn)
+    assert report.composition_pairs == report.composition_ambiguous == 0
+    found = _by_names(report.candidates)
+    expected_pair = (target_name, "А") if reverse else ("А", target_name)
+    assert found[expected_pair].confidence is (
+        Confidence.BY_SYNONYM if by_synonym else Confidence.EXACT
+    )
+    assert found[("Б", None) if reverse else (None, "Б")].confidence is Confidence.NO_PAIR
+
+
+def test_composition_different_object_kinds(tmp_path: Path) -> None:
+    source, target = _pair(tmp_path)
+    props = _composition_props("А", "Б", "В", "Г", "Д")
+    source.add("Справочник", "Источник", props)
+    target.add("Документ", "Приемник", props)
+    found = object_candidates(source.conn, target.conn)
+    assert len(found) == 2
+    assert all(item.confidence is Confidence.NO_PAIR for item in found)
+
+
+@pytest.mark.parametrize("prop_kind", ["Реквизит", "Измерение", "Ресурс"])
+def test_composition_root_properties_casefold(tmp_path: Path, prop_kind: str) -> None:
+    source, target = _pair(tmp_path)
+    names = ("Альфа", "Бета", "Гамма", "Дельта", "Эпсилон")
+    source.add("РегистрСведений", "Источник", _composition_props(*names, kind=prop_kind))
+    target.add(
+        "регистрсведений",
+        "Приемник",
+        _composition_props(*(f" {name.upper()} " for name in names), kind=prop_kind),
+    )
+    [pair] = object_candidates(source.conn, target.conn)
+    assert pair.confidence is Confidence.BY_COMPOSITION
+    assert pair.share == 1 and pair.common == 5
+
+
+@pytest.mark.parametrize(
+    "excluded", ["standard", "nested", "catalog_values", "enum_props", "nested_values"]
+)
+def test_composition_ignores_non_composition_members(tmp_path: Path, excluded: str) -> None:
+    source, target = _pair(tmp_path)
+    names = ("А", "Б", "В", "Г", "Д")
+    for builder, name in ((source, "Источник"), (target, "Приемник")):
+        if excluded == "standard":
+            builder.add("Справочник", name, _composition_props(*names, kind="Свойство"))
+        elif excluded == "nested":
+            builder.add(
+                "Документ", name, [("ТабличнаяЧасть", "Строки", "", "", _composition_props(*names))]
+            )
+        elif excluded == "catalog_values":
+            builder.add("Справочник", name, values=[(value, "") for value in names])
+        elif excluded == "enum_props":
+            builder.add("Перечисление", name, _composition_props(*names))
+        else:
+            builder.add(
+                "Перечисление", name, values=[("Родитель", ""), *((value, "") for value in names)]
+            )
+            builder.conn.execute(
+                "UPDATE object_values SET parent_id = (SELECT min(id) FROM object_values) "
+                "WHERE name <> 'Родитель'"
+            )
+    found = object_candidates(source.conn, target.conn)
+    assert len(found) == 2
+    assert all(item.confidence is Confidence.NO_PAIR for item in found)

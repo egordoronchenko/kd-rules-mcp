@@ -59,7 +59,7 @@ XML и проверяет. Что во что конвертировать, ре
 ## 2. Порядок построения: ПКО → ПКС → ПВД → ПРО
 
 1. Объект: `match_objects` **всегда с `text`** (и `kind`); ПКО для объекта ещё нет (`rules_list pko`).
-2. ПКО с ПКС — `pko_create_from_candidates`; `unresolved` и `not_applied` (`auto: false`) — только решением агента.
+2. ПКО с ПКС — `pko_create_from_candidates`; `unresolved`, `not_applied` и пары «по составу» — только решением агента.
 3. ПКЗ — `match_values`, `rule_create kind=pkz`.
 4. ПВД — `rule_create kind=pvd` по образцу существующего (`references/pvd.md`).
 5. ПРО — `structure_plan_content`, `registration_build`, `rules_validate` со структурой источника, `rules_save`.
