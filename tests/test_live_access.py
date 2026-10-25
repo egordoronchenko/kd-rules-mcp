@@ -11,6 +11,7 @@ import pytest
 
 from kd_rules_mcp.errors import (
     LiveBaseRefusedError,
+    LiveConnectError,
     LiveEmptyError,
     LiveProtocolError,
     LiveTransportError,
@@ -251,10 +252,10 @@ def test_b1_transport_error_names_endpoint_without_secrets(monkeypatch):
     assert calls == [1]
 
 
-def test_b1_connect_timeout_is_ten_seconds_without_retry(monkeypatch):
+def test_connect_phase_retried_then_reported_as_not_sent(monkeypatch):
     import urllib.request
 
-    from kd_rules_mcp.live.access import open_data_request
+    from kd_rules_mcp.live import access as module
 
     attempts = []
 
@@ -264,12 +265,95 @@ def test_b1_connect_timeout_is_ten_seconds_without_retry(monkeypatch):
 
     monkeypatch.setattr(socket, "create_connection", unresponsive)
     monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
-    monkeypatch.setattr("kd_rules_mcp.live.access.open_data_request", open_data_request)
+    monkeypatch.setattr(module, "CONNECT_PAUSE", 0)
     started = time.monotonic()
-    with pytest.raises(LiveTransportError, match=r"127\.0\.0\.1:8081"):
+    with pytest.raises(
+        LiveConnectError, match=r"127\.0\.0\.1:8081.*запрос не отправлялся"
+    ) as caught:
         DataMcpAccess("http://127.0.0.1:8081/base", {}).execute("запись")
+    assert caught.value.code == "live_connect"
     assert time.monotonic() - started < 10
-    assert attempts == [(("127.0.0.1", 8081), 10)]
+    assert attempts == [(("127.0.0.1", 8081), 10)] * 3
+
+
+class _Stub:
+    """Настоящий HTTP-сервер на петле: считает принятые запросы."""
+
+    def __init__(self, reply: bytes | None):
+        import http.server
+        import threading
+
+        stub = self
+        self.requests = 0
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                stub.requests += 1
+                if reply is None:
+                    # Ответ обрывается после приёма запроса: база могла выполнить код.
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+                    self.close_connection = True
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, format, *args):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_connect_retry_succeeds_and_request_is_sent_once(monkeypatch):
+    import urllib.request
+
+    from kd_rules_mcp.live import access as module
+
+    stub = _Stub(json.dumps(answer('OK {"value": 1}')).encode())
+    real = socket.create_connection
+    failures = []
+
+    def flaky(address, timeout, *args, **kwargs):
+        if len(failures) < 2:
+            failures.append(address)
+            raise TimeoutError("нет соединения")
+        return real(address, timeout, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", flaky)
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
+    monkeypatch.setattr(module, "CONNECT_PAUSE", 0)
+    try:
+        text = DataMcpAccess(f"http://127.0.0.1:{stub.port}/base", {}).execute("запись")
+    finally:
+        stub.close()
+    assert text == 'OK {"value": 1}'
+    assert len(failures) == 2
+    assert stub.requests == 1
+
+
+def test_broken_response_after_send_is_not_retried(monkeypatch):
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
+    stub = _Stub(None)
+    try:
+        with pytest.raises(LiveTransportError, match="запрос мог выполниться") as caught:
+            DataMcpAccess(f"http://127.0.0.1:{stub.port}/base", {}).execute("запись")
+    finally:
+        stub.close()
+    assert not isinstance(caught.value, LiveConnectError)
+    assert caught.value.code == "live_transport"
+    assert stub.requests == 1
 
 
 @pytest.mark.parametrize("secure", [False, True])

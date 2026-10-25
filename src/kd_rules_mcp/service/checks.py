@@ -1,10 +1,11 @@
 """Проверка правил и выгрузка обработчиков."""
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 from kd_rules_mcp.errors import Kd2Error
-from kd_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
+from kd_rules_mcp.kd2.model import ExchangeRules, RegistrationRules, RulesDocument
 from kd_rules_mcp.service.base import ServiceBase
 from kd_rules_mcp.service.views import page_limit, parse_level, report_view
 from kd_rules_mcp.validation.algorithms import check_algorithm_refs
@@ -13,8 +14,42 @@ from kd_rules_mcp.validation.exchange_plan import check_exchange_plan, plan_name
 from kd_rules_mcp.validation.format import check_format
 from kd_rules_mcp.validation.handlers import export_handlers, locate
 from kd_rules_mcp.validation.registration import check_registration
+from kd_rules_mcp.validation.report import ValidationReport
 from kd_rules_mcp.validation.search import check_search_objects, check_search_params
 from kd_rules_mcp.validation.structure import check_structures
+
+
+def validation_report(
+    document: RulesDocument,
+    source: sqlite3.Connection | None,
+    target: sqlite3.Connection | None,
+    rules_path: Path | None,
+    exchange: ExchangeRules | None,
+) -> ValidationReport:
+    """Полная проверка правил — общий прогон `rules_validate` и `rules_save`.
+
+    `exchange` нужен правилам регистрации (покрытие ПВД). У правил обмена не используется.
+    """
+    report = check_format(document)
+    if isinstance(document, ExchangeRules):
+        graph = build_call_graph(document)
+        report.extend(check_structures(document, source, target, graph))
+        report.extend(check_algorithm_refs(document))
+        report.extend(check_search_params(document))
+        report.extend(check_search_objects(document, target))
+        report.extend(
+            check_exchange_plan(
+                document,
+                source,
+                target,
+                plan_name_from_path(rules_path),
+                Path(rules_path).parts[:-1] if rules_path else (),
+                graph,
+            )
+        )
+    elif isinstance(document, RegistrationRules):
+        report.extend(check_registration(document, source, exchange_rules=exchange))
+    return report
 
 
 class ChecksMixin(ServiceBase):
@@ -31,32 +66,24 @@ class ChecksMixin(ServiceBase):
         limit: int,
         exchange_project_id: str | None = None,
     ) -> dict[str, Any]:
-        # Уровень проверяется до обхода правил: отказ не должен ждать полную проверку.
+        # Уровень проверяется до обхода правил: отказ не должен ждать полную проверку
+        # и не затирает запомненную тройку структур.
         selected = parse_level(level)
         with self._lock, self._sides(source_structure, target_structure) as (source, target):
             document = self._document(project_id)
-            report = check_format(document)
-            if isinstance(document, ExchangeRules):
-                graph = build_call_graph(document)
-                report.extend(check_structures(document, source, target, graph))
-                report.extend(check_algorithm_refs(document))
-                report.extend(check_search_params(document))
-                report.extend(check_search_objects(document, target))
-                rules_path = self.workspace.get(project_id).source_path
-                report.extend(
-                    check_exchange_plan(
-                        document,
-                        source,
-                        target,
-                        plan_name_from_path(rules_path),
-                        Path(rules_path).parts[:-1] if rules_path else (),
-                        graph,
-                    )
-                )
-            elif isinstance(document, RegistrationRules):
-                exchange = self._exchange(exchange_project_id) if exchange_project_id else None
-                report.extend(check_registration(document, source, exchange_rules=exchange))
-        return report_view(report, selected, check_prefix, offset, limit)
+            project = self.workspace.get(project_id)
+            exchange = (
+                self._exchange(exchange_project_id)
+                if isinstance(document, RegistrationRules) and exchange_project_id
+                else None
+            )
+            report = validation_report(document, source, target, project.source_path, exchange)
+            view = report_view(report, selected, check_prefix, offset, limit)
+            # Тройка как передана (в том числе пустая); в снимке — только идентификаторы.
+            self.workspace.remember_validation(
+                project_id, (source_structure, target_structure, exchange_project_id)
+            )
+        return view
 
     def handlers_export(self, project_id: str, folder: str, limit: int) -> dict[str, Any]:
         with self._lock:

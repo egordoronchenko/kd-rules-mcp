@@ -350,6 +350,23 @@ def test_dump_paths_usable_in_diff(setup):
     assert ".live" in Path(path).parts and Path(result["protocol_path"]).is_file()
 
 
+def test_dump_open_returns_projects_for_diff(setup):
+    service, source, _, _ = setup
+    source.readonly = True
+    result = service.live_rules_dump("source.sandbox", "План", open=True)
+    assert [p["kind"] for p in result["projects"]] == ["exchange", "correspondent", "registration"]
+    assert result["stages"][-1]["stage"] == "ОТКРЫТИЕ ПРАВИЛ"
+    exchange_id = result["projects"][0]["project_id"]
+    assert service.rules_overview(exchange_id)["kind"] == "exchange"
+    assert service.rules_overview(result["projects"][2]["project_id"])["kind"] == "registration"
+    diff = service.rules_diff(
+        exchange_id, str(DATA / "exchange_rules.xml"), False, False, None, 0, 50
+    )
+    assert diff["summary"] == {}
+    # Без флага проекты не открываются.
+    assert "projects" not in service.live_rules_dump("source.sandbox", "План")
+
+
 @pytest.mark.parametrize("fault", ["changed", "short", "digest", "between"])
 def test_dump_changed_chunks_leave_no_results(setup, fault):
     service, source, _, _ = setup

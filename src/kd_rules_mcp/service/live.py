@@ -18,6 +18,12 @@ from kd_rules_mcp.errors import (
 )
 from kd_rules_mcp.live.access import DataMcpAccess, LiveAccess, resolve_base
 from kd_rules_mcp.live.codegen import exchange, plans, rules
+from kd_rules_mcp.live.codegen.registration import registration_code, validate_registration_args
+from kd_rules_mcp.live.registration import (
+    parse_registration,
+    same_registration,
+    summarize_registration,
+)
 from kd_rules_mcp.live.response import compatibility_error, short_error
 from kd_rules_mcp.live.runs import (
     LiveRun,
@@ -327,10 +333,27 @@ class LiveMixin(ServiceBase):
             "records": state,
         }
 
-    def live_rules_dump(self, base: str, plan: str) -> dict[str, Any]:
+    def live_rules_dump(self, base: str, plan: str, open: bool = False) -> dict[str, Any]:
         access = self._live_access(base)
         run = self._live_run("live_rules_dump")
         result = run.stage("СНЯТИЕ ПРАВИЛ", lambda: self._live_dump(access, plan, run))
+        if result is not None and open:
+
+            def open_projects() -> list[dict[str, Any]]:
+                # Тот же путь, что у rules_open: проект по пути файла прогона (папка своя у
+                # каждого прогона, поэтому проект всегда новый).
+                with self._lock:
+                    return [
+                        {
+                            "kind": item["kind"],
+                            "project_id": self.workspace.open_rules(
+                                run.path / "rules" / rules.FILES[item["kind"]]
+                            ).project.id,
+                        }
+                        for item in result["files"]
+                    ]
+
+            result["projects"] = run.stage("ОТКРЫТИЕ ПРАВИЛ", open_projects)
         return run.result(**(result or {}))
 
     def _live_files(self, files: str | dict[str, str]) -> tuple[bytes, dict, bool]:
@@ -904,3 +927,51 @@ class LiveMixin(ServiceBase):
 
                 found = run.stage("ЗАПРОС", check)
             return run.result(message_path=message_file, query=found)
+
+    def live_registration_check(
+        self,
+        base: str,
+        object: str,
+        ref: str,
+        plan: str | None = None,
+        changes: dict[str, str | int | float | bool | dict[str, str]] | None = None,
+        write: bool = True,
+    ) -> dict[str, Any]:
+        """Регистрация сейчас, получатели по правилам и запись в отменяемой транзакции."""
+        with self._lock:
+            validate_registration_args(object, ref, plan, changes, write)
+            code = registration_code(object, ref, plan, changes, write)
+            access = self._live_access(base)
+            run = self._live_run("live_registration_check")
+            parsed: dict[str, Any] = {}
+
+            def read() -> dict[str, Any]:
+                payload = execute(access, code)
+                (run.path / "registration.json").write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                checked = parse_registration(payload, wrote=write)
+                parsed["value"] = checked
+                return summarize_registration(checked)
+
+            summary = run.stage("РЕГИСТРАЦИЯ", read)
+            if summary is None:
+                return run.result()
+            if write:
+                checked = parsed["value"]
+                after = checked["after"]
+                assert after is not None
+
+                def verify() -> bool:
+                    if not same_registration(checked["before"], after):
+                        raise LiveStageError(
+                            "регистрация после отката не совпала",
+                            {"before": checked["before"], "after": after},
+                        )
+                    return True
+
+                if run.stage("ОТКАТ", verify) is None:
+                    return run.result()
+            return run.result(**summary)

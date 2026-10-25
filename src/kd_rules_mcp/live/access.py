@@ -6,13 +6,17 @@ import json
 import os
 import re
 import ssl
+import time
+import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from kd_rules_mcp.errors import (
     LiveBaseRefusedError,
+    LiveConnectError,
     LiveEmptyError,
     LiveProtocolError,
     LiveTransportError,
@@ -73,28 +77,51 @@ def mapped_url(url: str) -> str:
     return urlunsplit(parsed._replace(netloc=netloc))
 
 
+CONNECT_TIMEOUT = 10
+CONNECT_ATTEMPTS = 3
+CONNECT_PAUSE = 1.0
+
+
+class ConnectFailedError(OSError):
+    """Соединение (TCP и TLS) не установлено: тело запроса не отправлялось."""
+
+
+def _connect_with_retry(conn: http.client.HTTPConnection, connect: Callable[[], None]) -> None:
+    """Повторяет только установку соединения: до неё в базу ничего не уходит, повтор безопасен.
+
+    Обрыв после соединения (отправка, ожидание и чтение ответа) не повторяется: запрос мог
+    выполниться в базе.
+    """
+    read_timeout = conn.timeout
+    last: OSError | None = None
+    for attempt in range(CONNECT_ATTEMPTS):
+        conn.timeout = CONNECT_TIMEOUT
+        try:
+            connect()
+        except OSError as error:
+            last = error
+            if conn.sock is not None:
+                conn.sock.close()
+                conn.sock = None
+            if attempt + 1 < CONNECT_ATTEMPTS:
+                time.sleep(CONNECT_PAUSE)
+            continue
+        finally:
+            conn.timeout = read_timeout
+        if conn.sock is not None:
+            conn.sock.settimeout(read_timeout)
+        return
+    raise ConnectFailedError(f"{type(last).__name__}") from last
+
+
 class _HTTPConnection(http.client.HTTPConnection):
     def connect(self) -> None:
-        read_timeout = self.timeout
-        self.timeout = 10
-        try:
-            super().connect()
-        finally:
-            self.timeout = read_timeout
-        if self.sock is not None:
-            self.sock.settimeout(read_timeout)
+        _connect_with_retry(self, super().connect)
 
 
 class _HTTPSConnection(http.client.HTTPSConnection):
     def connect(self) -> None:
-        read_timeout = self.timeout
-        self.timeout = 10
-        try:
-            super().connect()
-        finally:
-            self.timeout = read_timeout
-        if self.sock is not None:
-            self.sock.settimeout(read_timeout)
+        _connect_with_retry(self, super().connect)
 
 
 class _HTTPHandler(urllib.request.HTTPHandler):
@@ -118,7 +145,7 @@ def open_data_request(request: urllib.request.Request, timeout: int):
 
 @dataclass
 class DataMcpAccess:
-    """HTTP JSON-RPC/SSE, Basic из разрешения базы; ни одного повтора."""
+    """HTTP JSON-RPC/SSE, Basic из разрешения базы; повторяется только установка соединения."""
 
     url: str = field(repr=False)
     headers: dict[str, str] = field(repr=False)
@@ -192,9 +219,26 @@ class DataMcpAccess:
             else:
                 events = [raw]
             answers = [json.loads(event) for event in events]
-        except (OSError, ValueError, http.client.HTTPException):
+        except urllib.error.HTTPError as error:
             raise LiveTransportError(
-                f"сервер данных {destination} недоступен или ответ оборван (не-JSON)"
+                f"сервер данных {destination} ответил HTTP {error.code}"
+            ) from None
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, ConnectFailedError):
+                raise LiveConnectError(
+                    f"соединение с сервером данных {destination} не установлено "
+                    f"за {CONNECT_TIMEOUT} с ({CONNECT_ATTEMPTS} попытки); запрос не отправлялся"
+                ) from None
+            raise LiveTransportError(
+                f"ответ сервера данных {destination} оборван; запрос мог выполниться"
+            ) from None
+        except (OSError, http.client.HTTPException):
+            raise LiveTransportError(
+                f"ответ сервера данных {destination} оборван; запрос мог выполниться"
+            ) from None
+        except ValueError:
+            raise LiveTransportError(
+                f"ответ сервера данных {destination} не JSON; запрос мог выполниться"
             ) from None
         answer = next(
             (item for item in answers if isinstance(item, dict) and item.get("id") == body["id"]),

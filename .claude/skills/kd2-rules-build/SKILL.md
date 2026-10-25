@@ -66,7 +66,7 @@ XML и проверяет. Что во что конвертировать, ре
 6. Обратное направление — `correspondent_draft` (`references/correspondent.md`).
 
 Реквизит в существующее ПКО: `rules_get` → `match_properties` → `rule_create kind=pks` → `rules_validate`.
-Код обработчиков: выгрузочные — против источника, загрузочные — против приёмника; переменные — `handlers_export`;
+Код обработчиков: выгрузочные — против источника, загрузочные — против приёмника; переменные — `handlers_context`;
 **перед первым вызовом серверов 1С — `references/mcp-1c.md`**. Всё это с разбором ответов —
 `references/build-order.md`.
 
@@ -77,7 +77,7 @@ XML и проверяет. Что во что конвертировать, ре
 
 - [ ] `rules_validate` с обеими структурами: **нет новых** замечаний относительно §1.
 - [ ] Менялся код — `handlers_export` → синтакс-чекер → `handlers_locate`.
-- [ ] `rules_save`; `format_check` без ошибок. Загрузка из файла — `rules_pack`: `warnings` пусты.
+- [ ] `rules_save` без `rules_save_errors`. Загрузка из файла — `rules_pack`: `warnings` пусты.
 - [ ] `kd_check` → `ИТОГ OK`; `bsp_check` (`live_rules_check`) → OK, если правила грузятся в эту песочницу.
 - [ ] `exchange_check` (`live_exchange_run`), если правились поиск или загрузка и есть две песочницы с сервером данных.
 - [ ] Удаление — пометкой; физическое — только после отдельного «да» человека.

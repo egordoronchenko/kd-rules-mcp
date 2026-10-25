@@ -5,6 +5,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from kd_rules_mcp.kd2.bsl_text import bsl_code, code_matches, join_code, strip_comments
 from kd_rules_mcp.kd2.model import ExchangeRules, Node, object_name, rule_code
 from kd_rules_mcp.kd2.queries import assignment_expression, statement_assignment, tokens
 from kd_rules_mcp.validation.address import (
@@ -265,8 +266,8 @@ def build_call_graph(rules: ExchangeRules) -> CallGraph:
     for name, (h, loc) in sources.items():
         if index.get(h.address, (rules.root, False))[1]:
             continue
-        code = _positions(h.text, strings=False)
-        masked = _positions(h.text, strings=True)
+        code = strip_comments(h.text)
+        masked = bsl_code(h.text)
         lexical = tokens(h.text)
         for pos, token in enumerate(lexical):
             if (
@@ -313,7 +314,7 @@ def build_call_graph(rules: ExchangeRules) -> CallGraph:
             literal = tokens(execute.group(1))[0]
             nested = literal.value
             for start, names, unknown, incoming, expression, whole in _explicit_calls(
-                nested, _positions(nested, strings=True)
+                strip_comments(nested), bsl_code(nested)
             ):
                 site = call_site(h, loc, execute.start(1))
                 extra = nested.count("\n", 0, start)
@@ -503,7 +504,7 @@ def _export_calls(
             ):
                 continue
             expanded = _expand(handler.text, algorithms)
-            result.append((occurrence.target, occurrence.incoming, _strip_comments(expanded.code)))
+            result.append((occurrence.target, occurrence.incoming, strip_comments(expanded.code)))
     return result
 
 
@@ -521,18 +522,6 @@ def call_site(handler: Handler, location: HandlerFile, position: int) -> dict[st
         "line": line + location.line_offset,
         "handler_line": line,
     }
-
-
-def _positions(text: str, *, strings: bool) -> str:
-    """Маска с сохранением позиций, включая многострочные литералы."""
-    pattern = re.compile(r'"(?:[^"]|"")*"|//[^\n]*')
-
-    def replace(match: re.Match[str]) -> str:
-        if match.group().startswith('"') and not strings:
-            return match.group()
-        return "".join("\n" if c == "\n" else " " for c in match.group())
-
-    return pattern.sub(replace, text)
 
 
 def _target_names(expression: str, nesting: int = 0) -> list[str]:
@@ -558,9 +547,6 @@ def _target_names(expression: str, nesting: int = 0) -> list[str]:
     if depth or arguments is None or len(arguments) != 3:
         return []
     return [*_target_names(arguments[1], nesting + 1), *_target_names(arguments[2], nesting + 1)]
-
-
-_STRING = re.compile(r'"(?:[^"]|"")*"')
 
 
 _ALGORITHM = re.compile(
@@ -646,7 +632,7 @@ def _unescape_string(literal: str) -> str:
 
 
 def _expand(text: str, algorithms: dict[str, str], seen: set[str] | None = None) -> _Text:
-    """Текст с телами вызванных алгоритмов.
+    """Текст с телами вызванных алгоритмов и кодом из `Выполнить("…")`.
 
     Непрозрачен `Выполнить` не со строкой и алгоритм, которого в правилах нет.
     """
@@ -654,10 +640,15 @@ def _expand(text: str, algorithms: dict[str, str], seen: set[str] | None = None)
         seen = set()
     if not text.strip():
         return _Text("", False)
-    code = _strip_comments(text)
+    code = bsl_code(text)
     opaque = _EXECUTE_OPAQUE.search(code) is not None
     parts = [text]
-    for match in _ALGORITHM.finditer(_mask(code)):
+    for execute in code_matches(_EXECUTE_STRING, text):
+        # Литерал исполняется как код: декодер тот же, что у графа (без `|` и `""`).
+        executed = _expand(tokens(execute.group(1))[0].value, algorithms, seen)
+        parts.append(executed.code)
+        opaque = opaque or executed.opaque
+    for match in _ALGORITHM.finditer(code):
         key = match.group(1).casefold()
         if key in seen:
             continue
@@ -669,7 +660,7 @@ def _expand(text: str, algorithms: dict[str, str], seen: set[str] | None = None)
         nested = _expand(body, algorithms, seen)
         parts.append(nested.code)
         opaque = opaque or nested.opaque
-    return _Text("\n".join(parts), opaque)
+    return _Text(join_code(parts), opaque)
 
 
 def _algorithms(rules: ExchangeRules) -> dict[str, str]:
@@ -689,41 +680,6 @@ def _event(rules: ExchangeRules, name: str) -> str:
 def _disabled(node: Node) -> bool:
     flag = node.attrs.get("Отключить")
     return flag is True or flag == "true"
-
-
-def _strip_comments(text: str) -> str:
-    return "\n".join(_without_comment(line) for line in text.splitlines())
-
-
-def _without_comment(line: str) -> str:
-    """Строка до комментария `//` вне строкового литерала."""
-    quoted = False
-    index = 0
-    chars: list[str] = []
-    while index < len(line):
-        char = line[index]
-        if char == '"':
-            chars.append(char)
-            if quoted and index + 1 < len(line) and line[index + 1] == '"':
-                chars.append('"')
-                index += 2
-                continue
-            quoted = not quoted
-        elif not quoted and line.startswith("//", index):
-            break
-        else:
-            chars.append(char)
-        index += 1
-    return "".join(chars)
-
-
-def _mask(code: str) -> str:
-    """Строковые литералы заменены пустыми кавычками: вызов в тексте сообщения не считается."""
-    return _STRING.sub('""', code)
-
-
-def _literals(code: str) -> list[str]:
-    return [match.group(0)[1:-1].replace('""', '"') for match in _STRING.finditer(code)]
 
 
 PKS_HANDLERS = ("ПередВыгрузкой", "ПриВыгрузке", "ПослеВыгрузки")

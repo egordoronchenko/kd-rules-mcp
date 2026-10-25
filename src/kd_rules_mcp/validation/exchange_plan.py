@@ -70,6 +70,14 @@
   параметры и описание (БСП:6688–6722) и в `ДопОбработки` экземпляр не помещает.
   Имени нет в разделе «Обработки» — то же: загрузчик не добавляет ни одного ключа.
   Собственное присваивание этого имени в любом включённом тексте правил гасит замечание везде.
+- `handlers.object_params_dot` — ошибка: `ПараметрыОбъекта.<Имя>` не методом соответствия.
+  Переменная — `Неопределено` или соответствие (БСП:10131, БСП:10599, БСП:9783–9797).
+- `handlers.pvd_rule_variable` — ошибка: `Правило` в `ПередОбработкойПравила` или
+  `ПослеОбработкиПравила` ПВД. Обмен через план вызывает их в
+  `ВыполнитьВыгрузкуЗарегистрированныхДанных` без такой переменной (БСП:18170–18173, 18389,
+  18495); `ВыгрузитьДанныеПоПравилу` (БСП:1405) не вызывается.
+- `handlers.common_procedures_variable` — ошибка: `ОбщиеПроцедурыФункции` есть только в отладочном
+  модуле КД и в универсальной обработке (УОД:48, 2846); в модуле БСП вхождений нет.
 - `format.source_name`, `format.source_version` — `<Источник>` заголовка против структуры
   источника: имя без учёта регистра, из имени базы вырезано «БАЗОВАЯ» (`РПО:43–44`);
   версия — первые три числа (`РПО:64–69`, разбор — `ОбщегоНазначенияКлиентСервер:1030–1043`).
@@ -84,7 +92,19 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
+from kd_rules_mcp.kd2.bsl_text import (
+    bsl_code,
+    code_matches,
+    join_code,
+    literals,
+    previous_char,
+    statement_matches,
+    statement_start,
+    string_end,
+    strip_comments,
+)
 from kd_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
+from kd_rules_mcp.kd2.queries import tokens
 from kd_rules_mcp.structures.queries import exchange_plan_autoregistration
 from kd_rules_mcp.validation.address import (
     CONVERSION_ADDRESS,
@@ -98,15 +118,13 @@ from kd_rules_mcp.validation.call_graph import (
     _ALGORITHM,
     _ALGORITHM_EXECUTE,
     _EXECUTE_OPAQUE,
+    _EXECUTE_STRING,
     CallGraph,
     _algorithms,
     _disabled,
     _event,
     _expand,
     _export_calls,
-    _literals,
-    _mask,
-    _strip_comments,
     _Text,
     build_call_graph,
 )
@@ -130,6 +148,9 @@ PVD_SELECTION = "handlers.pvd_selection"
 EXPORT_KEY = "handlers.export_key"
 EXPORT_CACHE = "handlers.export_cache_without_key"
 ATTACHED = "handlers.attached_processing"
+OBJECT_PARAMS_DOT = "handlers.object_params_dot"
+PVD_RULE_VARIABLE = "handlers.pvd_rule_variable"
+COMMON_PROCEDURES = "handlers.common_procedures_variable"
 MODIFIED_FLAG = "handlers.ignored_modified_flag"
 TABLE_NO_CLEAR = "handlers.table_no_clear"
 PVD_REFUSAL = "handlers.pvd_refusal"
@@ -178,10 +199,6 @@ _DYNAMIC_INDEX = re.compile(
 )
 _DYNAMIC_OBJECT = re.compile(r"(?<![\w.])Объект\s*\[", re.IGNORECASE)
 _BYPASS_TRUE = re.compile(r"(?<![\w.])(?:Отказ|Пусто)\s*=\s*Истина\b", re.IGNORECASE)
-# Граница оператора: присваивание, а не сравнение в `Если Отказ = Истина`.
-_ASSIGN_BEFORE = frozenset(
-    {"", ";", "тогда", "иначе", "цикл", "конецесли", "конеццикла", "конецпопытки"}
-)
 _LOAD_FLAG_EVENTS = ("ПриЗагрузке", "ПослеЗагрузки")
 _PKS_NAME_EVENTS = ("ПередВыгрузкой", "ПриВыгрузке")
 _EXPORT_WHOLE = re.compile(r"(?<![\w.])ВыгрузитьОбъект\s*=\s*Истина\b", re.IGNORECASE)
@@ -242,6 +259,9 @@ def check_exchange_plan(
     _check_pvd_refusal(report, rules, algorithms, plan_content)
     _check_export_key(report, rules, algorithms)
     _check_attached(report, rules)
+    _check_object_params(report, rules)
+    _check_pvd_rule_variable(report, rules)
+    _check_common_procedures(report, rules)
     _check_incoming(report, rules, algorithms, graph)
     return report
 
@@ -524,7 +544,7 @@ def _check_object_write(report: ValidationReport, rules: ExchangeRules) -> None:
         if _disabled(pko):
             continue
         text = str(pko.get("ПослеЗагрузки"))
-        if _OBJECT_WRITE.search(_mask(_strip_comments(text))):
+        if _OBJECT_WRITE.search(bsl_code(text)):
             document = str(pko.get("Приемник")).startswith("ДокументСсылка.")
             template = _WRITE_DOCUMENT if document else _WRITE_OTHER
             message = template.format(event="ПослеЗагрузки")
@@ -532,7 +552,7 @@ def _check_object_write(report: ValidationReport, rules: ExchangeRules) -> None:
                 message += REF_ONLY_LOAD_NOTE
             report.warning(OBJECT_WRITE, rule_address(pko), message)
     conversion = _event(rules, "ПослеЗагрузкиДанных")
-    if _OBJECT_WRITE.search(_mask(_strip_comments(conversion))):
+    if _OBJECT_WRITE.search(bsl_code(conversion)):
         report.warning(
             OBJECT_WRITE,
             CONVERSION_ADDRESS,
@@ -555,7 +575,7 @@ def _check_pvd(
             )
         handler = str(pvd.get("ПередОбработкойПравила"))
         expanded = _expand(handler, algorithms)
-        masked = _mask(expanded.code)
+        masked = bsl_code(expanded.code)
         if _SELECTION.search(masked):
             report.warning(
                 PVD_SELECTION,
@@ -897,7 +917,7 @@ def _implicit_node(
     """Возвращает истину, если тип свойства не виден и неявный выбор не доказан."""
     if _conversion_code(node):
         return False
-    handlers = "\n".join(str(node.get(name)) for name in _PKS_NAME_EVENTS)
+    handlers = join_code(str(node.get(name)) for name in _PKS_NAME_EVENTS)
     choice = _name_choice(handlers, algorithms)
     if choice == "explicit":
         return False
@@ -1002,9 +1022,8 @@ def _check_export_key(
         if _disabled(pko):
             continue
         expanded = _expand(str(pko.get("ПередВыгрузкой")), algorithms)
-        masked = _mask(expanded.code)
-        has_key = _EXPORT_KEY_ASSIGN.search(masked) is not None
-        remembers = _REMEMBER_TRUE.search(masked) is not None
+        has_key = _assigned(_EXPORT_KEY_ASSIGN, expanded.code)
+        remembers = _assigned(_REMEMBER_TRUE, expanded.code)
         if has_key and not remembers:
             if expanded.opaque:
                 report.skip(
@@ -1032,7 +1051,7 @@ def _check_export_cache(
     к этому моменту — имя ПКО (БСП:424), внутреннее представление пишется раньше
     обработчика и только при уже истинном флаге (БСП:469–471).
     """
-    cleaned = _strip_comments(expanded.code)
+    cleaned = strip_comments(expanded.code)
     state = _export_cache_state(cleaned)
     address = rule_address(pko)
     if state == "off" or state == "keyed":
@@ -1094,7 +1113,7 @@ def _check_attached(report: ValidationReport, rules: ExchangeRules) -> None:
     for address, event, text in _iter_handler_code(rules):
         if "допобработки" not in text.casefold():
             continue
-        referenced, own, opaque = _attached_references(_strip_comments(text))
+        referenced, own, opaque = _attached_references(strip_comments(text))
         defined |= own
         scanned.append((address, event, referenced, opaque))
     if _ATTACHED_WHOLE in defined:
@@ -1129,6 +1148,181 @@ def _check_attached(report: ValidationReport, rules: ExchangeRules) -> None:
                 ATTACHED,
                 f"{address}: «{event}» задаёт имя вложенной обработки кодом — это имя не сверяется",
             )
+
+
+_OBJECT_PARAMS = re.compile(r"(?<!\w)ПараметрыОбъекта(?!\w)", re.IGNORECASE)
+_OBJECT_PARAMS_MEMBER = re.compile(r"\s*\.\s*([^\W\d]\w*)")
+# Методы соответствия (русские и английские имена): у соответствия других членов нет.
+_MAPPING_METHODS = frozenset(
+    {"вставить", "получить", "удалить", "очистить", "количество"}
+    | {"insert", "get", "delete", "clear", "count"}
+)
+
+
+def _check_object_params(report: ValidationReport, rules: ExchangeRules) -> None:
+    """`ПараметрыОбъекта.<Имя>`: у исполнителя БСП это соответствие или `Неопределено`.
+
+    Перед чтением объекта переменная — `Неопределено` (БСП:10131, БСП:10599), первый параметр
+    создаёт соответствие (`ДобавитьПараметрПриНеобходимости`, БСП:9783–9791; сложный параметр —
+    БСП:9793–9797). Полей у соответствия нет: обращение через точку падает при выполнении.
+
+    Одна переменная проходит несколько обработчиков объекта (БСП:10599 → 10640 → 11005), и её
+    можно присвоить в алгоритме: собственное присваивание `ПараметрыОбъекта =` в любом
+    включённом тексте правил — пропуск всех замечаний, тип значения не виден.
+    """
+    found: list[tuple[str, str, list[str]]] = []
+    assigned: list[str] = []
+    for address, event, text in _iter_handler_code(rules):
+        if "параметрыобъекта" not in text.casefold():
+            continue
+        names, own = _object_params_members(bsl_code(text))
+        if own:
+            assigned.append(f"{address} «{event}»")
+        if names:
+            found.append((address, event, names))
+    if assigned and found:
+        where = ", ".join(assigned[:3]) + (" и др." if len(assigned) > 3 else "")
+        for address, event, _names in found:
+            report.skip(
+                OBJECT_PARAMS_DOT,
+                f"{address}: «{event}» — «ПараметрыОбъекта» присваивается в правилах ({where}), "
+                "тип значения не виден",
+            )
+        return
+    for address, event, names in found:
+        for name in names:
+            report.error(
+                OBJECT_PARAMS_DOT,
+                address,
+                f"В «{event}» обращение «ПараметрыОбъекта.{name}»: у исполнителя БСП "
+                "«ПараметрыОбъекта» — соответствие или Неопределено, полей у него нет, обработчик "
+                f'упадёт при выполнении. Верно — ПараметрыОбъекта["{name}"] или '
+                f'ПараметрыОбъекта.Получить("{name}")',
+            )
+
+
+_RULE_NAME = re.compile(r"(?<!\w)Правило(?!\w)", re.IGNORECASE)
+_COMMON_NAME = re.compile(r"(?<!\w)ОбщиеПроцедурыФункции(?!\w)", re.IGNORECASE)
+_PVD_PLAN_EVENTS = ("ПередОбработкойПравила", "ПослеОбработкиПравила")
+_MANUAL_MODE = (
+    "Проверено для исполнителя БСП (обмен через план обмена); в ручном обмене универсальной "
+    "обработкой переменная есть"
+)
+
+
+def _check_pvd_rule_variable(report: ValidationReport, rules: ExchangeRules) -> None:
+    """`Правило` в двух обработчиках ПВД: в обмене через план такой переменной нет.
+
+    `ВыполнитьВыгрузкуЗарегистрированныхДанных` (БСП:18170) держит правило в
+    `ПравилоВыгрузкиДанных` (БСП:18317, 18389, 18495). `ВыгрузитьДанныеПоПравилу(Правило)`
+    (БСП:1405) в конфигурации не вызывается. Своё присваивание в обработчике снимает замечание.
+    """
+    for pvd in rules.pvd():
+        if _disabled(pvd):
+            continue
+        for event in _PVD_PLAN_EVENTS:
+            text = pvd.get(event)
+            if not isinstance(text, str) or "правило" not in text.casefold():
+                continue
+            used, assigned = _bare_name_uses(bsl_code(text), _RULE_NAME)
+            if used and not assigned:
+                report.error(
+                    PVD_RULE_VARIABLE,
+                    rule_address(pvd),
+                    f"В «{event}» обращение к «Правило»: обмен через план выполняет этот "
+                    "обработчик в ВыполнитьВыгрузкуЗарегистрированныхДанных, где правило лежит в "
+                    "«ПравилоВыгрузкиДанных», а переменной «Правило» нет — «Переменная не "
+                    f"определена». {_MANUAL_MODE} (ВыгрузитьДанныеПоПравилу)",
+                )
+
+
+def _check_common_procedures(report: ValidationReport, rules: ExchangeRules) -> None:
+    """`ОбщиеПроцедурыФункции`: переменная отладочного модуля КД, у исполнителя БСП её нет.
+
+    Глобальный контекст БСП — переменные модуля (БСП:24–224) и реквизиты обработки, их заводит
+    `ИнициализацияРеквизитовИМодульныхПеременных` (БСП:14647–14668); этого имени там нет.
+    Присваивание в любом включённом тексте правил снимает все замечания.
+    """
+    found: list[tuple[str, str]] = []
+    for address, event, text in _iter_handler_code(rules):
+        if "общиепроцедурыфункции" not in text.casefold():
+            continue
+        used, assigned = _bare_name_uses(bsl_code(text), _COMMON_NAME)
+        if assigned:
+            return
+        if used:
+            found.append((address, event))
+    for address, event in found:
+        report.error(
+            COMMON_PROCEDURES,
+            address,
+            f"В «{event}» обращение к «ОбщиеПроцедурыФункции»: это переменная отладочного модуля "
+            "КД, у исполнителя правил БСП её нет — «Переменная не определена». Служебные процедуры "
+            f"(ВыгрузитьПоПравилу, ЗаписатьОбъектВИБ и др.) вызывать без префикса. {_MANUAL_MODE}",
+        )
+
+
+def _bare_name_uses(code: str, pattern: re.Pattern[str]) -> tuple[bool, bool]:
+    """Есть ли обращение к голому имени и присваивание ему в начале оператора.
+
+    `code` — текст без комментариев и строк (`bsl_code`). Имя после точки — поле чужого объекта.
+    """
+    used = assigned = False
+    for match in pattern.finditer(code):
+        before = previous_char(code, match.start())
+        if before is not None and code[before] == ".":
+            continue
+        after = _skip_ws(code, match.end())
+        if after < len(code) and code[after] == "=" and statement_start(code, match.start()):
+            assigned = True
+        elif _word_before(code, match.start()) in _LOOP_VARIABLE_BEFORE:
+            # `Для Каждого Имя Из …`, `Для Имя = …` — переменная цикла, это присваивание.
+            assigned = True
+        else:
+            used = True
+    return used, assigned
+
+
+_LOOP_VARIABLE_BEFORE = frozenset({"каждого", "each", "для", "for"})
+
+
+def _word_before(code: str, index: int) -> str:
+    before = previous_char(code, index)
+    if before is None or not (code[before].isalnum() or code[before] == "_"):
+        return ""
+    start = before
+    while start > 0 and (code[start - 1].isalnum() or code[start - 1] == "_"):
+        start -= 1
+    return code[start : before + 1].casefold()
+
+
+def _object_params_members(code: str) -> tuple[list[str], bool]:
+    """Имена после `ПараметрыОбъекта.` (не методы соответствия) и есть ли присваивание.
+
+    `code` — текст без комментариев и содержимого строк (`bsl_code`). Имя после точки
+    (`Структура.ПараметрыОбъекта`, в том числе через пробел или перевод строки) — чужое поле.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    assigned = False
+    for match in _OBJECT_PARAMS.finditer(code):
+        before = previous_char(code, match.start())
+        if before is not None and code[before] == ".":
+            continue
+        after = _skip_ws(code, match.end())
+        if after < len(code) and code[after] == "=" and statement_start(code, match.start()):
+            assigned = True
+            continue
+        member = _OBJECT_PARAMS_MEMBER.match(code, match.end())
+        if member is None:
+            continue
+        name = member.group(1)
+        folded = name.casefold()
+        if folded in _MAPPING_METHODS or folded in seen:
+            continue
+        seen.add(folded)
+        names.append(name)
+    return names, assigned
 
 
 def _processor_names(rules: ExchangeRules) -> dict[str, str]:
@@ -1235,13 +1429,17 @@ def _attached_references(code: str) -> tuple[list[str], set[str], str]:
     length = len(code)
     while index < length:
         if code[index] == '"':
-            index = _skip_bsl_string(code, index)
+            index = string_end(code, index)
             continue
         if lower.startswith(folded, index) and _is_bare_name(code, index, size):
+            # Сравнение `ДопОбработки.Имя = …` в условии — чтение, а не присваивание.
+            statement = statement_start(code, index)
             index += size
             index = _skip_ws(code, index)
             if index < length and code[index] == ".":
                 name, index, kind, literal = _attached_member(code, index + 1)
+                if kind == "defined" and name and not statement:
+                    kind = "read"
                 if kind == "defined" and name:
                     defined.add(name.casefold())
                 elif kind == "defined" and literal:
@@ -1259,12 +1457,12 @@ def _attached_references(code: str) -> tuple[list[str], set[str], str]:
                     opaque = opaque or (
                         "задаёт имя вложенной обработки кодом — это имя не сверяется"
                     )
-                elif literal and assigned:
+                elif literal and assigned and statement:
                     defined.add(literal.casefold())
                 elif literal:
                     _remember_name(referenced, seen, literal)
                 continue
-            if index < length and code[index] == "=":
+            if statement and index < length and code[index] == "=":
                 return (
                     [],
                     {_ATTACHED_WHOLE},
@@ -1303,7 +1501,7 @@ def _attached_index(code: str, start: int) -> tuple[str, int, bool, bool]:
     index = _skip_ws(code, start)
     if index >= len(code) or code[index] != '"':
         return "", index, False, True
-    end = _skip_bsl_string(code, index)
+    end = string_end(code, index)
     literal = code[index + 1 : end - 1].replace('""', '"')
     index = _skip_ws(code, end)
     if index < len(code) and code[index] == "]":
@@ -1317,7 +1515,7 @@ def _insert_key(code: str, paren: int) -> tuple[str, bool]:
     """Первый аргумент `Вставить`. Второй элемент истинен, если это не строковый литерал."""
     index = _skip_ws(code, paren + 1)
     if index < len(code) and code[index] == '"':
-        end = _skip_bsl_string(code, index)
+        end = string_end(code, index)
         return code[index + 1 : end - 1].replace('""', '"'), False
     if index < len(code) and code[index] != ")":
         return "", True
@@ -1369,13 +1567,13 @@ def _check_incoming(
                 )
                 continue
             own = _expand(_own_handler(node), algorithms)
-            own_code = _strip_comments(own.code)
+            own_code = strip_comments(own.code)
             if _assigns_value(own_code, node):
                 continue
             # Свойство поиска читается до `ПриВыгрузке` ПКО (БСП:826 против БСП:941).
             filling = filling_link if _is_search_pks(node) else filling_object
             around = _expand(ancestors, algorithms)
-            code = "\n".join((filling.code, own_code, _strip_comments(around.code)))
+            code = join_code((filling.code, own_code, strip_comments(around.code)))
             if _key_present(code, key):
                 continue
             call = _incoming_from_call(calls, pko.code, key)
@@ -1452,18 +1650,18 @@ def _posting_modes(events: dict[str, str], algorithms: dict[str, str]) -> tuple[
 def _posting_mode(text: str, algorithms: dict[str, str]) -> str:
     """`sets` — режим или `Проведен` заданы; `opaque` — не разобрать; `clear` — не заданы."""
     expanded = _expand(text, algorithms)
-    code = _strip_comments(expanded.code)
+    code = strip_comments(expanded.code)
     if _sets_posting(code):
         return "sets"
-    if expanded.opaque or _DYNAMIC_OBJECT.search(code):
+    if expanded.opaque or _DYNAMIC_OBJECT.search(bsl_code(code)):
         return "opaque"
     return "clear"
 
 
 def _sets_posting(code: str) -> bool:
-    if _POSTED_ASSIGN.search(code):
+    if _assigned(_POSTED_ASSIGN, code):
         return True
-    for match in _MODE_ASSIGN.finditer(code):
+    for match in statement_matches(_MODE_ASSIGN, code):
         rhs = _rhs(match.group(1))
         if rhs and rhs != '""':
             return True
@@ -1506,7 +1704,7 @@ def _predefined_search(pko: Node, algorithms: dict[str, str]) -> bool | None:
     if _predefined_search_pks(pko):
         return True
     expanded = _expand(str(pko.get("ПоследовательностьПолейПоиска")), algorithms)
-    if _PREDEFINED_MARK.search(_mask(expanded.code)):
+    if _PREDEFINED_MARK.search(bsl_code(expanded.code)):
         return True
     if expanded.opaque:
         return None
@@ -1537,17 +1735,17 @@ def _predefined_name_assigned(
     `None` — присваивание есть, но правая часть непрозрачна. `ПриВыгрузке` выполняется
     после этого блока (БСП:705, затем БСП:941) и имя в узел уже не кладёт.
     """
-    text = "\n".join((str(pko.get("ПередВыгрузкой")), _event(rules, "ПередКонвертациейОбъекта")))
+    text = join_code((str(pko.get("ПередВыгрузкой")), _event(rules, "ПередКонвертациейОбъекта")))
     expanded = _expand(text, algorithms)
-    code = _strip_comments(expanded.code)
+    code = strip_comments(expanded.code)
     assigned = False
-    for match in _PREDEFINED_ASSIGN.finditer(code):
+    for match in statement_matches(_PREDEFINED_ASSIGN, code):
         rhs = _rhs(match.group(1))
         if rhs and rhs.casefold() != "неопределено":
             assigned = True
     if assigned:
         return True
-    if expanded.opaque and _PREDEFINED_ASSIGN.search(code):
+    if expanded.opaque and _assigned(_PREDEFINED_ASSIGN, code):
         return None
     return False
 
@@ -1602,9 +1800,9 @@ def _exported_as_object(
             ):
                 continue
             node = graph.index[edge.address][0]
-            handlers = "\n".join(str(node.get(name)) for name in ("ПередВыгрузкой", "ПриВыгрузке"))
-            masked = _mask(_strip_comments(handlers))
-            if _EXPORT_WHOLE.search(masked):
+            handlers = join_code(str(node.get(name)) for name in ("ПередВыгрузкой", "ПриВыгрузке"))
+            masked = bsl_code(handlers)
+            if _assigned(_EXPORT_WHOLE, handlers):
                 return True
             if _EXECUTE_OPAQUE.search(masked) and re.search(
                 r"(?<![\w.])ВыгрузитьОбъект\b", masked, re.IGNORECASE
@@ -1741,9 +1939,9 @@ def _combine(parts: list[str], algorithms: dict[str, str]) -> _Text:
     opaque = False
     for part in parts:
         expanded = _expand(part, algorithms)
-        chunks.append(_strip_comments(expanded.code))
+        chunks.append(strip_comments(expanded.code))
         opaque = opaque or expanded.opaque
-    code = "\n".join(chunks)
+    code = join_code(chunks)
     return _Text(code, opaque or _incoming_opaque(code))
 
 
@@ -1759,15 +1957,15 @@ def _assigns_value(code: str, node: Node) -> bool:
     ПКС: `Значение` (БСП:12071), `Отказ` (БСП:12958), `Пусто` и `Выражение` (БСП:13019–13029).
     Группа: `КоллекцияОбъектов` (БСП:11715) и `Отказ` (БСП:11591).
     """
-    if _BYPASS_TRUE.search(code):
+    if _assigned(_BYPASS_TRUE, code):
         return True
     pattern = _COLLECTION_ASSIGN if node.kind.name == "pks_group" else _VALUE_ASSIGN
-    for match in pattern.finditer(code):
+    for match in statement_matches(pattern, code):
         rhs = _rhs(match.group(1))
         if rhs and rhs != "Неопределено":
             return True
     if node.kind.name == "pks":
-        for match in _EXPRESSION_ASSIGN.finditer(code):
+        for match in statement_matches(_EXPRESSION_ASSIGN, code):
             rhs = _rhs(match.group(1))
             if rhs and rhs != "Неопределено":
                 return True
@@ -1791,7 +1989,7 @@ def _key_present(code: str, key: str) -> bool:
         re.IGNORECASE,
     ):
         return True
-    for literal in _literals(code):
+    for literal in literals(code):
         if literal.casefold() == folded:
             return True
         if any(part.strip().casefold() == folded for part in literal.split(",")):
@@ -1800,11 +1998,12 @@ def _key_present(code: str, key: str) -> bool:
 
 
 def _incoming_opaque(code: str) -> bool:
-    if not _INCOMING_VAR.search(code):
+    masked = bsl_code(code)
+    if not _INCOMING_VAR.search(masked):
         return False
-    if _DYNAMIC_INSERT.search(code) or _DYNAMIC_INDEX.search(code):
+    if _DYNAMIC_INSERT.search(masked) or _DYNAMIC_INDEX.search(masked):
         return True
-    for match in _INCOMING_ASSIGN.finditer(code):
+    for match in statement_matches(_INCOMING_ASSIGN, code):
         rhs = _rhs(match.group(1))
         if rhs and rhs != "Неопределено" and not _STRUCTURE_NEW.match(rhs):
             return True
@@ -1821,7 +2020,7 @@ def _enabled_pks(
         nested = collection or _is_collection(item)
         yield path, item, nested, ancestors
         if item.is_group:
-            extra = "\n".join(str(item.get(name)) for name in _GROUP_FILLERS)
+            extra = join_code(str(item.get(name)) for name in _GROUP_FILLERS)
             yield from _enabled_pks(item, f"{path}/", nested, f"{ancestors}\n{extra}")
 
 
@@ -2005,7 +2204,7 @@ def _may_set_pko_name(text: str, algorithms: dict[str, str], seen: set[str]) -> 
         return True
     if "алгоритм" not in lowered and "выполнить" not in lowered:
         return False
-    cleaned = _mask(_strip_comments(text))
+    cleaned = bsl_code(text)
     if _EXECUTE_OPAQUE.search(
         _ALGORITHM_EXECUTE.sub(
             lambda match: "" if match.group(1).casefold() in algorithms else match.group(0),
@@ -2060,12 +2259,14 @@ def _scan_chunks(
         calls = "алгоритм" in lowered or "выполнить" in lowered
         if not mentions and not calls:
             continue
-        cleaned = _strip_comments(chunk)
+        cleaned = strip_comments(chunk)
         if mentions and any(rhs.casefold() in accepted for rhs in _assign_rhs(cleaned, folded)):
             return "hit"
         if not calls:
             continue
-        masked = _mask(cleaned)
+        masked = bsl_code(cleaned)
+        # Литерал `Выполнить("…")` исполняется как код — так же, как в `_expand`.
+        stack.extend(tokens(m.group(1))[0].value for m in code_matches(_EXECUTE_STRING, chunk))
         pending = _ALGORITHM_EXECUTE.sub(
             lambda match: "" if match.group(1).casefold() in algorithms else match.group(0),
             masked,
@@ -2101,7 +2302,7 @@ def _text_opaque(expanded: _Text, algorithms: dict[str, str]) -> bool:
     """
     if not expanded.opaque:
         return False
-    cleaned = _mask(_strip_comments(expanded.code))
+    cleaned = bsl_code(expanded.code)
     pending = _ALGORITHM_EXECUTE.sub(
         lambda match: "" if match.group(1).casefold() in algorithms else match.group(0),
         cleaned,
@@ -2117,7 +2318,7 @@ def _assign_rhs(code: str, name: str) -> list[str]:
     """Правые части присваиваний `name` на границе оператора, без строк и комментариев."""
     if name.casefold() not in code.casefold():
         return []
-    cleaned = _strip_comments(code)
+    cleaned = strip_comments(code)
     found: list[str] = []
     folded = name.casefold()
     size = len(folded)
@@ -2126,7 +2327,7 @@ def _assign_rhs(code: str, name: str) -> list[str]:
     length = len(cleaned)
     while index < length:
         if cleaned[index] == '"':
-            index = _skip_bsl_string(cleaned, index)
+            index = string_end(cleaned, index)
             continue
         if lower.startswith(folded, index) and _is_bare_name(cleaned, index, size):
             after = index + size
@@ -2148,7 +2349,8 @@ def _is_bare_name(text: str, index: int, size: int) -> bool:
 
 
 def _is_statement_assign(text: str, start: int, after_name: int) -> bool:
-    if _token_before(text, start).casefold() not in _ASSIGN_BEFORE:
+    """Имя в начале оператора и за ним `=`: присваивание, а не сравнение в выражении."""
+    if not statement_start(text, start):
         return False
     cursor = after_name
     while cursor < len(text) and text[cursor] in " \t\r\n":
@@ -2163,27 +2365,13 @@ def _after_equals(text: str, after_name: int) -> int:
     return cursor + 1
 
 
-def _token_before(text: str, pos: int) -> str:
-    cursor = pos - 1
-    while cursor >= 0 and text[cursor] in " \t\r\n":
-        cursor -= 1
-    if cursor < 0:
-        return ""
-    if text[cursor] == ";":
-        return ";"
-    end = cursor + 1
-    while cursor >= 0 and (text[cursor].isalnum() or text[cursor] == "_"):
-        cursor -= 1
-    return text[cursor + 1 : end]
-
-
 def _read_rhs_until_break(text: str, start: int) -> tuple[str, int]:
     chars: list[str] = []
     index = start
     while index < len(text):
         char = text[index]
         if char == '"':
-            end = _skip_bsl_string(text, index)
+            end = string_end(text, index)
             chars.append(text[index:end])
             index = end
             continue
@@ -2199,22 +2387,10 @@ def _bsl_string(rhs: str) -> str | None:
     text = rhs.strip()
     if len(text) < 2 or text[0] != '"' or text[-1] != '"':
         return None
-    end = _skip_bsl_string(text, 0)
+    end = string_end(text, 0)
     if end != len(text):
         return None
     return text[1:-1].replace('""', '"')
-
-
-def _skip_bsl_string(text: str, start: int) -> int:
-    index = start + 1
-    while index < len(text):
-        if text[index] == '"':
-            if index + 1 < len(text) and text[index + 1] == '"':
-                index += 2
-                continue
-            return index + 1
-        index += 1
-    return len(text)
 
 
 def _same_configuration(source: Structure, target: Structure) -> bool:
@@ -2268,3 +2444,8 @@ def _sample(names: list[str]) -> str:
 
 def _rhs(raw: str) -> str:
     return raw.strip().rstrip(";").strip()
+
+
+def _assigned(pattern: re.Pattern[str], text: str) -> bool:
+    """Шаблон присваивания найден в коде в начале оператора, а не в сравнении или литерале."""
+    return next(statement_matches(pattern, text), None) is not None

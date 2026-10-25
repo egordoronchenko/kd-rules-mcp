@@ -27,6 +27,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 
+from kd_rules_mcp.kd2.bsl_text import bsl_code, statement_start, string_end, strip_comments
 from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
 from kd_rules_mcp.structures.queries import (
     exchange_plan_autoregistration,
@@ -34,13 +35,7 @@ from kd_rules_mcp.structures.queries import (
 )
 from kd_rules_mcp.structures.xmldump import KINDS
 from kd_rules_mcp.validation.address import rule_address
-from kd_rules_mcp.validation.exchange_plan import (
-    _assign_rhs,
-    _bsl_string,
-    _is_bare_name,
-    _skip_bsl_string,
-    _strip_comments,
-)
+from kd_rules_mcp.validation.exchange_plan import _assign_rhs, _bsl_string, _is_bare_name
 from kd_rules_mcp.validation.report import ValidationReport
 
 # Вид метаданных → префикс имени типа КД (`Документ` → `ДокументСсылка.`).
@@ -701,9 +696,10 @@ def _check_query_parameters(report: ValidationReport, rules: RegistrationRules, 
         text = str(rule.get(event))
         if not text.strip():
             continue
-        cleaned = _strip_comments(text)
+        cleaned = strip_comments(text)
         address = rule_address(rule)
-        if _EXECUTE.search(cleaned) or _ALGORITHM_REF.search(cleaned):
+        code = bsl_code(text)
+        if _EXECUTE.search(code) or _ALGORITHM_REF.search(code):
             report.skip(
                 QUERY_PARAMETERS,
                 f"{address}: «{event}» собирает запрос кодом — параметры не сверяются",
@@ -776,7 +772,7 @@ def _query_parameter_names(query: str) -> list[str]:
     while index < length:
         char = query[index]
         if char == '"':
-            index = _skip_bsl_string(query, index)
+            index = string_end(query, index)
             continue
         if query.startswith("//", index):
             newline = query.find("\n", index)
@@ -837,12 +833,16 @@ def _bound_keys(code: str, initial: set[str]) -> set[str] | None:
     length = len(code)
     while index < length:
         if code[index] == '"':
-            index = _skip_bsl_string(code, index)
+            index = string_end(code, index)
             continue
         if lower.startswith(folded_name, index) and _is_bare_name(code, index, size):
             cursor = index + size
             while cursor < length and code[cursor] in " \t\r\n":
                 cursor += 1
+            if cursor < length and code[cursor] == "=" and not statement_start(code, index):
+                # Сравнение в условии: параметры запроса не меняются.
+                index = cursor + 1
+                continue
             if cursor < length and code[cursor] == "=":
                 replaced = _structure_keys(code, cursor + 1)
                 if replaced is None:
@@ -901,7 +901,7 @@ def _structure_keys(code: str, start: int) -> set[str] | None:
         return set()
     if cursor >= len(code) or code[cursor] != '"':
         return None
-    end = _skip_bsl_string(code, cursor)
+    end = string_end(code, cursor)
     inner = code[cursor + 1 : end - 1].replace('""', '"')
     return {part.strip() for part in inner.split(",") if part.strip()}
 
@@ -927,7 +927,7 @@ def _read_call(code: str, start: int) -> tuple[str, str | None, int] | None:
         cursor += 1
     argument: str | None = None
     if cursor < len(code) and code[cursor] == '"':
-        end = _skip_bsl_string(code, cursor)
+        end = string_end(code, cursor)
         argument = code[cursor + 1 : end - 1].replace('""', '"')
         cursor = end
     return name, argument, cursor

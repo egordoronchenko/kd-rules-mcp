@@ -29,6 +29,7 @@
 import re
 from enum import Enum
 
+from kd_rules_mcp.kd2.bsl_text import bsl_code
 from kd_rules_mcp.kd2.model import ExchangeRules, Node
 from kd_rules_mcp.validation.address import rule_address
 from kd_rules_mcp.validation.handlers import ALGORITHM_EVENT, collect_handlers
@@ -70,7 +71,6 @@ _IMPORT_EVENTS: dict[str, frozenset[str]] = {
 _EXPORT_ONLY = frozenset({"ПКС", "ПКГС", "ПВД"})
 _ANY_PHASE = {("Конвертация", "ПослеЗагрузкиПравилОбмена")}
 
-_LITERAL = re.compile(r'"[^"\n]*"?')
 _REFERENCE = re.compile(r"(?<![\w.])Алгоритмы\s*\.\s*([^\W\d]\w*)\b(?!\s*\()", re.IGNORECASE)
 
 
@@ -132,10 +132,8 @@ def _soften_ref_only_load(report: ValidationReport, rules: ExchangeRules) -> Non
 def references(text: str) -> list[str]:
     """Имена алгоритмов из `Алгоритмы.Имя` в порядке первого появления."""
     found: dict[str, str] = {}
-    for line in text.splitlines():
-        code = _LITERAL.sub('""', line).split("//", 1)[0]
-        for match in _REFERENCE.finditer(code):
-            found.setdefault(match.group(1).casefold(), match.group(1))
+    for match in _REFERENCE.finditer(bsl_code(text)):
+        found.setdefault(match.group(1).casefold(), match.group(1))
     return list(found.values())
 
 

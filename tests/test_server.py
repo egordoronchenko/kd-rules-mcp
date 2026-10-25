@@ -154,6 +154,7 @@ EXPECTED_TOOLS = {
     "live_status",
     "live_rules_dump",
     "live_rules_check",
+    "live_registration_check",
     "live_rules_install",
     "live_nodes_setup",
     "live_exchange_run",
@@ -209,6 +210,7 @@ EXPECTED_TOOLS = {
     "handlers_queries",
     "handlers_search",
     "handlers_read",
+    "handlers_context",
     "registration_build",
     "registration_retarget",
     "correspondent_draft",
@@ -1182,3 +1184,36 @@ async def test_rules_diff_pages_large_result(service: Kd2Service) -> None:
             "Наименование",
             "Комментарий",
         }
+
+
+async def test_rules_save_errors_json(service: Kd2Service) -> None:
+    """Отказ записи — JSON с code, errors и validation; acknowledge_errors виден в схеме."""
+    async with Client(create_server(service)) as client:
+        opened = await _call(client, "rules_open", path=str(DATA / "exchange_rules.xml"))
+        project = opened["project_id"]
+        await _call(
+            client,
+            "rule_update",
+            project_id=project,
+            kind="conversion",
+            key="",
+            fields={"ПередВыгрузкойДанных": "Выполнить(Алгоритмы.НетТакого);"},
+        )
+        error = await _error(client, "rules_save", project_id=project, path="out/bad.xml")
+        assert error["code"] == "rules_save_errors"
+        assert error["message"].startswith("Правила не записаны")
+        assert error["errors"]
+        assert set(error["errors"][0]) == {"level", "check", "address", "message"}
+        assert error["validation"]["errors"] >= 1
+        assert "structures" in error["validation"]
+        assert not (service.workspace.root / "out" / "bad.xml").is_file()
+
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+        schema = tools["rules_save"].input_schema
+        acknowledge = schema["properties"]["acknowledge_errors"]
+        assert acknowledge["type"] == "boolean"
+        assert acknowledge["default"] is False
+        assert acknowledge["description"] == "Write even if validation finds errors"
+        assert "acknowledge_errors" not in schema.get("required", [])
+        source = schema["properties"]["source_structure"]["description"]
+        assert source.endswith("default: last rules_validate")

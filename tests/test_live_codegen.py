@@ -7,6 +7,7 @@ import pytest
 
 from kd_rules_mcp.errors import LiveParseError
 from kd_rules_mcp.live.codegen import exchange, files, plans, rules
+from kd_rules_mcp.live.codegen.registration import registration_code
 from kd_rules_mcp.live.response import literal
 from kd_rules_mcp.live.runs import download_rule
 
@@ -46,10 +47,27 @@ def snippets():
         (files.append_chunk_code(VALUE, "YQ=="), False),
         (files.delete_file_code(VALUE), False),
         (files.file_info_code(VALUE), True),
+        (registration_code(VALUE, VALUE, None, None, False), True),
+        (
+            registration_code(
+                "Документ.Поступление",
+                "11111111-1111-1111-1111-111111111111",
+                "План",
+                {"Имя": VALUE},
+                True,
+            ),
+            False,
+        ),
     ]
 
 
-@pytest.mark.parametrize("code,readonly", snippets())
+# Идентификатор — номер: текст генератора длиннее лимита имени теста Windows.
+_SNIPPETS = snippets()
+
+
+@pytest.mark.parametrize(
+    "code,readonly", _SNIPPETS, ids=[str(index) for index in range(len(_SNIPPETS))]
+)
 def test_all_generators_single_line(code: str, readonly: bool) -> None:
     assert "\n" not in code and "\r" not in code and "//" not in code
     assert code.startswith("Попытка ") and code.endswith("КонецПопытки;")

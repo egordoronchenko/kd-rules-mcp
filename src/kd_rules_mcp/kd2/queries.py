@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from kd_rules_mcp.kd2.bsl_text import STATEMENT_KEYWORDS, literal_value, read_literal
+
 
 @dataclass(frozen=True, slots=True)
 class Token:
@@ -17,28 +19,7 @@ class Token:
     closed: bool = True
 
 
-_STATEMENT_BEFORE = frozenset(
-    {
-        ";",
-        ":",
-        "тогда",
-        "иначе",
-        "цикл",
-        "конецесли",
-        "конеццикла",
-        "конецпопытки",
-        "попытка",
-        "исключение",
-        "then",
-        "else",
-        "do",
-        "endif",
-        "enddo",
-        "try",
-        "except",
-        "endtry",
-    }
-)
+_STATEMENT_BEFORE = frozenset({";", ":"}) | STATEMENT_KEYWORDS
 _EXECUTIONS = {
     "выполнить": "single",
     "execute": "single",
@@ -92,22 +73,11 @@ def tokens(text: str) -> list[Token]:
             found.append(Token(";", start, index))
             continue
         if char == '"':
-            index += 1
-            value: list[str] = []
-            closed = False
-            while index < len(text):
-                if text[index] == '"':
-                    if text.startswith('""', index):
-                        value.append('"')
-                        index += 2
-                        continue
-                    index += 1
-                    closed = True
-                    break
-                value.append(text[index])
-                index += 1
-            decoded = re.sub(r"\n[ \t]*\|", "\n", "".join(value)).replace("\r", "")
-            found.append(Token(decoded, start, index, True, closed))
+            literal = read_literal(text, start)
+            index = literal.end
+            value = literal_value(text, literal)
+            decoded = re.sub(r"\n[ \t]*\|", "\n", value).replace("\r", "")
+            found.append(Token(decoded, start, index, True, literal.closed))
             continue
         match = re.match(r"[\w]+", text[index:])
         index += len(match.group()) if match else 1

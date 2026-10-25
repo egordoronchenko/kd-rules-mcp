@@ -57,7 +57,10 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
     )
     # Виды правил и синтаксис адресов нужны агенту без локального docs/tools.md.
     # Шесть live-инструментов добавляют компактные схемы баз, файлов и preview/apply.
-    assert len(serialized) <= 53_000, f"Схемы: {len(serialized)} знаков"
+    # handlers_context (#81) — около 350 знаков при минимальных описаниях.
+    # rules_save: acknowledge_errors и тройка структур (схема anyOf string|null) — около 340.
+    # live_registration_check (#78) — около 750 знаков (вместо урезания чужих описаний).
+    assert len(serialized) <= 54_500, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:

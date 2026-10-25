@@ -21,7 +21,17 @@ from kd_rules_mcp.validation.call_graph import (
     validation_evidence,
 )
 from kd_rules_mcp.validation.exchange_plan import check_exchange_plan
-from kd_rules_mcp.validation.handlers import Handler, HandlerFile, handler_sources
+from kd_rules_mcp.validation.handlers import (
+    EVENT_AREAS,
+    HANDLER_GLOBALS,
+    HANDLER_NOTES,
+    HANDLER_PARAMS,
+    HANDLER_TEMPLATE_LINES,
+    Handler,
+    HandlerFile,
+    handler_area,
+    handler_sources,
+)
 from kd_rules_mcp.validation.structure import (
     check_structures,
     ref_only_pko_codes,
@@ -103,8 +113,45 @@ class ReviewMixin(ServiceBase):
                 "address": h.address,
                 "handler": h.event,
                 "file": loc.name,
+                "params": h.param_names,
                 **slice_rows(rows, offset, limit),
             }
+
+    def handlers_context(
+        self, kind: str | None = None, handler: str | None = None
+    ) -> dict[str, Any]:
+        """Параметры события по макету КД, глобальный контекст и расхождения с исполнителем БСП.
+
+        Проект правил не нужен: данные — `HANDLER_PARAMS` и соседние константы. Список событий
+        (39 коротких строк) отдаётся целиком, без страниц.
+        """
+        kinds = sorted({found for found, _tag in EVENT_AREAS})
+        if kind and kind not in kinds:
+            raise Kd2Error(f"Неизвестный вид «{kind}»; допустимые: {', '.join(kinds)}")
+        if not handler:
+            rows = [
+                {"kind": found, "handler": tag, "area": area, "params": len(HANDLER_PARAMS[area])}
+                for (found, tag), area in EVENT_AREAS.items()
+                if not kind or found == kind
+            ]
+            return {"items": rows, "total": len(rows)}
+        try:
+            found, tag, area = handler_area(kind, handler)
+        except KeyError:
+            allowed = sorted({t for k, t in EVENT_AREAS if not kind or k == kind})
+            scope = f" вида «{kind}»" if kind else " (без вида — имя области или однозначный тег)"
+            raise Kd2Error(
+                f"Неизвестное событие «{handler}»{scope}; допустимые: {', '.join(allowed)}"
+            ) from None
+        return {
+            "kind": found,
+            "handler": tag,
+            "area": area,
+            "template_lines": HANDLER_TEMPLATE_LINES[area],
+            "params": list(HANDLER_PARAMS[area]),
+            "globals": [asdict(item) for item in HANDLER_GLOBALS],
+            "notes": list(HANDLER_NOTES.get(area, ())),
+        }
 
     def handlers_search(
         self,

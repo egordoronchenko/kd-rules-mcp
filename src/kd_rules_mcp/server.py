@@ -69,6 +69,7 @@ from kd_rules_mcp.errors import (
     RuleEditError,
     RuleNotFoundError,
     RulesFormatError,
+    RulesSaveErrorsError,
     StructureFormatError,
     StructureNotFoundError,
     UnknownFieldError,
@@ -111,6 +112,7 @@ ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (ProjectNotFoundError, "project_not_found"),
     (DuplicateProjectError, "duplicate_project"),
     (WorkspacePathError, "path_outside_workspace"),
+    (RulesSaveErrorsError, "rules_save_errors"),
     (UnknownFieldError, "unknown_field"),
     (DuplicateRuleError, "duplicate_rule"),
     (AmbiguousAddressError, "ambiguous_address"),
@@ -215,6 +217,8 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
     if isinstance(error, RegistrationToolError):
         payload.update(error.details)
     if isinstance(error, EdAuthoringPreconditionError):
+        payload.update(error.details)
+    if isinstance(error, RulesSaveErrorsError):
         payload.update(error.details)
     if isinstance(error, (EdSchemaNotFoundError, StructureNotFoundError)):
         payload.update(getattr(error, "reopen_details", {}))
@@ -336,9 +340,10 @@ def create_server(service: Kd2Service) -> MCPServer:
     async def live_rules_dump(
         base: Annotated[str, Field(description="Sandbox project.base")],
         plan: Annotated[str, Field(description="Exchange plan")],
+        open: Annotated[bool, Field(description="Also open as projects")] = False,
     ) -> dict[str, Any]:
         """Download active XML rules in verified chunks to workspace/.live for rules_diff."""
-        return await call(service.live_rules_dump, base, plan)
+        return await call(service.live_rules_dump, base, plan, open)
 
     @server.tool()
     async def live_rules_check(
@@ -355,6 +360,22 @@ def create_server(service: Kd2Service) -> MCPServer:
     ) -> dict[str, Any]:
         """Test BSP loading without writing rule records; return loading flags and messages."""
         return await call(service.live_rules_check, base, plan, files, accept_version_mismatch)
+
+    @server.tool()
+    async def live_registration_check(
+        base: Annotated[str, Field(description="Sandbox project.base")],
+        object: Annotated[str, Field(description="Вид.Имя")],
+        ref: Annotated[str, Field(description="UUID")],
+        plan: Annotated[str | None, Field(description="One plan")] = None,
+        changes: Annotated[
+            dict[str, Any] | None,
+            Field(description="Scalar or {type, value}"),
+        ] = None,
+        write: Annotated[bool, Field(description="false: read only")] = True,
+    ) -> dict[str, Any]:
+        """Registration, recipients, node reasons. Writes in a rolled-back transaction;
+        effects outside the database (files, calls, jobs) are not rolled back."""
+        return await call(service.live_registration_check, base, object, ref, plan, changes, write)
 
     @server.tool()
     async def live_rules_install(
@@ -748,10 +769,41 @@ def create_server(service: Kd2Service) -> MCPServer:
             Field(description=("Workspace path or absolute rules_dir path")),
         ],
         overwrite: Annotated[bool, Field(description="Replace existing file")] = False,
+        acknowledge_errors: Annotated[
+            bool, Field(description="Write even if validation finds errors")
+        ] = False,
+        source_structure: Annotated[
+            str | None,
+            Field(
+                description="Source or registration plan structure; default: last rules_validate"
+            ),
+        ] = None,
+        target_structure: Annotated[
+            str | None,
+            Field(description="Exchange target structure; default: last rules_validate"),
+        ] = None,
+        exchange_project_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Exchange project for registration ПВД coverage; default: last rules_validate"
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
-        """Save XML to workspace/rules_dir with format checks. Preserve unchanged line endings;
-        validate rules and syntax before delivery."""
-        return await call(service.rules_save, project_id, path, overwrite)
+        """Validate like rules_validate, then save XML to workspace/rules_dir. Errors refuse
+        the save (code rules_save_errors) unless acknowledge_errors. Preserve unchanged
+        line endings."""
+        return await call(
+            service.rules_save,
+            project_id,
+            path,
+            overwrite,
+            acknowledge_errors,
+            source_structure,
+            target_structure,
+            exchange_project_id,
+        )
 
     @server.tool()
     async def rules_close(project_id: ProjectId) -> dict[str, Any]:
@@ -1077,6 +1129,14 @@ def create_server(service: Kd2Service) -> MCPServer:
     ) -> dict[str, Any]:
         """Read numbered handler lines."""
         return await call(service.handlers_read, project_id, address, handler, offset, limit)
+
+    @server.tool()
+    async def handlers_context(
+        kind: Annotated[str | None, Field(description="Kind")] = None,
+        handler: Annotated[str | None, Field(description="Event or area")] = None,
+    ) -> dict[str, Any]:
+        """Handler params, globals and BSP notes; no project. Omit handler to list events."""
+        return await call(service.handlers_context, kind, handler)
 
     # --- Регистрация и корреспондент -----------------------------------------------------
 

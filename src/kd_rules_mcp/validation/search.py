@@ -43,6 +43,13 @@ import re
 import sqlite3
 from dataclasses import dataclass
 
+from kd_rules_mcp.kd2.bsl_text import (
+    code_matches,
+    in_literal,
+    statement_start,
+    string_end,
+    strip_comments,
+)
 from kd_rules_mcp.kd2.model import ExchangeRules, Node
 from kd_rules_mcp.validation.address import rule_address, side_name
 from kd_rules_mcp.validation.report import ValidationReport
@@ -88,22 +95,7 @@ def check_search_params(rules: ExchangeRules) -> ValidationReport:
 
 
 def _read_parameters(text: str) -> set[str]:
-    names: set[str] = set()
-    for line in text.splitlines():
-        for match in _PARAMETER.finditer(_without_comment(line)):
-            names.add(match.group(1) or match.group(2))
-    return names
-
-
-def _without_comment(line: str) -> str:
-    """Строка до комментария `//` вне строкового литерала."""
-    quoted = False
-    for index, char in enumerate(line):
-        if char == '"':
-            quoted = not quoted
-        elif not quoted and line.startswith("//", index):
-            return line[:index]
-    return line
+    return {match.group(1) or match.group(2) for match in code_matches(_PARAMETER, text)}
 
 
 def _passed_parameters(pko: Node) -> dict[str, bool]:
@@ -153,7 +145,6 @@ _SYSTEM_NAMES = frozenset(
     name.casefold() for name in ("{УникальныйИдентификатор}", "{ИмяПредопределенногоЭлемента}")
 )
 _SEARCH_STRING = "строкаименсвойствпоиска"
-_ASSIGN_BEFORE = frozenset({"", ";", "тогда", "иначе", "цикл"})
 _SYNC = "СинхронизироватьПоИдентификатору"
 _CONTINUE = "ПродолжитьПоискПоПолямПоискаЕслиПоИдентификаторуНеНашли"
 _HANDLER = "ПоследовательностьПолейПоиска"
@@ -444,14 +435,14 @@ def _search_string_assignments(text: str) -> list[str | None]:
     Пустая строка — отдельный случай: поиск по всем свойствам (БСП:8559–8561), это не пропуск.
     Сравнение в `Если` присваиванием не считается. Комментарии `//` отброшены.
     """
-    cleaned = "\n".join(_without_comment(line) for line in text.splitlines())
+    cleaned = strip_comments(text)
     found: list[str | None] = []
     length = len(cleaned)
     lower = cleaned.casefold()
     index = 0
     while index < length:
         if cleaned[index] == '"':
-            index = _skip_string(cleaned, index)
+            index = string_end(cleaned, index)
             continue
         if lower.startswith(_SEARCH_STRING, index) and _is_identifier(cleaned, index):
             after = index + len(_SEARCH_STRING)
@@ -471,7 +462,7 @@ def _is_identifier(text: str, start: int) -> bool:
 
 
 def _is_assignment(text: str, start: int, after_name: int) -> bool:
-    if _previous_token(text, start).casefold() not in _ASSIGN_BEFORE:
+    if not statement_start(text, start):
         return False
     cursor = after_name
     while cursor < len(text) and text[cursor] in " \t\r\n":
@@ -484,20 +475,6 @@ def _skip_equals(text: str, after_name: int) -> int:
     while cursor < len(text) and text[cursor] != "=":
         cursor += 1
     return cursor + 1
-
-
-def _previous_token(text: str, pos: int) -> str:
-    cursor = pos - 1
-    while cursor >= 0 and text[cursor] in " \t\r\n":
-        cursor -= 1
-    if cursor < 0:
-        return ""
-    if not (text[cursor].isalnum() or text[cursor] == "_"):
-        return text[cursor]
-    end = cursor + 1
-    while cursor >= 0 and (text[cursor].isalnum() or text[cursor] == "_"):
-        cursor -= 1
-    return text[cursor + 1 : end]
 
 
 def _read_rhs(text: str, start: int) -> tuple[str, int]:
@@ -536,18 +513,6 @@ def _closes_one_string(text: str) -> bool:
     return False
 
 
-def _skip_string(text: str, start: int) -> int:
-    index = start + 1
-    while index < len(text):
-        if text[index] == '"':
-            if index + 1 < len(text) and text[index + 1] == '"':
-                index += 2
-                continue
-            return index + 1
-        index += 1
-    return len(text)
-
-
 def _split_names(inner: str) -> list[str]:
     """Имена из литерала: разделители — запятая и пробел, пустые части отбрасываются (БСП:8565)."""
     return [part for part in re.split(r"[, ]+", inner) if part]
@@ -558,7 +523,7 @@ def _written_search_names(text: str) -> set[str]:
 
     Чтение `СвойстваПоиска["Имя"]` в условии присваиванием не считается.
     """
-    cleaned = "\n".join(_without_comment(line) for line in text.splitlines())
+    cleaned = strip_comments(text)
     names: set[str] = set()
     lower = cleaned.casefold()
     ident = "свойствапоиска"
@@ -568,9 +533,9 @@ def _written_search_names(text: str) -> set[str]:
         if pos < 0:
             break
         index = pos + len(ident)
-        if not _is_word(cleaned, pos, len(ident)):
+        if not _is_word(cleaned, pos, len(ident)) or in_literal(cleaned, pos):
             continue
-        if _previous_token(cleaned, pos).casefold() not in _ASSIGN_BEFORE:
+        if not statement_start(cleaned, pos):
             continue
         names.update(_property_write(cleaned, index))
     return names

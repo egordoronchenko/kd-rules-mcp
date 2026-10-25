@@ -64,6 +64,9 @@ class RulesProject:
     `source_size` — его время и размер на момент открытия.
     `handlers` — карта строк последнего `handlers_export`.
     `private` — копия по запросу: свой документ того же файла, путь общего проекта не занимает.
+    `validation_inputs` — тройка последнего успешного `rules_validate`
+    (`source_structure`, `target_structure`, `exchange_project_id`). В `meta.json` — только
+    эти идентификаторы, сами структуры в снимок не попадают; старый снимок без поля — `None`.
     """
 
     id: str
@@ -77,6 +80,7 @@ class RulesProject:
     source_size: int | None = None
     handlers: HandlerExport | None = None
     private: bool = False
+    validation_inputs: tuple[str | None, str | None, str | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +198,26 @@ class RulesWorkspace:
                 logger.warning("%s", error)
                 yield self._lookup(project_id)
 
+    def check_destination(
+        self,
+        path: Path | str,
+        *,
+        overwrite: bool = False,
+        allowed: Sequence[Path] = (),
+    ) -> Path:
+        """Проверяет путь записи и запрет перезаписи. Каталог и файл не создаёт.
+
+        После `resolve` (включая `..` и симлинки) путь должен лежать внутри корня или одной
+        из `allowed`, иначе `WorkspacePathError`. Существующий файл — только при
+        `overwrite=True`.
+        """
+        destination = self._destination(path, allowed)
+        if destination.is_file() and not overwrite:
+            raise Kd2Error(
+                f"Файл «{destination}» уже существует; повторная запись только при overwrite=True"
+            )
+        return destination
+
     def save(
         self,
         project_id: str,
@@ -204,21 +228,15 @@ class RulesWorkspace:
     ) -> Path:
         """Пишет XML проекта внутрь рабочей папки (или разрешённой папки) и запоминает путь.
 
-        Путь относительный к корню или абсолютный. После `resolve` (включая `..` и симлинки)
-        файл должен лежать внутри корня или одной из `allowed` (папки живых правил проектов),
-        иначе `WorkspacePathError`. Существующий файл заменяется только при `overwrite=True`.
-        Успешная запись сбрасывает `modified` и обновляет снимок.
+        Путь относительный к корню или абсолютный. Проверку пути и `overwrite` делает
+        `check_destination`. Успешная запись сбрасывает `modified` и обновляет снимок.
         Файл сохранения снимок не заменяет: каталог `.projects` живёт отдельно.
         """
         project = self.get(project_id)
         document = project.document
         if document is None:
             raise RulesFormatError(f"Проект «{project_id}» не загружен из снимка")
-        destination = self._destination(path, allowed)
-        if destination.is_file() and not overwrite:
-            raise Kd2Error(
-                f"Файл «{destination}» уже существует; повторная запись только при overwrite=True"
-            )
+        destination = self.check_destination(path, overwrite=overwrite, allowed=allowed)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.is_file():
             data = preserve_line_endings(destination.read_bytes(), dump_rules(document))
@@ -258,6 +276,24 @@ class RulesWorkspace:
         project = self.get(project_id)
         project.handlers = export
         self.snapshot(project_id)
+
+    def remember_validation(
+        self, project_id: str, inputs: tuple[str | None, str | None, str | None]
+    ) -> None:
+        """Запоминает тройку структур последнего `rules_validate` и пишет её в снимок.
+
+        Та же тройка — ничего не пишется. Иначе переписывается только `meta.json`, если
+        `rules.xml` снимка уже есть: перезаписывать правила ради трёх идентификаторов незачем.
+        """
+        project = self.get(project_id)
+        if project.validation_inputs == inputs:
+            return
+        project.validation_inputs = inputs
+        directory = self._snapshot_dir(project.id)
+        if (directory / "rules.xml").is_file():
+            _atomic_write(directory / "meta.json", _dump_meta(project))
+        else:
+            self.snapshot(project_id)
 
     def snapshot(self, project_id: str) -> None:
         """Пишет `rules.xml`, `handlers.json` (если карта есть) и `meta.json` атомарно.
@@ -448,6 +484,7 @@ class RulesWorkspace:
             source_mtime_ns=_meta_int(payload.get("source_mtime_ns")),
             source_size=_meta_int(payload.get("source_size")),
             private=private,
+            validation_inputs=_meta_inputs(payload.get("validation_inputs"), directory),
         )
         self._projects[project.id] = project
         # Копия делит путь с общим проектом и не должна подменять его в `_by_source`.
@@ -572,6 +609,27 @@ def _meta_int(value: object) -> int | None:
     return value
 
 
+_INPUT_KEYS = ("source_structure", "target_structure", "exchange_project_id")
+
+
+def _meta_inputs(
+    value: object, directory: Path
+) -> tuple[str | None, str | None, str | None] | None:
+    """Тройка структур последней проверки из `meta.json`. Нет поля — `None`.
+
+    Неверная форма не мешает восстановлению проекта: предупреждение в лог и `None`.
+    Пустая строка — сторона не задана.
+    """
+    if value is None:
+        return None
+    items = [value.get(key) for key in _INPUT_KEYS] if isinstance(value, dict) else None
+    if items is None or any(item is not None and not isinstance(item, str) for item in items):
+        logger.warning("Снимок %s: validation_inputs не разобран, проверка без структур", directory)
+        return None
+    source, target, exchange = (item or None for item in items)
+    return source, target, exchange
+
+
 def _dump_meta(project: RulesProject) -> bytes:
     payload: dict[str, object] = {
         "version": _META_VERSION,
@@ -585,6 +643,10 @@ def _dump_meta(project: RulesProject) -> bytes:
         payload["private"] = True
     payload["source_mtime_ns"] = project.source_mtime_ns
     payload["source_size"] = project.source_size
+    if project.validation_inputs is not None:
+        payload["validation_inputs"] = dict(
+            zip(_INPUT_KEYS, project.validation_inputs, strict=True)
+        )
     payload["updated_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return _json_bytes(payload)
 

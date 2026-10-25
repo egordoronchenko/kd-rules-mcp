@@ -30,6 +30,12 @@ class LiveTransportError(LiveError):
     code = "live_transport"
 
 
+class LiveConnectError(LiveTransportError):
+    """Соединение не установлено ни с одной попытки: запрос в базу не отправлялся."""
+
+    code = "live_connect"
+
+
 class LiveProtocolError(LiveError):
     """Сервер данных отклонил вызов инструмента."""
 
@@ -176,6 +182,14 @@ class ObjectNotFoundError(Kd2Error):
 
 class WorkspacePathError(Kd2Error):
     """Путь записи лежит вне рабочей папки и папок живых правил проектов (rules_dir)."""
+
+
+class RulesSaveErrorsError(Kd2Error):
+    """Validation found errors; repeat with acknowledge_errors to write anyway."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
 
 
 class ProjectNotFoundError(Kd2Error):

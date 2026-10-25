@@ -73,6 +73,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "handlers_queries",
         "handlers_search",
         "handlers_read",
+        "handlers_context",
     ),
     "Registration and correspondent rules": (
         "registration_build",
@@ -83,6 +84,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "live_status",
         "live_rules_dump",
         "live_rules_check",
+        "live_registration_check",
         "live_rules_install",
         "live_nodes_setup",
         "live_exchange_run",
