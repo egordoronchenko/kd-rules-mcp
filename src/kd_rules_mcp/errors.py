@@ -352,3 +352,7 @@ class EdFormatMissingKeyError(EdFormatPackageError):
 
 class EdFormatShapeError(EdFormatPackageError):
     """A declaration is inconsistent or outside the supported XDTO profile."""
+
+
+class ReferenceUnavailableError(Kd2Error):
+    """Server skill folder with references was not found; set KD2_REFERENCE_DIR."""

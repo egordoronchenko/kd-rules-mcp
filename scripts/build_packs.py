@@ -22,7 +22,10 @@
    `token` того же файла, если токен задан. Это правка чужого репозитория — только с согласия
    человека.
 3. `--dest <папка обмена> --side <имя>=<папка> --side <имя>=<папка>` — папка обмена двух
-   проектов. Сторон ровно две; имя — строчные латинские буквы, цифры и дефис, с буквы; папки
+   проектов; `--exchange <id>` вместо `--side` берёт стороны и направления из профиля
+   `projects.yaml`, папки — из `projects.local.yaml`. При совпадении папок `--side` с одним
+   профилем направления и файлы тоже берутся из него. Сторон ровно две; имя — строчные
+   латинские буквы, цифры и дефис, с буквы; папки
    существуют. Папка обмена не совпадает со стороной, не лежит внутри неё и не содержит её
    (по разрешённым путям). Иначе отказ до любой записи, папка обмена не создаётся. Проекты
    сторон только читаются. Скиллы и `kd-rules-mcp` — как при обычном `--dest`. HTTP-серверы
@@ -51,13 +54,20 @@ import os
 import re
 import shutil
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
 import our_skills
 
 from kd_rules_mcp.console import utf8_stdout
-from kd_rules_mcp.projects import DEFAULT_SERVER_URL, bearer_auth, load_local
+from kd_rules_mcp.projects import (
+    DEFAULT_SERVER_URL,
+    Exchange,
+    ProjectConfigError,
+    bearer_auth,
+    load_catalog,
+    load_local,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / ".claude" / "skills"
@@ -653,6 +663,133 @@ def _note_missing_exchange_hint(path: Path) -> str | None:
     return f"{path.name}: добавьте строку «{EXCHANGE_HINT}»"
 
 
+def _exchange_profile(
+    sides: Sequence[tuple[str, Path]],
+    exchange: str | None,
+    projects_file: Path,
+    local_file: Path,
+) -> tuple[Sequence[tuple[str, Path]], Exchange | None, dict[str, str]]:
+    """Выбирает профиль до записи; без файлов каталога прежний --side работает как раньше."""
+    if exchange is None and (not projects_file.is_file() or not local_file.is_file()):
+        return sides, None, {}
+    if exchange is None:
+        # С --side каталог — только подсказка: никакой сбой его разбора (и не только
+        # ProjectConfigError — кривой тип поля даёт TypeError) не ломает прежнюю установку.
+        try:
+            catalog = load_catalog(projects_file)
+            local = load_local(local_file)
+        except Exception:
+            return sides, None, {}
+        profile = None
+    else:
+        try:
+            catalog = load_catalog(projects_file)
+            profile = catalog.exchange(exchange)
+            local = load_local(local_file)
+        except ProjectConfigError as error:
+            raise SystemExit(str(error)) from None
+        if not profile.sides:
+            raise SystemExit(f"Обмен «{profile.id}»: профиль без сторон (sides)")
+    if profile is not None:
+        chosen = []
+        for side in profile.sides:
+            if SIDE_NAME.fullmatch(side.project) is None:
+                raise SystemExit(
+                    f"Проект «{side.project}» не годится в имя стороны; задайте --side"
+                )
+            folder = local.project_dirs.get(side.project)
+            if folder is None:
+                raise SystemExit(f"Не задана папка проекта «{side.project}» в projects.local.yaml")
+            chosen.append((side.project, folder))
+        return chosen, profile, {s.project: s.project for s in profile.sides}
+    actual = {os.path.normcase(str(folder.resolve())): name for name, folder in sides}
+    matches = []
+    for item in catalog.exchanges:
+        if not item.sides:
+            continue
+        folders = {s.project: local.project_dirs.get(s.project) for s in item.sides}
+        if any(folder is None for folder in folders.values()):
+            continue
+        paths = {
+            project: os.path.normcase(str(folder.resolve()))
+            for project, folder in folders.items()
+            if folder is not None
+        }
+        if len(set(paths.values())) == 2 and set(paths.values()) == set(actual):
+            matches.append((item, {project: actual[path] for project, path in paths.items()}))
+    if len(matches) > 1:
+        raise SystemExit(
+            "Папки совпали с несколькими профилями; выберите --exchange: "
+            + ", ".join(p.id for p, _ in matches)
+        )
+    return (sides, *matches[0]) if matches else (sides, None, {})
+
+
+def _render_profile_exchange_md(
+    sides: Sequence[tuple[str, Path]],
+    built: ExchangeServers,
+    profile: Exchange,
+    names: dict[str, str],
+) -> str:
+    """Подставляет только раздел направлений; прежний текст без профиля не меняется."""
+    original = _render_exchange_md(sides, built)
+    start, _, rest = original.partition("## Направления и файлы правил")
+    _, _, end = rest.partition("## Правила")
+    lines = [
+        "## Направления и файлы правил",
+        "",
+        f"Профиль обмена: `{profile.id}`; технология: `{profile.technology or 'не задана'}`.",
+        "",
+    ]
+    for side in profile.sides:
+        lines.append(
+            f"- {names[side.project]}: план `{side.plan}`, "
+            f"технология `{profile.technology or 'не задана'}`."
+        )
+    by_project = {s.project: s for s in profile.sides}
+    lines.append("")
+    # Технология не задана, а у сторон только модули — это тоже универсальный формат по описанию.
+    modules_only = any(s.module for s in profile.sides) and not any(s.rules for s in profile.sides)
+    if profile.technology == "ed" or (profile.technology is None and modules_only):
+        lines.extend(
+            ["| направление | модуль источника | модуль приёмника |", "| --- | --- | --- |"]
+        )
+        lines.extend(
+            f"| {names[source]} → {names[target]} | `{by_project[source].module or 'не задан'}` | "
+            f"`{by_project[target].module or 'не задан'}` |"
+            for source, target in profile.directions
+        )
+    else:
+        lines.extend(
+            ["| направление | выгрузка | загрузка | регистрация |", "| --- | --- | --- | --- |"]
+        )
+
+        def file(project: str, filename: str) -> str:
+            folder = by_project[project].rules
+            return (
+                f"`{PurePosixPath(folder.replace(chr(92), '/')) / filename}` {names[project]}"
+                if folder
+                else "не задан"
+            )
+
+        for source, target in profile.directions:
+            lines.append(
+                f"| {names[source]} → {names[target]} | {file(source, 'ExchangeRules.xml')} | "
+                f"{file(target, 'CorrespondentExchangeRules.xml')} | "
+                f"{file(source, 'RegistrationRules.xml')} |"
+            )
+        lines.extend(
+            [
+                "",
+                "Пути — от папки проекта стороны. Загружает приёмник по копии правил",
+                "корреспондента из своего комплекта, а не по файлу источника. Совпадение копий",
+                "проверять `rules_diff`, а не хешем файла: концы строк в репозиториях сторон",
+                "могут отличаться.",
+            ]
+        )
+    return start + "\n".join(lines) + "\n\n## Правила" + end
+
+
 def _write_exchange_entries(dest: Path, client: str) -> list[str]:
     """Создаёт `AGENTS.md` и `CLAUDE.md`, только если файлов ещё нет."""
     notes: list[str] = []
@@ -683,6 +820,9 @@ def install_exchange(
     server_url: str | None = None,
     *,
     cursor: bool = False,
+    exchange: str | None = None,
+    projects_file: Path | None = None,
+    local_file: Path | None = None,
 ) -> list[str]:
     """Ставит упаковку в папку обмена и подключает серверы сторон.
 
@@ -691,6 +831,14 @@ def install_exchange(
     из собранного `.mcp.json`, `KD-EXCHANGE.md` и точки входа. Отчёт — строки `install`
     и строки этого режима.
     """
+    if exchange is not None and sides:
+        raise SystemExit("--exchange нельзя вместе с --side")
+    sides, profile, names = _exchange_profile(
+        sides,
+        exchange,
+        projects_file or ROOT / "projects.yaml",
+        local_file or ROOT / "projects.local.yaml",
+    )
     resolved = _validate_exchange_sides(dest, sides)
     loaded: list[tuple[str, dict[str, Any]]] = []
     missing: list[str] = []
@@ -704,6 +852,8 @@ def install_exchange(
     built = exchange_servers(loaded)
     dest.mkdir(parents=True, exist_ok=True)
     report = install(dest, client, server_url, cursor=False)
+    if profile is not None:
+        report.append(f"направления — из профиля обмена {profile.id}")
     # Строки install про «запустите с --cursor» относятся к вызову без переноса.
     # Здесь перенос идёт следом, из уже собранного файла.
     if cursor:
@@ -726,7 +876,12 @@ def install_exchange(
         report.append(".mcp.json папки обмена содержит учётные данные — коммитить его нельзя")
     if cursor:
         report.extend(_transfer_exchange_cursor(dest, data))
-    (dest / "KD-EXCHANGE.md").write_bytes(_render_exchange_md(resolved, built).encode("utf-8"))
+    text = (
+        _render_profile_exchange_md(resolved, built, profile, names)
+        if profile
+        else _render_exchange_md(resolved, built)
+    )
+    (dest / "KD-EXCHANGE.md").write_bytes(text.encode("utf-8"))
     report.extend(_write_exchange_entries(dest, client))
     return report
 
@@ -869,6 +1024,9 @@ def _parser() -> argparse.ArgumentParser:
             "Папка обмена двух проектов: --dest <папка> --side <имя>=<проект> "
             "--side <имя>=<проект>. Скиллы и kd-rules-mcp, HTTP-серверы сторон "
             "(общий без префикса, свой — <сторона>-), файл KD-EXCHANGE.md. "
+            "Или --dest <папка> --exchange <id>: стороны, планы, файлы и направления "
+            "из projects.yaml, папки проектов из projects.local.yaml. При совпадении --side "
+            "с профилем он используется автоматически. "
             "Проекты сторон не изменяются."
         ),
     )
@@ -882,6 +1040,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--client", choices=sorted(CLIENT_ROOTS), default="claude")
     parser.add_argument("--server-url", help="адрес сервера для .mcp.json проекта")
+    parser.add_argument("--exchange", help="id профиля обмена из projects.yaml (вместо --side)")
     parser.add_argument(
         "--side",
         action="append",
@@ -906,6 +1065,10 @@ def main() -> None:
     utf8_stdout()
     parser = _parser()
     args = parser.parse_args()
+    if args.exchange is not None and args.side:
+        parser.error("--exchange нельзя вместе с --side")
+    if args.exchange is not None and args.dest is None:
+        parser.error("--exchange указывается только вместе с --dest")
     if args.side and args.dest is None:
         parser.error("--side указывается только вместе с --dest")
 
@@ -931,13 +1094,14 @@ def main() -> None:
         dest = args.dest
         if dest is None:
             parser.error("нужна папка --dest")
-        if args.side:
+        if args.side or args.exchange is not None:
             lines = install_exchange(
                 dest,
-                _parse_exchange_sides(args.side),
+                _parse_exchange_sides(args.side or []),
                 args.client,
                 args.server_url,
                 cursor=args.cursor,
+                exchange=args.exchange,
             )
         else:
             lines = install(dest, args.client, args.server_url, cursor=args.cursor)

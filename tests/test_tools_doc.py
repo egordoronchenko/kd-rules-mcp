@@ -61,7 +61,10 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
     # rules_save: acknowledge_errors и тройка структур (схема anyOf string|null) — около 340.
     # live_registration_check (#78) — около 750 знаков (вместо урезания чужих описаний).
     # Класс «по составу» (#85) в фильтре и описании match_objects — около 40 знаков.
-    assert len(serialized) <= 54_600, f"Схемы: {len(serialized)} знаков"
+    # reference_get и reference_search (#86) — около 970 знаков при однословных описаниях полей
+    # (фильтр skill — 100 из них: без него справочники КД 3 перебивают КД 2 по общим словам).
+    # project_exchanges и live_base_check (#83) — около 1250 знаков схем и описаний.
+    assert len(serialized) <= 56_600, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:

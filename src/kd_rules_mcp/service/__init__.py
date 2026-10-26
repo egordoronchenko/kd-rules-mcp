@@ -13,10 +13,12 @@
 from kd_rules_mcp.service.base import ServiceBase
 from kd_rules_mcp.service.checks import ChecksMixin
 from kd_rules_mcp.service.ed_writer import EdWriterMixin
+from kd_rules_mcp.service.exchanges import ExchangesMixin
 from kd_rules_mcp.service.generate import GenerateMixin
 from kd_rules_mcp.service.live import LiveMixin
 from kd_rules_mcp.service.matching import MatchingMixin
 from kd_rules_mcp.service.paths import PathMap, Settings
+from kd_rules_mcp.service.reference import ReferenceMixin
 from kd_rules_mcp.service.registration_retarget import RegistrationRetargetMixin
 from kd_rules_mcp.service.review import ReviewMixin
 from kd_rules_mcp.service.rules import RulesMixin
@@ -27,7 +29,9 @@ __all__ = ["Kd2Service", "PathMap", "Settings"]
 
 class Kd2Service(
     LiveMixin,
+    ExchangesMixin,
     ReviewMixin,
+    ReferenceMixin,
     EdWriterMixin,
     RegistrationRetargetMixin,
     StructuresMixin,

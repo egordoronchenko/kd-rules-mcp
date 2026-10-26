@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -1190,3 +1191,278 @@ def test_exchange_sides_untouched_help(
     assert "--side" in help_text
     assert "KD-EXCHANGE.md" in help_text
     assert "ИМЯ=ПАПКА" in help_text
+
+
+def _profile_files(tmp_path: Path, *, technology: str = "kd2") -> tuple[Path, Path]:
+    projects = {
+        name: {"name": name, "configurations": {"full": {"dump": "main"}}} for name in ("bp", "do")
+    }
+    sides = [
+        {
+            "project": name,
+            "plan": f"План{name}",
+            **(
+                {"module": f"Manager{name}"}
+                if technology == "ed"
+                else {"rules": f"rules/{name}/Комплект"}
+            ),
+        }
+        for name in projects
+    ]
+    profile = {
+        "id": "bp-do",
+        "plan": "План",
+        "technology": technology,
+        "sides": sides,
+        "directions": [["bp", "do"]],
+    }
+    catalog = tmp_path / "projects.yaml"
+    local = tmp_path / "projects.local.yaml"
+    catalog.write_text(
+        yaml.safe_dump({"projects": projects, "exchanges": [profile]}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    local.write_text(
+        yaml.safe_dump({"projects": {name: str(tmp_path / name) for name in projects}}),
+        encoding="utf-8",
+    )
+    for name in projects:
+        (tmp_path / name).mkdir()
+    return catalog, local
+
+
+def test_exchange_profile_single_direction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_token(monkeypatch)
+    catalog, local = _profile_files(tmp_path)
+    dest = tmp_path / "exchange"
+    report = build_packs.install_exchange(
+        dest,
+        [],
+        "claude",
+        URL,
+        exchange="bp-do",
+        projects_file=catalog,
+        local_file=local,
+    )
+    text = (dest / "KD-EXCHANGE.md").read_text(encoding="utf-8")
+    assert "направления — из профиля обмена bp-do" in report
+    rows = [line for line in text.splitlines() if " → " in line]
+    assert rows == [
+        "| bp → do | `rules/bp/Комплект/ExchangeRules.xml` bp | "
+        "`rules/do/Комплект/CorrespondentExchangeRules.xml` do | "
+        "`rules/bp/Комплект/RegistrationRules.xml` bp |"
+    ]
+    assert "Планbp" in text and "Планdo" in text and "`kd2`" in text
+
+
+def test_exchange_side_matching_profile_uses_custom_side_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_token(monkeypatch)
+    catalog, local = _profile_files(tmp_path)
+    dest = tmp_path / "exchange"
+    report = build_packs.install_exchange(
+        dest,
+        [("right", tmp_path / "do"), ("left", tmp_path / "bp")],
+        "claude",
+        URL,
+        projects_file=catalog,
+        local_file=local,
+    )
+    text = (dest / "KD-EXCHANGE.md").read_text(encoding="utf-8")
+    assert "направления — из профиля обмена bp-do" in report
+    assert "| left → right | `rules/bp/Комплект/ExchangeRules.xml` left |" in text
+    assert "right → left" not in text
+
+
+def test_exchange_side_broken_catalog_keeps_old_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """С --side каталог — только подсказка: битый projects.yaml не останавливает установку."""
+    _no_token(monkeypatch)
+    catalog, local = _profile_files(tmp_path)
+    catalog.write_text("exchanges: [{plan: План, rule: x}]\n", encoding="utf-8")
+    dest = tmp_path / "exchange"
+    report = build_packs.install_exchange(
+        dest,
+        [("bp", tmp_path / "bp"), ("do", tmp_path / "do")],
+        "claude",
+        URL,
+        projects_file=catalog,
+        local_file=local,
+    )
+    text = (dest / "KD-EXCHANGE.md").read_text(encoding="utf-8")
+    assert not any("профиля обмена" in line for line in report)
+    assert "| bp → do | `ExchangeRules.xml` bp |" in text and "do → bp" in text
+
+
+def test_exchange_side_catalog_type_error_keeps_old_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Кривой тип поля — TypeError, не ProjectConfigError; прежний --side всё равно работает."""
+    _no_token(monkeypatch)
+    catalog, local = _profile_files(tmp_path)
+    catalog.write_text(
+        "projects:\n  bp:\n    configurations:\n      full: {dump: main, extensions: 5}\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "exchange"
+    build_packs.install_exchange(
+        dest,
+        [("bp", tmp_path / "bp"), ("do", tmp_path / "do")],
+        "claude",
+        URL,
+        projects_file=catalog,
+        local_file=local,
+    )
+    assert "| bp → do | `ExchangeRules.xml` bp |" in (dest / "KD-EXCHANGE.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_exchange_profile_kd2_keeps_rules_diff_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_token(monkeypatch)
+    catalog, local = _profile_files(tmp_path)
+    dest = tmp_path / "exchange"
+    build_packs.install_exchange(
+        dest, [], "claude", URL, exchange="bp-do", projects_file=catalog, local_file=local
+    )
+    text = (dest / "KD-EXCHANGE.md").read_text(encoding="utf-8")
+    assert "`rules_diff`" in text and "## Правила" in text
+
+
+def test_exchange_profile_ed_lists_modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_token(monkeypatch)
+    catalog, local = _profile_files(tmp_path, technology="ed")
+    dest = tmp_path / "exchange"
+    build_packs.install_exchange(
+        dest, [], "claude", URL, exchange="bp-do", projects_file=catalog, local_file=local
+    )
+    text = (dest / "KD-EXCHANGE.md").read_text(encoding="utf-8")
+    assert "| bp → do | `Managerbp` | `Managerdo` |" in text
+    assert "`ed`" in text and "ExchangeRules.xml" not in text
+
+
+def test_exchange_cli_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_token(monkeypatch)
+    _profile_files(tmp_path)
+    monkeypatch.setattr(build_packs, "ROOT", tmp_path)
+    dest = tmp_path / "exchange"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["build_packs.py", "--dest", str(dest), "--exchange", "bp-do", "--server-url", URL],
+    )
+    # Содержимое упаковки не зависит от папки каталога.
+    monkeypatch.setattr(build_packs, "stale_copies", lambda: [])
+    monkeypatch.setattr(build_packs, "pack_files", lambda client: {})
+    build_packs.main()
+    assert "bp → do" in (dest / "KD-EXCHANGE.md").read_text(encoding="utf-8")
+
+
+def test_exchange_and_side_are_argparse_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    dest = tmp_path / "not-created"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["build_packs.py", "--dest", str(dest), "--exchange", "bp-do", "--side", "bp=unused"],
+    )
+    with pytest.raises(SystemExit) as caught:
+        build_packs.main()
+    assert caught.value.code == 2
+    assert "--exchange нельзя вместе с --side" in capsys.readouterr().err
+    assert not dest.exists()
+
+
+@pytest.mark.parametrize(
+    "fault,message",
+    [
+        ("unknown", "нет.*bp-do"),
+        ("legacy", "без сторон"),
+        ("missing-folder", "папка проекта.*do"),
+        ("bad-name", "--side"),
+    ],
+)
+def test_exchange_profile_refuses_before_writing(tmp_path: Path, fault: str, message: str) -> None:
+    catalog, local = _profile_files(tmp_path)
+    data = yaml.safe_load(catalog.read_text(encoding="utf-8"))
+    exchange = "bp-do"
+    if fault == "unknown":
+        exchange = "absent"
+    elif fault == "legacy":
+        data["exchanges"] = [{"id": "bp-do", "plan": "План", "projects": ["bp", "do"]}]
+    elif fault == "missing-folder":
+        local.write_text(
+            yaml.safe_dump({"projects": {"bp": str(tmp_path / "bp")}}), encoding="utf-8"
+        )
+    else:
+        data["projects"]["БП"] = data["projects"].pop("bp")
+        data["exchanges"][0]["sides"][0]["project"] = "БП"
+        data["exchanges"][0]["directions"] = [["БП", "do"]]
+    catalog.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    dest = tmp_path / "not-created"
+    before = {name: _fingerprints(tmp_path / name) for name in ("bp", "do")}
+    with pytest.raises(SystemExit, match=message):
+        build_packs.install_exchange(
+            dest, [], "claude", URL, exchange=exchange, projects_file=catalog, local_file=local
+        )
+    assert not dest.exists()
+    assert {name: _fingerprints(tmp_path / name) for name in ("bp", "do")} == before
+
+
+def test_exchange_without_profile_keeps_exact_legacy_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_token(monkeypatch)
+    bp, do = tmp_path / "bp", tmp_path / "do"
+    bp.mkdir()
+    do.mkdir()
+    dest = tmp_path / "exchange"
+    build_packs.install_exchange(
+        dest,
+        [("bp", bp), ("do", do)],
+        "claude",
+        URL,
+        projects_file=tmp_path / "absent.yaml",
+        local_file=tmp_path / "absent.local.yaml",
+    )
+    direction_rows = (
+        "| bp → do | `ExchangeRules.xml` bp | `CorrespondentExchangeRules.xml` do | "
+        "`RegistrationRules.xml` bp |\n"
+        "| do → bp | `ExchangeRules.xml` do | `CorrespondentExchangeRules.xml` bp | "
+        "`RegistrationRules.xml` do |"
+    )
+    expected = f"""# Папка обмена: bp ↔ do
+
+- bp: `{bp.resolve()}`
+- do: `{do.resolve()}`
+
+| сервер | сторона |
+| --- | --- |
+
+## Направления и файлы правил
+
+Комплект БСП лежит в папке живых правил стороны (`rules_dir` в `project_list`,
+внутри — папка плана обмена). Какой файл работает в каком направлении:
+
+| направление | выгрузка | загрузка | регистрация |
+| --- | --- | --- | --- |
+{direction_rows}
+
+Загружает приёмник по копии правил корреспондента из своего комплекта, а не по файлу
+источника. Совпадение копий проверять `rules_diff`, а не хешем файла: концы строк
+в репозиториях сторон могут отличаться.
+
+## Правила
+
+- Правила обмена правятся из этой папки.
+- Код и данные стороны — её серверами (префикс `bp-` или `do-`).
+- Работа по проекту базы — в папке проекта; папка обмена не внутри проектов.
+- `.mcp.json` этой папки не читать: в нём учётные данные сторон.
+  Список серверов — таблица выше.
+"""
+    assert (dest / "KD-EXCHANGE.md").read_bytes() == expected.encode("utf-8")

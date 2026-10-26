@@ -153,6 +153,7 @@ async def test_registration_retarget_deletion_filter_tool(tmp_path: Path) -> Non
 
 
 EXPECTED_TOOLS = {
+    "live_base_check",
     "live_status",
     "live_rules_dump",
     "live_rules_check",
@@ -178,6 +179,7 @@ EXPECTED_TOOLS = {
     "ed_validate",
     "ed_close",
     "project_list",
+    "project_exchanges",
     "structure_load_project",
     "structure_list",
     "structure_load_xml",
@@ -213,6 +215,8 @@ EXPECTED_TOOLS = {
     "handlers_search",
     "handlers_read",
     "handlers_context",
+    "reference_get",
+    "reference_search",
     "registration_build",
     "registration_retarget",
     "correspondent_draft",

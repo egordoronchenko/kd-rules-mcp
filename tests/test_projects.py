@@ -533,3 +533,107 @@ def test_generated_configs_replace_previous_server_key(tmp_path: Path) -> None:
         assert list(written) == list(servers)
         assert "keep" not in written
         assert previous not in written or previous == setup_local.SERVER
+
+
+def _profile_catalog(tmp_path: Path, exchanges: list[dict]):
+    data = yaml.safe_load(CATALOG)
+    data["exchanges"] = exchanges
+    return load_catalog(_write_catalog(tmp_path, yaml.safe_dump(data, allow_unicode=True)))
+
+
+def _profile() -> dict:
+    return {
+        "plan": "План",
+        "technology": "kd2",
+        "sides": [
+            {"project": "alpha", "base": "sandbox", "rules": "rules/alpha"},
+            {"project": "beta", "rules": "rules/beta"},
+        ],
+    }
+
+
+def test_exchange_old_form_and_duplicate_plan_ids(tmp_path: Path) -> None:
+    old = {"plan": "План", "projects": ["alpha", "beta"]}
+    exchange = _profile_catalog(tmp_path, [old]).exchanges[0]
+    assert exchange.id == "План"
+    assert exchange.sides == () and exchange.directions == ()
+    repeated = _profile_catalog(tmp_path, [old, {**old, "projects": ["beta", "alpha"]}])
+    assert [e.id for e in repeated.exchanges] == ["План@alpha+beta", "План@beta+alpha"]
+
+
+def test_exchange_profile_defaults(tmp_path: Path) -> None:
+    exchange = _profile_catalog(tmp_path, [_profile()]).exchanges[0]
+    assert exchange.projects == ("alpha", "beta")
+    assert exchange.directions == (("alpha", "beta"), ("beta", "alpha"))
+    assert exchange.technology == "kd2"
+    assert exchange.sides[0].base == "sandbox"
+    assert exchange.sides[0].rules == "rules/alpha"
+    assert exchange.sides[1].plan == "План"
+
+
+@pytest.mark.parametrize(
+    "patch, message",
+    [
+        (
+            {"sides": [{"project": "alpha", "base": "missing"}, {"project": "beta"}]},
+            r"sides\[0\].base.*missing",
+        ),
+        ({"sides": [{"project": "alpha"}]}, "ровно две"),
+        ({"sides": [{"project": "alpha"}] * 3}, "ровно две"),
+        ({"sides": [{"project": "alpha"}] * 2}, "одинаковые проекты"),
+        ({"sides": [{"project": "absent"}, {"project": "beta"}]}, "sides.*project.*absent"),
+        ({"projects": ["beta", "alpha"]}, "projects.*расходятся"),
+        ({"technology": "xml"}, "technology.*kd2.*ed"),
+        ({"technology": "ed"}, "sides.*rules.*ed"),
+        (
+            {"sides": [{"project": "alpha", "module": "Module"}, {"project": "beta"}]},
+            "sides.*module.*kd2",
+        ),
+        ({"directions": [["alpha", "other"]]}, "directions.*проектов сторон"),
+        ({"directions": [["alpha", "alpha"]]}, "directions.*разных"),
+        ({"directions": [["alpha", "beta"], ["alpha", "beta"]]}, "directions.*повтор"),
+        (
+            {"sides": [{"project": "alpha", "rule": "rules"}, {"project": "beta"}]},
+            "sides.*rule.*неизвестный ключ",
+        ),
+        ({"password": "not-a-real-secret"}, "password.*неизвестный ключ"),
+    ],
+)
+def test_exchange_profile_refuses_invalid_fields(tmp_path: Path, patch: dict, message: str) -> None:
+    with pytest.raises(ProjectConfigError, match=message):
+        _profile_catalog(tmp_path, [{**_profile(), **patch}])
+
+
+def test_exchange_directions_require_sides(tmp_path: Path) -> None:
+    with pytest.raises(ProjectConfigError, match=r"directions.*без sides"):
+        _profile_catalog(
+            tmp_path, [{"plan": "План", "projects": ["alpha", "beta"], "directions": []}]
+        )
+
+
+def test_exchange_legacy_forms_still_read(tmp_path: Path) -> None:
+    """Формы, которые прежний разбор принимал: пустой словарь и повтор одинакового элемента."""
+    assert _profile_catalog(tmp_path, {}).exchanges == ()  # type: ignore[arg-type]
+    old = {"plan": "План", "projects": ["alpha", "beta"]}
+    ids = [e.id for e in _profile_catalog(tmp_path, [old, dict(old)]).exchanges]
+    assert ids == ["План@alpha+beta", "План@alpha+beta#2"]
+
+
+@pytest.mark.parametrize(
+    "rules", ["../beta/kit", "a/../../etc", "/etc/kit", "C:/Rules/kit", "C:kit"]
+)
+def test_exchange_rules_stay_inside_project(tmp_path: Path, rules: str) -> None:
+    profile = _profile()
+    profile["sides"][0]["rules"] = rules
+    with pytest.raises(ProjectConfigError, match=r"sides\[0\].rules.*от папки проекта"):
+        _profile_catalog(tmp_path, [profile])
+
+
+def test_exchange_empty_directions_refused(tmp_path: Path) -> None:
+    with pytest.raises(ProjectConfigError, match=r"directions.*хотя бы одно"):
+        _profile_catalog(tmp_path, [{**_profile(), "directions": []}])
+
+
+def test_exchange_duplicate_explicit_ids(tmp_path: Path) -> None:
+    with pytest.raises(ProjectConfigError, match=r"id.*одинаковые.*same"):
+        _profile_catalog(tmp_path, [{**_profile(), "id": "same"}, {**_profile(), "id": "same"}])

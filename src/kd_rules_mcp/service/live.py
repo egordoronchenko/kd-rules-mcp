@@ -4,6 +4,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import zipfile
 from collections.abc import Callable
 from typing import Any
@@ -18,6 +19,7 @@ from kd_rules_mcp.errors import (
 )
 from kd_rules_mcp.live.access import DataMcpAccess, LiveAccess, resolve_base
 from kd_rules_mcp.live.codegen import exchange, plans, rules
+from kd_rules_mcp.live.codegen.base import base_check_code
 from kd_rules_mcp.live.codegen.registration import registration_code, validate_registration_args
 from kd_rules_mcp.live.registration import (
     parse_registration,
@@ -33,8 +35,10 @@ from kd_rules_mcp.live.runs import (
     preview_hash,
     uploaded,
 )
-from kd_rules_mcp.projects import LocalSettings
+from kd_rules_mcp.projects import LocalSettings, ProjectConfigError
 from kd_rules_mcp.service.base import ServiceBase
+from kd_rules_mcp.service.structures import _extension_list
+from kd_rules_mcp.service.views import project_structure_id
 
 
 def _required(data: dict, name: str, kind: type) -> Any:
@@ -42,6 +46,55 @@ def _required(data: dict, name: str, kind: type) -> Any:
     if type(value) is not kind:
         raise LiveParseError(f"неверное поле ответа: {name}")
     return value
+
+
+def _connection_parts(text: str) -> dict[str, str]:
+    """Только адрес базы; произвольные параметры и учётные данные не выходят наружу."""
+    return {
+        key.casefold(): quoted.replace('""', '"') if quoted is not None else plain.strip()
+        for key, quoted, plain in (
+            (m[1], m[2], m[3])
+            for m in re.finditer(
+                r'(?:^|;)\s*([\w]+)\s*=\s*(?:"((?:[^"]|"")*)"|([^;]*))\s*(?=;|$)', text
+            )
+        )
+        if key.casefold() in {"srvr", "ref", "file"}
+    }
+
+
+def _base_identity(expected: str, actual: dict[str, str]) -> dict:
+    configured = _connection_parts(expected)
+
+    def normalized(key: str, value: str) -> str:
+        return (value.replace("/", "\\").rstrip("\\") if key == "file" else value).casefold()
+
+    common = configured.keys() & actual.keys()
+    different = [
+        key
+        for key in sorted(common)
+        if normalized(key, configured[key]) != normalized(key, actual[key])
+    ]
+    # Нет общих ключей — база другого вида (файловая против серверной): это другая база.
+    # Ключ есть только с одной стороны — сверена часть адреса: `ok` обещал бы больше сделанного.
+    if different or not common:
+        status = "error"
+    elif configured.keys() != actual.keys():
+        status = "warning"
+    else:
+        status = "ok"
+    if different:
+        verdict = f"Различаются: {', '.join(different)}"
+    elif not common:
+        verdict = "Нет общих ключей адреса: база другого вида или адрес не прочитан"
+    elif status == "warning":
+        verdict = f"Сверены только {', '.join(sorted(common))}"
+    else:
+        verdict = "Адрес совпадает"
+    return {
+        "check": "base.identity",
+        "status": status,
+        "message": f"Настройка: {configured}; база: {actual}. {verdict}",
+    }
 
 
 class LiveMixin(ServiceBase):
@@ -260,6 +313,198 @@ class LiveMixin(ServiceBase):
         if len([n for n in state["nodes"] if n["this"]]) != 1:
             raise LiveParseError("не найден единственный этот узел")
         return state
+
+    def live_base_check(
+        self, base: str, plan: str | None = None, exchange: str | None = None
+    ) -> dict[str, Any]:
+        """Паспорт песочницы и сверки с профилем и кэшем структур без записи в базу."""
+        catalog = self._catalog()
+        selected = (catalog.exchange(exchange),) if exchange is not None else catalog.exchanges
+        # Разрешение роли и доступа — до прогона; неизвестный обмен тоже отвергается до сети.
+        access = self._live_access(base)
+        project, _, base_id = base.partition(".")
+        configured = catalog.base(project, base_id)
+        profile_sides = [
+            (item, side)
+            for item in selected
+            for side in item.sides
+            if side.project == project and side.base == base_id
+        ]
+        if exchange is not None and not profile_sides:
+            # Иначе проверка молча ушла бы в обзор всех планов без сверки плана и технологии.
+            bases = ", ".join(f"{s.project}.{s.base}" for s in selected[0].sides if s.base)
+            raise ProjectConfigError(
+                f"База {base} — не сторона обмена «{exchange}» (стороны с базой: {bases or 'нет'})"
+            )
+        names = (
+            [plan]
+            if plan is not None
+            else list(dict.fromkeys(side.plan for _, side in profile_sides)) or None
+        )
+        run = self._live_run("live_base_check")
+
+        def read() -> dict:
+            raw = execute(access, base_check_code(names))
+            connection = (
+                _connection_parts(_required(raw, "connection", str))
+                if "connection_error" not in raw
+                else {}
+            )
+            result = {
+                "connection": connection,
+                "configuration": raw.get("configuration", {}),
+                "platform": raw.get("platform"),
+                "bsp": raw.get("bsp"),
+                "extensions": raw.get("extensions", []),
+                "plans": [],
+            }
+            for section in (
+                "connection",
+                "configuration",
+                "platform",
+                "bsp",
+                "extensions",
+                "plans",
+            ):
+                if f"{section}_error" in raw:
+                    result[f"{section}_error"] = _required(raw, f"{section}_error", str)
+            configuration = _required(result, "configuration", dict)
+            if "configuration_error" not in raw:
+                for field in ("name", "synonym", "version"):
+                    _required(configuration, field, str)
+            extensions = _required(result, "extensions", list)
+            for ext in extensions:
+                if not isinstance(ext, dict):
+                    raise LiveParseError("неверное расширение")
+                _required(ext, "name", str)
+                _required(ext, "version", str)
+                _required(ext, "active", bool)
+            for entry in raw.get("plans", []):
+                if not isinstance(entry, dict):
+                    raise LiveParseError("неверный план")
+                for field, kind in (("name", str), ("exists", bool), ("bsp", bool)):
+                    _required(entry, field, kind)
+                row = {k: entry[k] for k in ("name", "exists", "bsp")}
+                # КД 2 — подключённый план не XDTO и не РИБ; РИБ по правилам КД 2 не работает.
+                # Признак РИБ не прочитан — технология не утверждается.
+                if not entry["bsp"] or "xdto" not in entry:
+                    technology = None
+                elif entry["xdto"] is True:
+                    technology = "ed"
+                elif entry.get("rib") is True:
+                    technology = "rib"
+                elif entry.get("rib") is False:
+                    technology = "kd2"
+                else:
+                    technology = None
+                row["technology"] = technology
+                row.update(
+                    {
+                        key: entry[key]
+                        for key in ("versions", "format", "error", "rib_error")
+                        if key in entry
+                    }
+                )
+                result["plans"].append(row)
+            return result
+
+        data = run.stage("БАЗА", read)
+        if data is None:
+            return run.result(base=base)
+        checks = [_base_identity(configured.connection, data["connection"])]
+        if names is not None:
+            for name in names:
+                row = next((p for p in data["plans"] if p["name"] == name), {})
+                ok = row.get("exists") and row.get("bsp") and not row.get("error")
+                checks.append(
+                    {
+                        "check": "base.plan",
+                        "status": "ok" if ok else "error",
+                        "message": (
+                            f"{name}: план есть и подключён к БСП"
+                            if ok
+                            else f"{name}: план отсутствует, не подключён к БСП или не прочитан; "
+                            f"{row.get('error', data.get('plans_error', ''))}"
+                        ),
+                    }
+                )
+        # Без явных планов и профиля (все планы БСП) сверять технологию не с чем.
+        for row in data["plans"] if names is not None else []:
+            expected = {
+                item.technology
+                for item, side in profile_sides
+                if side.plan == row["name"] and item.technology is not None
+            }
+            checks.append(
+                {
+                    "check": "base.technology",
+                    "status": (
+                        "skipped"
+                        if not expected
+                        else "ok"
+                        if expected == {row["technology"]}
+                        else "error"
+                    ),
+                    "message": (
+                        f"{row['name']}: профиль "
+                        f"{', '.join(sorted(expected)) or 'без технологии'}; "
+                        f"база {row['technology']}"
+                    ),
+                }
+            )
+        structure_id = project_structure_id(project, configured.configuration)
+        steps = []
+        if structure_id not in self.store.ids():
+            checks.append(
+                {
+                    "check": "base.structure",
+                    "status": "warning",
+                    "message": f"Структура {structure_id} не загружена",
+                }
+            )
+            steps.append(
+                {
+                    "tool": "structure_load_project",
+                    "arguments": {"project": project, "configuration": configured.configuration},
+                }
+            )
+        else:
+            meta = self.store.meta(structure_id)
+            cached = {str(name).casefold() for name in _extension_list(meta.get("extensions"))}
+            # Структура собирается из активных расширений; отключённое в базе не сравнивается.
+            active = {ext["name"].casefold() for ext in data["extensions"] if ext["active"]}
+            config = data["configuration"]
+            fresh = (
+                meta.get("config_name", "").casefold() == config.get("name", "").casefold()
+                and meta.get("config_version") == config.get("version")
+                and cached == active
+                and not data.get("configuration_error")
+                and not data.get("extensions_error")
+            )
+            message = (
+                f"Структура {structure_id}: {meta.get('config_name')}, "
+                f"версия {meta.get('config_version')}; "
+                f"база: {config.get('name')}, версия {config.get('version')}; "
+                f"расширения только в структуре: {sorted(cached - active)}, "
+                f"только в базе: {sorted(active - cached)}"
+            )
+            checks.append(
+                {
+                    "check": "base.structure",
+                    "status": "ok" if fresh else "warning",
+                    "message": message
+                    if fresh
+                    else "Структура устарела или не сверена: " + message,
+                }
+            )
+        return run.result(
+            base=base,
+            **data,
+            checks=checks,
+            problems=sum(c["status"] == "error" for c in checks),
+            warnings=sum(c["status"] == "warning" for c in checks),
+            **({"steps": steps} if steps else {}),
+        )
 
     def live_status(self, base: str, plan: str | None = None) -> dict[str, Any]:
         access = self._live_access(base)

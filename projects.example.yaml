@@ -85,5 +85,15 @@ shared_mcp:
 exchanges:
   - plan: ОбменБухгалтерияПредприятияДокументооборот20
     projects: [bp, do]
+    id: bp-do
+    technology: kd2
+    # Без directions — оба направления. Пути комплектов — от папок проектов.
+    sides:
+      - project: bp
+        base: bp_dev
+        rules: ПравилаОбмена/ОбменБухгалтерияПредприятияДокументооборот20
+      - project: do
+        base: do_dev
+        rules: ПравилаОбмена/ОбменБухгалтерияПредприятияДокументооборот20
   - plan: ОбменЗарплата3Бухгалтерия3
     projects: [bp, zup]

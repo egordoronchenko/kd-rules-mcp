@@ -35,6 +35,7 @@ END = "<!-- tools:end — manual reference below; not changed by the generator -
 GROUPS: dict[str, tuple[str, ...]] = {
     "Projects and configuration structures": (
         "project_list",
+        "project_exchanges",
         "structure_load_project",
         "structure_list",
         "structure_load_xml",
@@ -75,12 +76,14 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "handlers_read",
         "handlers_context",
     ),
+    "Reference": ("reference_get", "reference_search"),
     "Registration and correspondent rules": (
         "registration_build",
         "registration_retarget",
         "correspondent_draft",
     ),
     "Live sandbox checks": (
+        "live_base_check",
         "live_status",
         "live_rules_dump",
         "live_rules_check",

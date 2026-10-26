@@ -63,6 +63,7 @@ from kd_rules_mcp.errors import (
     LiveError,
     ObjectNotFoundError,
     ProjectNotFoundError,
+    ReferenceUnavailableError,
     RegistrationDeliveryError,
     RegistrationRetargetError,
     RegistrationToolError,
@@ -122,6 +123,7 @@ ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (RulesFormatError, "rules_format"),
     (StructureFormatError, "structure_format"),
     (ProjectConfigError, "project_config"),
+    (ReferenceUnavailableError, "reference_unavailable"),
     (Kd2Error, "rejected"),
     (ValueError, "invalid_argument"),
 )
@@ -338,6 +340,19 @@ def create_server(service: Kd2Service) -> MCPServer:
         return result
 
     @server.tool()
+    async def live_base_check(
+        base: Annotated[str, Field(description="Sandbox project.base")],
+        plan: Annotated[
+            str | None, Field(description="Exchange plan; omit for profile or BSP plans")
+        ] = None,
+        exchange: Annotated[str | None, Field(description="Exchange profile ID")] = None,
+    ) -> dict[str, Any]:
+        """Read only: check base identity, versions, plans and profile technology. Structure
+        freshness compares configuration name, version and active extension names; extension
+        versions and edits without a version change are not detected."""
+        return await call(service.live_base_check, base, plan, exchange)
+
+    @server.tool()
     async def live_status(
         base: Annotated[str, Field(description="Sandbox project.base")],
         plan: Annotated[
@@ -496,6 +511,14 @@ def create_server(service: Kd2Service) -> MCPServer:
         """List 1C projects, configurations, infobases, MCP names and exchange plans. Call before
         structure loading or choosing writable rules_dir. Login is a boolean."""
         return await call(service.project_list)
+
+    @server.tool()
+    async def project_exchanges(
+        project: Annotated[str | None, Field(description="Filter by project ID")] = None,
+        exchange: Annotated[str | None, Field(description="Filter by exchange profile ID")] = None,
+    ) -> dict[str, Any]:
+        """List exchange profiles, sides, rule files and ready tool steps without executing them."""
+        return await call(service.project_exchanges, project, exchange)
 
     @server.tool()
     async def structure_load_project(
@@ -1149,6 +1172,29 @@ def create_server(service: Kd2Service) -> MCPServer:
     ) -> dict[str, Any]:
         """Handler params, globals and BSP notes; no project. Omit handler to list events."""
         return await call(service.handlers_context, kind, handler)
+
+    # --- Справка --------------------------------------------------------------------------
+
+    @server.tool()
+    async def reference_get(
+        section: Annotated[str | None, Field(description="Section")] = None,
+        key: Annotated[str | None, Field(description="Table row key")] = None,
+        offset: ReviewOffset = 0,
+        limit: ReviewLimit = 60,
+    ) -> dict[str, Any]:
+        """BSP reference from skill files: protocol codes, symptoms, phases, handler_params.
+        Omit section to list."""
+        return await call(service.reference_get, section, key, offset, limit)
+
+    @server.tool()
+    async def reference_search(
+        query: Annotated[str, Field(description="Words")],
+        skill: Annotated[str | None, Field(description="Skill prefix: kd2, kd3")] = None,
+        offset: ReviewOffset = 0,
+        limit: ReviewLimit = 10,
+    ) -> dict[str, Any]:
+        """Full-text search in server skills and references."""
+        return await call(service.reference_search, query, skill, offset, limit)
 
     # --- Регистрация и корреспондент -----------------------------------------------------
 

@@ -35,11 +35,11 @@ https://raw.githubusercontent.com/egordoronchenko/kd-rules-mcp/main/.claude/skil
 |---|---|---|---|
 | 0 | Что есть: `git`, `docker`, `uv`, `docker info`; уже установлен — к нужному шагу | Docker отвечает | `references/start.md` |
 | 1 | Образ (по умолчанию без uv/Git) или клон | файлы релиза / `import kd_rules_mcp` | `references/start.md` |
-| 2 | Черновик проектов: выгрузки, расширения, серверы 1С; спросить порядок расширений, `data_mcp`, `rules_dir` | предусловия названы человеку | `references/projects.md` |
+| 2 | Черновик проектов: выгрузки, расширения, серверы 1С; спросить порядок расширений, `data_mcp`, `rules_dir`, обмены (профиль обмена) | предусловия названы человеку | `references/projects.md` |
 | 3 | `projects.yaml` | `load_catalog`; **закончить ход**: файл целиком, «да» | `references/projects-yaml.md` |
 | 4 | `projects.local.yaml`; порт 8060 занят — `port`, второй экземпляр — `instance` | `docker ps` | `references/local-settings.md` |
 | 5 | Запуск: образ — `setup`, `up --no-build`; клон — `setup_local.py`, `up --build` | `check_server.py`, код 0 | `references/run-and-connect.md` |
-| 6 | Скиллы и `.mcp.json` проекта; обмен двух баз — **папка обмена вне проектов баз** (`--side` дважды); **закончить ход**: перезапуск клиента, одобрение | `project_list`, `structure_load_project` в новой сессии | `references/run-and-connect.md` |
+| 6 | Скиллы и `.mcp.json` проекта; обмен двух баз — **папка обмена вне проектов баз** (`--side` дважды или `--exchange <id>` профиля); **закончить ход**: перезапуск клиента, одобрение | `project_list`, `structure_load_project` в новой сессии | `references/run-and-connect.md` |
 | 7 | Необязательно: база КД для `kd_check` | `ИТОГ OK` | `references/kd-check.md` |
 | 8 | Необязательно: `bsp_check` | `ИТОГ OK` | `references/bsp-check.md` |
 | 9 | Обновление: сначала `rules_projects`, образ для отката, сверка `docker compose config` | `check_server.py`, `project_list` | `references/update.md` |

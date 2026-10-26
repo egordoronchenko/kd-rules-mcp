@@ -89,11 +89,13 @@ class Settings:
     rules_dirs: dict[str, Path] = field(default_factory=dict)
     # Подключённые на запись выгрузки расширений; ключ — проект.конфигурация.номер.
     extension_dirs: dict[str, Path] = field(default_factory=dict)
+    # Папка скиллов сервера для справки (`KD2_REFERENCE_DIR`); пусто — рядом с исходниками.
+    reference_dir: Path | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         """`KD2_CACHE_DIR`, `KD2_WORKSPACE`, `KD2_PATH_MAP`, `KD2_HOST`, `KD2_PORT`, `KD2_TOKEN`,
-        `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`.
+        `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`, `KD2_REFERENCE_DIR`.
 
         Без `KD2_PROJECT_DIRS` папки проектов берутся из `projects.local.yaml` рядом с
         `projects.yaml` (локальный запуск без Docker); без `KD2_RULES_DIRS` папки живых правил —
@@ -120,4 +122,5 @@ class Settings:
             extension_dirs=parse_project_dirs(
                 source.get("KD2_EXTENSION_DIRS", ""), "KD2_EXTENSION_DIRS"
             ),
+            reference_dir=Path(text) if (text := source.get("KD2_REFERENCE_DIR", "")) else None,
         )

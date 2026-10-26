@@ -89,6 +89,7 @@ async def test_project_list_reports_agent_paths_and_server_names(tmp_path: Path)
     async with Client(create_server(Kd2Service(settings))) as client:
         listed = (await client.call_tool("project_list", {})).structured_content
     assert listed is not None
+    assert listed["exchanges"] == [{"plan": "ОбменАльфаБета", "projects": ["alpha", "beta"]}]
     assert listed["workspace"] == HOST_WORKSPACE
     assert listed["shared_mcp"] == ["docs"]
     by_id = {item["project"]: item for item in listed["projects"]}
@@ -193,6 +194,25 @@ async def test_project_list_login_flag_hides_credentials(tmp_path: Path) -> None
     assert USER_LOGIN not in text
     assert USER_ENV not in text
     assert SECRET not in text
+
+
+def test_project_list_profile_keeps_legacy_exchange_view(tmp_path: Path) -> None:
+    settings, _ = _prepare(tmp_path)
+    data = yaml.safe_load(settings.projects_file.read_text(encoding="utf-8"))
+    data["exchanges"][0].update(
+        {
+            "id": "alpha-beta",
+            "technology": "kd2",
+            "sides": [
+                {"project": "alpha", "base": "sandbox", "rules": "rules"},
+                {"project": "beta"},
+            ],
+        }
+    )
+    settings.projects_file.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    assert Kd2Service(settings).project_list()["exchanges"] == [
+        {"plan": "ОбменАльфаБета", "projects": ["alpha", "beta"]}
+    ]
 
 
 @pytest.mark.anyio
