@@ -345,3 +345,77 @@ def test_rules_save_path_errors_precede_validation(tmp_path: Path) -> None:
     assert not isinstance(caught.value, RulesSaveErrorsError)
     assert target.read_bytes() == b"keep"
     assert _modified(service, project) is True
+
+
+def test_rules_validate_exchange_with_paired_registration(tmp_path: Path) -> None:
+    """Правила обмена с правилами регистрации в exchange_project_id: pko_ref_only видит режим
+    выгрузки узла; правила обмена там — отказ; rules_save берёт ту же пару."""
+    from tests.test_validation_structure import _pro, _ref_rules
+
+    exchange_path = tmp_path / "ExchangeRules.xml"
+    exchange_path.write_bytes(_ref_rules())
+    registration_path = tmp_path / "RegistrationRules.xml"
+    registration_path.write_bytes(
+        (
+            "<ПравилаРегистрации><ВерсияФормата>2.01</ВерсияФормата>"
+            '<ПланОбмена Имя="План">ПланОбменаСсылка.План</ПланОбмена>'
+            "<ПравилаРегистрацииОбъектов>"
+            + _pro("Справочник.Контрагенты", "РежимВыгрузкиСправочников")
+            + "</ПравилаРегистрацииОбъектов></ПравилаРегистрации>"
+        ).encode()
+    )
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    exchange = service.rules_open(str(exchange_path))["project_id"]
+    registration = service.rules_open(str(registration_path))["project_id"]
+
+    def ref_only(paired: str | None) -> list[dict]:
+        view = service.rules_validate(
+            exchange, None, None, None, "structure.pko_ref_only", 0, 50, paired
+        )
+        return view["issues"]["items"]
+
+    alone = ref_only(None)
+    assert [i["level"] for i in alone] == ["предупреждение"]
+    paired = ref_only(registration)
+    assert [i["level"] for i in paired] == ["info"]
+    assert "РежимВыгрузкиСправочников" in paired[0]["message"]
+    with pytest.raises(Kd2Error, match="правила регистрации того же плана"):
+        ref_only(exchange)
+
+    service.rules_validate(exchange, None, None, None, None, 0, 50, registration)
+    saved = service.rules_save(exchange, "saved.xml", False)
+    assert saved["validation"]["structures"]["exchange_project"] == registration
+
+
+@pytest.mark.parametrize(
+    ("relative", "message"),
+    [
+        ("CorrespondentExchangeRules.xml", "другой базе"),
+        ("ExchangePlans/Другой/Ext/ExchangeRules.xml", "в плане «Другой»"),
+    ],
+)
+def test_rules_validate_refuses_foreign_registration(
+    tmp_path: Path, relative: str, message: str
+) -> None:
+    """ПРО берутся по плану узла (БСП:3551-3552): чужой план и правила корреспондента — отказ."""
+    from tests.test_validation_structure import _pro, _ref_rules
+
+    exchange_path = tmp_path / relative
+    exchange_path.parent.mkdir(parents=True, exist_ok=True)
+    exchange_path.write_bytes(_ref_rules())
+    registration_path = tmp_path / "RegistrationRules.xml"
+    registration_path.write_bytes(
+        (
+            "<ПравилаРегистрации><ВерсияФормата>2.01</ВерсияФормата>"
+            '<ПланОбмена Имя="План">ПланОбменаСсылка.План</ПланОбмена>'
+            "<ПравилаРегистрацииОбъектов>"
+            + _pro("Справочник.Контрагенты", "Р")
+            + "</ПравилаРегистрацииОбъектов></ПравилаРегистрации>"
+        ).encode()
+    )
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    exchange = service.rules_open(str(exchange_path))["project_id"]
+    registration = service.rules_open(str(registration_path))["project_id"]
+    with pytest.raises(Kd2Error, match=message):
+        service.rules_validate(exchange, None, None, None, None, 0, 50, registration)
+    assert service.workspace.get(exchange).validation_inputs is None

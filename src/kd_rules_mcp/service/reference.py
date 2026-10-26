@@ -14,7 +14,9 @@ from kd_rules_mcp.reference.sections import (
     file_headings,
     file_title,
     group_rows,
+    heading_rows,
     numbered,
+    outline,
     parts,
     read_lines,
     rows_by_key,
@@ -75,6 +77,15 @@ class ReferenceMixin(ServiceBase):
         view: dict[str, Any] = {"section": found.id, "title": file_title(lines), "file": found.file}
         if found.see:
             view["see"] = found.see
+        if key is not None and key.strip() and found.key_headings:
+            titles, matched = heading_rows(lines, key)
+            page = slice_rows(matched, offset, min(limit, GET_LIMIT))
+            view |= {"key": key, "headings": titles, "parts": parts(page.pop("items")), **page}
+            if not titles:
+                # Промах: оглавление файла отдельным ключом, `headings` — всегда совпавшие.
+                view["outline"] = outline(lines)
+                view["hint"] = "no heading matches the key; see outline or try reference_search"
+            return view
         if key is not None and key.strip():
             page = slice_rows(rows_by_key(rows, found, key), offset, min(limit, GET_LIMIT))
             view |= {"key": key, "tables": group_rows(page.pop("items")), **page}

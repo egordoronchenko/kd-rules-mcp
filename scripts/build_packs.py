@@ -67,6 +67,7 @@ from kd_rules_mcp.projects import (
     bearer_auth,
     load_catalog,
     load_local,
+    resolve,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -764,12 +765,19 @@ def _render_profile_exchange_md(
             ["| направление | выгрузка | загрузка | регистрация |", "| --- | --- | --- | --- |"]
         )
 
+        folders = dict(sides)
+
         def file(project: str, filename: str) -> str:
             folder = by_project[project].rules
+            if not folder:
+                return "не задан"
+            side_folder = folders.get(names[project])
+            missing = (
+                side_folder is not None and not (resolve(side_folder, folder) / filename).is_file()
+            )
             return (
                 f"`{PurePosixPath(folder.replace(chr(92), '/')) / filename}` {names[project]}"
-                if folder
-                else "не задан"
+                + (" (файла нет)" if missing else "")
             )
 
         for source, target in profile.directions:
@@ -777,6 +785,15 @@ def _render_profile_exchange_md(
                 f"| {names[source]} → {names[target]} | {file(source, 'ExchangeRules.xml')} | "
                 f"{file(target, 'CorrespondentExchangeRules.xml')} | "
                 f"{file(source, 'RegistrationRules.xml')} |"
+            )
+        defaults = [names[s.project] for s in profile.sides if s.rules_default]
+        if defaults:
+            lines.extend(
+                [
+                    "",
+                    f"Папка комплекта не задана в профиле ({', '.join(defaults)}) — взята папка",
+                    "плана в живых правилах проекта (`rules_dir`).",
+                ]
             )
         lines.extend(
             [

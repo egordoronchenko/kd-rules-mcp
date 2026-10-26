@@ -26,6 +26,7 @@ from kd_rules_mcp.projects import (
 from kd_rules_mcp.service.paths import Settings, _is_absolute
 from kd_rules_mcp.service.views import counts, edit_view
 from kd_rules_mcp.structures.store import LoadResult, StructureStore
+from kd_rules_mcp.validation.exchange_plan import plan_name_from_path
 
 
 class ServiceBase:
@@ -110,6 +111,45 @@ class ServiceBase:
                 "Правила регистрации строит registration_build, читает rules_get"
             )
         return document
+
+    def _paired(
+        self, document: RulesDocument, project_id: str | None, rules_path: Path | None = None
+    ) -> ExchangeRules | RegistrationRules | None:
+        """Вторая половина комплекта для `rules_validate` и `rules_save`.
+
+        Правилам регистрации — правила обмена (покрытие ПВД), правилам обмена — правила
+        регистрации того же плана (режим выгрузки узла для `structure.pko_ref_only`).
+        Исполнитель берёт ПРО по плану узла (БСП:3551-3552); правила корреспондента
+        исполняются в другой базе, и ПРО этой стороны к ним не относятся. Поэтому отказ,
+        если путь правил называет другой план или файл — правила корреспондента.
+        """
+        if not project_id:
+            return None
+        if isinstance(document, RegistrationRules):
+            return self._exchange(project_id)
+        paired = self._document(project_id)
+        if not isinstance(paired, RegistrationRules):
+            raise Kd2Error(
+                f"Проект «{project_id}» — правила обмена; к правилам обмена в "
+                "exchange_project_id передаются правила регистрации того же плана"
+            )
+        if rules_path is not None:
+            path = Path(rules_path)
+            # Файл комплекта БСП или макет плана обмена в выгрузке конфигурации.
+            if "correspondent" in path.name.casefold() or any(
+                part.casefold() == "правилаобменакорреспондента" for part in path.parts
+            ):
+                raise Kd2Error(
+                    "Правила корреспондента исполняются в другой базе: правила регистрации "
+                    "этой стороны к ним не относятся — exchange_project_id не передавайте"
+                )
+            plan = plan_name_from_path(rules_path)
+            if plan and paired.exchange_plan and plan != paired.exchange_plan:
+                raise Kd2Error(
+                    f"Правила обмена лежат в плане «{plan}», а правила регистрации проекта "
+                    f"«{project_id}» — плана «{paired.exchange_plan}»"
+                )
+        return paired
 
     def _require_structure(self, structure_id: str) -> None:
         """Структура есть в кэше; иначе ошибка со списком загруженных."""

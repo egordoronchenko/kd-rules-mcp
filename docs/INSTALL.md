@@ -254,8 +254,7 @@ exchanges:
         base: bp_dev          # база проекта из bases
         rules: ПравилаОбмена/ОбменБухгалтерияПредприятияДокументооборот20   # папка комплекта от папки проекта
       - project: do
-        base: do_dev
-        rules: ПравилаОбмена/ОбменБухгалтерияПредприятияДокументооборот20
+        base: do_dev          # rules не задан: <rules_dir проекта do>/<план стороны>
     # directions: [[bp, do]]  # только эти направления; по умолчанию — оба
 ```
 
@@ -265,7 +264,7 @@ exchanges:
 | `technology` | `kd2` или `ed`; не знаете — не пишите, `live_base_check` покажет, как план работает в базе |
 | `sides[].project`, `sides[].base` | проект из `projects` и его база |
 | `sides[].plan` | имя плана на этой стороне, если оно другое, чем `plan` |
-| `sides[].rules` | для `kd2`: папка комплекта правил БСП (`ExchangeRules.xml`, `CorrespondentExchangeRules.xml`, `RegistrationRules.xml`) **от папки проекта** |
+| `sides[].rules` | для `kd2`: папка комплекта правил БСП (`ExchangeRules.xml`, `CorrespondentExchangeRules.xml`, `RegistrationRules.xml`) **от папки проекта**. Не задана, а у проекта есть `rules_dir` — берётся `<rules_dir>/<план стороны>`; при `ed` и при `module` у любой стороны — не берётся |
 | `sides[].module` | для `ed`: общий модуль менеджера обмена этой стороны |
 | `directions` | пары `[источник, приёмник]`, если обмен идёт только в одну сторону |
 

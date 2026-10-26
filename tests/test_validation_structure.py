@@ -8,9 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from kd_rules_mcp.kd2.rules_io import load_exchange_rules
+from kd_rules_mcp.kd2.model import RegistrationRules
+from kd_rules_mcp.kd2.rules_io import load_exchange_rules, load_registration_rules
 from kd_rules_mcp.structures.store import StructureStore
 from kd_rules_mcp.validation.address import pks_candidates, side_name
+from kd_rules_mcp.validation.algorithms import check_algorithm_refs
 from kd_rules_mcp.validation.report import Issue, Level, ValidationReport
 from kd_rules_mcp.validation.structure import _listed_types, check_rule, check_structures
 
@@ -668,3 +670,158 @@ def test_ref_only_is_not_checked_on_edit(sides: tuple[sqlite3.Connection, ...]) 
     report = check_rule(rules, rules.pko()[1], sides[0], sides[1])
     assert only(report, "structure.pko_ref_only") == []
     assert only(check(sides, _ref_rules()), "structure.pko_ref_only")
+
+
+def _registration(rules: str) -> RegistrationRules:
+    """Правила регистрации плана «План» со списком ПРО."""
+    return load_registration_rules(
+        (
+            "<ПравилаРегистрации><ВерсияФормата>2.01</ВерсияФормата>"
+            '<ПланОбмена Имя="План">ПланОбменаСсылка.План</ПланОбмена>'
+            f"<ПравилаРегистрацииОбъектов>{rules}</ПравилаРегистрацииОбъектов>"
+            "</ПравилаРегистрации>"
+        ).encode()
+    )
+
+
+def _pro(meta: str, mode: str = "", attrs: str = 'Валидное="true"') -> str:
+    flag = f"<РеквизитРежимаВыгрузки>{mode}</РеквизитРежимаВыгрузки>" if mode else ""
+    return (
+        f"<Правило {attrs}><Код>{meta}</Код><ОбъектМетаданныхИмя>{meta}</ОбъектМетаданныхИмя>"
+        f"{flag}</Правило>"
+    )
+
+
+def _ref_only(registration: RegistrationRules | None) -> list[Issue]:
+    rules = load_exchange_rules(_ref_rules())
+    return only(
+        check_structures(rules, None, None, registration=registration), "structure.pko_ref_only"
+    )
+
+
+def test_ref_only_without_registration_keeps_old_text() -> None:
+    """Без правил регистрации — прежнее предупреждение с оговоркой «проверьте ПРО»."""
+    issues = _ref_only(None)
+    assert [i.level for i in issues] == [Level.WARNING]
+    assert "Исключение — флаг узла «при необходимости»" in issues[0].message
+
+
+def test_ref_only_with_export_mode_pro_is_info() -> None:
+    """ПРО с реквизитом режима выгрузки — сведение: «при необходимости» выгрузит объект целиком
+    (БСП:3393-3437, БСП:13173-13196)."""
+    registration = _registration(_pro("Справочник.Контрагенты", "РежимВыгрузкиСправочников"))
+    issues = _ref_only(registration)
+    assert [(i.level, i.address) for i in issues] == [(Level.INFO, "ПКО «Контрагенты»")]
+    message = issues[0].message
+    assert "ПРО «Справочник.Контрагенты»" in message
+    assert "«РежимВыгрузкиСправочников»" in message
+    assert "Выгружать при необходимости" in message
+    assert "ПКО «Номенклатура» / ПКС Владелец" in message
+
+
+@pytest.mark.parametrize(
+    "pro",
+    [
+        _pro("Справочник.Контрагенты"),
+        _pro("Справочник.Номенклатура", "РежимВыгрузкиСправочников"),
+        _pro("Справочник.Контрагенты", "Режим", 'Отключить="true" Валидное="true"'),
+        _pro("Справочник.Контрагенты", "Режим", 'Валидное="false"'),
+        _pro("Справочник.Контрагенты", "Режим", ""),
+    ],
+    ids=["no-mode", "other-object", "disabled", "invalid", "no-valid-attr"],
+)
+def test_ref_only_without_loaded_export_mode_pro_stays_warning(pro: str) -> None:
+    """Без загружаемого ПРО этого объекта с режимом выгрузки режим узла не действует
+    (РЕГ:281-292, РЕГ:309-311)."""
+    issues = _ref_only(_registration(pro))
+    assert [i.level for i in issues] == [Level.WARNING]
+    message = issues[0].message
+    assert "Исключение — флаг узла" not in message
+    assert "нет загружаемого ПРО «Справочник.Контрагенты» с реквизитом режима выгрузки" in message
+
+
+def test_ref_only_export_mode_pro_inside_disabled_group_counts() -> None:
+    """`Отключить` группы читатель не смотрит (РЕГ:662-687): вложенное ПРО загружается."""
+    group = (
+        '<Группа Отключить="true"><Код>Г</Код>'
+        + _pro("Справочник.Контрагенты", "РежимВыгрузкиСправочников")
+        + "</Группа>"
+    )
+    assert [i.level for i in _ref_only(_registration(group))] == [Level.INFO]
+
+
+def _registration_of(plan: str, rules: str) -> RegistrationRules:
+    return load_registration_rules(
+        (
+            "<ПравилаРегистрации><ВерсияФормата>2.01</ВерсияФормата>"
+            f'<ПланОбмена Имя="{plan}">ПланОбменаСсылка.{plan}</ПланОбмена>'
+            f"<ПравилаРегистрацииОбъектов>{rules}</ПравилаРегистрацииОбъектов>"
+            "</ПравилаРегистрации>"
+        ).encode()
+    )
+
+
+def test_ref_only_mode_attribute_missing_in_plan_is_warning(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    """Реквизита режима нет у плана в структуре источника: исполнитель его не читает
+    (БСП:3474, БСП:3417-3421) — предупреждение, а не сведение."""
+    registration = _registration_of("Обмен", _pro("Справочник.Контрагенты", "РежимВыгрузки"))
+    report = check_structures(
+        load_exchange_rules(_ref_rules()), sides[0], sides[1], None, registration
+    )
+    issues = only(report, "structure.pko_ref_only")
+    assert [i.level for i in issues] == [Level.WARNING]
+    assert "у плана обмена «Обмен»" in issues[0].message
+    assert "«РежимВыгрузки»" in issues[0].message
+
+
+def test_ref_only_plan_absent_in_structure_keeps_info(
+    sides: tuple[sqlite3.Connection, ...],
+) -> None:
+    """Плана правил регистрации в структуре нет — реквизит не проверить, остаётся сведение."""
+    registration = _registration_of("Другой", _pro("Справочник.Контрагенты", "РежимВыгрузки"))
+    report = check_structures(
+        load_exchange_rules(_ref_rules()), sides[0], sides[1], None, registration
+    )
+    assert [i.level for i in only(report, "structure.pko_ref_only")] == [Level.INFO]
+
+
+def test_ref_only_names_every_mode_attribute_and_ignores_case() -> None:
+    """Итог исполнителя — ИЛИ по всем ПРО объекта (БСП:3413-3429): текст называет все реквизиты.
+    Тип источника ПКО в другом регистре находит то же ПРО."""
+    registration = _registration(
+        _pro("Справочник.Контрагенты", "Р1") + _pro("Справочник.Контрагенты", "Р2")
+    )
+    xml = _ref_rules().replace(
+        "<Источник>СправочникСсылка.Контрагенты</Источник>".encode(),
+        "<Источник>СправочникСсылка.контрагенты</Источник>".encode(),
+    )
+    rules = load_exchange_rules(xml)
+    issues = only(
+        check_structures(rules, None, None, registration=registration), "structure.pko_ref_only"
+    )
+    assert [i.level for i in issues] == [Level.INFO]
+    assert "«Р1», «Р2»" in issues[0].message
+    assert "Выгружать по условию" in issues[0].message
+
+
+@pytest.mark.parametrize("field", ["ОбъектМетаданныхИмя", "РеквизитРежимаВыгрузки"])
+def test_ref_only_leading_space_is_not_trimmed(field: str) -> None:
+    """Читатель ПРО обрезает только справа (`СокрП`, РЕГ:1114): « Справочник.X» не найдётся."""
+    pro = _pro("Справочник.Контрагенты", "Р").replace(f"<{field}>", f"<{field}> ")
+    assert [i.level for i in _ref_only(_registration(pro))] == [Level.WARNING]
+
+
+def test_load_handler_errors_not_softened_when_mode_pro_exists() -> None:
+    """ПКО с ПРО режима выгрузки может уйти целиком: ошибка обработчика загрузки — ошибка."""
+    xml = _ref_rules().replace(
+        "<Код>Контрагенты</Код>".encode(),
+        "<Код>Контрагенты</Код><ПередЗагрузкой>Алгоритмы.НетТакого;</ПередЗагрузкой>".encode(),
+    )
+    rules = load_exchange_rules(xml)
+    missing = [i for i in check_algorithm_refs(rules).issues if i.check == "algorithm.missing"]
+    assert [i.level for i in missing] == [Level.WARNING]
+    registration = _registration(_pro("Справочник.Контрагенты", "Р"))
+    paired = check_algorithm_refs(rules, registration).issues
+    assert [i.level for i in paired if i.check == "algorithm.missing"] == [Level.ERROR]

@@ -1,39 +1,41 @@
 # Правила обмена КД 2 и сервер kd-rules-mcp
 
-MCP-сервер `kd-rules-mcp` разбирает, правит и проверяет правила обмена «Конвертации данных 2» (ПравилаОбмена
-2.01, ПравилаРегистрации) по структурам метаданных двух конфигураций 1С. Сервер детерминированный: что во что
-конвертировать, решаешь ты — и пишешь решения в отчёт. Знания — в `.agents/skills/` этого проекта (имена скиллов `kd-`, `kd2-` или `kd3-`); сами
-они могут не открыться, поэтому ниже сказано, какой файл прочитать и когда.
+MCP-сервер `kd-rules-mcp` разбирает, правит и проверяет правила обмена «Конвертации данных 2» по структурам
+метаданных двух конфигураций 1С. Что во что конвертировать, решаешь ты — и пишешь решения в отчёт. Знания — в
+`.agents/skills/` (скиллы `kd-`, `kd2-`, `kd3-`); сами они могут не открыться, ниже — что прочитать и когда.
 
 ## Порядок работы
 
-1. `project_list` — проекты: папка (`folder`) и видна ли она серверу, базы и их роли, серверы MCP для 1С
-   (`code_mcp`, `data_mcp` у песочниц, `shared_mcp`), папка живых правил (`rules_dir`), обмены, рабочая папка
-   сервера (`workspace`).
-2. Структуры — `structure_load_project` для обеих сторон обмена в начале каждой задачи.
-3. Правила — `rules_open` и сразу `rules_validate` с обеими структурами (замечания «до правок»); новые —
-   `rules_create`.
-4. Кандидаты — `match_objects` (всегда с `text`), `match_properties`, `match_values`; пары с `auto: false` —
-   только твоим решением.
-5. Правки — `pko_create_from_candidates`, `rule_create`, `rule_update`, `rule_delete`: ПКО → ПКС → ПВД → ПРО.
-6. Проверки — `rules_validate` без новых замечаний; код обработчиков — `handlers_export` → синтакс-чекер →
-   `handlers_locate`; дальше по лестнице проверок.
-7. Сохранение — `rules_save` в рабочую папку или в `rules_dir`; с ошибками проверки — отказ `rules_save_errors`.
-   Проекты правил переживают перезапуск сервера (снимки); открытые — `rules_projects`, законченный — `rules_close`.
+1. `project_list` — проекты: папка (`folder`), базы и роли, серверы MCP для 1С (`code_mcp`, `data_mcp` у
+   песочниц, `shared_mcp`), папка живых правил (`rules_dir`), обмены, рабочая папка (`workspace`).
+2. Структуры обеих сторон — `structure_load_project`; правила — `rules_open` и сразу `rules_validate` с обеими
+   структурами (замечания «до правок»), новые — `rules_create`.
+3. Кандидаты — `match_objects` (с `text`), `match_properties`, `match_values`; `auto: false` — только твоим решением.
+4. Правки ПКО → ПКС → ПВД → ПРО; проверки — `rules_validate` без новых замечаний, обработчики — `handlers_export` →
+   синтакс-чекер → `handlers_locate`; сохранение — `rules_save` (с ошибками проверки — отказ `rules_save_errors`).
+   Проекты правил переживают перезапуск (снимки): открытые — `rules_projects`, законченный — `rules_close`.
+
+## Типовые цепочки
+
+- Новые правила: `rules_create` → `match_objects` → `pko_create_from_candidates` → `match_properties` →
+  `rule_update` → ПВД `rule_create` → `rules_validate` → `rules_save` → `registration_build` → `rules_pack`.
+- Доработка: `rules_open` → `rules_validate` → `rules_trace`/`rules_get` → `rule_update` → `rules_validate` →
+  `handlers_export` → `rules_diff` → `rules_save`; правка загрузки — и в правилах корреспондента.
+- После обновления конфигурации: новая структура под другим `structure_id` → `structure_compare` →
+  `rules_validate` с новой структурой → правки → `rules_save`; модуль менеджера — `ed_create(mode="rebind")`.
+- Универсальный формат: `ed_open` → `ed_overview` → `ed_schema_open` → `ed_validate(schema_id, structure_id)`.
+- Две базы через профиль: `project_exchanges` → его шаги → `live_base_check(exchange=…)` → `live_rules_check`.
 
 ## Что прочитать и когда
 
 - Любая задача с правилами — сначала `.agents/skills/kd2-rules-build/SKILL.md` (порядок, чек-лист).
 - Перед первым вызовом серверов MCP для 1С — `.agents/skills/kd2-rules-build/references/mcp-1c.md`.
-- Создаёшь ПКО — `references/pko.md`; ключи поиска и дубли — `search.md`; свойства и табличные части — `pks.md`;
-  перечисления — `pkz.md`; объект в обмен — `pvd.md`; код обработчиков — `handlers.md`; правила регистрации —
-  `pro.md` (всё в `.agents/skills/kd2-rules-build/references/`).
-- Проверки и их итоги — `references/checks.md`; параметры и ошибки инструментов — `references/tools.md`;
-  сокращения (ПКО, ПКС, ПВД, БСП…) — `references/glossary.md`.
-- Жалоба на живой обмен (задвоился, не нашёл существующий, не выгрузился) —
-  `.agents/skills/kd2-exchange-pitfalls/SKILL.md`.
-- Обмен через универсальный формат (правила — код модуля менеджера обмена; сервер их читает и проверяет:
-  `ed_open` → `ed_validate`, схема — `ed_schema_open`) — `.agents/skills/kd3-rules/SKILL.md`.
+- ПКО — `references/pko.md`, поиск и дубли — `search.md`, ПКС — `pks.md`, перечисления — `pkz.md`, ПВД — `pvd.md`,
+  обработчики — `handlers.md`, ПРО — `pro.md` (в `.agents/skills/kd2-rules-build/references/`; без скиллов — те же
+  файлы через `reference_get`). Проверки — `references/checks.md`, инструменты — `references/tools.md`, сокращения
+  — `references/glossary.md`.
+- Жалоба на живой обмен (задвоился, не нашёл, не выгрузился) — `.agents/skills/kd2-exchange-pitfalls/SKILL.md`.
+- Универсальный формат (правила — код модуля менеджера обмена) — `.agents/skills/kd3-rules/SKILL.md`.
 - Установить или обновить сервер, подключить ещё проект — `.agents/skills/kd-install/SKILL.md`.
 
 ## Серверы MCP для 1С
@@ -50,11 +52,9 @@ comol `ai_rules_1c` в папке проекта (`folder`): `.cursor/rules/mcp-
 
 ## Где остановиться и спросить человека
 
-- Пароли и логины баз: не спрашивать в чате, не писать в файлы.
+- Пароли и логины баз не спрашивать в чате и не писать в файлы; перезапуск сервера — после `rules_save` всего.
 - Запись в репозиторий проекта 1С вне `rules_dir` (правила агента, скиллы, `.mcp.json`, код) — только с его «да»;
   коммит живых правил — только файлы `rules_dir`, по правилам проекта.
-- Загрузка правил и запись в базу (`Записать`, `Удалить`, транзакции через сервер данных) — только в базы роли
-  «песочница» и с согласия; в боевую базу — никогда.
-- Скрипты `kdbase` (`kd_check`, `bsp_check`, `exchange_check`) запускаются из клона сервера: путь спросить, если
-  его нет в правилах проекта.
-- Перезапуск или обновление сервера — сначала `rules_save` всего открытого (`rules_projects`).
+- Загрузка правил и запись в базу — только песочницы и с согласия, боевая — никогда; физическое удаление данных —
+  отдельное «да». Скрипты `kdbase` — из клона сервера: путь спросить, если его нет в правилах проекта.
+- Отказ `path_outside_workspace` — сохранить в рабочую папку или `rules_dir`; разрешённые папки не расширять.

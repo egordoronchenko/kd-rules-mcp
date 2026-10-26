@@ -400,7 +400,9 @@ uid 1000, корень нужен точке входа, чтобы отдать
 под `self._lock`, ответ — компактный словарь (списки — через `slice_rows`/`page_view` в `service/views.py`).
 Затем функция с `@server.tool()` в `create_server` (`src/kd_rules_mcp/server.py:128`):
 каждый параметр — `Annotated[…, Field(description=…)]`, docstring — описание инструмента для агента; вызов —
-`await call(service.<метод>, …)`. Новый вид отказа — подкласс `Kd2Error` в `errors.py` и строка в
+`await call(service.<метод>, …)`. Метка эффекта — строка в `TOOL_EFFECTS` того же файла (`read`, `workspace`,
+`project`, `sandbox` и когда инструмент пишет); без неё `create_server` падает, в описание метка попадает сама,
+повторять её в docstring не нужно. Новый вид отказа — подкласс `Kd2Error` в `errors.py` и строка в
 `ERROR_CODES` (подклассы раньше базовых). Тесты: имя — в `EXPECTED_TOOLS` и вызов в `tests/test_server.py`
 (проверяет описания всех параметров), содержательные — отдельным файлом; затем `uv run python
 scripts/dump_tools.py` обновляет [tools.md](tools.md), а ключи ответа дописываются в его ручную часть. Если

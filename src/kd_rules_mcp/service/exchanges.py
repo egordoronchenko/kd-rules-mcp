@@ -51,6 +51,8 @@ class ExchangesMixin(ServiceBase):
             rules_folder = resolve(folder, side.rules) if available and folder else None
             row["rules"] = {
                 "folder": self._host(rules_folder) if rules_folder else side.rules,
+                # rules_dir — папка не задана в профиле, взята `<rules_dir>/<план стороны>`.
+                "source": "rules_dir" if side.rules_default else "profile",
                 "files": {
                     kind: {
                         "path": self._host(rules_folder / name)
@@ -137,6 +139,8 @@ class ExchangesMixin(ServiceBase):
             if item.technology == "kd2":
                 n = opened.get((source, "exchange"))
                 if n:
+                    # Правила регистрации стороны дают pko_ref_only режим выгрузки узла.
+                    paired = opened.get((source, "registration"))
                     step(
                         "проверка",
                         "rules_validate",
@@ -144,7 +148,7 @@ class ExchangesMixin(ServiceBase):
                             "source_structure": left["structure_id"],
                             "target_structure": right["structure_id"],
                         },
-                        {"project_id": n},
+                        {"project_id": n, **({"exchange_project_id": paired} if paired else {})},
                     )
                 if all(
                     s.get("rules", {}).get("files", {}).get(k, {}).get("exists") is True

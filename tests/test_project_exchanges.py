@@ -11,7 +11,13 @@ from kd_rules_mcp.server import create_server
 from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 
 
-def prepare(tmp_path: Path, *, technology: str | None = "kd2", legacy: bool = False) -> Kd2Service:
+def prepare(
+    tmp_path: Path,
+    *,
+    technology: str | None = "kd2",
+    legacy: bool = False,
+    rules_dir: bool = False,
+) -> Kd2Service:
     projects = {}
     sides = []
     for name in ("bp", "do"):
@@ -37,7 +43,14 @@ def prepare(tmp_path: Path, *, technology: str | None = "kd2", legacy: bool = Fa
             },
         }
         side = {"project": name, "base": "dev", "plan": f"План{name}"}
-        side.update({"module": f"Manager{name}"} if technology == "ed" else {"rules": "rules/План"})
+        if technology == "ed":
+            side["module"] = f"Manager{name}"
+        elif rules_dir:
+            # Папка комплекта по умолчанию: `<rules_dir>/<план стороны>`.
+            projects[name]["rules_dir"] = "rules"
+            (folder / "rules" / "План").rename(folder / "rules" / f"План{name}")
+        else:
+            side["rules"] = "rules/План"
         sides.append(side)
     exchange: dict = {"plan": "План", "projects": ["bp", "do"]}
     if not legacy:
@@ -202,3 +215,44 @@ async def test_step_argument_names_match_server_tools(
         provided = step["arguments"].keys() | step.get("fill", {}).keys()
         assert provided <= schema["properties"].keys(), step
         assert set(schema.get("required", [])) <= provided, step
+
+
+def test_rules_folder_defaults_to_rules_dir_plan(tmp_path: Path) -> None:
+    """Без `rules` в профиле — `<rules_dir>/<план стороны>`, файлы видны и открываются."""
+    service = prepare(tmp_path, rules_dir=True)
+    (tmp_path / "do" / "rules" / "Планdo" / "RegistrationRules.xml").unlink()
+    exchange = view(service)
+    bp, do = exchange["sides"]
+    assert bp["rules"]["source"] == "rules_dir"
+    assert bp["rules"]["folder"].replace("\\", "/").endswith("/bp/rules/Планbp")
+    assert bp["rules"]["files"]["exchange"]["exists"] is True
+    assert do["rules"]["files"]["registration"]["exists"] is False
+    opened = [
+        s["arguments"]["path"].replace("\\", "/")
+        for s in exchange["steps"]
+        if s["tool"] == "rules_open"
+    ]
+    assert len(opened) == 3
+    assert any(p.endswith("/do/rules/Планdo/ExchangeRules.xml") for p in opened)
+    assert not any(p.endswith("/do/rules/Планdo/RegistrationRules.xml") for p in opened)
+
+
+def test_explicit_rules_folder_is_profile_source(tmp_path: Path) -> None:
+    assert {s["rules"]["source"] for s in view(prepare(tmp_path))["sides"]} == {"profile"}
+
+
+def test_exchange_validate_gets_paired_registration(tmp_path: Path) -> None:
+    """Правила обмена стороны проверяются с её открытыми ПРО (режим выгрузки для pko_ref_only)."""
+    service = prepare(tmp_path)
+    (tmp_path / "do" / "rules" / "План" / "RegistrationRules.xml").unlink()
+    steps = view(service)["steps"]
+    validate = [
+        s for s in steps if s["tool"] == "rules_validate" and "target_structure" in s["arguments"]
+    ]
+    bp_validate = next(s for s in validate if s["arguments"]["source_structure"].startswith("bp"))
+    exchange = steps[bp_validate["fill"]["project_id"] - 1]["arguments"]["path"]
+    paired = steps[bp_validate["fill"]["exchange_project_id"] - 1]["arguments"]["path"]
+    assert exchange.replace("\\", "/").endswith("/bp/rules/План/ExchangeRules.xml")
+    assert paired.replace("\\", "/").endswith("/bp/rules/План/RegistrationRules.xml")
+    do_validate = next(s for s in validate if s["arguments"]["source_structure"].startswith("do"))
+    assert "exchange_project_id" not in do_validate["fill"]

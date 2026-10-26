@@ -16,7 +16,7 @@ import ipaddress
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -98,13 +98,18 @@ class Project:
 
 @dataclass(frozen=True, slots=True)
 class ExchangeSide:
-    """Сторона обмена: база, план и явно заданный источник правил."""
+    """Сторона обмена: база, план и источник правил.
+
+    `rules` без явного значения в профиле КД 2 — `<rules_dir проекта>/<план стороны>`;
+    тогда `rules_default` истинен.
+    """
 
     project: str
     base: str | None = None
     plan: str = ""
     rules: str | None = None
     module: str | None = None
+    rules_default: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +209,35 @@ def with_login(connection: str, login: tuple[str, str] | None) -> str:
         return connection
     user, password = login
     return f'{connection.rstrip(";")};Usr="{user}";Pwd="{password}";'
+
+
+_LOGIN_KEYS = frozenset({"usr", "pwd"})
+
+
+def without_login(connection: str) -> str:
+    """Строка соединения без пар `Usr`/`Pwd`: для Конфигуратора, без логина и пароля.
+
+    Пары делятся `;` вне двойных кавычек (`""` внутри кавычек — сама кавычка); ключ сравнивается
+    без учёта регистра и пробелов. Остальные пары остаются как были, в конце — `;`.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    quoted = False
+    for char in connection:
+        if char == '"':
+            quoted = not quoted
+        if char == ";" and not quoted:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    kept = [
+        part.strip()
+        for part in parts
+        if part.strip() and part.split("=", 1)[0].strip().casefold() not in _LOGIN_KEYS
+    ]
+    return "".join(f"{part};" for part in kept)
 
 
 def base_login(local: LocalSettings, project_id: str, base: Base) -> tuple[str, str] | None:
@@ -379,12 +413,7 @@ def _exchanges(value: Any, projects: dict[str, Project]) -> tuple[Exchange, ...]
                     for key in ("base", "plan", "rules", "module")
                     if key in side
                 }
-                rules = fields.get("rules", "").replace("\\", "/")
-                if "rules" in fields and (
-                    rules.startswith("/")
-                    or re.match(r"^[A-Za-z]:", rules)
-                    or ".." in rules.split("/")
-                ):
+                if "rules" in fields and not _relative_path(fields["rules"]):
                     raise ProjectConfigError(
                         f"{at}.rules: путь от папки проекта, без «..» и без диска"
                     )
@@ -399,10 +428,21 @@ def _exchanges(value: Any, projects: dict[str, Project]) -> tuple[Exchange, ...]
                     raise ProjectConfigError(
                         f"{at}.{incompatible}: недопустимо при technology: {technology}"
                     )
-                fields.setdefault("plan", plan)
-                sides.append(ExchangeSide(project_id, **fields))
+                sides.append(
+                    ExchangeSide(
+                        project_id,
+                        base=fields.get("base"),
+                        plan=fields.get("plan", plan),
+                        rules=fields.get("rules"),
+                        module=fields.get("module"),
+                    )
+                )
             if sides[0].project == sides[1].project:
                 raise ProjectConfigError(f"{address}.sides: одинаковые проекты сторон")
+            # Папка комплекта по умолчанию — папка плана в живых правилах проекта. Модуль у
+            # какой-либо стороны — признак универсального формата, там комплекта КД 2 нет.
+            if technology != "ed" and not any(side.module for side in sides):
+                sides = [_default_rules(side, projects) for side in sides]
         raw_projects = body.get("projects", [s.project for s in sides])
         if not isinstance(raw_projects, list):
             raise ProjectConfigError(f"{address}.projects: нужен список проектов")
@@ -450,6 +490,25 @@ def _exchanges(value: Any, projects: dict[str, Project]) -> tuple[Exchange, ...]
             Exchange(plan, members, exchange_id, technology, tuple(sides), tuple(directions))
         )
     return tuple(result)
+
+
+def _relative_path(value: str) -> bool:
+    """Путь от папки проекта: без корня, диска и «..»."""
+    path = value.replace("\\", "/")
+    return not (path.startswith("/") or re.match(r"^[A-Za-z]:", path) or ".." in path.split("/"))
+
+
+def _default_rules(side: ExchangeSide, projects: dict[str, Project]) -> ExchangeSide:
+    """Сторона без явного `rules` — `<rules_dir>/<план стороны>`, если `rules_dir` задан.
+
+    `rules_dir` с диском или «..» значения по умолчанию не даёт: прежде такой каталог читался,
+    отказ ломал бы его; явный `rules` для стороны по-прежнему проверяется строго.
+    """
+    rules_dir = projects[side.project].rules_dir
+    if side.rules is not None or not rules_dir or not _relative_path(rules_dir):
+        return side
+    rules = f"{rules_dir.replace(chr(92), '/').rstrip('/')}/{side.plan}"
+    return replace(side, rules=rules, rules_default=True)
 
 
 def load_local(path: Path) -> LocalSettings:

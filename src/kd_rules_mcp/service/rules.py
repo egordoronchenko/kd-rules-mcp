@@ -5,6 +5,7 @@ from typing import Any
 
 from kd_rules_mcp.authoring.edits import (
     CONVERSION_KIND,
+    create_pko_many,
     create_pko_with_properties,
     create_rule,
     delete_rule,
@@ -23,9 +24,9 @@ from kd_rules_mcp.service.checks import validation_report
 from kd_rules_mcp.service.views import (
     PKS_SECTION,
     REGISTRATION_SECTION,
+    batch_update_view,
     conversion_view,
     counts,
-    edit_view,
     find_pro,
     listed_rule_rows,
     node_view,
@@ -33,6 +34,7 @@ from kd_rules_mcp.service.views import (
     overview_groups,
     page_limit,
     parse_detail,
+    pko_batch_view,
     pro_view,
     report_summary,
     rule_group,
@@ -45,17 +47,19 @@ _SAVE_ERRORS_LIMIT = 50
 
 
 def _used_structures(
-    document: RulesDocument,
     source_id: str | None,
     target_id: str | None,
     exchange_id: str | None,
 ) -> dict[str, str | None]:
-    """Идентификаторы, которые проверка открыла. Пустая строка — стороны не было."""
-    exchange = exchange_id if isinstance(document, RegistrationRules) and exchange_id else None
+    """Идентификаторы, которые проверка открыла. Пустая строка — стороны не было.
+
+    `exchange_project` — парный проект комплекта: правила обмена у правил регистрации
+    и правила регистрации у правил обмена.
+    """
     return {
         "source": source_id or None,
         "target": target_id or None,
-        "exchange_project": exchange,
+        "exchange_project": exchange_id or None,
     }
 
 
@@ -188,15 +192,11 @@ class RulesMixin(ServiceBase):
                 project, source_structure, target_structure, exchange_project_id
             )
             with self._sides(source_id, target_id) as (source, target):
-                exchange = (
-                    self._exchange(exchange_id)
-                    if isinstance(document, RegistrationRules) and exchange_id
-                    else None
-                )
-                report = validation_report(document, source, target, project.source_path, exchange)
+                paired = self._paired(document, exchange_id, project.source_path)
+                report = validation_report(document, source, target, project.source_path, paired)
             validation = _validation_view(
                 report,
-                _used_structures(document, source_id, target_id, exchange_id),
+                _used_structures(source_id, target_id, exchange_id),
                 dropped,
             )
             error_items = [issue.to_dict() for issue in report.errors]
@@ -286,12 +286,14 @@ class RulesMixin(ServiceBase):
             return {
                 "path": self._host(result.path),
                 "size_bytes": result.path.stat().st_size,
+                "sha256": result.sha256,
                 "load_with": result.form,
                 "files": [
                     {
                         "file": item.name,
                         "path": self._host(item.source),
                         "size_bytes": item.size_bytes,
+                        "sha256": item.sha256,
                         "rules": item.summary,
                     }
                     for item in result.files
@@ -311,19 +313,29 @@ class RulesMixin(ServiceBase):
         self,
         project_id: str,
         kind: str,
-        owner: str,
         fields: Mapping[str, Any],
-        keys: list[str] | None,
-        except_keys: list[str] | None,
-        source_structure: str | None,
-        target_structure: str | None,
+        owner: str = "",
+        keys: list[str] | None = None,
+        except_keys: list[str] | None = None,
+        filter: dict[str, Any] | None = None,
+        mode: str = "apply",
+        expected_count: int | None = None,
+        source_structure: str | None = None,
+        target_structure: str | None = None,
+        offset: int = 0,
+        limit: int = 200,
     ) -> dict[str, Any]:
-        """Одни поля у нескольких ПКС, групп ПКС или ПКЗ. Отказ не помечает проект изменённым."""
+        """Одни поля у нескольких правил одного вида. Отказ не помечает проект изменённым.
+
+        `preview` выполняет ту же правку и возвращает документ. Проект меняется только в `apply`.
+        """
+        if mode not in ("apply", "preview"):
+            raise ValueError(f"Режим «{mode}» не принимается. Допустимые: apply, preview")
         if not fields:
             raise Kd2Error("Не переданы поля для изменения")
         with self._lock, self._sides(source_structure, target_structure) as (source, target):
             rules = self._exchange(project_id)
-            results = update_rules(
+            batch = update_rules(
                 rules,
                 kind,
                 fields,
@@ -332,14 +344,51 @@ class RulesMixin(ServiceBase):
                 except_keys=() if except_keys is None else except_keys,
                 source=source,
                 target=target,
+                filter=filter,
+                preview=mode == "preview",
+                expected_count=expected_count,
             )
-            self.workspace.mark_modified(project_id)
-            return {
-                "owner": owner,
-                "kind": kind,
-                "count": len(results),
-                "updated": [edit_view(item) for item in results],
-            }
+            if mode == "apply":
+                self.workspace.mark_modified(project_id)
+            return batch_update_view(kind, owner, mode, batch, offset, limit)
+
+    def pko_create_many(
+        self,
+        project_id: str,
+        source_structure: str,
+        target_structure: str,
+        kind: str | None = None,
+        pairs: list[dict[str, Any]] | None = None,
+        fields: Mapping[str, Any] | None = None,
+        group: str = "",
+        mode: str = "preview",
+        expected_preview_hash: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """ПКО и ПКС по многим парам. Проект меняется только после apply с хешем предпросмотра."""
+        with (
+            self._lock,
+            self._structure(source_structure) as source,
+            self._structure(target_structure) as target,
+        ):
+            rules = self._exchange(project_id)
+            batch = create_pko_many(
+                rules,
+                source_structure,
+                target_structure,
+                source,
+                target,
+                kind=kind,
+                pairs=pairs,
+                fields=fields,
+                group=group,
+                mode=mode,
+                expected_preview_hash=expected_preview_hash,
+            )
+            if mode == "apply":
+                self.workspace.mark_modified(project_id)
+            return pko_batch_view(batch, offset, limit)
 
     def rule_delete(
         self,

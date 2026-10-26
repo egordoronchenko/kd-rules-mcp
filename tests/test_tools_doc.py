@@ -11,7 +11,14 @@ import pytest
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 
-from kd_rules_mcp.server import INSTRUCTIONS, _without_schema_titles, create_server
+from kd_rules_mcp.server import (
+    EFFECTS,
+    INSTRUCTIONS,
+    TOOL_EFFECTS,
+    _without_schema_titles,
+    create_server,
+    effect_tag,
+)
 from kd_rules_mcp.service import Kd2Service, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +51,48 @@ def test_every_tool_has_a_group() -> None:
     assert f"Tools: {len(grouped)}." in dump_tools.render()
 
 
+def test_every_tool_has_an_effect_tag(tmp_path: Path) -> None:
+    """Описание начинается с метки эффекта; таблица меток — ровно инструменты сервера."""
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    tools = {tool.name: tool for tool in anyio.run(dump_tools._tools, service)}
+    assert set(TOOL_EFFECTS) == set(tools)
+    assert {effect for effect, _ in TOOL_EFFECTS.values()} == set(EFFECTS)
+    for name, tool in tools.items():
+        assert (tool.description or "").startswith(f"[{TOOL_EFFECTS[name][0]}] "), name
+    expected = {
+        "rules_get": "read",
+        "rules_create": "workspace",
+        "rules_save": "project",
+        "live_rules_install": "sandbox",
+        "live_registration_check": "sandbox",
+    }
+    assert {name: TOOL_EFFECTS[name][0] for name in expected} == expected
+    # Пишущий в базу инструмент называет параметр, который включает запись.
+    for name, (effect, note) in TOOL_EFFECTS.items():
+        if effect == "sandbox":
+            assert "write" in note or "apply" in note, name
+    rendered = dump_tools.render()
+    assert "| Group | Effect | Tools |" in rendered
+    assert 'Effect: `sandbox` — sandbox with mode="apply"' in rendered
+
+
+def test_instructions_name_tags_and_boundaries() -> None:
+    """Инструкция сервера: легенда меток эффекта и границы (agent-ux, Р2)."""
+    for tag in ("[read]", "[workspace]", "[project]", "[sandbox]"):
+        assert tag in INSTRUCTIONS
+    for words in ("never widen allowed", "sandboxes", "deletion needs separate human consent"):
+        assert words in " ".join(INSTRUCTIONS.split()), words
+
+
+def test_tool_without_effect_tag_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
+    monkeypatch.delitem(TOOL_EFFECTS, "rules_get")
+    with pytest.raises(RuntimeError, match="rules_get"):
+        create_server(service)
+
+
 def test_tool_schema_context_budget(tmp_path: Path) -> None:
     """Публичные описания укладываются в бюджет контекста, а имена 1С остаются кириллицей."""
     service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace"))
@@ -64,7 +113,9 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
     # reference_get и reference_search (#86) — около 970 знаков при однословных описаниях полей
     # (фильтр skill — 100 из них: без него справочники КД 3 перебивают КД 2 по общим словам).
     # project_exchanges и live_base_check (#83) — около 1250 знаков схем и описаний.
-    assert len(serialized) <= 56_600, f"Схемы: {len(serialized)} знаков"
+    # rule_update_many для ПКО и ПВД (filter, mode, expected_count, страница) и pko_create_many —
+    # около 1810 знаков при однословных описаниях полей.
+    assert len(serialized) <= 57_850, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:
@@ -180,7 +231,9 @@ def test_public_schemas_preserve_calls_and_argument_errors(
     before, before_errors, before_valid = anyio.run(exercise, raw_server)
     after, after_errors, after_valid = anyio.run(exercise, compact_server)
     for tool in before:
-        tool["description"] = inspect.cleandoc(tool["description"] or "")
+        tool["description"] = (
+            f"{effect_tag(tool['name'])} {inspect.cleandoc(tool['description'] or '')}"
+        )
 
     # Восстанавливаем простые union-типы для сравнения листьев с исходной схемой SDK.
     def expand_types(value: Any) -> Any:

@@ -12,12 +12,12 @@ XML и проверяет. Что во что конвертировать, ре
 
 ## Справочники (читать по мере надобности)
 
-Многие флаги КД в БСП не работают — сверьтесь со справочником. Нет файла — `reference_get`/`reference_search`.
+Многие флаги КД в БСП не работают — см. справочник. Нет файла — `reference_get`/`reference_search`.
 
 | Файл | Когда читать |
 |---|---|
 | `references/start.md` | начало задачи: `project_list`, структуры, проекты правил, два агента |
-| `references/build-order.md` | §2 целиком: разбор ответов, реквизит в ПКО, фаза обработчиков |
+| `references/build-order.md` | §2: ответы, реквизит в ПКО, пачки, обработчики |
 | `references/checklist.md` | §3 целиком: команды проверок, рабочая папка |
 | `references/handoff.md` | пауза, передача задачи, обновление: что записать |
 | `references/pko.md` | ПКО и его флаги |
@@ -59,7 +59,8 @@ XML и проверяет. Что во что конвертировать, ре
 ## 2. Порядок построения: ПКО → ПКС → ПВД → ПРО
 
 1. Объект: `match_objects` **всегда с `text`** (и `kind`); ПКО для объекта ещё нет (`rules_list pko`).
-2. ПКО с ПКС — `pko_create_from_candidates`; `unresolved`, `not_applied` и пары «по составу» — только решением агента.
+2. ПКО с ПКС — `pko_create_from_candidates`, пачкой по виду — `pko_create_many` (только `auto: true`);
+   `unresolved`, `not_applied`, «по составу» — решением агента.
 3. ПКЗ — `match_values`, `rule_create kind=pkz`.
 4. ПВД — `rule_create kind=pvd` по образцу существующего (`references/pvd.md`).
 5. ПРО — `structure_plan_content`, `registration_build`, `rules_validate` со структурой источника, `rules_save`.

@@ -1,5 +1,7 @@
 """`rules_pack`: ZIP правил для загрузки в БСП (задача #1) — без баз 1С."""
 
+import base64
+import hashlib
 import json
 import zipfile
 from pathlib import Path
@@ -135,6 +137,15 @@ async def test_tool_packs_folder_into_workspace_or_rules_dir(
     assert default["files"][0]["path"] == str((rules_set / EXCHANGE).resolve())
     assert default["files"][0]["rules"]["source"] == "БП"
     assert default["files"][2]["rules"]["exchange_plan"] == "ОбменЗУП"
+    # Хеши — base64 SHA-256, как `hash` правил у live_rules_dump/live_status.
+    archive_bytes = (tmp_path / "ws" / "ОбменЗУП.zip").read_bytes()
+    assert default["sha256"] == base64.b64encode(hashlib.sha256(archive_bytes).digest()).decode()
+    with zipfile.ZipFile(tmp_path / "ws" / "ОбменЗУП.zip") as archive:
+        for item in default["files"]:
+            packed = archive.read(item["file"])
+            assert packed == (rules_set / item["file"]).read_bytes()
+            assert item["sha256"] == base64.b64encode(hashlib.sha256(packed).digest()).decode()
+    assert len({item["sha256"] for item in default["files"]}) == 3
     assert (rules_dir / "ОбменЗУП.zip").is_file() and beside["warnings"] == []
     assert rejected.is_error
     text = "".join(getattr(item, "text", "") for item in rejected.content)

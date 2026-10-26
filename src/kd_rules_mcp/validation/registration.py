@@ -34,7 +34,7 @@ from kd_rules_mcp.structures.queries import (
     read_object_card,
 )
 from kd_rules_mcp.structures.xmldump import KINDS
-from kd_rules_mcp.validation.address import rule_address
+from kd_rules_mcp.validation.address import pro_loaded, rule_address
 from kd_rules_mcp.validation.exchange_plan import _assign_rhs, _bsl_string, _is_bare_name
 from kd_rules_mcp.validation.report import ValidationReport
 
@@ -201,7 +201,7 @@ def check_registration(
             return report
         # Согласованность ОбъектНастройки с видом не требует базы: её задаёт писатель.
         for rule in rules.rules():
-            if _loaded(rule):
+            if pro_loaded(rule):
                 _check_settings(report, rule, None)
                 _check_query_parameters(report, rules, rule)
         return report
@@ -213,7 +213,7 @@ def check_registration(
     elif plan is not None:
         report.skip("registration.plan_content", _NO_PLAN_CONTENT)
     for rule in rules.rules():
-        if not _loaded(rule):
+        if not pro_loaded(rule):
             continue
         obj = _check_object(report, rule, index, plan)
         if has_object_settings:
@@ -233,20 +233,6 @@ def check_registration(
     if not has_object_settings:
         report.skip("registration.settings_type", _NO_OBJECT_SETTINGS)
     return report
-
-
-def _loaded(rule: Node) -> bool:
-    """Правило попадёт в таблицу читателя.
-
-    `Отключить=true` или `Валидное=false` — поддерево пропускается
-    (ЗагрузкаПравилРегистрацииОбъектов:282-293). Пустой булев атрибут читается
-    как Ложь (там же, :1077-1078), поэтому отсутствующее `Валидное` тоже отбрасывает
-    правило. `Отключить` группы читатель не смотрит (:662-687) — вложенные правила
-    проверяются.
-    """
-    if rule.attrs.get("Отключить") is True:
-        return False
-    return rule.attrs.get("Валидное", False) is True
 
 
 def _title(rule: Node) -> str:
@@ -474,7 +460,7 @@ def _check_no_pvd(
     """
     covered = _enabled_pvd_types(exchange)
     with_rule = {
-        str(rule.get("ОбъектНастройки")).strip() for rule in rules.rules() if _loaded(rule)
+        str(rule.get("ОбъектНастройки")).strip() for rule in rules.rules() if pro_loaded(rule)
     }
     for type_name in sorted(plan.content):
         if type_name in covered:
@@ -509,7 +495,7 @@ def _enabled_pvd_types(rules: ExchangeRules) -> set[str]:
 def _address_for_type(rules: RegistrationRules, type_name: str, plan_name: str) -> str:
     """Адрес ПРО этого типа, если правило загружается; иначе адрес плана."""
     for rule in rules.rules():
-        if _loaded(rule) and str(rule.get("ОбъектНастройки")) == type_name:
+        if pro_loaded(rule) and str(rule.get("ОбъектНастройки")) == type_name:
             return rule_address(rule)
     return f"ПланОбмена «{plan_name}»"
 

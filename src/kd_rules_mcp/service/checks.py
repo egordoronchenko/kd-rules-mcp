@@ -24,17 +24,19 @@ def validation_report(
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
     rules_path: Path | None,
-    exchange: ExchangeRules | None,
+    paired: ExchangeRules | RegistrationRules | None,
 ) -> ValidationReport:
     """Полная проверка правил — общий прогон `rules_validate` и `rules_save`.
 
-    `exchange` нужен правилам регистрации (покрытие ПВД). У правил обмена не используется.
+    `paired` — вторая половина комплекта: правилам регистрации — правила обмена (покрытие
+    ПВД), правилам обмена — правила регистрации (режим выгрузки в `structure.pko_ref_only`).
     """
     report = check_format(document)
     if isinstance(document, ExchangeRules):
         graph = build_call_graph(document)
-        report.extend(check_structures(document, source, target, graph))
-        report.extend(check_algorithm_refs(document))
+        registration = paired if isinstance(paired, RegistrationRules) else None
+        report.extend(check_structures(document, source, target, graph, registration))
+        report.extend(check_algorithm_refs(document, registration))
         report.extend(check_search_params(document))
         report.extend(check_search_objects(document, target))
         report.extend(
@@ -45,9 +47,11 @@ def validation_report(
                 plan_name_from_path(rules_path),
                 Path(rules_path).parts[:-1] if rules_path else (),
                 graph,
+                registration,
             )
         )
     elif isinstance(document, RegistrationRules):
+        exchange = paired if isinstance(paired, ExchangeRules) else None
         report.extend(check_registration(document, source, exchange_rules=exchange))
     return report
 
@@ -72,12 +76,8 @@ class ChecksMixin(ServiceBase):
         with self._lock, self._sides(source_structure, target_structure) as (source, target):
             document = self._document(project_id)
             project = self.workspace.get(project_id)
-            exchange = (
-                self._exchange(exchange_project_id)
-                if isinstance(document, RegistrationRules) and exchange_project_id
-                else None
-            )
-            report = validation_report(document, source, target, project.source_path, exchange)
+            paired = self._paired(document, exchange_project_id, project.source_path)
+            report = validation_report(document, source, target, project.source_path, paired)
             view = report_view(report, selected, check_prefix, offset, limit)
             # Тройка как передана (в том числе пустая); в снимке — только идентификаторы.
             self.workspace.remember_validation(

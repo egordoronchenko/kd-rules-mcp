@@ -8,6 +8,7 @@ from lxml import etree
 
 from kd_rules_mcp.authoring.edits import (
     EditResult,
+    create_pko_many,
     create_pko_with_properties,
     create_rule,
     delete_rule,
@@ -17,9 +18,11 @@ from kd_rules_mcp.authoring.edits import (
 )
 from kd_rules_mcp.errors import (
     AmbiguousAddressError,
+    CountMismatchError,
     DanglingReferenceError,
     DuplicateRuleError,
     ObjectNotFoundError,
+    PreviewRequiredError,
     RuleEditError,
     RuleNotFoundError,
     UnknownFieldError,
@@ -28,7 +31,9 @@ from kd_rules_mcp.kd2.canonical import canonical_diff, canonical_form
 from kd_rules_mcp.kd2.model import ExchangeRules, Node
 from kd_rules_mcp.kd2.rules_io import dump_rules, load_exchange_rules, load_rules
 from kd_rules_mcp.server import error_payload
+from kd_rules_mcp.service.views import pko_batch_view
 from kd_rules_mcp.structures import db
+from kd_rules_mcp.structures.xmldump import KINDS
 from kd_rules_mcp.validation.address import side_name, walk_pks
 from kd_rules_mcp.validation.format import check_format
 
@@ -1155,7 +1160,9 @@ def test_create_pko_with_properties_lands_in_group(tmp_path: Path) -> None:
 
 _HIERARCHY_ATTRS = '{"Иерархический": "true", "ВидИерархии": "ИерархияГруппИЭлементов"}'
 _SYNC_NOTE = (
-    "СинхронизироватьПоИдентификатору включено по умолчанию: ссылочный приёмник, не перечисление"
+    "СинхронизироватьПоИдентификатору включено по умолчанию: ссылочный приёмник, не перечисление. "
+    "Если данные уже заведены в обеих базах, при первой синхронизации поиск только по GUID даст "
+    "дубли: нужны поля поиска и ПродолжитьПоискПоПолямПоискаЕслиПоИдентификаторуНеНашли"
 )
 
 
@@ -1595,7 +1602,7 @@ def test_update_rules_sets_flag_on_every_pks_except_two() -> None:
         owner="Организации",
         except_keys=["ИНН", "Контакты/Телефон"],
     )
-    assert [item.address for item in results] == [
+    assert [item.address for item in results.results] == [
         "ПКО «Организации» / ПКС КПП",
         "ПКО «Организации» / ПКС Наименование",
         "ПКО «Организации» / ПКС Контакты/Почта",
@@ -1622,7 +1629,7 @@ def test_update_rules_explicit_keys_follow_document_order() -> None:
         owner="Организации",
         keys=["Контакты/Почта", "ИНН"],
     )
-    assert [item.address for item in results] == [
+    assert [item.address for item in results.results] == [
         "ПКО «Организации» / ПКС ИНН",
         "ПКО «Организации» / ПКС Контакты/Почта",
     ]
@@ -1691,7 +1698,7 @@ def test_update_rules_rejects_top_level_kind() -> None:
     rules = load_exchange_rules(DATA / "exchange_rules.xml")
     before = dump_rules(rules)
     with pytest.raises(RuleEditError, match="rule_update по одному"):
-        update_rules(rules, "pko", {"НеЗамещать": False}, owner="Организации")
+        update_rules(rules, "pod", {"НеЗамещать": False}, owner="Организации")
     assert dump_rules(rules) == before
 
 
@@ -1712,7 +1719,7 @@ def test_update_rules_group_kind_touches_only_groups() -> None:
     rules = load_exchange_rules(DATA / "exchange_rules.xml")
     _pks_with_group(rules)
     results = update_rules(rules, "pks_group", {"НеЗамещать": True}, owner="Организации")
-    assert [item.address for item in results] == ["ПКО «Организации» / ПКС Контакты"]
+    assert [item.address for item in results.results] == ["ПКО «Организации» / ПКС Контакты"]
     flags = _pks_flags(rules)
     assert flags["Контакты"] is True
     assert flags["Контакты/Телефон"] is None
@@ -1729,7 +1736,7 @@ def test_update_rules_pkz_except_one() -> None:
         owner="ВидыОпераций",
         except_keys=["Начисление"],
     )
-    assert [item.address for item in results] == ["ПКО «ВидыОпераций» / ПКЗ Удержание"]
+    assert [item.address for item in results.results] == ["ПКО «ВидыОпераций» / ПКЗ Удержание"]
     kept = find_rule(rules, "pkz", "Начисление", "ВидыОпераций")
     changed = find_rule(rules, "pkz", "Удержание", "ВидыОпераций")
     assert "Наименование" not in kept.values
@@ -1826,8 +1833,1001 @@ def test_update_rules_key_selects_the_search_pks() -> None:
         owner="БанковскиеСчета",
         keys=["Владелец[поиск]"],
     )
-    assert [item.address for item in results] == ["ПКО «БанковскиеСчета» / ПКС Владелец[поиск]"]
+    assert [item.address for item in results.results] == [
+        "ПКО «БанковскиеСчета» / ПКС Владелец[поиск]"
+    ]
     properties = rules.pko()[0].child("Свойства")
     assert properties is not None
     assert properties.items[0].values["НеЗамещать"] is True
     assert "НеЗамещать" not in properties.items[1].values
+
+
+# --- Групповая правка ПКО и ПВД и пачка ПКО ----------------------------------------------------
+
+_BULK_XML = """\
+<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>
+<ПравилаКонвертацииОбъектов>
+<Группа><Код>Справочники</Код>
+<Правило><Код>Валюты</Код>
+<Источник>СправочникСсылка.Валюты</Источник><Приемник>СправочникСсылка.Валюты</Приемник>
+</Правило>
+<Группа><Код>Прочее</Код>
+<Правило><Код>Контрагенты</Код>
+<Источник>СправочникСсылка.Контрагенты</Источник><Приемник>СправочникСсылка.Контрагенты</Приемник>
+</Правило>
+</Группа>
+<Правило><Код>Номенклатура</Код>
+<Источник>СправочникСсылка.Номенклатура</Источник><Приемник>ДокументСсылка.Номенклатура</Приемник>
+</Правило>
+</Группа>
+<Правило><Код>Поступление</Код>
+<Источник>ДокументСсылка.Поступление</Источник><Приемник>ДокументСсылка.Поступление</Приемник>
+</Правило>
+<Правило><Код>Реализация</Код>
+<Источник>ДокументСсылка.Реализация</Источник><Приемник>СправочникСсылка.Реализация</Приемник>
+</Правило>
+</ПравилаКонвертацииОбъектов>
+<ПравилаВыгрузкиДанных>
+<Правило><Код>Документы</Код><ОбъектВыборки>ДокументСсылка.Поступление</ОбъектВыборки></Правило>
+<Правило><Код>БезВыборки</Код></Правило>
+<Правило><Код>СправочникиВыгрузка</Код>
+<ОбъектВыборки>СправочникСсылка.Валюты</ОбъектВыборки></Правило>
+</ПравилаВыгрузкиДанных>
+</ПравилаОбмена>
+"""
+
+_CATALOG_CODES = ("Валюты", "Контрагенты", "Номенклатура")
+_ALL_PKO = (*_CATALOG_CODES, "Поступление", "Реализация")
+
+
+def _bulk_rules() -> ExchangeRules:
+    return load_exchange_rules(_BULK_XML.encode())
+
+
+def _addresses(batch) -> list[str]:
+    return [item.address for item in batch.results]
+
+
+def _pko_addresses(codes: Sequence[str]) -> list[str]:
+    return [f"ПКО «{code}»" for code in codes]
+
+
+def _many(rules: ExchangeRules, source: _Builder, target: _Builder, **options):
+    return create_pko_many(rules, "source", "target", source.conn, target.conn, **options)
+
+
+def _pair(source: str, target: str, code: str | None = None) -> dict[str, str]:
+    item = {"source": source, "target": target}
+    if code is not None:
+        item["code"] = code
+    return item
+
+
+def _occupy(rules: ExchangeRules, code: str, number: int) -> None:
+    """Занимает код ПКО чужими типами, чтобы пара по типам не стала `exists`."""
+    type_name = f"ДокументСсылка.Занятие{number}"
+    create_rule(rules, "pko", code, {"Источник": type_name, "Приемник": type_name})
+
+
+def test_update_many_filter_source_kind_selects_three_catalogs() -> None:
+    """Из пяти ПКО фильтр source_kind берёт три справочника и не трогает документы."""
+    rules = _bulk_rules()
+    batch = update_rules(
+        rules,
+        "pko",
+        {"Комментарий": "справочники"},
+        filter={"source_kind": "Справочник"},
+        expected_count=3,
+    )
+    assert _addresses(batch) == _pko_addresses(_CATALOG_CODES)
+    assert batch.matched == 3
+    assert batch.changed == 3
+    for code in _CATALOG_CODES:
+        assert find_rule(rules, "pko", code).values["Комментарий"] == "справочники"
+    for code in ("Поступление", "Реализация"):
+        assert "Комментарий" not in find_rule(rules, "pko", code).values
+
+
+def test_update_many_filter_target_kind() -> None:
+    """target_kind смотрит на Приемник: два справочника и Реализация, чей приёмник — справочник."""
+    rules = _bulk_rules()
+    batch = update_rules(
+        rules, "pko", {"Комментарий": "приёмник"}, filter={"target_kind": "Справочник"}
+    )
+    assert _addresses(batch) == _pko_addresses(("Валюты", "Контрагенты", "Реализация"))
+    assert "Комментарий" not in find_rule(rules, "pko", "Номенклатура").values
+    assert "Комментарий" not in find_rule(rules, "pko", "Поступление").values
+
+
+def test_update_many_filter_group_includes_subgroup() -> None:
+    """Группа Справочники включает подгруппу Прочее и не включает ПКО вне группы."""
+    rules = _bulk_rules()
+    batch = update_rules(rules, "pko", {"Комментарий": "группа"}, filter={"group": "Справочники"})
+    assert _addresses(batch) == _pko_addresses(_CATALOG_CODES)
+    assert find_rule(rules, "pko", "Контрагенты").values["Комментарий"] == "группа"
+    assert "Комментарий" not in find_rule(rules, "pko", "Поступление").values
+    assert "Комментарий" not in find_rule(rules, "pko", "Реализация").values
+
+
+def test_update_many_pvd_by_source_object() -> None:
+    """ПВД отбираются по ОбъектВыборки. Правило без объекта выборки не попадает."""
+    rules = _bulk_rules()
+    batch = update_rules(rules, "pvd", {"Отключить": True}, filter={"source_kind": "Документ"})
+    assert _addresses(batch) == ["ПВД «Документы»"]
+    flags = {node.code: node.attrs.get("Отключить") for node in rules.pvd()}
+    assert flags["Документы"] is True
+    assert flags["БезВыборки"] is not True
+    assert flags["СправочникиВыгрузка"] is not True
+
+
+def test_update_many_pvd_target_kind_rejected() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="target_kind"):
+        update_rules(rules, "pvd", {"Отключить": True}, filter={"target_kind": "Справочник"})
+    assert dump_rules(rules) == before
+
+
+def test_update_many_unknown_object_kind_lists_allowed() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="Справочники") as error:
+        update_rules(rules, "pko", {"Комментарий": "x"}, filter={"source_kind": "Справочники"})
+    allowed = str(error.value).split("Допустимые: ", 1)[1]
+    listed = [item.strip() for item in allowed.split(",")]
+    for info in KINDS.values():
+        assert info[1] in listed
+    assert "Справочники" not in listed
+    assert dump_rules(rules) == before
+
+
+def test_update_many_unknown_filter_key() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="нет_такого"):
+        update_rules(rules, "pko", {"Комментарий": "x"}, filter={"нет_такого": "Справочник"})
+    assert dump_rules(rules) == before
+
+
+def test_update_many_keys_and_filter_together() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="ровно одно"):
+        update_rules(
+            rules,
+            "pko",
+            {"Комментарий": "x"},
+            keys=["Валюты"],
+            filter={"source_kind": "Справочник"},
+        )
+    assert dump_rules(rules) == before
+
+
+def test_update_many_requires_keys_or_filter() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="ровно одно"):
+        update_rules(rules, "pko", {"Комментарий": "x"})
+    assert dump_rules(rules) == before
+
+
+def test_update_many_owner_rejected_for_pko() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="owner"):
+        update_rules(rules, "pko", {"Комментарий": "x"}, owner="Валюты", keys=["Валюты"])
+    assert dump_rules(rules) == before
+
+
+def test_update_many_filter_rejected_for_pks() -> None:
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="Фильтр"):
+        update_rules(rules, "pks", {"НеЗамещать": True}, owner="Организации", filter={})
+    assert dump_rules(rules) == before
+
+
+def test_update_many_except_keys_unknown_code() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(RuleNotFoundError, match="НетТакого"):
+        update_rules(
+            rules,
+            "pko",
+            {"Комментарий": "x"},
+            filter={"source_kind": "Справочник"},
+            except_keys=["НетТакого"],
+        )
+    assert dump_rules(rules) == before
+
+
+def test_update_many_except_keys_with_keys_rejected() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="except_keys"):
+        update_rules(
+            rules,
+            "pko",
+            {"Комментарий": "x"},
+            keys=["Валюты"],
+            except_keys=["Контрагенты"],
+        )
+    assert dump_rules(rules) == before
+
+
+def test_update_many_code_field_rejected() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(RuleEditError, match="Код"):
+        update_rules(rules, "pko", {"Код": "Другой"}, keys=["Валюты"])
+    assert dump_rules(rules) == before
+    assert find_rule(rules, "pko", "Валюты").code == "Валюты"
+
+
+def test_update_many_empty_filter_selects_every_pko() -> None:
+    """Пустой фильтр — все ПКО. Группы списка в выбор не входят."""
+    rules = _bulk_rules()
+    batch = update_rules(rules, "pko", {"Комментарий": "все"}, filter={})
+    assert _addresses(batch) == _pko_addresses(_ALL_PKO)
+    assert batch.matched == 5
+    section = rules.root.children["ПравилаКонвертацииОбъектов"]
+    group = section.items[0]
+    assert group.code == "Справочники"
+    assert group.is_group
+    assert "Комментарий" not in group.values
+    subgroup = next(item for item in group.items if item.is_group)
+    assert subgroup.code == "Прочее"
+    assert "Комментарий" not in subgroup.values
+
+
+def test_update_many_missing_group() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(RuleNotFoundError, match="НетГруппы"):
+        update_rules(rules, "pko", {"Комментарий": "x"}, filter={"group": "НетГруппы"})
+    assert dump_rules(rules) == before
+
+
+def test_update_many_keys_follow_document_order() -> None:
+    """Повторы в keys схлопываются, порядок — порядок документа, не порядок списка."""
+    rules = _bulk_rules()
+    batch = update_rules(
+        rules, "pko", {"Комментарий": "ключи"}, keys=["Реализация", "Валюты", "Валюты"]
+    )
+    assert _addresses(batch) == _pko_addresses(("Валюты", "Реализация"))
+    assert batch.matched == 2
+    assert batch.changed == 2
+
+
+def test_update_many_expected_count_mismatch_changes_nothing() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(CountMismatchError) as error:
+        update_rules(
+            rules,
+            "pko",
+            {"Комментарий": "нет"},
+            filter={"source_kind": "Справочник"},
+            expected_count=2,
+        )
+    assert error.value.details == {"matched": 3}
+    payload = error_payload(error.value)
+    assert payload["code"] == "count_mismatch"
+    assert payload["matched"] == 3
+    assert dump_rules(rules) == before
+
+
+def test_update_many_preview_restores_every_node() -> None:
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    batch = update_rules(
+        rules,
+        "pko",
+        {"Комментарий": "черновик"},
+        filter={"source_kind": "Справочник"},
+        preview=True,
+        expected_count=3,
+    )
+    assert dump_rules(rules) == before
+    assert batch.matched == 3
+    assert batch.changed == 3
+    assert batch.results[0].changes["Комментарий"] == {"old": None, "new": "черновик"}
+    assert all("Комментарий" not in node.values for node in rules.pko())
+
+
+def test_update_many_rolls_back_when_last_pko_fails(tmp_path: Path) -> None:
+    """Приёмника последнего справочника нет в структуре: правка первых двух тоже снимается."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    for name in ("Валюты", "Контрагенты", "Номенклатура"):
+        source.add("Справочник", name)
+    target.add("Справочник", "Валюты")
+    target.add("Справочник", "Контрагенты")
+    rules = _bulk_rules()
+    before = dump_rules(rules)
+    with pytest.raises(DanglingReferenceError, match="Номенклатура"):
+        update_rules(
+            rules,
+            "pko",
+            {"Комментарий": "нет"},
+            filter={"source_kind": "Справочник"},
+            source=source.conn,
+            target=target.conn,
+        )
+    assert dump_rules(rules) == before
+
+
+def test_update_many_unchanged_value_is_not_changed() -> None:
+    """Уже стоящее значение не попадает в changes и не считается изменённым."""
+    rules = _bulk_rules()
+    update_rule(rules, "pko", "Валюты", {"НеЗамещать": True})
+    batch = update_rules(rules, "pko", {"НеЗамещать": True}, filter={"source_kind": "Справочник"})
+    by_address = {item.address: item for item in batch.results}
+    assert batch.matched == 3
+    assert batch.changed == 2
+    assert by_address["ПКО «Валюты»"].changes == {}
+    assert by_address["ПКО «Контрагенты»"].changes["НеЗамещать"] == {"old": None, "new": True}
+    assert find_rule(rules, "pko", "Валюты").values["НеЗамещать"] is True
+
+
+def test_update_many_true_string_matches_bool() -> None:
+    """Строка true приводится к булеву и при уже стоящем true не даёт changes."""
+    rules = _bulk_rules()
+    update_rule(rules, "pko", "Валюты", {"НеЗамещать": True})
+    batch = update_rules(rules, "pko", {"НеЗамещать": "true"}, keys=["Валюты"])
+    assert batch.matched == 1
+    assert batch.changed == 0
+    assert batch.results[0].changes == {}
+    assert find_rule(rules, "pko", "Валюты").values["НеЗамещать"] is True
+
+
+def test_update_many_pks_side_type_is_in_changes() -> None:
+    rules = load_exchange_rules(DATA / "exchange_rules.xml")
+    batch = update_rules(
+        rules,
+        "pks",
+        {"Приемник": {"Тип": "Число"}},
+        owner="Организации",
+        keys=["ИНН"],
+    )
+    assert batch.matched == 1
+    assert batch.changed == 1
+    changes = batch.results[0].changes
+    assert changes["Приемник.Тип"] == {"old": "Строка", "new": "Число"}
+    assert "Приемник.Имя" not in changes
+    assert "Приемник.Вид" not in changes
+    assert "Источник.Тип" not in changes
+
+
+def test_create_many_kind_keeps_only_exact_pairs(tmp_path: Path) -> None:
+    """kind берёт только auto: «по синониму» и «нет пары» в пачку не входят."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты", synonym="Валюты")
+    target.add("Справочник", "Валюты", synonym="Валюты")
+    source.add("Справочник", "Номенклатура", synonym="Товары")
+    target.add("Справочник", "Товары", synonym="Товары")
+    source.add("Справочник", "ТолькоИсточник")
+    target.add("Справочник", "ТолькоПриемник")
+    rules = _rules()
+    before = dump_rules(rules)
+    batch = _many(rules, source, target, kind="Справочник")
+    assert dump_rules(rules) == before
+    assert [(item.status, item.code, item.source, item.target) for item in batch.items] == [
+        ("created", "Валюты", "Справочник.Валюты", "Справочник.Валюты")
+    ]
+    view = pko_batch_view(batch, 0, 50)
+    assert view["mode"] == "preview"
+    assert view["summary"] == {
+        "requested": 1,
+        "planned": 1,
+        "skipped": 0,
+        "skip_reasons": {},
+        "pks": 0,
+        "unresolved": 0,
+        "not_applied": 0,
+    }
+    assert view["items"][0]["status"] == "planned"
+    assert view["items"][0]["code"] == "Валюты"
+
+
+def test_create_many_explicit_synonym_pair_keeps_only_auto_pks(tmp_path: Path) -> None:
+    """Явная пара «по синониму» создаётся. ПКС — только auto; синоним в not_applied."""
+    source_props: Sequence[Prop] = (
+        ("Реквизит", "Код", "Код", "Строка", ()),
+        ("Реквизит", "Артикул", "Код товара", "Строка", ()),
+    )
+    target_props: Sequence[Prop] = (
+        ("Реквизит", "Код", "Код", "Строка", ()),
+        ("Реквизит", "КодТовара", "код товара", "Строка", ()),
+        ("Реквизит", "Лишний", "Лишний", "Строка", ()),
+    )
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Номенклатура", source_props, synonym="Товары")
+    target.add("Справочник", "Товары", target_props, synonym="Товары")
+    rules = _rules()
+    batch = _many(
+        rules,
+        source,
+        target,
+        pairs=[_pair("Справочник.Номенклатура", "Справочник.Товары")],
+        fields={"Комментарий": "пачка"},
+    )
+    item = batch.items[0]
+    assert item.status == "created"
+    assert item.code == "Товары"
+    assert item.source == "Справочник.Номенклатура"
+    assert item.target == "Справочник.Товары"
+    assert item.node is not None and item.node.values["Комментарий"] == "пачка"
+    assert item.result is not None
+    assert item.result.disabled == ["Лишний"]
+    assert len(item.result.not_applied) == 1
+    assert "Артикул" in item.result.not_applied[0]
+    assert "КодТовара" in item.result.not_applied[0]
+    assert "по синониму" in item.result.not_applied[0]
+    view = pko_batch_view(batch, 0, 50)["items"][0]
+    assert view["pks"] == 2
+    assert view["disabled"] == 1
+    assert view["not_applied"] == item.result.not_applied
+    properties = item.node.child("Свойства")
+    assert properties is not None
+    assert [side_name(node, "Приемник") for node in properties.items] == ["Код", "Лишний"]
+
+
+def test_create_many_exists_leaves_the_pko(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    create_pko_with_properties(
+        rules,
+        "Уже",
+        source.conn,
+        target.conn,
+        "Справочник.Валюты",
+        "Справочник.Валюты",
+        {"Комментарий": "держится"},
+    )
+    before = dump_rules(rules)
+    preview = _many(rules, source, target, pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")])
+    assert preview.items[0].status == "skipped"
+    assert preview.items[0].reason == "exists"
+    assert preview.items[0].existing == "Уже"
+    applied = _many(
+        rules,
+        source,
+        target,
+        pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")],
+        mode="apply",
+        expected_preview_hash=preview.preview_hash,
+    )
+    assert dump_rules(rules) == before
+    view = pko_batch_view(applied, 0, 50)
+    assert view["summary"]["created"] == 0
+    assert view["summary"]["skipped"] == 1
+    assert view["summary"]["skip_reasons"] == {"exists": 1}
+    assert view["items"][0]["existing"] == "Уже"
+    assert find_rule(rules, "pko", "Уже").values["Комментарий"] == "держится"
+
+
+def test_create_many_repeated_pair_is_exists(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    pair = _pair("Справочник.Валюты", "Справочник.Валюты")
+    batch = _many(rules, source, target, pairs=[pair, pair])
+    assert batch.items[0].status == "created"
+    assert batch.items[0].code == "Валюты"
+    assert batch.items[1].status == "skipped"
+    assert batch.items[1].reason == "exists"
+    assert batch.items[1].existing == "Валюты"
+    assert rules.pko() == []
+
+
+def _unit_sides(tmp_path: Path) -> tuple[_Builder, _Builder]:
+    props: Sequence[Prop] = (("Реквизит", "Единица", "Единица", "СправочникСсылка.Единицы", ()),)
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Номенклатура", props)
+    target.add("Справочник", "Номенклатура", props)
+    source.add("Справочник", "Единицы")
+    target.add("Справочник", "Единицы")
+    return source, target
+
+
+def test_create_many_pks_sees_later_pko_in_the_batch(tmp_path: Path) -> None:
+    """ПКС ссылки заполняется ПКО той же пачки, даже если оно идёт следом."""
+    source, target = _unit_sides(tmp_path)
+    rules = _rules()
+    batch = _many(
+        rules,
+        source,
+        target,
+        pairs=[
+            _pair("Справочник.Номенклатура", "Справочник.Номенклатура"),
+            _pair("Справочник.Единицы", "Справочник.Единицы"),
+        ],
+    )
+    item = batch.items[0]
+    assert item.result is not None
+    assert item.result.unresolved == []
+    assert item.node is not None
+    properties = item.node.child("Свойства")
+    assert properties is not None
+    assert properties.items[0].values["КодПравилаКонвертации"] == "Единицы"
+    view = pko_batch_view(batch, 0, 50)["items"][0]
+    assert "unresolved" not in view
+
+
+def test_create_many_single_call_still_leaves_unresolved(tmp_path: Path) -> None:
+    """Одиночное создание не ждёт ПКО, которого ещё нет: ссылка остаётся unresolved."""
+    source, target = _unit_sides(tmp_path)
+    rules = _rules()
+    result = create_pko_with_properties(
+        rules,
+        "Номенклатура",
+        source.conn,
+        target.conn,
+        "Справочник.Номенклатура",
+        "Справочник.Номенклатура",
+    )
+    assert result.unresolved
+    assert any("СправочникСсылка.Единицы" in line for line in result.unresolved)
+    properties = find_rule(rules, "pko", "Номенклатура").child("Свойства")
+    assert properties is not None
+    assert "КодПравилаКонвертации" not in properties.items[0].values
+
+
+def test_create_many_allocates_code_from_base(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    batch = _many(_rules(), source, target, pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")])
+    assert batch.items[0].code == "Валюты"
+    assert batch.items[0].result is not None
+    assert not any("занят" in warning for warning in batch.items[0].result.warnings)
+
+
+def test_create_many_occupied_base_gets_suffix(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    _occupy(rules, "Валюты", 1)
+    batch = _many(rules, source, target, pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")])
+    assert batch.items[0].code == "Валюты00001"
+    assert batch.items[0].result is not None
+    assert "код «Валюты» занят — взят «Валюты00001»" in batch.items[0].result.warnings
+
+
+def test_create_many_occupied_suffixes_skip_to_next(tmp_path: Path) -> None:
+    """Заняты основа, …00001 и …00003: берётся …00004, а не дырка 00002."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    for number, code in enumerate(("Валюты", "Валюты00001", "Валюты00003"), start=1):
+        _occupy(rules, code, number)
+    batch = _many(rules, source, target, pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")])
+    assert batch.items[0].code == "Валюты00004"
+
+
+def test_create_many_string_order_trap_picks_a_free_code(tmp_path: Path) -> None:
+    """X1 больше X00002 как строка; первый кандидат X00002 занят, свободен X00003."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "X")
+    target.add("Справочник", "X")
+    rules = _rules()
+    for number, code in enumerate(("X", "X1", "X00002"), start=1):
+        _occupy(rules, code, number)
+    batch = _many(rules, source, target, pairs=[_pair("Справочник.X", "Справочник.X")])
+    assert batch.items[0].code == "X00003"
+    assert batch.items[0].result is not None
+    assert "код «X» занят — взят «X00003»" in batch.items[0].result.warnings
+
+
+def test_create_many_base_is_truncated_to_45(tmp_path: Path) -> None:
+    name = "А" * 50
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", name)
+    target.add("Справочник", name)
+    batch = _many(
+        _rules(), source, target, pairs=[_pair(f"Справочник.{name}", f"Справочник.{name}")]
+    )
+    assert batch.items[0].code == "А" * 45
+    assert len(batch.items[0].code) == 45
+
+
+def test_create_many_explicit_code_taken_is_casefold(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Контрагенты")
+    target.add("Справочник", "Контрагенты")
+    rules = _rules()
+    _occupy(rules, "Валюты", 1)
+    before = dump_rules(rules)
+    batch = _many(
+        rules,
+        source,
+        target,
+        pairs=[_pair("Справочник.Контрагенты", "Справочник.Контрагенты", "валюты")],
+    )
+    assert dump_rules(rules) == before
+    assert batch.items[0].status == "skipped"
+    assert batch.items[0].reason == "code_taken"
+    assert batch.items[0].code == "валюты"
+    view = pko_batch_view(batch, 0, 50)
+    assert view["summary"]["skip_reasons"] == {"code_taken": 1}
+    assert view["items"][0]["code"] == "валюты"
+    assert "existing" not in view["items"][0]
+
+
+def test_create_many_exists_wins_over_code_taken(tmp_path: Path) -> None:
+    """Та же пара типов — exists, даже если явный код уже занят этим ПКО."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    create_pko_with_properties(
+        rules, "Валюты", source.conn, target.conn, "Справочник.Валюты", "Справочник.Валюты"
+    )
+    batch = _many(
+        rules,
+        source,
+        target,
+        pairs=[_pair("Справочник.Валюты", "Справочник.Валюты", "Валюты")],
+    )
+    assert batch.items[0].reason == "exists"
+    assert batch.items[0].existing == "Валюты"
+
+
+def test_create_many_unknown_objects_are_one_error(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    before = dump_rules(rules)
+    with pytest.raises(ObjectNotFoundError) as error:
+        _many(
+            rules,
+            source,
+            target,
+            pairs=[
+                _pair("Справочник.Валюты", "Справочник.Валюты"),
+                _pair("Справочник.НетИсточника", "Справочник.НетПриемника"),
+                _pair("Справочник.ЕщёНет", "Справочник.Валюты"),
+            ],
+        )
+    text = str(error.value)
+    assert "НетИсточника" in text
+    assert "НетПриемника" in text
+    assert "ЕщёНет" in text
+    assert dump_rules(rules) == before
+    assert rules.pko() == []
+
+
+def test_create_many_unknown_kind_lists_both_sides(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Документ", "Приход")
+    rules = _rules()
+    before = dump_rules(rules)
+    with pytest.raises(ValueError, match="Перечисление") as error:
+        _many(rules, source, target, kind="Перечисление")
+    text = str(error.value)
+    assert "Справочник" in text
+    assert "Документ" in text
+    assert dump_rules(rules) == before
+
+
+def test_create_many_identity_fields_rejected(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    before = dump_rules(rules)
+    with pytest.raises(RuleEditError, match="Источник"):
+        _many(
+            rules,
+            source,
+            target,
+            pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")],
+            fields={"Источник": "СправочникСсылка.Валюты"},
+        )
+    assert dump_rules(rules) == before
+
+
+def test_create_many_structure_error_rolls_back_inserts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    source.add("Справочник", "Контрагенты")
+    target.add("Справочник", "Контрагенты")
+    rules = _rules()
+    before = dump_rules(rules)
+    calls = {"n": 0}
+
+    def boom(*_args, **_kwargs) -> list[str]:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise DanglingReferenceError("проверка второго ПКО")
+        return []
+
+    monkeypatch.setattr("kd_rules_mcp.authoring.edits._apply_structure", boom)
+    with pytest.raises(DanglingReferenceError, match="второго"):
+        _many(
+            rules,
+            source,
+            target,
+            pairs=[
+                _pair("Справочник.Валюты", "Справочник.Валюты"),
+                _pair("Справочник.Контрагенты", "Справочник.Контрагенты"),
+            ],
+        )
+    assert dump_rules(rules) == before
+    assert "ПравилаКонвертацииОбъектов" not in rules.root.children
+
+
+def test_create_many_hash_ignores_page(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    source.add("Справочник", "Контрагенты")
+    target.add("Справочник", "Контрагенты")
+    rules = _rules()
+    first = _many(rules, source, target, kind="Справочник")
+    second = _many(rules, source, target, kind="Справочник")
+    assert first.preview_hash == second.preview_hash
+    page_a = pko_batch_view(first, 0, 1)
+    page_b = pko_batch_view(first, 1, 1)
+    assert page_a["preview_hash"] == page_b["preview_hash"] == first.preview_hash
+    assert page_a["items"][0]["code"] != page_b["items"][0]["code"]
+    assert page_a["has_more"] is True
+    assert page_a["total"] == 2
+    assert page_a["offset"] == 0
+    assert page_a["limit"] == 1
+    assert rules.pko() == []
+
+
+def test_create_many_hash_changes_after_manual_pko(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    source.add("Справочник", "Контрагенты")
+    target.add("Справочник", "Контрагенты")
+    rules = _rules()
+    pairs = [
+        _pair("Справочник.Валюты", "Справочник.Валюты"),
+        _pair("Справочник.Контрагенты", "Справочник.Контрагенты"),
+    ]
+    original = _many(rules, source, target, pairs=pairs).preview_hash
+    create_pko_with_properties(
+        rules, "Валюты", source.conn, target.conn, "Справочник.Валюты", "Справочник.Валюты"
+    )
+    preview = _many(rules, source, target, pairs=pairs)
+    assert preview.preview_hash != original
+    assert preview.items[0].reason == "exists"
+    assert preview.items[0].existing == "Валюты"
+    kept = dump_rules(rules)
+    with pytest.raises(PreviewRequiredError) as stale:
+        _many(rules, source, target, pairs=pairs, mode="apply", expected_preview_hash=original)
+    assert stale.value.details == {"preview_hash": preview.preview_hash}
+    assert error_payload(stale.value)["code"] == "preview_required"
+    assert error_payload(stale.value)["preview_hash"] == preview.preview_hash
+    assert dump_rules(rules) == kept
+    with pytest.raises(PreviewRequiredError):
+        _many(rules, source, target, pairs=pairs, mode="apply")
+    assert dump_rules(rules) == kept
+    again = _many(rules, source, target, pairs=pairs)
+    assert dump_rules(rules) == kept
+    assert again.preview_hash == preview.preview_hash
+    applied = _many(
+        rules,
+        source,
+        target,
+        pairs=pairs,
+        mode="apply",
+        expected_preview_hash=preview.preview_hash,
+    )
+    assert applied.preview_hash == preview.preview_hash
+    assert [node.code for node in rules.pko()] == ["Валюты", "Контрагенты"]
+    view = pko_batch_view(applied, 0, 50)
+    assert view["summary"]["created"] == 1
+    assert view["summary"]["skipped"] == 1
+    assert view["items"][1]["status"] == "created"
+
+
+def test_create_many_preview_leaves_the_document(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    before = dump_rules(rules)
+    _many(rules, source, target, pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")])
+    assert dump_rules(rules) == before
+    assert "ПравилаКонвертацииОбъектов" not in rules.root.children
+
+
+def test_create_many_group_and_missing_group(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _section_with_groups(
+        "ПравилаКонвертацииОбъектов", "<Группа><Код>Справочники</Код></Группа>"
+    )
+    before = dump_rules(rules)
+    with pytest.raises(RuleNotFoundError, match="НетТакой"):
+        _many(
+            rules,
+            source,
+            target,
+            pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")],
+            group="НетТакой",
+        )
+    assert dump_rules(rules) == before
+    preview = _many(
+        rules,
+        source,
+        target,
+        pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")],
+        group="Справочники",
+    )
+    assert dump_rules(rules) == before
+    _many(
+        rules,
+        source,
+        target,
+        pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")],
+        group="Справочники",
+        mode="apply",
+        expected_preview_hash=preview.preview_hash,
+    )
+    group = _group_node(rules, "ПравилаКонвертацииОбъектов", "Справочники")
+    assert [item.code for item in group.items] == ["Валюты"]
+    root = rules.root.children["ПравилаКонвертацииОбъектов"]
+    assert all(item.code != "Валюты" for item in root.items)
+
+
+def test_create_many_requires_one_selector(tmp_path: Path) -> None:
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    rules = _rules()
+    with pytest.raises(ValueError, match="ровно одно"):
+        _many(rules, source, target)
+    with pytest.raises(ValueError, match="ровно одно"):
+        _many(
+            rules,
+            source,
+            target,
+            kind="Справочник",
+            pairs=[_pair("Справочник.Валюты", "Справочник.Валюты")],
+        )
+    with pytest.raises(ValueError, match="Режим"):
+        _many(rules, source, target, kind="Справочник", mode="later")
+    with pytest.raises(ValueError, match="неизвестные ключи"):
+        _many(
+            rules,
+            source,
+            target,
+            pairs=[{"source": "Справочник.Валюты", "target": "x", "extra": "y"}],
+        )
+    batch = _many(rules, source, target, pairs=[])
+    assert batch.items == []
+    assert pko_batch_view(batch, 0, 50)["summary"]["planned"] == 0
+
+
+# --- Находки ревью bulk-edits -----------------------------------------------------------------
+
+_DUP_CODE = """<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>
+<ПравилаКонвертацииОбъектов>
+<Группа><Код>Справочники</Код>
+<Правило><Код>Х</Код><Источник>СправочникСсылка.Х</Источник><Приемник>СправочникСсылка.Х</Приемник></Правило>
+</Группа>
+<Группа><Код>Документы</Код>
+<Правило><Код>Х</Код><Источник>ДокументСсылка.Х</Источник><Приемник>ДокументСсылка.Х</Приемник></Правило>
+</Группа>
+</ПравилаКонвертацииОбъектов></ПравилаОбмена>"""
+
+
+def test_update_many_duplicate_code_edits_the_filtered_node() -> None:
+    """Повтор кода ПКО в разных группах: правится ровно выбранное фильтром правило."""
+    rules = load_exchange_rules(_DUP_CODE.encode())
+    batch = update_rules(rules, "pko", {"НеЗамещать": True}, filter={"source_kind": "Документ"})
+    assert (batch.matched, batch.changed) == (1, 1)
+    flags = {str(node.get("Источник")): node.values.get("НеЗамещать") for node in rules.pko()}
+    assert flags == {"СправочникСсылка.Х": None, "ДокументСсылка.Х": True}
+
+    rules = load_exchange_rules(_DUP_CODE.encode())
+    batch = update_rules(rules, "pko", {"НеЗамещать": True}, filter={})
+    assert (batch.matched, batch.changed) == (2, 2)
+    assert all(node.values.get("НеЗамещать") is True for node in rules.pko())
+
+
+def test_update_many_pkz_same_source_in_two_groups_edits_both() -> None:
+    """ПКЗ с одним именем значения источника в двух группах значений: правятся обе."""
+    xml = """<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>
+<ПравилаКонвертацииОбъектов>
+<Правило><Код>Виды</Код><Источник>ПеречислениеСсылка.Виды</Источник><Приемник>ПеречислениеСсылка.Виды</Приемник>
+<Значения>
+<Группа><Код>Г1</Код><Наименование>Г1</Наименование>
+<Значение><Код>1</Код><Источник>Товар</Источник><Приемник>Товар</Приемник></Значение>
+</Группа>
+<Группа><Код>Г2</Код><Наименование>Г2</Наименование>
+<Значение><Код>2</Код><Источник>Товар</Источник><Приемник>Услуга</Приемник></Значение>
+</Группа>
+</Значения>
+</Правило>
+</ПравилаКонвертацииОбъектов></ПравилаОбмена>"""
+    rules = load_exchange_rules(xml.encode())
+    batch = update_rules(rules, "pkz", {"Наименование": "x"}, owner="Виды")
+    assert (batch.matched, batch.changed) == (2, 2)
+    values = find_rule(rules, "pko", "Виды").child("Значения")
+    assert values is not None
+    assert [node.values.get("Наименование") for node in values.walk()] == ["x", "x"]
+
+
+def test_update_many_clearing_absent_true_only_flag_is_not_a_change() -> None:
+    """Флаг «только истина» без значения и ложь пишутся одинаково — не изменение."""
+    xml = """<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>
+<ПравилаКонвертацииОбъектов>
+<Правило><Код>А</Код><Источник>СправочникСсылка.А</Источник><Приемник>СправочникСсылка.А</Приемник></Правило>
+<Правило><Код>Б</Код><НеЗамещать>true</НеЗамещать><Источник>СправочникСсылка.Б</Источник><Приемник>СправочникСсылка.Б</Приемник></Правило>
+</ПравилаКонвертацииОбъектов></ПравилаОбмена>"""
+    rules = load_exchange_rules(xml.encode())
+    batch = update_rules(rules, "pko", {"НеЗамещать": False}, filter={})
+    assert (batch.matched, batch.changed) == (2, 1)
+    assert [item.changes for item in batch.results] == [
+        {},
+        {"НеЗамещать": {"old": True, "new": False}},
+    ]
+
+
+def test_create_many_code_of_list_group_is_taken(tmp_path: Path) -> None:
+    """Код группы списка ПКО занят, как в КД: новое ПКО получает суффикс."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    source.add("Справочник", "Валюты")
+    target.add("Справочник", "Валюты")
+    xml = """<ПравилаОбмена><ВерсияФормата>2.01</ВерсияФормата>
+<ПравилаКонвертацииОбъектов><Группа><Код>Валюты</Код><Наименование>Валюты</Наименование></Группа>
+</ПравилаКонвертацииОбъектов></ПравилаОбмена>"""
+    rules = load_exchange_rules(xml.encode())
+    batch = _many(rules, source, target, kind="Справочник")
+    assert [item.code for item in batch.items] == ["Валюты00001"]
+
+
+def test_create_many_pks_count_excludes_groups(tmp_path: Path) -> None:
+    """`pks` в ответе пачки — число ПКС без групп ПКС (табличных частей)."""
+    source = _Builder(tmp_path / "source.sqlite")
+    target = _Builder(tmp_path / "target.sqlite")
+    for builder in (source, target):
+        builder.add(
+            "Справочник",
+            "А",
+            [("ТабличнаяЧасть", "ТЧ", "", "", [("Реквизит", "Р", "", "Строка", ())])],
+        )
+    view = pko_batch_view(_many(_rules(), source, target, kind="Справочник"), 0, 50)
+    assert view["summary"]["pks"] == 1
+    assert view["items"][0]["pks"] == 1

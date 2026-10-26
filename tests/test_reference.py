@@ -57,6 +57,11 @@ def test_get_lists_sections(service: Kd2Service) -> None:
         "symptoms",
         "phases",
         "handler_params",
+        "pko",
+        "pks",
+        "pvd",
+        "pro",
+        "search",
     ]
     for item in result["items"]:
         assert item["title"] and item["headings"] and item["lines"] > 0
@@ -93,8 +98,115 @@ def test_get_handler_params_points_to_handlers_context(service: Kd2Service) -> N
 
 
 def test_get_unknown_section(service: Kd2Service) -> None:
-    with pytest.raises(Kd2Error, match="protocol, symptoms, phases, handler_params"):
+    allowed = "protocol, symptoms, phases, handler_params, pko, pks, pvd, pro, search"
+    with pytest.raises(Kd2Error, match=allowed):
         service.reference_get("grabli")
+
+
+# --- Разделы по видам правил: ключ — заголовок --------------------------------------------
+
+
+@pytest.mark.parametrize("section", ["pko", "pks", "pvd", "pro", "search"])
+def test_rule_kind_section_is_the_whole_skill_file(service: Kd2Service, section: str) -> None:
+    result = service.reference_get(section, limit=200)
+    assert result["file"] == f"kd2-rules-build/references/{section}.md"
+    lines = (SKILLS / result["file"]).read_text(encoding="utf-8").splitlines()
+    assert result["total"] == len(lines)
+    assert result["parts"][0]["line"] == 1
+    assert result["parts"][0]["text"].splitlines()[0] == lines[0]
+
+
+def test_rule_kind_key_selects_heading_with_nested(service: Kd2Service) -> None:
+    result = service.reference_get("pko", key="флаги", limit=200)
+    # Вложенный `###` совпал сам, но его строки уже в разделе `##` — назван, не повторён.
+    assert result["headings"] == [
+        "Как флаг доходит до приёмника",
+        "Флаги",
+        "Флаги КД, которые БСП 3.1.12 не исполняет",
+    ]
+    assert len(result["parts"]) == 2
+    text = result["parts"][1]["text"]
+    assert text.startswith("## Флаги\n")
+    assert text.count("### Флаги КД, которые БСП 3.1.12 не исполняет") == 1
+    assert "## Связи ПКО с другими правилами" not in text
+    lines = (SKILLS / result["file"]).read_text(encoding="utf-8").splitlines()
+    first = result["parts"][1]["line"]
+    assert lines[first - 1] == "## Флаги"
+    assert result["total"] == sum(len(part["text"].split("\n")) for part in result["parts"])
+
+
+def test_rule_kind_key_exact_does_not_hide_stem_matches(service: Kd2Service) -> None:
+    # Ревью 26.10.2026: «флаг» целым словом совпадал только с «Как флаг…», раздел «Флаги» пропадал.
+    flags = service.reference_get("pko", key="флаг", limit=200)
+    assert flags["headings"][:2] == ["Как флаг доходит до приёмника", "Флаги"]
+    search = service.reference_get("search", key="поиск", limit=1)
+    assert "Рецепт: ключи поиска" in search["headings"]
+    assert len(search["headings"]) == 3
+
+
+def test_rule_kind_short_key_matches_whole_words_only(service: Kd2Service) -> None:
+    # Основа короче трёх букв — только целым словом: «по» и «к» не находят «поиск» и «КД».
+    assert service.reference_get("search", key="по")["total"] == 0
+    assert service.reference_get("pko", key="к")["total"] == 0
+
+
+def test_rule_kind_key_by_stem_and_level_three(service: Kd2Service) -> None:
+    # «отбора» — не целое слово заголовка: второй проход по основе находит «Отборы в …».
+    result = service.reference_get("pro", key="отбора registration_build", limit=200)
+    assert result["headings"] == ["Отборы в `registration_build`"]
+    text = result["parts"][0]["text"]
+    assert text.startswith("### Отборы в `registration_build`")
+    assert "### Ручная правка файла" not in text
+
+
+def test_rule_kind_key_pages(service: Kd2Service) -> None:
+    whole = service.reference_get("pko", key="флаги", limit=200)
+    page = service.reference_get("pko", key="флаги", offset=5, limit=3)
+    assert page["total"] == whole["total"] and page["has_more"] is True
+    expected = whole["parts"][0]["text"].splitlines()[5:8]
+    start = whole["parts"][0]["line"] + 5
+    assert page["parts"] == [{"line": start, "text": "\n".join(expected)}]
+
+
+def test_rule_kind_key_not_found_lists_headings(service: Kd2Service) -> None:
+    result = service.reference_get("pvd", key="ракета")
+    assert result["parts"] == [] and result["total"] == 0
+    assert result["headings"] == []
+    assert "Поля ПВД" in result["outline"]
+    assert "reference_search" in result["hint"]
+
+
+def test_rule_kind_heading_inside_code_block_is_ignored(tmp_path: Path) -> None:
+    copy = tmp_path / "skills"
+    shutil.copytree(SKILLS, copy)
+    pvd = copy / "kd2-rules-build" / "references" / "pvd.md"
+    fenced = (
+        "\n```\n## Ракета в коде\n```\n"
+        # Длинный забор с ``` внутри и забор тильдами.
+        "\n````\n```\n## Ракета два\n```\n````\n"
+        "\n~~~\n## Ракета три\n~~~\n"
+        # Строка с кодом в строке — не забор: заголовок после неё остаётся заголовком.
+        "\n```код``` в тексте\n## Ракета снаружи ##\n"
+    )
+    pvd.write_text(pvd.read_text(encoding="utf-8") + fenced, encoding="utf-8")
+    service = Kd2Service(
+        Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace", reference_dir=copy)
+    )
+    assert service.reference_get("pvd", key="ракета")["headings"] == ["Ракета снаружи"]
+
+
+def test_rule_kind_level_one_heading_ends_section(tmp_path: Path) -> None:
+    copy = tmp_path / "skills"
+    shutil.copytree(SKILLS, copy)
+    pvd = copy / "kd2-rules-build" / "references" / "pvd.md"
+    pvd.write_text(
+        pvd.read_text(encoding="utf-8") + "\n## Ракета\nтекст\n# Другой файл\nчужое\n", "utf-8"
+    )
+    service = Kd2Service(
+        Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "workspace", reference_dir=copy)
+    )
+    text = service.reference_get("pvd", key="ракета")["parts"][0]["text"]
+    assert text == "## Ракета\nтекст"
 
 
 # --- Ключ ---------------------------------------------------------------------------------
@@ -163,8 +275,11 @@ def test_key_rows_are_paged(service: Kd2Service) -> None:
 
 
 def _section_table_rows() -> list[tuple[str, int, str]]:
+    """Строки таблиц разделов с ключом по таблицам; разделы по заголовкам — со своими правилами."""
     found = []
     for section in SECTIONS:
+        if section.key_headings:
+            continue
         rows = numbered(read_lines(SKILLS, section), section)
         found += [(section.file, line, text) for _, line, text in table_rows(rows)]
     return found
@@ -184,6 +299,18 @@ def test_source_text_is_not_in_code() -> None:
         for file, line, text in _section_table_rows()
         for cell in text.split("|")
         if len(cell.strip()) > 60 and cell.strip() in code
+    ]
+    assert copied == [], "текст справки скопирован в код сервера"
+
+
+def test_section_text_is_not_in_code() -> None:
+    """Источник один: ни одна строка любого раздела (длиннее 60 знаков) не повторена в коде."""
+    code = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src").rglob("*.py"))
+    copied = [
+        f"{section.file}:{line}"
+        for section in SECTIONS
+        for line, text in numbered(read_lines(SKILLS, section), section)
+        if len(text.strip()) > 60 and text.strip() in code
     ]
     assert copied == [], "текст справки скопирован в код сервера"
 

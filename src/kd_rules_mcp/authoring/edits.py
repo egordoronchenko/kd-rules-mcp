@@ -34,23 +34,34 @@
 о созданных ПКС.
 """
 
+import hashlib
+import json
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
-from kd_rules_mcp.authoring.candidates import Candidate, Side, property_candidates
+from kd_rules_mcp.authoring.candidates import (
+    Candidate,
+    Side,
+    object_candidates_report,
+    property_candidates,
+)
 from kd_rules_mcp.errors import (
     AmbiguousAddressError,
+    CountMismatchError,
     DanglingReferenceError,
     DuplicateRuleError,
     ObjectNotFoundError,
+    PreviewRequiredError,
     RuleEditError,
     RuleNotFoundError,
     UnknownFieldError,
 )
 from kd_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
-from kd_rules_mcp.kd2.schema import CONVERSION_EVENTS, Scalar, ValueType
+from kd_rules_mcp.kd2.schema import CONVERSION_EVENTS, Policy, Scalar, ValueType
 from kd_rules_mcp.structures.queries import NotFound, find_object
+from kd_rules_mcp.structures.xmldump import KINDS as _METADATA_KINDS
 from kd_rules_mcp.validation.address import (
     CONVERSION_ADDRESS,
     pks_address,
@@ -62,7 +73,14 @@ from kd_rules_mcp.validation.address import (
     walk_pks,
 )
 from kd_rules_mcp.validation.report import Level, ValidationReport
-from kd_rules_mcp.validation.structure import SOURCE, TARGET, check_rule, is_ref
+from kd_rules_mcp.validation.structure import (
+    SOURCE,
+    TARGET,
+    Structure,
+    check_rule,
+    is_ref,
+    load_sides,
+)
 
 # Шаг `Порядок` автонастройки ПКС (СохранитьПравилаКС, 796 и 864).
 _ORDER_STEP = 50
@@ -85,8 +103,12 @@ _SYNC_BY_ID = "СинхронизироватьПоИдентификатору"
 _MANDATORY = "Обязательное"
 # Фрагмент шаблона `ПОДОБНО "%ЭтоГруппа%"` (ВыгрузкаКонвертации, 1214–1216).
 _GROUP_PROPERTY_MARK = "этогруппа"
+# Первая синхронизация баз с заведёнными данными: без продолжения поиска объект, не найденный
+# по GUID, создаётся сразу (БСП:8837, 8856-8860), с ним — ищется по полям поиска (БСП:8862-8882).
 _SYNC_DEFAULT_NOTE = (
-    "СинхронизироватьПоИдентификатору включено по умолчанию: ссылочный приёмник, не перечисление"
+    "СинхронизироватьПоИдентификатору включено по умолчанию: ссылочный приёмник, не перечисление. "
+    "Если данные уже заведены в обеих базах, при первой синхронизации поиск только по GUID даст "
+    "дубли: нужны поля поиска и ПродолжитьПоискПоПолямПоискаЕслиПоИдентификаторуНеНашли"
 )
 
 # События конвертации — одно правило на файл, ключ пустой или `Конвертация`.
@@ -120,8 +142,21 @@ _TOP: dict[str, tuple[str, str, str]] = {
     "parameter": ("Параметры", "Параметр", "Имя"),
 }
 _NESTED_TAGS = {"pks": "Свойство", "pks_group": "Группа", "pkz": "Значение"}
-# Групповая правка — только вложенные правила одного ПКО. Верхний уровень — `rule_update`.
-_BATCH_KINDS = frozenset(_NESTED_TAGS)
+# Групповая правка вложенных правил одного ПКО и правил верхнего уровня ПКО и ПВД.
+_NESTED_BATCH = frozenset(_NESTED_TAGS)
+_TOP_BATCH = frozenset({"pko", "pvd"})
+_BATCH_KINDS = _NESTED_BATCH | _TOP_BATCH
+_FILTER_KEYS = frozenset({"source_kind", "target_kind", "group"})
+# Виды объектов из `KINDS` (`info[1]`) — единственные допустимые значения фильтра.
+_OBJECT_KINDS = tuple(info[1] for info in _METADATA_KINDS.values())
+_OBJECT_KIND_LIST = ", ".join(_OBJECT_KINDS)
+# Первые 45 символов имени — длина кода в `СформироватьУникальныйКодДляСправочника`
+# (`CommonModules/ОбщегоНазначения/Ext/Module.bsl:200`).
+_CODE_LIMIT = 45
+_CODE_SUFFIX = 5
+_ASCII_DIGITS = frozenset("0123456789")
+# Общие поля пачки одинаковы у всех ПКО; код и стороны задаёт пара.
+_BATCH_PKO_FIELDS = frozenset({"Код", "Источник", "Приемник"})
 _KINDS = set(_TOP) | set(_NESTED_TAGS)
 # Группа списка при создании — только у ПКО, ПВД и ПОД. У алгоритма, запроса и параметра
 # группы в схеме есть, но параметр `group` для них не задаётся.
@@ -163,6 +198,58 @@ class EditResult:
     unresolved: list[str] = field(default_factory=list)
     # Созданные выключенные ПКС (свойство приёмника без пары).
     disabled: list[str] = field(default_factory=list)
+    # Только групповая правка: изменённые поля снимка, `{"old", "new"}`.
+    changes: dict[str, dict[str, Scalar | None]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class BatchUpdate:
+    """Итог `update_rules`: сколько правил выбрано и результат по каждому."""
+
+    matched: int
+    results: list[EditResult]
+
+    @property
+    def changed(self) -> int:
+        """Правила, у которых значения на деле изменились."""
+        return sum(bool(item.changes) for item in self.results)
+
+
+@dataclass(frozen=True, slots=True)
+class _ObjectRef:
+    """Объект структуры для пачки ПКО: подпись `Вид.Имя` и имя типа."""
+
+    kind: str
+    name: str
+    type_name: str
+    synonym: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.kind}.{self.name}"
+
+
+@dataclass(slots=True)
+class PkoBatchItem:
+    """Одна пара пачки. `status` — `created` или `skipped`; preview показывает `planned`."""
+
+    source: str
+    target: str
+    status: str
+    reason: str = ""
+    code: str = ""
+    existing: str = ""
+    node: Node | None = None
+    result: EditResult | None = None
+
+
+@dataclass(slots=True)
+class PkoBatch:
+    """Построенная пачка ПКО и хеш итога. Страницу нарезает вид ответа."""
+
+    mode: str
+    preview_hash: str
+    items: list[PkoBatchItem]
 
 
 @dataclass(slots=True)
@@ -289,32 +376,57 @@ def update_rules(
     kind_name: str,
     fields: Mapping[str, FieldValue],
     *,
-    owner: str,
+    owner: str = "",
     keys: Sequence[str] | None = None,
     except_keys: Sequence[str] = (),
     source: sqlite3.Connection | None = None,
     target: sqlite3.Connection | None = None,
-) -> list[EditResult]:
-    """Меняет одни и те же поля у нескольких вложенных правил одного ПКО.
+    filter: Mapping[str, Any] | None = None,
+    preview: bool = False,
+    expected_count: int | None = None,
+) -> BatchUpdate:
+    """Меняет одни и те же поля у нескольких правил одного вида.
 
-    Вид — `pks`, `pks_group` или `pkz`. `keys` — адреса (путь ПКС или имя значения
-    источника ПКЗ): меняются ровно они. `keys is None` — все правила этого вида у ПКО,
-    кроме `except_keys` (тогда `except_keys` и проверяется). ПКС берутся с раскрытием
-    групп (`walk_pks`); сами группы — только при виде `pks_group`. Неизвестный адрес —
-    ошибка до правок. Пустой итог — ошибка. Порядок — обход ПКО, не порядок `keys`.
+    Вложенные виды — `pks`, `pks_group`, `pkz` одного ПКО (`owner`). `keys` — адреса;
+    `keys is None` — все правила этого вида у ПКО, кроме `except_keys`. ПКО и ПВД
+    выбираются ровно одним способом: `keys` или `filter` (`source_kind`, `target_kind`,
+    `group`). Пустой фильтр — все правила вида. `except_keys` вместе с `keys` у ПКО и
+    ПВД — ошибка. Неизвестный код, ключ фильтра или вид объекта отклоняют пачку до правок.
 
-    Правка атомарна: снимки всех целей снимаются до изменений. Ошибка `_apply_fields`
-    или `_after_change` на любой цели возвращает уже затронутые узлы и пробрасывается.
+    `preview` выполняет ту же правку и проверки и возвращает узлы по снимкам. `expected_count`
+    сверяется с числом выбранных правил до изменений. Правка атомарна: ошибка на любой цели
+    возвращает уже затронутые узлы.
     """
     if kind_name == CONVERSION_KIND:
         raise RuleEditError("События конвертации меняются вызовом rule_update, не пакетом")
     if kind_name not in _BATCH_KINDS:
         raise RuleEditError("Для правил верхнего уровня — rule_update по одному")
-    selected = _select_batch(rules, kind_name, owner, keys, except_keys)
-    if not selected:
-        raise RuleEditError("Нечего менять")
-    loaded = [_require(rules, kind_name, key, owner) for key in selected]
+    _reject_count(expected_count)
+    if isinstance(keys, str) or isinstance(except_keys, str):
+        raise ValueError("keys и except_keys должны быть списками кодов")
+    if kind_name in _TOP_BATCH:
+        if owner:
+            raise ValueError("Для ПКО и ПВД параметр owner не передаётся")
+        if fields and "Код" in fields:
+            raise RuleEditError("Поле «Код» в групповой правке ПКО и ПВД не меняется")
+        # Узлы, а не коды: при повторе кода (`format.duplicate_code`) правится ровно выбранное.
+        loaded: list[tuple[Node, Node, Node | None]] = [
+            (container, node, None)
+            for container, node in _select_top(rules, kind_name, keys, except_keys, filter)
+        ]
+    else:
+        if filter is not None:
+            raise ValueError("Фильтр задаётся только для ПКО и ПВД")
+        selected = _select_batch(rules, kind_name, owner, keys, except_keys)
+        loaded = _load_nested(rules, kind_name, owner, selected)
+    if not loaded:
+        raise RuleEditError(_empty_selection(kind_name, keys, filter, except_keys))
+    if expected_count is not None and expected_count != len(loaded):
+        raise CountMismatchError(
+            f"Под выбор попало {len(loaded)} правил, ожидалось {expected_count}", len(loaded)
+        )
     snaps = [_save(node) for _, node, _ in loaded]
+    sides = load_sides(source, target)
     results: list[EditResult] = []
     for index, (container, node, pko) in enumerate(loaded):
         old_code = node.code
@@ -332,6 +444,7 @@ def update_rules(
                 previous_target,
                 source,
                 target,
+                sides,
             )
         except Exception:
             # Текущая цель могла измениться частично — её снимок тоже возвращается.
@@ -340,8 +453,221 @@ def update_rules(
             raise
         result = _result(kind_name, node, owner, pko, source, target)
         result.warnings.extend(warnings)
+        result.changes = _diff_snap(node, snaps[index])
         results.append(result)
-    return results
+    if preview:
+        for done, snap in enumerate(snaps):
+            _restore(loaded[done][1], snap)
+    return BatchUpdate(len(loaded), results)
+
+
+def _load_nested(
+    rules: ExchangeRules, kind_name: str, owner: str, selected: Sequence[str]
+) -> list[tuple[Node, Node, Node | None]]:
+    """Контейнер, узел и ПКО выбранных вложенных правил в порядке обхода.
+
+    ПКЗ адресуется именем значения источника, а оно может повторяться в разных группах
+    значений: берутся все ПКЗ с выбранными именами, а не первая (`_find_pkz`).
+    """
+    if kind_name != "pkz":
+        return [_require(rules, kind_name, key, owner) for key in selected]
+    pko = _require_pko(rules, owner)
+    values = pko.child("Значения")
+    wanted = set(selected)
+    if values is None:
+        return []
+    return [
+        (container, node, pko)
+        for container, node in _coded_places(values)
+        if str(node.get(SOURCE)) in wanted
+    ]
+
+
+def _coded_places(container: Node) -> list[tuple[Node, Node]]:
+    """Правила списка с их непосредственным контейнером; группы раскрываются."""
+    places: list[tuple[Node, Node]] = []
+    for item in container.items:
+        if item.is_group:
+            places.extend(_coded_places(item))
+        else:
+            places.append((container, item))
+    return places
+
+
+def object_kind(type_name: object) -> str:
+    """Вид объекта по префиксу имени типа из `KINDS`; нет префикса — пустая строка.
+
+    `СправочникСсылка.Валюты` → `Справочник`. `КонстантыНабор`, пустое поле и примитив
+    не совпадают ни с одним префиксом и дают пустую строку: такое правило не попадает
+    под фильтр вида.
+    """
+    if not isinstance(type_name, str) or not type_name:
+        return ""
+    for info in _METADATA_KINDS.values():
+        if type_name.startswith(info[4]):
+            return info[1]
+    return ""
+
+
+def _reject_count(expected_count: int | None) -> None:
+    if isinstance(expected_count, bool):
+        raise ValueError("expected_count должен быть целым числом")
+
+
+def _empty_selection(
+    kind_name: str,
+    keys: Sequence[str] | None,
+    rule_filter: Mapping[str, Any] | None,
+    except_keys: Sequence[str],
+) -> str:
+    parts = [f"вид {kind_name}"]
+    if keys is not None:
+        parts.append("keys: " + (", ".join(keys) or "пусто"))
+    if rule_filter is not None:
+        if rule_filter:
+            listed = ", ".join(f"{key}={value}" for key, value in rule_filter.items())
+        else:
+            listed = "{}"
+        parts.append(f"filter: {listed}")
+    if except_keys:
+        parts.append("кроме " + ", ".join(except_keys))
+    return "Нечего менять: " + "; ".join(parts)
+
+
+def _select_top(
+    rules: ExchangeRules,
+    kind_name: str,
+    keys: Sequence[str] | None,
+    except_keys: Sequence[str],
+    rule_filter: Mapping[str, Any] | None,
+) -> list[tuple[Node, Node]]:
+    """Контейнеры и узлы ПКО или ПВД в порядке документа. Неясный вход — ошибка до правок.
+
+    Код в `keys` выбирает все правила с этим кодом (при повторе кода их несколько).
+    """
+    if (keys is None) == (rule_filter is None):
+        raise ValueError("Для ПКО и ПВД укажите ровно одно: keys или filter")
+    if keys is not None and except_keys:
+        raise ValueError("except_keys вместе с keys для ПКО и ПВД не используется")
+    section = _section_node(rules, _TOP[kind_name][0])
+    places = _coded_places(section) if section is not None else []
+    known = {node.code for _container, node in places}
+    if rule_filter is not None:
+        cleaned = _validate_filter(kind_name, rule_filter)
+        allowed: set[int] | None = None
+        if "group" in cleaned:
+            group_node = _list_group(rules, kind_name, cleaned["group"])
+            if group_node is None:
+                raise RuleNotFoundError(f"Группа «{cleaned['group']}» не найдена")
+            allowed = {id(node) for node in group_node.walk()}
+        source_field = "Источник" if kind_name == "pko" else "ОбъектВыборки"
+        chosen: list[tuple[Node, Node]] = []
+        for container, node in places:
+            if allowed is not None and id(node) not in allowed:
+                continue
+            if (
+                "source_kind" in cleaned
+                and object_kind(node.get(source_field)) != cleaned["source_kind"]
+            ):
+                continue
+            if "target_kind" in cleaned and object_kind(node.get(TARGET)) != cleaned["target_kind"]:
+                continue
+            chosen.append((container, node))
+        excluded = _require_codes(kind_name, except_keys, known)
+        return [place for place in chosen if place[1].code not in excluded]
+    wanted = _require_codes(kind_name, keys or (), known)
+    return [place for place in places if place[1].code in wanted]
+
+
+def _require_codes(kind_name: str, keys: Sequence[str], known: set[str]) -> set[str]:
+    """Коды из списка. Повторы схлопываются. Неизвестного кода нет — ошибка."""
+    found: set[str] = set()
+    for key in keys:
+        code = rule_code(key)
+        if code not in known:
+            raise RuleNotFoundError(_missing(kind_name, code, ""))
+        found.add(code)
+    return found
+
+
+def _validate_filter(kind_name: str, raw: Mapping[str, Any]) -> dict[str, str]:
+    if not isinstance(raw, Mapping):
+        raise ValueError("filter должен быть объектом с ключами source_kind, target_kind, group")
+    cleaned: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or key not in _FILTER_KEYS:
+            raise ValueError(
+                f"Неизвестный ключ фильтра «{key}». Допустимые: source_kind, target_kind, group"
+            )
+        if not isinstance(value, str) or value.strip() == "":
+            raise ValueError(f"Значение фильтра «{key}» должно быть непустой строкой")
+        cleaned[key] = value
+    if kind_name == "pvd" and "target_kind" in cleaned:
+        raise ValueError(
+            "У ПВД параметр target_kind не задаётся: приёмник — свойство его ПКО. "
+            "Отберите ПВД по кодам ПКО из rules_list"
+        )
+    for name in ("source_kind", "target_kind"):
+        if name in cleaned:
+            _require_object_kind(cleaned[name])
+    return cleaned
+
+
+def _require_object_kind(value: str) -> None:
+    if value not in _OBJECT_KINDS:
+        raise ValueError(f"Неизвестный вид объекта «{value}». Допустимые: {_OBJECT_KIND_LIST}")
+
+
+def _diff_snap(node: Node, snap: _Snap) -> dict[str, dict[str, Scalar | None]]:
+    """Поля снимка, которые правка изменила так, что меняется файл. Равные значения не попадают.
+
+    Сравнивается то, что пишет писатель (`Policy`): флаг «только истина» без значения и
+    ложь — одно и то же (ВК:740-748), пустая строка и 0 тега `ADD` не выводятся (ВК:83-95).
+    """
+    policies = {name: leaf.policy for name, leaf in node.kind.leaves.items()}
+    changes = _diff_map(snap.values, node.values, policies)
+    attr_policies = {name: attr.policy for name, attr in node.kind.attr_map.items()}
+    changes.update(_diff_map(snap.attrs, node.attrs, attr_policies))
+    names = list(snap.children)
+    names.extend(name for name in node.children if name not in snap.children)
+    for name in names:
+        child = node.children.get(name)
+        new_attrs = child.attrs if child is not None else {}
+        child_policies = (
+            {key: attr.policy for key, attr in child.kind.attr_map.items()}
+            if child is not None
+            else {}
+        )
+        old_attrs = snap.children.get(name, {})
+        for attr, pair in _diff_map(old_attrs, new_attrs, child_policies).items():
+            changes[f"{name}.{attr}"] = pair
+    return changes
+
+
+def _diff_map(
+    before: Mapping[str, Scalar],
+    after: Mapping[str, Scalar],
+    policies: Mapping[str, Policy],
+) -> dict[str, dict[str, Scalar | None]]:
+    names = list(before)
+    names.extend(name for name in after if name not in before)
+    changes: dict[str, dict[str, Scalar | None]] = {}
+    for name in names:
+        old = before.get(name)
+        new = after.get(name)
+        policy = policies.get(name, Policy.KEEP)
+        if _written(policy, old) != _written(policy, new):
+            changes[name] = {"old": old, "new": new}
+    return changes
+
+
+def _written(policy: Policy, value: Scalar | None) -> Scalar | None:
+    """Значение так, как его увидит файл правил; `None` — поле не выводится."""
+    if policy is Policy.IF_TRUE:
+        return True if value is True else None
+    if policy is Policy.ADD and not isinstance(value, bool) and value in ("", 0):
+        return None
+    return value
 
 
 def delete_rule(
@@ -409,42 +735,440 @@ def create_pko_with_properties(
     if not code:
         raise RuleEditError("Пустой адрес правила")
     list_group = _list_group(rules, "pko", group)
-    source_row = find_object(source, source_object)
-    if isinstance(source_row, NotFound):
-        raise ObjectNotFoundError(source_row.message, source_row.suggestions)
-    target_row = find_object(target, target_object)
-    if isinstance(target_row, NotFound):
-        raise ObjectNotFoundError(target_row.message, target_row.suggestions)
+    source_ref = _require_object(source, source_object)
+    target_ref = _require_object(target, target_object)
     if _find_coded(rules, "pko", code) is not None:
         raise DuplicateRuleError(f"ПКО с кодом «{code}» уже есть")
     candidates = property_candidates(source, target, source_object, target_object)
     if isinstance(candidates, NotFound):
         # Тот же смысл, что у find_object выше: объекта источника или приёмника нет.
         raise ObjectNotFoundError(candidates.message, candidates.suggestions)
-    _reject_identity_mismatch("pko", code, fields)
-    # глНаименованиеПКО (ОбщегоНазначения, 113): тип источника, двоеточие, синоним.
-    node = Node.new("pko", "Правило")
-    node.values["Код"] = code
-    node.values["Наименование"] = f"{source_row['kind']}: {source_row['synonym']}"
-    node.values[SOURCE] = str(source_row["type_name"])
-    node.values[TARGET] = str(target_row["type_name"])
-    if fields:
-        _apply_fields(node, fields)
-    sync_by_id = _apply_identifier_sync(node, str(target_row["kind"]), fields)
+    node, result, sync_by_id = _new_pko_node(code, source_ref, target_ref, fields)
     inserted = _attach(rules, "pko", node, None, None, list_group)
-    result = EditResult(rule_address(node))
     try:
         # Сгенерированные ПКС не проверяются: ссылка без ПКО остаётся в `unresolved`.
         result.warnings.extend(_apply_structure(rules, "pko", node, source, target))
         if sync_by_id:
             result.warnings.append(_SYNC_DEFAULT_NOTE)
-        properties = Node.new("pks_list", "Свойства")
-        node.children["Свойства"] = properties
-        _fill_properties(properties, candidates, rules, "", result)
+        _fill_pko_properties(node, candidates, rules, result)
     except Exception:
         _detach(inserted, node)
         raise
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class _PairSpec:
+    """Пара пачки: объекты сторон и явный код, если его передали."""
+
+    source: _ObjectRef
+    target: _ObjectRef
+    code: str | None = None
+
+
+def create_pko_many(
+    rules: ExchangeRules,
+    source_structure: str,
+    target_structure: str,
+    source: sqlite3.Connection,
+    target: sqlite3.Connection,
+    *,
+    kind: str | None = None,
+    pairs: Sequence[Mapping[str, Any]] | None = None,
+    fields: Mapping[str, FieldValue] | None = None,
+    group: str = "",
+    mode: str = "preview",
+    expected_preview_hash: str | None = None,
+) -> PkoBatch:
+    """ПКО и ПКС по многим парам. Сначала все узлы ПКО, затем их ПКС.
+
+    `kind` берёт только пары `auto` с обеими сторонами. `pairs` — решение агента.
+    Хеш считается по входам и итогу; статус в хеше — `created`, ответ preview
+    показывает `planned`. `offset` и `limit` в хеш не входят: страницу режет вид ответа.
+    Предупреждения тоже не входят: они выводятся из тех же узлов.
+    """
+    if mode not in ("preview", "apply"):
+        raise ValueError(f"Режим «{mode}» не принимается. Допустимые: preview, apply")
+    if (kind is None) == (pairs is None):
+        raise ValueError("Укажите ровно одно: kind или pairs")
+    if kind is not None and not isinstance(kind, str):
+        raise ValueError("kind должен быть строкой")
+    _reject_batch_pko_fields(fields)
+    list_group = _list_group(rules, "pko", group)
+    specs = _resolve_pair_specs(source, target, kind, pairs)
+    inserted: list[tuple[_Inserted, Node]] = []
+    items: list[PkoBatchItem] = []
+    sides = load_sides(source, target)
+
+    def rollback() -> None:
+        for place, node in reversed(inserted):
+            _detach(place, node)
+
+    try:
+        for spec in specs:
+            existing = _pko_by_types(rules, spec.source.type_name, spec.target.type_name)
+            if existing is not None:
+                items.append(
+                    PkoBatchItem(
+                        spec.source.label,
+                        spec.target.label,
+                        "skipped",
+                        reason="exists",
+                        existing=existing.code,
+                    )
+                )
+                continue
+            explicit = spec.code
+            if explicit is not None and _code_taken(rules, explicit):
+                items.append(
+                    PkoBatchItem(
+                        spec.source.label,
+                        spec.target.label,
+                        "skipped",
+                        reason="code_taken",
+                        code=explicit,
+                    )
+                )
+                continue
+            base = _pko_code_base(spec.target.type_name)
+            code = explicit if explicit is not None else _allocate_pko_code(rules, base)
+            node, result, sync_by_id = _new_pko_node(code, spec.source, spec.target, fields)
+            inserted.append((_attach(rules, "pko", node, None, None, list_group), node))
+            result.warnings.extend(_apply_structure(rules, "pko", node, source, target, sides))
+            if sync_by_id:
+                result.warnings.append(_SYNC_DEFAULT_NOTE)
+            if explicit is None and code != base:
+                result.warnings.append(f"код «{base}» занят — взят «{code}»")
+            items.append(
+                PkoBatchItem(
+                    spec.source.label,
+                    spec.target.label,
+                    "created",
+                    code=node.code,
+                    node=node,
+                    result=result,
+                )
+            )
+        for item in items:
+            if item.status != "created" or item.node is None or item.result is None:
+                continue
+            candidates = property_candidates(source, target, item.source, item.target)
+            if isinstance(candidates, NotFound):
+                raise ObjectNotFoundError(candidates.message, candidates.suggestions)
+            _fill_pko_properties(item.node, candidates, rules, item.result)
+    except Exception:
+        rollback()
+        raise
+    digest = _pko_batch_hash(source_structure, target_structure, kind, pairs, fields, group, items)
+    if mode == "preview":
+        rollback()
+    elif expected_preview_hash != digest:
+        rollback()
+        raise PreviewRequiredError(digest)
+    return PkoBatch(mode, digest, items)
+
+
+def _require_object(conn: sqlite3.Connection, name: str) -> _ObjectRef:
+    row = find_object(conn, name)
+    if isinstance(row, NotFound):
+        raise ObjectNotFoundError(row.message, row.suggestions)
+    return _ObjectRef(
+        str(row["kind"]), str(row["name"]), str(row["type_name"]), str(row["synonym"])
+    )
+
+
+def _new_pko_node(
+    code: str,
+    source_ref: _ObjectRef,
+    target_ref: _ObjectRef,
+    fields: Mapping[str, FieldValue] | None,
+) -> tuple[Node, EditResult, bool]:
+    """Узел ПКО без ПКС: наименование, стороны, поля и синхронизация по идентификатору."""
+    _reject_identity_mismatch("pko", code, fields)
+    # глНаименованиеПКО (ОбщегоНазначения, 113): тип источника, двоеточие, синоним.
+    node = Node.new("pko", "Правило")
+    node.values["Код"] = code
+    node.values["Наименование"] = f"{source_ref.kind}: {source_ref.synonym}"
+    node.values[SOURCE] = source_ref.type_name
+    node.values[TARGET] = target_ref.type_name
+    if fields:
+        _apply_fields(node, fields)
+    sync_by_id = _apply_identifier_sync(node, target_ref.kind, fields)
+    return node, EditResult(rule_address(node)), sync_by_id
+
+
+def _fill_pko_properties(
+    node: Node, candidates: list[Candidate], rules: ExchangeRules, result: EditResult
+) -> None:
+    """ПКС узла по уже полученным кандидатам."""
+    properties = Node.new("pks_list", "Свойства")
+    node.children["Свойства"] = properties
+    _fill_properties(properties, candidates, rules, "", result)
+
+
+def _reject_batch_pko_fields(fields: Mapping[str, FieldValue] | None) -> None:
+    if not fields:
+        return
+    banned = [name for name in fields if name in _BATCH_PKO_FIELDS]
+    if not banned:
+        return
+    names = ", ".join(f"«{name}»" for name in banned)
+    raise RuleEditError(f"Поля {names} в массовом создании задаются парами, а не общими fields")
+
+
+def _resolve_pair_specs(
+    source: sqlite3.Connection,
+    target: sqlite3.Connection,
+    kind: str | None,
+    pairs: Sequence[Mapping[str, Any]] | None,
+) -> list[_PairSpec]:
+    if kind is not None:
+        return _specs_from_kind(source, target, kind)
+    return _specs_from_pairs(source, target, pairs)
+
+
+def _specs_from_kind(
+    source: sqlite3.Connection, target: sqlite3.Connection, kind: str
+) -> list[_PairSpec]:
+    present_source = _present_kinds(source)
+    present_target = _present_kinds(target)
+    if kind not in present_source and kind not in present_target:
+        source_list = ", ".join(present_source) or "нет"
+        target_list = ", ".join(present_target) or "нет"
+        raise ValueError(
+            f"Вида «{kind}» нет в структурах. "
+            f"Виды источника: {source_list}. Виды приёмника: {target_list}"
+        )
+    report = object_candidates_report(source, target, kind, composition=False)
+    specs: list[_PairSpec] = []
+    for candidate in report.candidates:
+        if not candidate.auto or candidate.source is None or candidate.target is None:
+            continue
+        specs.append(_PairSpec(_ref_from_side(candidate.source), _ref_from_side(candidate.target)))
+    return specs
+
+
+def _ref_from_side(side: Side) -> _ObjectRef:
+    return _ObjectRef(side.kind, side.name, side.path, side.synonym)
+
+
+def _present_kinds(conn: sqlite3.Connection) -> list[str]:
+    """Виды объектов с теми же условиями, что `_objects` в кандидатах."""
+    rows = conn.execute(
+        "SELECT DISTINCT kind FROM objects "
+        "WHERE is_group = 0 AND kind <> '' AND type_name LIKE '%.%' ORDER BY kind"
+    )
+    return [str(row[0]) for row in rows]
+
+
+def _specs_from_pairs(
+    source: sqlite3.Connection,
+    target: sqlite3.Connection,
+    pairs: Sequence[Mapping[str, Any]] | None,
+) -> list[_PairSpec]:
+    parsed = _parse_pairs(pairs)
+    missing: list[str] = []
+    suggestions: list[str] = []
+    found: list[tuple[_ObjectRef | None, _ObjectRef | None, str | None]] = []
+    for spec in parsed:
+        source_ref = _lookup_ref(source, spec["source"], "источника", missing, suggestions)
+        target_ref = _lookup_ref(target, spec["target"], "приёмника", missing, suggestions)
+        found.append((source_ref, target_ref, spec.get("code")))
+    if missing:
+        raise ObjectNotFoundError("Объекты не найдены: " + "; ".join(missing), suggestions)
+    specs: list[_PairSpec] = []
+    for source_ref, target_ref, code in found:
+        if source_ref is None or target_ref is None:
+            continue
+        specs.append(_PairSpec(source_ref, target_ref, code))
+    return specs
+
+
+def _lookup_ref(
+    conn: sqlite3.Connection,
+    name: str,
+    side: str,
+    missing: list[str],
+    suggestions: list[str],
+) -> _ObjectRef | None:
+    row = find_object(conn, name)
+    if isinstance(row, NotFound):
+        missing.append(f"{side} «{name}»")
+        for item in row.suggestions:
+            if item not in suggestions:
+                suggestions.append(item)
+        return None
+    return _ObjectRef(
+        str(row["kind"]), str(row["name"]), str(row["type_name"]), str(row["synonym"])
+    )
+
+
+def _parse_pairs(pairs: Sequence[Mapping[str, Any]] | None) -> list[dict[str, str]]:
+    if pairs is None or isinstance(pairs, (str, bytes)) or not isinstance(pairs, Sequence):
+        raise ValueError("pairs должен быть списком пар {source, target, code?}")
+    parsed: list[dict[str, str]] = []
+    for index, item in enumerate(pairs, start=1):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"Пара {index} должна быть объектом {{source, target, code?}}")
+        unknown = [str(key) for key in item if key not in {"source", "target", "code"}]
+        if unknown:
+            names = ", ".join(f"«{key}»" for key in unknown)
+            raise ValueError(
+                f"Пара {index}: неизвестные ключи {names}. Допустимые: source, target, code"
+            )
+        if "source" not in item or "target" not in item:
+            raise ValueError(f"Пара {index}: нужны source и target")
+        source_name = item["source"]
+        target_name = item["target"]
+        if not isinstance(source_name, str) or source_name.strip() == "":
+            raise ValueError(f"Пара {index}: source должен быть непустой строкой")
+        if not isinstance(target_name, str) or target_name.strip() == "":
+            raise ValueError(f"Пара {index}: target должен быть непустой строкой")
+        spec = {"source": source_name, "target": target_name}
+        if "code" in item:
+            code = item["code"]
+            if not isinstance(code, str) or code.strip() == "":
+                raise ValueError(f"Пара {index}: code должен быть непустой строкой")
+            spec["code"] = code
+        parsed.append(spec)
+    return parsed
+
+
+def _pko_by_types(rules: ExchangeRules, source_type: str, target_type: str) -> Node | None:
+    source_key = rule_code(source_type)
+    target_key = rule_code(target_type)
+    for item in _walk_coded(rules, "pko"):
+        if rule_code(item.get(SOURCE)) == source_key and rule_code(item.get(TARGET)) == target_key:
+            return item
+    return None
+
+
+def _code_taken(rules: ExchangeRules, code: str) -> bool:
+    folded = rule_code(code).casefold()
+    return any(item.casefold() == folded for item in _pko_list_codes(rules))
+
+
+def _pko_list_codes(rules: ExchangeRules) -> list[str]:
+    """Коды ПКО и групп списка ПКО: КД ищет занятый код по всему справочнику, группы тоже
+    (`СформироватьУникальныйКодДляСправочника`, ОбщегоНазначения:206-216, 234-245)."""
+    section = _section_node(rules, _TOP["pko"][0])
+    return _list_codes(section) if section is not None else []
+
+
+def _list_codes(container: Node) -> list[str]:
+    codes: list[str] = []
+    for item in container.items:
+        codes.append(item.code)
+        if item.is_group:
+            codes.extend(_list_codes(item))
+    return codes
+
+
+def _pko_code_base(type_name: str) -> str:
+    """Имя приёмника без вида, не длиннее 45 символов (`глИмяОбъекта`, ОбщегоНазначения:185-189)."""
+    _head, dot, tail = type_name.partition(".")
+    if not dot:
+        return ""
+    return tail.strip()[:_CODE_LIMIT]
+
+
+def _allocate_pko_code(rules: ExchangeRules, base: str) -> str:
+    """Свободный код ПКО: основа или суффикс из пяти цифр, пока код не свободен.
+
+    Занятая основа ищет наибольший (сравнением строк) код вида `<основа>[0-9]…`
+    (`СформироватьУникальныйКодДляСправочника`, ОбщегоНазначения:198-302). Если этот
+    код тоже занят (`Валюты1` больше `Валюты00002` как строка), число увеличивается.
+    """
+    if not base:
+        raise RuleEditError("Не удалось построить код ПКО: у приёмника пустое имя")
+    if not _code_taken(rules, base):
+        return base
+    folded_base = base.casefold()
+    matched: list[str] = []
+    for code in _pko_list_codes(rules):
+        folded = code.casefold()
+        if not folded.startswith(folded_base):
+            continue
+        rest = folded[len(folded_base) :]
+        if rest and rest[0] in _ASCII_DIGITS:
+            matched.append(code)
+    if not matched:
+        candidate = base + "00001"
+    else:
+        greatest = max(matched)
+        prefix, digits = _split_trailing_digits(greatest)
+        candidate = greatest + "00001" if not digits else prefix + _code_suffix(int(digits) + 1)
+    seen: set[str] = set()
+    while _code_taken(rules, candidate):
+        if candidate in seen:
+            raise RuleEditError(f"Не удалось подобрать свободный код ПКО для основы «{base}»")
+        seen.add(candidate)
+        candidate = _bump_code(candidate)
+    return candidate
+
+
+def _split_trailing_digits(code: str) -> tuple[str, str]:
+    index = len(code)
+    while index > 0 and code[index - 1] in _ASCII_DIGITS:
+        index -= 1
+    return code[:index], code[index:]
+
+
+def _code_suffix(number: int) -> str:
+    return str(number).zfill(_CODE_SUFFIX)[-_CODE_SUFFIX:]
+
+
+def _bump_code(code: str) -> str:
+    prefix, digits = _split_trailing_digits(code)
+    if not digits:
+        return code + "00001"
+    return prefix + _code_suffix(int(digits) + 1)
+
+
+def _pko_batch_hash(
+    source_structure: str,
+    target_structure: str,
+    kind: str | None,
+    pairs: Sequence[Mapping[str, Any]] | None,
+    fields: Mapping[str, FieldValue] | None,
+    group: str,
+    items: list[PkoBatchItem],
+) -> str:
+    payload = {
+        "source_structure": source_structure,
+        "target_structure": target_structure,
+        "kind": kind,
+        "pairs": None if pairs is None else [dict(item) for item in pairs],
+        "fields": None if fields is None else dict(fields),
+        "group": group,
+        "items": [_item_canon(item) for item in items],
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _item_canon(item: PkoBatchItem) -> dict[str, Any]:
+    return {
+        "status": item.status,
+        "reason": item.reason or None,
+        "code": item.code or None,
+        "existing": item.existing or None,
+        "source": item.source,
+        "target": item.target,
+        "node": None if item.node is None else _node_canon(item.node),
+    }
+
+
+def _node_canon(node: Node) -> dict[str, Any]:
+    return {
+        "kind": node.kind.name,
+        "tag": node.tag,
+        "attrs": dict(node.attrs),
+        "values": dict(node.values),
+        "text": node.text,
+        "children": {name: _node_canon(child) for name, child in node.children.items()},
+        "items": [_node_canon(child) for child in node.items],
+    }
 
 
 # --- События конвертации -----------------------------------------------------------------------
@@ -1099,6 +1823,7 @@ def _after_change(
     previous_target: str,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
+    sides: dict[str, Structure | None] | None = None,
 ) -> list[str]:
     if kind_name == "pko" and node.code != old_code:
         refs = _referrers(rules, old_code, node)
@@ -1117,7 +1842,7 @@ def _after_change(
     if kind_name == "pkz" and pko is not None:
         _reject_pkz_clash(container, node)
     _check_dangling(rules, kind_name, node)
-    return _apply_structure(rules, kind_name, node, source, target)
+    return _apply_structure(rules, kind_name, node, source, target, sides)
 
 
 def _reject_receiver_clash(container: Node, node: Node, previous: str) -> None:
@@ -1187,6 +1912,7 @@ def _apply_structure(
     node: Node,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
+    sides: dict[str, Structure | None] | None = None,
 ) -> list[str]:
     """Замечания `check_rule` по этому узлу. Ошибка отклоняет правку, предупреждение — нет.
 
@@ -1195,7 +1921,7 @@ def _apply_structure(
     """
     if kind_name not in _STRUCTURE_KINDS:
         return []
-    return _structure_messages(check_rule(rules, node, source, target))
+    return _structure_messages(check_rule(rules, node, source, target, sides=sides))
 
 
 def _structure_messages(report: ValidationReport) -> list[str]:

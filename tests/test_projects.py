@@ -637,3 +637,54 @@ def test_exchange_empty_directions_refused(tmp_path: Path) -> None:
 def test_exchange_duplicate_explicit_ids(tmp_path: Path) -> None:
     with pytest.raises(ProjectConfigError, match=r"id.*одинаковые.*same"):
         _profile_catalog(tmp_path, [{**_profile(), "id": "same"}, {**_profile(), "id": "same"}])
+
+
+def _rules_dir_catalog(tmp_path: Path, exchange: dict, rules_dir: str = "Проект/ПравилаОбмена"):
+    data = yaml.safe_load(CATALOG)
+    data["projects"]["alpha"]["rules_dir"] = rules_dir
+    data["exchanges"] = [exchange]
+    return load_catalog(_write_catalog(tmp_path, yaml.safe_dump(data, allow_unicode=True)))
+
+
+def test_exchange_rules_default_from_rules_dir(tmp_path: Path) -> None:
+    """Без `rules` — `<rules_dir>/<план стороны>`; явный `rules` главнее; без `rules_dir` — нет."""
+    profile = {
+        "plan": "План",
+        "technology": "kd2",
+        "sides": [{"project": "alpha", "plan": "ПланАльфы"}, {"project": "beta"}],
+    }
+    alpha, beta = _rules_dir_catalog(tmp_path, profile).exchanges[0].sides
+    assert (alpha.rules, alpha.rules_default) == ("Проект/ПравилаОбмена/ПланАльфы", True)
+    assert (beta.rules, beta.rules_default) == (None, False)
+    profile["sides"][0]["rules"] = "свои/План"
+    alpha = _rules_dir_catalog(tmp_path, profile).exchanges[0].sides[0]
+    assert (alpha.rules, alpha.rules_default) == ("свои/План", False)
+
+
+@pytest.mark.parametrize("rules_dir", ["Проект\\ПравилаОбмена\\", "Проект/ПравилаОбмена/"])
+def test_exchange_rules_default_normalizes_separators(tmp_path: Path, rules_dir: str) -> None:
+    profile = {"plan": "План", "sides": [{"project": "alpha"}, {"project": "beta"}]}
+    alpha = _rules_dir_catalog(tmp_path, profile, rules_dir).exchanges[0].sides[0]
+    assert alpha.rules == "Проект/ПравилаОбмена/План"
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"plan": "План", "technology": "ed", "sides": [{"project": "alpha"}, {"project": "beta"}]},
+        {"plan": "План", "sides": [{"project": "alpha"}, {"project": "beta", "module": "М"}]},
+        {"plan": "План", "projects": ["alpha", "beta"]},
+    ],
+    ids=["ed", "module-without-technology", "legacy"],
+)
+def test_exchange_rules_default_only_for_kd2_sides(tmp_path: Path, profile: dict) -> None:
+    exchange = _rules_dir_catalog(tmp_path, profile).exchanges[0]
+    assert all(side.rules is None for side in exchange.sides)
+
+
+@pytest.mark.parametrize("rules_dir", ["../общие/ПравилаОбмена", "C:/Правила"])
+def test_exchange_rules_default_skips_unusual_rules_dir(tmp_path: Path, rules_dir: str) -> None:
+    """Прежде такой каталог читался: значения по умолчанию нет, отказа тоже."""
+    profile = {"plan": "План", "sides": [{"project": "alpha"}, {"project": "beta"}]}
+    alpha = _rules_dir_catalog(tmp_path, profile, rules_dir).exchanges[0].sides[0]
+    assert alpha.rules is None

@@ -30,7 +30,7 @@ import re
 from enum import Enum
 
 from kd_rules_mcp.kd2.bsl_text import bsl_code
-from kd_rules_mcp.kd2.model import ExchangeRules, Node
+from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules
 from kd_rules_mcp.validation.address import rule_address
 from kd_rules_mcp.validation.handlers import ALGORITHM_EVENT, collect_handlers
 from kd_rules_mcp.validation.report import Issue, Level, ValidationReport
@@ -74,8 +74,14 @@ _ANY_PHASE = {("Конвертация", "ПослеЗагрузкиПравил
 _REFERENCE = re.compile(r"(?<![\w.])Алгоритмы\s*\.\s*([^\W\d]\w*)\b(?!\s*\()", re.IGNORECASE)
 
 
-def check_algorithm_refs(rules: ExchangeRules) -> ValidationReport:
-    """Ссылки `Алгоритмы.Имя` в обработчиках и алгоритмах против списка алгоритмов правил."""
+def check_algorithm_refs(
+    rules: ExchangeRules, registration: RegistrationRules | None = None
+) -> ValidationReport:
+    """Ссылки `Алгоритмы.Имя` в обработчиках и алгоритмах против списка алгоритмов правил.
+
+    `registration` — правила регистрации плана: ПКО с ПРО режима выгрузки может уйти
+    целиком, ошибки его обработчиков загрузки не смягчаются.
+    """
     report = ValidationReport()
     algorithms = _algorithms(rules)
     names = {
@@ -97,13 +103,15 @@ def check_algorithm_refs(rules: ExchangeRules) -> ValidationReport:
         if isinstance(text, str):
             address = f"{rule_address(node)} / {ALGORITHM_EVENT}"
             _check_text(report, text, address, _phase_of_algorithm(node), names)
-    _soften_ref_only_load(report, rules)
+    _soften_ref_only_load(report, rules, registration)
     return report
 
 
-def _soften_ref_only_load(report: ValidationReport, rules: ExchangeRules) -> None:
+def _soften_ref_only_load(
+    report: ValidationReport, rules: ExchangeRules, registration: RegistrationRules | None
+) -> None:
     """Обработчики загрузки ПКО «только ссылка» исполнителем не вызываются (БСП:7984–8010)."""
-    addresses = ref_only_pko_addresses(rules)
+    addresses = ref_only_pko_addresses(rules, registration)
     if not addresses:
         return
     softened: list[Issue] = []

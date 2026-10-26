@@ -12,11 +12,13 @@
 import sqlite3
 from dataclasses import dataclass, field
 
-from kd_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
+from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, rule_code
 from kd_rules_mcp.validation.address import (
     pks_address,
     pks_segments,
     pkz_address,
+    pro_addresses,
+    pro_loaded,
     rule_address,
     side_name,
 )
@@ -154,6 +156,8 @@ class _Context:
     pko_by_code: dict[str, Node] = field(default_factory=dict)
     pko_sources: set[str] = field(default_factory=set)
     graph: CallGraph | None = None
+    # Правила регистрации того же плана: режим выгрузки «при необходимости» (БСП:3393-3437).
+    registration: RegistrationRules | None = None
 
 
 def check_structures(
@@ -161,13 +165,17 @@ def check_structures(
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
     graph: CallGraph | None = None,
+    registration: RegistrationRules | None = None,
 ) -> ValidationReport:
     """Проверяет ПКО, ПКС, ПКЗ, ПВД и ПОД против структур источника и приёмника.
 
     Без структуры стороны проверки по ней не выполняются и перечисляются в отчёте отдельно.
+    `registration` — правила регистрации плана этих правил; по ним `structure.pko_ref_only`
+    видит реквизит режима выгрузки узла. Без них проверка ведёт себя как прежде.
     """
     context = _prepare(rules, source, target)
     context.graph = graph
+    context.registration = registration
     for pko in rules.pko():
         _check_pko(context, pko)
     for pvd in rules.pvd():
@@ -180,20 +188,35 @@ def check_structures(
     return context.report
 
 
+def load_sides(
+    source: sqlite3.Connection | None, target: sqlite3.Connection | None
+) -> dict[str, "Structure | None"]:
+    """Индексы обеих структур один раз — для пачки узлов (`check_rule(..., sides=…)`)."""
+    return {
+        SOURCE: Structure.load(source) if source is not None else None,
+        TARGET: Structure.load(target) if target is not None else None,
+    }
+
+
 def check_rule(
     rules: ExchangeRules,
     node: Node,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
+    *,
+    sides: dict[str, "Structure | None"] | None = None,
 ) -> ValidationReport:
     """Проверяет один узел, уже стоящий в дереве `rules`.
+
+    `sides` — индексы из `load_sides` тех же `source` и `target`: пачка правок загружает
+    структуры один раз, а не на каждый узел (на тысяче ПКО это 2 × 1000 чтений списка объектов).
 
     Владелец-ПКО и группы-предки ищутся обходом документа: у `Node` нет ссылки на родителя.
     Предки задают путь и вид родителя и сами замечаний не дают. Соседи и вложенные правила,
     которых эта правка не меняла, молчат. `structure.pko_unreachable` и `structure.pko_ref_only`
     считают весь документ и здесь не выполняются.
     """
-    context = _prepare(rules, source, target)
+    context = _prepare(rules, source, target, sides)
     place = _locate(rules, node)
     if place is None:
         return context.report
@@ -214,13 +237,11 @@ def _prepare(
     rules: ExchangeRules,
     source: sqlite3.Connection | None,
     target: sqlite3.Connection | None,
+    loaded: dict[str, "Structure | None"] | None = None,
 ) -> _Context:
     """Стороны и индекс ПКО. Без структуры стороны проверки по ней пропускаются."""
     report = ValidationReport()
-    sides: dict[str, Structure | None] = {
-        SOURCE: Structure.load(source) if source is not None else None,
-        TARGET: Structure.load(target) if target is not None else None,
-    }
+    sides = dict(loaded) if loaded is not None else load_sides(source, target)
     for side, structure in sides.items():
         if structure is None:
             report.skip(
@@ -706,9 +727,13 @@ def ref_only_pko_codes(rules: ExchangeRules, graph: CallGraph | None = None) -> 
     return found
 
 
-def ref_only_pko_addresses(rules: ExchangeRules) -> set[str]:
-    """Адреса ПКО из `ref_only_pko_codes`."""
+def ref_only_pko_addresses(
+    rules: ExchangeRules, registration: RegistrationRules | None = None
+) -> set[str]:
+    """Адреса ПКО из `ref_only_pko_codes`, кроме тех, что режим выгрузки узла может
+    выгрузить целиком (`mode_pko_codes`)."""
     codes = ref_only_pko_codes(rules)
+    codes -= mode_pko_codes(rules, registration, codes)
     return {rule_address(pko) for pko in rules.pko() if rule_code(pko.code) in codes}
 
 
@@ -735,17 +760,117 @@ def _check_unreachable_pko(context: _Context) -> None:
         )
 
 
-def _ref_only_message(code: str, addresses: str) -> str:
+def _ref_only_message(code: str, addresses: str, mode_hint: str) -> str:
     return (
         f"ПКО «{code}» достижим только ссылкой: ПВД на него нет, ПКС {addresses} выгружают"
         " значение без ВыгрузитьОбъект = Истина — в сообщение уходят только свойства поиска,"
         " остальные ПКС этого ПКО не исполняются. Чтобы объект уходил целиком: ПВД и правило"
         " регистрации на него (объект должен входить в состав плана обмена) либо"
-        " ВыгрузитьОбъект = Истина в ПередВыгрузкой ПКС, где он выгружается. Исключение —"
-        " флаг узла «при необходимости» в правилах регистрации объекта: проверьте ПРО."
+        f" ВыгрузитьОбъект = Истина в ПередВыгрузкой ПКС, где он выгружается. {mode_hint}"
         " Для классификаторов и справочников, которые приёмник находит по полям поиска,"
         " это штатная схема — тогда замечание можно не учитывать."
     )
+
+
+# Без правил регистрации режим узла не виден — прежний текст.
+_MODE_UNKNOWN = (
+    "Исключение — флаг узла «при необходимости» в правилах регистрации объекта: проверьте ПРО."
+)
+# Тип реквизита узла, который исполнитель читает как режим выгрузки (БСП:3474).
+_MODE_TYPE = "ПеречислениеСсылка.РежимыВыгрузкиОбъектовОбмена"
+
+
+def _mode_missing(meta: str) -> str:
+    return (
+        f"В правилах регистрации нет загружаемого ПРО «{meta}» с реквизитом режима выгрузки —"
+        " режим узла «при необходимости» на этот объект не действует."
+    )
+
+
+def _mode_not_in_plan(meta: str, plan: str, attributes: list[str]) -> str:
+    names = ", ".join(dict.fromkeys(f"«{name}»" for name in attributes))
+    return (
+        f"ПРО «{meta}» называет реквизит режима выгрузки {names}, но у плана обмена «{plan}»"
+        f" в структуре источника нет такого реквизита типа «{_MODE_TYPE}» — исполнитель его"
+        " не читает, режим узла «при необходимости» на этот объект не действует."
+    )
+
+
+def _mode_message(code: str, addresses: str, modes: list[tuple[str, str]]) -> str:
+    pro = ", ".join(dict.fromkeys(address for address, _ in modes))
+    names = ", ".join(dict.fromkeys(f"«{attribute}»" for _, attribute in modes))
+    return (
+        f"ПКО «{code}» достижим только ссылкой (ПКС {addresses}), но {pro} задаёт режим"
+        f" выгрузки реквизитом узла {names}. Если хотя бы в одном из них на узле «Выгружать"
+        " при необходимости» или пусто, объект, которого ещё нет в регистре соответствий узла,"
+        " при первой ссылке уходит целиком; при «Выгружать всегда», «Выгружать по условию»,"
+        " «Выгружать вручную» и «Не выгружать» — только ссылкой. Проверьте значение на узле."
+    )
+
+
+def export_mode_pro(registration: RegistrationRules) -> dict[str, list[tuple[str, str]]]:
+    """Полное имя объекта (без регистра) → [(адрес ПРО, реквизит режима выгрузки)].
+
+    Читатель кладёт `РеквизитРежимаВыгрузки` в `ИмяРеквизитаФлага` (РЕГ:309-311) и грузит
+    только включённые валидные правила (РЕГ:281-292); текст узла обрезает только справа
+    (`СокрП`, РЕГ:1114). Исполнитель ищет ПРО по полному имени объекта метаданных
+    (БСП:3409-3411, РЕГ:305), итог — ИЛИ по всем найденным ПРО (БСП:3413-3429).
+    """
+    nodes = registration.rules()
+    found: dict[str, list[tuple[str, str]]] = {}
+    for node, address in zip(nodes, pro_addresses(nodes), strict=True):
+        meta = str(node.get("ОбъектМетаданныхИмя")).rstrip()
+        attribute = str(node.get("РеквизитРежимаВыгрузки")).rstrip()
+        # Имя с пробелом слева не совпадёт ни с одним реквизитом узла: режим не действует.
+        if meta and attribute and not attribute[0].isspace() and pro_loaded(node):
+            found.setdefault(meta.casefold(), []).append((address, attribute))
+    return found
+
+
+def _pko_metadata_name(pko: Node) -> str:
+    """Полное имя объекта метаданных источника ПКО: `СправочникСсылка.X` → `Справочник.X`."""
+    head, _, name = str(pko.get(SOURCE)).strip().partition(".")
+    return f"{head.removesuffix('Ссылка')}.{name}"
+
+
+def _plan_mode_attributes(
+    context: _Context, plan: str, modes: list[tuple[str, str]]
+) -> list[tuple[str, str]] | None:
+    """ПРО, чей реквизит есть у плана с типом режима выгрузки; None — плана в структуре нет.
+
+    Исполнитель читает у узла только реквизиты этого типа (БСП:3474, `ИменаРеквизитовПоТипу`
+    общего модуля `ОбщегоНазначения`); у другого имени значение `Неопределено`, и режим не
+    действует (БСП:3417-3421).
+    """
+    structure = context.sides.get(SOURCE)
+    obj = structure.get(f"ПланОбменаСсылка.{plan}") if structure is not None and plan else None
+    if structure is None or obj is None:
+        return None
+    properties = structure.properties(obj)
+    return [
+        (address, attribute)
+        for address, attribute in modes
+        if any(_MODE_TYPE in prop.types for prop in properties.get((attribute, ""), []))
+    ]
+
+
+def mode_pko_codes(
+    rules: ExchangeRules, registration: RegistrationRules | None, codes: set[str]
+) -> set[str]:
+    """Коды из `codes`, у объекта которых есть ПРО с реквизитом режима выгрузки.
+
+    Такой ПКО может уйти целиком (режим «при необходимости»), поэтому обработчики его
+    загрузки не считаются заведомо неисполняемыми. Структура здесь не нужна: без неё
+    реквизит у плана не проверить, и выбирается осторожный вывод.
+    """
+    if registration is None or not codes:
+        return set()
+    modes = export_mode_pro(registration)
+    return {
+        rule_code(pko.code)
+        for pko in rules.pko()
+        if rule_code(pko.code) in codes and _pko_metadata_name(pko).casefold() in modes
+    }
 
 
 def _check_ref_only_pko(context: _Context) -> None:
@@ -755,22 +880,51 @@ def _check_ref_only_pko(context: _Context) -> None:
     узел `<Ссылка>` со свойствами поиска, остальные ПКС этого ПКО не исполняются
     (БСП:13170-13196). Целиком объект уходит, если `ПередВыгрузкой` ссылающейся ПКС ставит
     `ВыгрузитьОбъект = Истина` (БСП:12924, БСП:12949) или граф содержит вызов целого объекта.
-    Флаг узла «при необходимости» задаётся правилами регистрации (БСП:3393-3437) и отсюда
-    не виден. От загруженных структур не зависит; при правке одного правила не считается.
+
+    Ещё один путь — режим выгрузки узла. Если у объекта есть ПРО с непустым реквизитом режима
+    выгрузки, а на узле в этом реквизите «Выгружать при необходимости» или пусто
+    (`ВыгружатьОбъектПоСсылке`, БСП:3393-3437), выгрузка ссылкой превращается в полную для
+    объекта, которого ещё нет в регистре соответствий узла (БСП:13173-13196, БСП:17889-17893;
+    то же для субконто, БСП:12365-12384). Значение реквизита на узле из правил не видно:
+    с таким ПРО замечание — сведение с именами реквизитов. Если в структуре источника у плана
+    правил регистрации нет ни одного из этих реквизитов с типом режима — предупреждение.
+    С правилами регистрации без такого ПРО режим не действует, и текст об этом говорит.
+    Без правил регистрации — прежний текст. При правке одного правила не считается.
     """
     context.graph = context.graph or build_call_graph(context.rules)
     references = _pks_references(context.rules, context.graph)
     ref_only = ref_only_pko_codes(context.rules, context.graph)
+    registration = context.registration
+    modes = export_mode_pro(registration) if registration is not None else {}
     for pko in context.rules.pko():
         code = rule_code(pko.code)
         if code not in ref_only:
             continue
         linked = references.get(code, [])
         shown = ", ".join(item.address for item in linked[:_REF_ONLY_SHOWN])
+        address = rule_address(pko)
+        if registration is None:
+            context.report.warning(
+                "structure.pko_ref_only", address, _ref_only_message(pko.code, shown, _MODE_UNKNOWN)
+            )
+            continue
+        meta = _pko_metadata_name(pko)
+        found = modes.get(meta.casefold(), [])
+        valid = _plan_mode_attributes(context, registration.exchange_plan, found) if found else []
+        if found and valid != []:
+            context.report.info(
+                "structure.pko_ref_only",
+                address,
+                _mode_message(pko.code, shown, found if valid is None else valid),
+            )
+            continue
+        hint = (
+            _mode_not_in_plan(meta, registration.exchange_plan, [a for _, a in found])
+            if found
+            else _mode_missing(meta)
+        )
         context.report.warning(
-            "structure.pko_ref_only",
-            rule_address(pko),
-            _ref_only_message(pko.code, shown),
+            "structure.pko_ref_only", address, _ref_only_message(pko.code, shown, hint)
         )
 
 

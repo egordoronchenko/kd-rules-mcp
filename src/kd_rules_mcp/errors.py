@@ -204,6 +204,22 @@ class RuleEditError(Kd2Error):
     """Rule edit was rejected."""
 
 
+class CountMismatchError(RuleEditError):
+    """Selection size differs from expected_count."""
+
+    def __init__(self, message: str, matched: int = 0) -> None:
+        super().__init__(message)
+        self.details: dict[str, Any] = {"matched": matched}
+
+
+class PreviewRequiredError(RuleEditError):
+    """Apply requires the preview hash of this batch."""
+
+    def __init__(self, preview_hash: str) -> None:
+        super().__init__("Сначала нужен preview: передайте expected_preview_hash текущей пачки")
+        self.details: dict[str, Any] = {"preview_hash": preview_hash}
+
+
 class UnknownFieldError(RuleEditError):
     """Field is outside the schema for this rule kind."""
 

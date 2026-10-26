@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from kd_rules_mcp.errors import LiveParseError, LiveStageError
-from kd_rules_mcp.live.codegen.registration import registration_code, validate_registration_args
+from kd_rules_mcp.live.codegen.registration import (
+    lookup_code,
+    registration_code,
+    validate_registration_args,
+)
 from kd_rules_mcp.live.registration import parse_registration, summarize_registration
 from kd_rules_mcp.live.response import literal
 from kd_rules_mcp.service import Kd2Service, Settings
@@ -53,23 +57,86 @@ def check_registration_code(code: str) -> None:
         assert "НачатьТранзакцию" not in code and ".Записать(" not in code
 
 
+def check_lookup_code(code: str) -> None:
+    """Код поиска — одна строка и только запрос. Дата дня видна по конструктору Дата(…235959)."""
+    assert "\r" not in code and "\n" not in code
+    assert "//" not in code
+    assert code.startswith("Попытка ")
+    assert "ЗаписатьJSON(" in code
+    assert "ПЕРВЫЕ 21" in code
+    assert "МО.СтандартныеРеквизиты" in code
+    assert "ПривестиЗначение(" in code
+    assert "ПолучитьОбъект" not in code
+    assert ".Записать(" not in code
+    assert "НачатьТранзакцию" not in code
+    # Привилегированно, как основной код: иначе RLS отказал бы поиску там, где проверка прошла бы.
+    assert code.index("УстановитьПривилегированныйРежим(Истина)") < code.index("ЗапросПоиска")
+    assert "УстановитьПривилегированныйРежим(Ложь)" not in code
+    # Значение кандидата — без пробелов фиксированной строки и без разделителей групп числа.
+    assert "СокрП(ВыборкаПоиска.Значение)" in code
+    assert "XMLСтрока(ВыборкаПоиска.Значение)" in code
+    assert "Строка(ВыборкаПоиска.Значение)" not in code.replace("XMLСтрока(ВыборкаПоиска", "")
+    # Обратное приведение до запроса: длинный код не обрезается молча до чужого.
+    check = code.index("Если Не Совпало Тогда ВызватьИсключение")
+    assert code.index("СокрП(Значение) = Исходное") < check
+    assert code.index("XMLСтрока(Значение) = Исходное") < check
+    assert check < code.index("ЗапросПоиска.Выполнить()")
+    if re.search(r'Дата\(\("\d{8}235959"\)\)', code):
+        assert "МЕЖДУ &Начало И &Конец" in code
+
+
+def _is_lookup_code(code: str) -> bool:
+    return "ПЕРВЫЕ 21" in code and "ПривестиЗначение(" in code
+
+
 class RegistrationBase:
-    def __init__(self, payload: dict | None = None, error: str = ""):
-        self.payload = payload or {}
+    def __init__(
+        self,
+        payload: dict | list[dict] | None = None,
+        error: str = "",
+        *,
+        lookup: dict | None = None,
+        lookup_error: str = "",
+        expect_value: str | None = None,
+    ):
+        # Список — ответы по порядку вызовов; lookup — отдельный ответ на код поиска.
+        if isinstance(payload, list):
+            self.queue: list[dict] | None = payload
+            self.payload: dict = {}
+        else:
+            self.queue = None
+            self.payload = payload or {}
         self.error = error
+        self.lookup = lookup
+        self.lookup_error = lookup_error
+        self.expect_value = expect_value
         self.codes: list[str] = []
 
     def execute(self, code: str) -> str:
-        check_registration_code(code)
         self.codes.append(code)
-        if self.error:
+        if _is_lookup_code(code):
+            check_lookup_code(code)
+            if self.expect_value is not None:
+                assert f"Исходное = {literal(self.expect_value)};" in code
+            if self.lookup_error:
+                return "ОШИБКА " + self.lookup_error
+            body = self._next_body(self.lookup)
+        else:
+            check_registration_code(code)
+            body = None if self.error else self._next_body(self.payload)
+        if self.error and not _is_lookup_code(code):
             reply = "ОШИБКА " + self.error
         else:
-            reply = "OK " + json.dumps(self.payload, ensure_ascii=False)
+            reply = "OK " + json.dumps(body, ensure_ascii=False)
         assert reply.startswith("OK ") or reply.startswith("ОШИБКА ")
         if reply.startswith("OK "):
             assert isinstance(json.loads(reply[3:]), dict)
         return reply
+
+    def _next_body(self, fallback: dict | None) -> dict:
+        if self.queue is not None:
+            return self.queue.pop(0)
+        return {} if fallback is None else fallback
 
 
 @pytest.fixture
@@ -313,17 +380,26 @@ def folded(object_filter: list[dict], node_filter: list[dict] | None = None, **r
 
 
 def invoke(service, payload: dict, **kwargs):
-    base = RegistrationBase(payload)
+    base = RegistrationBase(payload, lookup=kwargs.pop("lookup", None))
     service.live_access_factory = lambda access: base
-    result = service.live_registration_check(
-        "source.sandbox",
-        kwargs.pop("object", "Справочник.Контрагенты"),
-        kwargs.pop("ref", REF),
-        kwargs.pop("plan", None),
-        kwargs.pop("changes", None),
-        kwargs.pop("write", False),
-    )
+    result = service.live_registration_check("source.sandbox", **_registration_kwargs(kwargs))
     return result, base
+
+
+def _registration_kwargs(kwargs: dict) -> dict:
+    """Позиции number/date/code не должны забирать plan, changes и write."""
+    params = {
+        "object": kwargs.pop("object", "Справочник.Контрагенты"),
+        "plan": kwargs.pop("plan", None),
+        "changes": kwargs.pop("changes", None),
+        "write": kwargs.pop("write", False),
+    }
+    if "ref" in kwargs:
+        params["ref"] = kwargs.pop("ref")
+    elif "number" not in kwargs and "code" not in kwargs:
+        params["ref"] = REF
+    params.update(kwargs)
+    return params
 
 
 def refuse(service, **kwargs):
@@ -335,14 +411,7 @@ def refuse(service, **kwargs):
 
     service.live_access_factory = factory
     with pytest.raises(ValueError) as caught:
-        service.live_registration_check(
-            "source.sandbox",
-            kwargs.get("object", "Справочник.Контрагенты"),
-            kwargs.get("ref", REF),
-            kwargs.get("plan"),
-            kwargs.get("changes"),
-            kwargs.get("write", False),
-        )
+        service.live_registration_check("source.sandbox", **_registration_kwargs(kwargs))
     assert called == []
     return str(caught.value)
 
@@ -434,7 +503,10 @@ def test_scenario_регистрация_после_отката_не_совпа
     service.live_access_factory = lambda access: base
     with pytest.raises(LiveStageError) as caught:
         service.live_registration_check(
-            "source.sandbox", "Справочник.Контрагенты", REF, None, None, True
+            "source.sandbox",
+            "Справочник.Контрагенты",
+            REF,
+            write=True,
         )
     stage = next(item for item in caught.value.details["stages"] if item["stage"] == "ОТКАТ")
     assert stage["code"] == "live_stage"
@@ -620,9 +692,8 @@ def test_scenario_нет_реквизита(service) -> None:
             "source.sandbox",
             "Документ.Поступление",
             REF,
-            None,
-            {"Комментарий": "текст"},
-            True,
+            changes={"Комментарий": "текст"},
+            write=True,
         )
     code = base.codes[0]
     missing = code.index("нет реквизита")
@@ -1474,3 +1545,269 @@ def test_cache_bad_shape(cache) -> None:
     payload["cache"] = cache
     with pytest.raises(LiveParseError):
         parse_registration(payload, wrote=False)
+
+
+def _candidate(ref: str, value: str, day: str | None, presentation: str = "Объект") -> dict:
+    return {"ref": ref, "value": value, "date": day, "presentation": presentation}
+
+
+def test_scenario_документ_по_номеру_и_дате(service) -> None:
+    found = "22222222-2222-2222-2222-222222222222"
+    payload = raw([matching()])
+    payload["object"]["name"] = "Документ.Счет"
+    payload["object"]["ref"] = found
+    lookup = {
+        "candidates": [_candidate(found, "0000-000123", "2026-10-01", "Счет")],
+        "more": False,
+    }
+    result, base = invoke(
+        service,
+        payload,
+        lookup=lookup,
+        object="Документ.Счет",
+        ref=None,
+        number="0000-000123",
+        date="2026-10-01",
+    )
+    search, main = base.codes
+    assert "Т.Номер" in search
+    assert "Т.Дата КАК Дата" in search
+    assert "МЕЖДУ &Начало И &Конец" in search
+    assert literal("0000-000123") in search
+    assert literal("20261001000000") in search
+    assert literal("20261001235959") in search
+    assert "ПолучитьОбъект" not in search and "НачатьТранзакцию" not in search
+    assert main == registration_code("Документ.Счет", found, None, None, False)
+    assert result["lookup"] == {
+        "by": "number",
+        "value": "0000-000123",
+        "date": "2026-10-01",
+        "ref": found,
+        "match": {"value": "0000-000123", "date": "2026-10-01", "presentation": "Счет"},
+    }
+    assert [stage["stage"] for stage in result["stages"]] == ["ПОИСК", "РЕГИСТРАЦИЯ"]
+    saved = json.loads((Path(result["run_path"]) / "lookup.json").read_text(encoding="utf-8"))
+    assert saved["candidates"][0]["ref"] == found
+
+
+def test_scenario_справочник_по_коду(service) -> None:
+    found = "22222222-2222-2222-2222-222222222222"
+    payload = raw([matching()])
+    payload["object"]["ref"] = found
+    lookup = {
+        "candidates": [_candidate(found, "000000001", None, "Контрагент")],
+        "more": False,
+    }
+    result, base = invoke(
+        service,
+        payload,
+        lookup=lookup,
+        object="Справочник.Контрагенты",
+        ref=None,
+        code="000000001",
+    )
+    search, main = base.codes
+    assert "Т.Код" in search
+    assert "Т.Дата" not in search
+    assert "МЕЖДУ" not in search
+    assert literal("000000001") in search
+    assert main == registration_code("Справочник.Контрагенты", found, None, None, False)
+    assert result["lookup"] == {
+        "by": "code",
+        "value": "000000001",
+        "ref": found,
+        "match": {"value": "000000001", "date": None, "presentation": "Контрагент"},
+    }
+
+
+def test_code_found_in_other_case_shows_stored_value(service) -> None:
+    # Ревью F1: запрос сравнивает строки без учёта регистра — в match код как в базе.
+    found = "22222222-2222-2222-2222-222222222222"
+    payload = raw([matching()])
+    payload["object"]["ref"] = found
+    lookup = {"candidates": [_candidate(found, "АБ-1", None, "Контрагент")], "more": False}
+    base = RegistrationBase(payload, lookup=lookup, expect_value="аб-1")
+    service.live_access_factory = lambda access: base
+    result = service.live_registration_check(
+        "source.sandbox", "Справочник.Контрагенты", code="аб-1", write=False
+    )
+    assert result["lookup"]["value"] == "аб-1"
+    assert result["lookup"]["match"]["value"] == "АБ-1"
+
+
+def test_lookup_platform_error_stops_before_main_code(service) -> None:
+    # Ревью F7: отказ обратного приведения приходит ошибкой платформы стадии ПОИСК.
+    message = "значение не подходит к типу реквизита Код: 00-000002"
+    base = RegistrationBase(lookup_error=message, expect_value="00-0000021")
+    service.live_access_factory = lambda access: base
+    with pytest.raises(LiveStageError) as caught:
+        service.live_registration_check(
+            "source.sandbox", "Справочник.Контрагенты", code="00-0000021", write=False
+        )
+    stages = caught.value.details["stages"]
+    assert [(stage["stage"], stage["code"]) for stage in stages] == [("ПОИСК", "live_code")]
+    assert message in stages[0]["message"]
+    assert len(base.codes) == 1
+
+
+def test_scenario_несколько_объектов(service) -> None:
+    rows = [
+        _candidate("22222222-2222-2222-2222-222222222222", "1", "2026-10-01", "первый"),
+        _candidate("33333333-3333-3333-3333-333333333333", "1", "2026-10-02", "второй"),
+    ]
+    base = RegistrationBase(lookup={"candidates": rows, "more": False})
+    service.live_access_factory = lambda access: base
+    with pytest.raises(LiveStageError) as caught:
+        service.live_registration_check(
+            "source.sandbox", "Документ.Счет", ref=None, number="1", write=False
+        )
+    assert len(base.codes) == 1
+    assert "МЕЖДУ" not in base.codes[0]
+    assert "Т.Дата КАК Дата" in base.codes[0]
+    stage = caught.value.details["stages"][0]
+    assert stage["stage"] == "ПОИСК" and stage["code"] == "live_stage"
+    assert stage["message"] == "найдено объектов: 2; уточните номер датой или передайте ref"
+    assert stage["candidates"] == rows and stage["more"] is False
+    assert len(caught.value.details["stages"]) == 1
+
+
+def test_несколько_по_коду_советуют_ref(service) -> None:
+    # Живой прогон 26.10.2026: в песочнице два контрагента с одним кодом; дата коду не поможет.
+    rows = [
+        _candidate("22222222-2222-2222-2222-222222222222", "00-1", None, "первый"),
+        _candidate("33333333-3333-3333-3333-333333333333", "00-1", None, "второй"),
+    ]
+    base = RegistrationBase(lookup={"candidates": rows, "more": False})
+    service.live_access_factory = lambda access: base
+    with pytest.raises(LiveStageError) as caught:
+        service.live_registration_check(
+            "source.sandbox", "Справочник.Контрагенты", code="00-1", write=False
+        )
+    stage = caught.value.details["stages"][0]
+    assert stage["message"] == "найдено объектов: 2; передайте ref из candidates"
+
+
+def test_scenario_объект_не_найден_по_номеру(service) -> None:
+    base = RegistrationBase(lookup={"candidates": [], "more": False})
+    service.live_access_factory = lambda access: base
+    with pytest.raises(LiveStageError) as caught:
+        service.live_registration_check(
+            "source.sandbox", "Документ.Счет", ref=None, number="9", write=False
+        )
+    assert len(base.codes) == 1
+    stage = caught.value.details["stages"][0]
+    assert stage["stage"] == "ПОИСК" and stage["code"] == "live_stage"
+    assert stage["message"] == "объект не найден"
+    assert stage["lookup"] == {"by": "number", "value": "9"}
+    saved = json.loads(
+        (Path(caught.value.details["run_path"]) / "lookup.json").read_text(encoding="utf-8")
+    )
+    assert saved == {"candidates": [], "more": False}
+
+
+def test_scenario_номер_у_справочника(service) -> None:
+    assert "номер" in refuse(service, object="Справочник.Контрагенты", ref=None, number="1")
+
+
+def test_scenario_код_у_документа(service) -> None:
+    assert "код" in refuse(service, object="Документ.Счет", ref=None, code="1")
+
+
+def test_scenario_ни_ссылки_ни_номера_ни_кода(service) -> None:
+    assert "ссылка" in refuse(service, ref=None)
+
+
+def test_scenario_два_способа(service) -> None:
+    assert "один" in refuse(service, object="Документ.Счет", ref=REF, number="1")
+
+
+def test_scenario_дата_без_номера(service) -> None:
+    assert "дат" in refuse(service, ref=None, date="2026-10-01")
+
+
+def test_scenario_неверная_дата(service) -> None:
+    assert (
+        refuse(service, object="Документ.Счет", ref=None, number="1", date="2026-02-30")
+        == "неверная дата"
+    )
+
+
+def test_scenario_пустой_номер(service) -> None:
+    assert refuse(service, object="Документ.Счет", ref=None, number="   ") == "пустой номер"
+    assert refuse(service, object="Документ.Счет", ref=None, number="") == "пустой номер"
+
+
+def test_scenario_номер_с_переводом_строки(service) -> None:
+    assert "управляющ" in refuse(service, object="Документ.Счет", ref=None, number="1\n2")
+
+
+def test_hostile_number_stays_literal() -> None:
+    code = lookup_code("Документ.Счет", "Номер", HOSTILE, "2026-10-01")
+    check_lookup_code(code)
+    assert literal(HOSTILE) in code
+    assert HOSTILE not in code
+    assert "МЕЖДУ &Начало И &Конец" in code
+
+
+def test_lookup_more_when_twenty_first_row(service) -> None:
+    rows = [
+        _candidate(f"00000000-0000-4000-8000-{index:012d}", "1", "2026-10-01", str(index))
+        for index in range(1, 21)
+    ]
+    base = RegistrationBase(lookup={"candidates": rows, "more": True})
+    service.live_access_factory = lambda access: base
+    with pytest.raises(LiveStageError) as caught:
+        service.live_registration_check(
+            "source.sandbox", "Документ.Счет", ref=None, number="1", write=False
+        )
+    assert len(base.codes) == 1
+    assert "ПЕРВЫЕ 21" in base.codes[0]
+    assert "Кандидаты.Количество() = 20" in base.codes[0]
+    stage = caught.value.details["stages"][0]
+    assert stage["message"] == "найдено объектов: 20+; уточните номер датой или передайте ref"
+    assert stage["more"] is True and stage["candidates"] == rows
+
+
+def test_lookup_bad_payload_is_parse_error(service) -> None:
+    base = RegistrationBase(
+        lookup={
+            "candidates": [{"ref": "не-uuid", "value": "1", "date": None, "presentation": "x"}],
+            "more": False,
+        }
+    )
+    service.live_access_factory = lambda access: base
+    with pytest.raises(LiveStageError) as caught:
+        service.live_registration_check(
+            "source.sandbox", "Справочник.Контрагенты", ref=None, code="1", write=False
+        )
+    assert len(base.codes) == 1
+    assert caught.value.details["stages"][0]["code"] == "live_parse"
+
+
+def test_lookup_kinds_and_limits() -> None:
+    for name in ("Документ.Счет", "БизнесПроцесс.Заявка", "Задача.ЗадачаИсполнителя"):
+        validate_registration_args(name, None, None, None, False, number="1" * 50)
+    for name in (
+        "Справочник.Контрагенты",
+        "ПланВидовХарактеристик.Виды",
+        "ПланСчетов.Хозрасчетный",
+        "ПланВидовРасчета.Начисления",
+    ):
+        validate_registration_args(name, None, None, None, False, code="A")
+    with pytest.raises(ValueError, match="длиннее 50"):
+        validate_registration_args("Документ.Счет", None, None, None, False, number="1" * 51)
+
+
+def test_lookup_strips_edge_spaces(service) -> None:
+    found = "44444444-4444-4444-4444-444444444444"
+    lookup = {"candidates": [_candidate(found, "15", "2026-01-02")], "more": False}
+    result, base = invoke(
+        service,
+        raw([matching()]),
+        lookup=lookup,
+        object="Документ.Счет",
+        ref=None,
+        number=" \t15\t ",
+    )
+    assert literal("15") in base.codes[0]
+    assert result["lookup"]["value"] == "15"

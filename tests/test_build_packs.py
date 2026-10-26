@@ -1248,11 +1248,40 @@ def test_exchange_profile_single_direction(tmp_path: Path, monkeypatch: pytest.M
     assert "направления — из профиля обмена bp-do" in report
     rows = [line for line in text.splitlines() if " → " in line]
     assert rows == [
-        "| bp → do | `rules/bp/Комплект/ExchangeRules.xml` bp | "
-        "`rules/do/Комплект/CorrespondentExchangeRules.xml` do | "
-        "`rules/bp/Комплект/RegistrationRules.xml` bp |"
+        "| bp → do | `rules/bp/Комплект/ExchangeRules.xml` bp (файла нет) | "
+        "`rules/do/Комплект/CorrespondentExchangeRules.xml` do (файла нет) | "
+        "`rules/bp/Комплект/RegistrationRules.xml` bp (файла нет) |"
     ]
     assert "Планbp" in text and "Планdo" in text and "`kd2`" in text
+    assert "rules_dir" not in text
+
+
+def test_exchange_profile_rules_folder_from_rules_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без `rules` в профиле — `<rules_dir>/<план стороны>`; есть ли файл — видно в таблице."""
+    _no_token(monkeypatch)
+    catalog, local = _profile_files(tmp_path)
+    data = yaml.safe_load(catalog.read_text(encoding="utf-8"))
+    for side in data["exchanges"][0]["sides"]:
+        del side["rules"]
+        data["projects"][side["project"]]["rules_dir"] = "ПравилаОбмена"
+    catalog.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    kit = tmp_path / "bp" / "ПравилаОбмена" / "Планbp"
+    kit.mkdir(parents=True)
+    (kit / "ExchangeRules.xml").write_text("test", encoding="utf-8")
+    dest = tmp_path / "exchange"
+    build_packs.install_exchange(
+        dest, [], "claude", URL, exchange="bp-do", projects_file=catalog, local_file=local
+    )
+    text = (dest / "KD-EXCHANGE.md").read_text(encoding="utf-8")
+    rows = [line for line in text.splitlines() if " → " in line]
+    assert rows == [
+        "| bp → do | `ПравилаОбмена/Планbp/ExchangeRules.xml` bp | "
+        "`ПравилаОбмена/Планdo/CorrespondentExchangeRules.xml` do (файла нет) | "
+        "`ПравилаОбмена/Планbp/RegistrationRules.xml` bp (файла нет) |"
+    ]
+    assert "Папка комплекта не задана в профиле (bp, do)" in text
 
 
 def test_exchange_side_matching_profile_uses_custom_side_names(
@@ -1271,7 +1300,7 @@ def test_exchange_side_matching_profile_uses_custom_side_names(
     )
     text = (dest / "KD-EXCHANGE.md").read_text(encoding="utf-8")
     assert "направления — из профиля обмена bp-do" in report
-    assert "| left → right | `rules/bp/Комплект/ExchangeRules.xml` left |" in text
+    assert "| left → right | `rules/bp/Комплект/ExchangeRules.xml` left (файла нет) |" in text
     assert "right → left" not in text
 
 

@@ -20,7 +20,12 @@ from kd_rules_mcp.errors import (
 from kd_rules_mcp.live.access import DataMcpAccess, LiveAccess, resolve_base
 from kd_rules_mcp.live.codegen import exchange, plans, rules
 from kd_rules_mcp.live.codegen.base import base_check_code
-from kd_rules_mcp.live.codegen.registration import registration_code, validate_registration_args
+from kd_rules_mcp.live.codegen.registration import (
+    lookup_code,
+    parse_lookup,
+    registration_code,
+    validate_registration_args,
+)
 from kd_rules_mcp.live.registration import (
     parse_registration,
     same_registration,
@@ -46,6 +51,18 @@ def _required(data: dict, name: str, kind: type) -> Any:
     if type(value) is not kind:
         raise LiveParseError(f"неверное поле ответа: {name}")
     return value
+
+
+def _registration_lookup(
+    by: str, value: str, day: str | None, ref: str | None = None
+) -> dict[str, Any]:
+    """Как искали объект. Дата — только если её передали, ссылка — когда она одна."""
+    item: dict[str, Any] = {"by": by, "value": value}
+    if day is not None:
+        item["date"] = day
+    if ref is not None:
+        item["ref"] = ref
+    return item
 
 
 def _connection_parts(text: str) -> dict[str, str]:
@@ -354,6 +371,8 @@ class LiveMixin(ServiceBase):
                 "connection": connection,
                 "configuration": raw.get("configuration", {}),
                 "platform": raw.get("platform"),
+                "user": raw.get("user"),
+                "universal_xml": raw.get("universal_xml"),
                 "bsp": raw.get("bsp"),
                 "extensions": raw.get("extensions", []),
                 "plans": [],
@@ -362,12 +381,20 @@ class LiveMixin(ServiceBase):
                 "connection",
                 "configuration",
                 "platform",
+                "user",
+                "universal_xml",
                 "bsp",
                 "extensions",
                 "plans",
             ):
                 if f"{section}_error" in raw:
                     result[f"{section}_error"] = _required(raw, f"{section}_error", str)
+            if "user_error" not in raw:
+                user = _required(result, "user", dict)
+                _required(user, "name", str)
+                _required(user, "full_name", str)
+            if "universal_xml_error" not in raw:
+                _required(result, "universal_xml", bool)
             configuration = _required(result, "configuration", dict)
             if "configuration_error" not in raw:
                 for field in ("name", "synonym", "version"):
@@ -1177,46 +1204,96 @@ class LiveMixin(ServiceBase):
         self,
         base: str,
         object: str,
-        ref: str,
+        ref: str | None = None,
+        number: str | None = None,
+        date: str | None = None,
+        code: str | None = None,
         plan: str | None = None,
         changes: dict[str, str | int | float | bool | dict[str, str]] | None = None,
         write: bool = True,
     ) -> dict[str, Any]:
         """Регистрация сейчас, получатели по правилам и запись в отменяемой транзакции."""
         with self._lock:
-            validate_registration_args(object, ref, plan, changes, write)
-            code = registration_code(object, ref, plan, changes, write)
+            checked = validate_registration_args(
+                object, ref, plan, changes, write, number=number, date=date, code=code
+            )
             access = self._live_access(base)
             run = self._live_run("live_registration_check")
             parsed: dict[str, Any] = {}
+            lookup: dict[str, Any] | None = None
+            resolved = checked.ref
+            if checked.number is not None or checked.code is not None:
+                by = "number" if checked.number is not None else "code"
+                field = "Номер" if checked.number is not None else "Код"
+                value = checked.number if checked.number is not None else checked.code
+                assert value is not None
+                sought = _registration_lookup(by, value, checked.date)
+
+                def find() -> dict[str, Any]:
+                    payload = execute(
+                        access, lookup_code(checked.object, field, value, checked.date)
+                    )
+                    (run.path / "lookup.json").write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                    candidates, more = parse_lookup(payload)
+                    if not candidates:
+                        raise LiveStageError("объект не найден", {"lookup": sought})
+                    if len(candidates) > 1 or more:
+                        suffix = "+" if more else ""
+                        advice = (
+                            "уточните номер датой или передайте ref"
+                            if by == "number"
+                            else "передайте ref из candidates"
+                        )
+                        raise LiveStageError(
+                            f"найдено объектов: {len(candidates)}{suffix}; {advice}",
+                            {"candidates": candidates, "more": more},
+                        )
+                    return candidates[0]
+
+                found = run.stage("ПОИСК", find)
+                if not isinstance(found, dict):
+                    return run.result()
+                resolved = found["ref"]
+                lookup = _registration_lookup(by, value, checked.date, resolved)
+                # Найденное значение — как в базе: сравнение строк в запросе без учёта регистра.
+                lookup["match"] = {name: found[name] for name in ("value", "date", "presentation")}
+            if resolved is None:
+                raise ValueError("нужна ссылка, номер или код")
+            generated = registration_code(checked.object, resolved, plan, changes, write)
 
             def read() -> dict[str, Any]:
-                payload = execute(access, code)
+                payload = execute(access, generated)
                 (run.path / "registration.json").write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                     newline="\n",
                 )
-                checked = parse_registration(payload, wrote=write)
-                parsed["value"] = checked
-                return summarize_registration(checked)
+                report = parse_registration(payload, wrote=write)
+                parsed["value"] = report
+                return summarize_registration(report)
 
             summary = run.stage("РЕГИСТРАЦИЯ", read)
             if summary is None:
                 return run.result()
             if write:
-                checked = parsed["value"]
-                after = checked["after"]
+                report = parsed["value"]
+                after = report["after"]
                 assert after is not None
 
                 def verify() -> bool:
-                    if not same_registration(checked["before"], after):
+                    if not same_registration(report["before"], after):
                         raise LiveStageError(
                             "регистрация после отката не совпала",
-                            {"before": checked["before"], "after": after},
+                            {"before": report["before"], "after": after},
                         )
                     return True
 
                 if run.stage("ОТКАТ", verify) is None:
                     return run.result()
-            return run.result(**summary)
+            if lookup is None:
+                return run.result(**summary)
+            return run.result(**summary, lookup=lookup)

@@ -103,7 +103,7 @@ from kd_rules_mcp.kd2.bsl_text import (
     string_end,
     strip_comments,
 )
-from kd_rules_mcp.kd2.model import ExchangeRules, Node, rule_code
+from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, rule_code
 from kd_rules_mcp.kd2.queries import tokens
 from kd_rules_mcp.structures.queries import exchange_plan_autoregistration
 from kd_rules_mcp.validation.address import (
@@ -134,6 +134,7 @@ from kd_rules_mcp.validation.structure import (
     REF_ONLY_LOAD_NOTE,
     Structure,
     is_ref,
+    mode_pko_codes,
     ref_only_pko_codes,
     unreachable_pko_codes,
 )
@@ -230,8 +231,12 @@ def check_exchange_plan(
     plan_name: str | None = None,
     plan_hints: Sequence[str] = (),
     graph: CallGraph | None = None,
+    registration: RegistrationRules | None = None,
 ) -> ValidationReport:
     """Проверки обмена через план обмена. Без нужной структуры — запись в `skipped`.
+
+    `registration` — правила регистрации плана: ПКО с ПРО режима выгрузки может уйти
+    целиком, оговорка «только ссылка» к нему не пишется.
 
     `plan_name` — имя плана этих правил (каталог `ExchangePlans/<Имя>`). Состав
     ищется в структуре источника так же, как у `registration.plan_membership`.
@@ -249,7 +254,7 @@ def check_exchange_plan(
     _check_header(report, rules, source)
     _check_values(report, rules, source_structure, target_structure, algorithms, graph)
     _check_posting(report, rules, target_structure, algorithms)
-    _check_object_write(report, rules)
+    _check_object_write(report, rules, registration)
     _check_modified_flag(report, rules, algorithms)
     _check_table_clear(report, rules, target_structure, algorithms)
     _check_repeated_table(report, rules, target_structure)
@@ -538,8 +543,11 @@ _WRITE_DOCUMENT = _WRITE_PREFIX + "проведение выполнится д�
 _WRITE_OTHER = _WRITE_PREFIX + "запись выполнится дважды или прервёт загрузку"
 
 
-def _check_object_write(report: ValidationReport, rules: ExchangeRules) -> None:
+def _check_object_write(
+    report: ValidationReport, rules: ExchangeRules, registration: RegistrationRules | None
+) -> None:
     ref_only = ref_only_pko_codes(rules)
+    ref_only -= mode_pko_codes(rules, registration, ref_only)
     for pko in rules.pko():
         if _disabled(pko):
             continue

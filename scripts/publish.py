@@ -10,6 +10,10 @@
 
 Запуск: `uv run python scripts/publish.py -m "сообщение" [--target КАТАЛОГ] [--push] [--no-checks]`;
 каталог по умолчанию — `KD2_PUBLISH_DIR` или соседний `kd-rules-mcp-public`.
+
+Код выхода: 0 — опубликовано или открытая копия уже совпадает; 1 — запретные слова; 2 — проверки в
+собранной копии не прошли; 3 — не выполнено условие запуска (нет `publish/`, копия не git, есть
+незакоммиченные изменения); 4 — ошибка команды git. Причина печатается в stderr.
 """
 
 import argparse
@@ -18,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from kd_rules_mcp.console import utf8_stdout
@@ -25,6 +30,20 @@ from kd_rules_mcp.console import utf8_stdout
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "publish"
 BINARY = {".epf", ".erf", ".cf", ".cfe", ".dt", ".1cd", ".bin", ".png", ".jpg", ".ico", ".zip"}
+
+EXIT_OK = 0
+EXIT_FORBIDDEN = 1
+EXIT_CHECKS = 2
+EXIT_SETUP = 3
+EXIT_GIT = 4
+
+
+class PublishStop(Exception):
+    """Остановка публикации: код выхода и причина для stderr."""
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def main() -> None:
@@ -35,25 +54,44 @@ def main() -> None:
     parser.add_argument("--push", action="store_true", help="после коммита отправить в origin")
     parser.add_argument("--no-checks", action="store_true", help="не запускать ruff/pyright/pytest")
     args = parser.parse_args()
+    raise SystemExit(publish(args))
 
+
+def publish(args: argparse.Namespace) -> int:
+    """Публикация целиком; возвращает код выхода, причину остановки печатает в stderr."""
+    try:
+        _publish(args)
+    except PublishStop as stop:
+        print(stop, file=sys.stderr)
+        return stop.code
+    return EXIT_OK
+
+
+def _publish(args: argparse.Namespace) -> None:
     if not CONFIG.is_dir():
-        raise SystemExit("Нет каталога publish/: публикация делается из рабочего репозитория")
+        raise PublishStop(
+            EXIT_SETUP, "Нет каталога publish/: публикация делается из рабочего репозитория"
+        )
     target = (args.target or _default_target()).resolve()
     if not (target / ".git").is_dir():
-        raise SystemExit(f"{target} — не git-репозиторий: склонируйте открытый репозиторий туда")
+        raise PublishStop(
+            EXIT_SETUP, f"{target} — не git-репозиторий: склонируйте открытый репозиторий туда"
+        )
     if _git(ROOT, "status", "--porcelain").strip():
-        raise SystemExit("В рабочем репозитории есть незакоммиченные изменения — сначала коммит")
+        raise PublishStop(
+            EXIT_SETUP, "В рабочем репозитории есть незакоммиченные изменения — сначала коммит"
+        )
 
     files = _published_files()
     _sync(files, target)
     hits = _forbidden_hits(target, files)
     if hits:
-        print("Запретные слова — публикация остановлена:")
+        print("Запретные слова:")
         for hit in hits[:50]:
             print(f"  {hit}")
         _git(target, "checkout", "--", ".")
         _git(target, "clean", "-fdq")
-        raise SystemExit(1)
+        raise PublishStop(EXIT_FORBIDDEN, f"Запретных слов: {len(hits)} — публикация остановлена")
     print(f"Собрано файлов: {len(files)}; запретных слов нет")
 
     if not args.no_checks:
@@ -160,7 +198,7 @@ def _checks(target: Path) -> None:
         print(f"{' '.join(command[:3])}: {'OK' if result.returncode == 0 else 'ОШИБКА'} {tail[0]}")
         if result.returncode != 0:
             print((result.stdout + result.stderr)[-3000:])
-            raise SystemExit("Проверки в открытой копии не прошли — коммит не сделан")
+            raise PublishStop(EXIT_CHECKS, "Проверки в открытой копии не прошли — коммит не сделан")
 
 
 def _lines(path: Path) -> list[str]:
@@ -173,7 +211,7 @@ def _git(repo: Path, *args: str) -> str:
         ["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8"
     )
     if result.returncode != 0:
-        raise SystemExit(f"git {' '.join(args)}: {result.stderr.strip()}")
+        raise PublishStop(EXIT_GIT, f"git {' '.join(args)}: {result.stderr.strip()}")
     return result.stdout
 
 

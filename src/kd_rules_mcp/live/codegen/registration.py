@@ -5,11 +5,13 @@
 ОДСл — `ОбменДаннымиСлужебный`, ЗПРО — `DataProcessors/ЗагрузкаПравилРегистрацииОбъектов`.
 """
 
+import datetime
 import math
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
-from kd_rules_mcp.live.response import literal, one_line
+from kd_rules_mcp.errors import LiveParseError
+from kd_rules_mcp.live.response import json_code, literal, one_line
 
 # Вид.Имя ссылочных объектов; регистры и константы — отдельная ветка БСП (design Р7).
 _REFERENCE_PREFIXES = (
@@ -24,34 +26,86 @@ _REFERENCE_PREFIXES = (
 _IDENT = re.compile(r"[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*")
 _TYPE = re.compile(rf"{_IDENT.pattern}(?:\.{_IDENT.pattern})*")
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# Номер есть у документа, бизнес-процесса и задачи; код — у остальных ссылочных с кодом.
+_NUMBER_PREFIXES = ("Документ.", "БизнесПроцесс.", "Задача.")
+_CODE_PREFIXES = (
+    "Справочник.",
+    "ПланВидовХарактеристик.",
+    "ПланСчетов.",
+    "ПланВидовРасчета.",
+)
+_LOOKUP_FIELDS = frozenset({"ref", "value", "date", "presentation"})
 
 ChangeValue = str | int | float | bool | dict[str, str]
 
 
+class RegistrationRequest(NamedTuple):
+    """Каноническое имя и ровно один способ найти объект."""
+
+    object: str
+    ref: str | None
+    number: str | None
+    date: str | None
+    code: str | None
+
+
 def validate_registration_args(
     object: str,
-    ref: str,
+    ref: str | None,
     plan: str | None,
     changes: dict[str, ChangeValue] | None,
     write: bool,
-) -> None:
-    """Отказ до сети: в базу уходит только ссылка и правки, которые можно вставить строкой."""
+    *,
+    number: str | None = None,
+    date: str | None = None,
+    code: str | None = None,
+) -> RegistrationRequest:
+    """Отказ до сети: ровно один способ найти объект и правки, которые можно вставить строкой."""
     if type(write) is not bool:
         raise ValueError("write: нужно булево значение")
-    if not _is_reference(object):
+    canonical = _canonical_reference(object)
+    if canonical is None:
         raise ValueError("поддерживаются только ссылочные объекты")
-    if not isinstance(ref, str) or _UUID.fullmatch(ref) is None:
-        raise ValueError("неверная ссылка")
+    if date is not None and number is None:
+        raise ValueError("дата указывается только вместе с номером")
+    chosen = (ref is not None, number is not None, code is not None)
+    if not any(chosen):
+        raise ValueError("нужна ссылка, номер или код")
+    if sum(chosen) != 1:
+        raise ValueError("нужен ровно один способ: ссылка, номер или код")
+    found_ref: str | None = None
+    found_number: str | None = None
+    found_date: str | None = None
+    found_code: str | None = None
+    if ref is not None:
+        if not isinstance(ref, str) or _UUID.fullmatch(ref) is None:
+            raise ValueError("неверная ссылка")
+        found_ref = ref
+    elif number is not None:
+        if not _has_prefix(canonical, _NUMBER_PREFIXES):
+            raise ValueError("номер только у документа, бизнес-процесса и задачи")
+        found_number = _lookup_text(number, "номер")
+        if date is not None:
+            found_date = _valid_day(date)
+    elif code is not None:
+        if not _has_prefix(canonical, _CODE_PREFIXES):
+            raise ValueError(
+                "код только у справочника, плана видов характеристик, "
+                "плана счетов и плана видов расчёта"
+            )
+        found_code = _lookup_text(code, "код")
     if plan is not None and (not isinstance(plan, str) or _IDENT.fullmatch(plan) is None):
         raise ValueError("неверное имя плана")
-    if changes is None:
-        return
-    if not isinstance(changes, dict):
-        raise ValueError("changes: нужен объект")
-    for name, value in changes.items():
-        if not isinstance(name, str) or _IDENT.fullmatch(name) is None:
-            raise ValueError(f"неверное имя реквизита: {name}")
-        _encode_change(name, value)
+    if changes is not None:
+        if not isinstance(changes, dict):
+            raise ValueError("changes: нужен объект")
+        for name, value in changes.items():
+            if not isinstance(name, str) or _IDENT.fullmatch(name) is None:
+                raise ValueError(f"неверное имя реквизита: {name}")
+            _encode_change(name, value)
+    return RegistrationRequest(canonical, found_ref, found_number, found_date, found_code)
 
 
 def registration_code(
@@ -74,6 +128,157 @@ def registration_code(
     return _guard(body)
 
 
+def lookup_code(object: str, field: str, value: str, date: str | None) -> str:
+    """Один запрос по стандартному реквизиту. Ничего не записывает: откат не нужен.
+
+    Тип реквизита приводит номер или код, а обратное представление сверяется с переданным:
+    иначе длинный код молча обрезался бы до чужого (`00-0000021` → `00-000002`), а нечисловая
+    строка для числа стала бы 0. Не совпало — исключение с приведённым значением. У документа,
+    бизнес-процесса и задачи дата выбирается всегда, ограничение дня — только если передана date.
+    """
+    if field not in ("Номер", "Код"):
+        raise ValueError("неверный реквизит поиска")
+    if date is not None and field != "Номер":
+        raise ValueError("дата указывается только вместе с номером")
+    source = _canonical_reference(object) or object
+    columns = f"Т.Ссылка КАК Ссылка, Т.{field} КАК Значение"
+    condition = f"Т.{field} = &Значение"
+    date_expr = "Неопределено"
+    bounds = ""
+    if field == "Номер":
+        columns += ", Т.Дата КАК Дата"
+        date_expr = 'Формат(ВыборкаПоиска.Дата, "ДФ=yyyy-MM-dd")'
+    if date is not None:
+        start, end = _day_bounds(date)
+        condition += " И Т.Дата МЕЖДУ &Начало И &Конец"
+        bounds = f"""
+Начало = Дата({literal(start)});
+Конец = Дата({literal(end)});
+ЗапросПоиска.УстановитьПараметр("Начало", Начало);
+ЗапросПоиска.УстановитьПараметр("Конец", Конец);
+"""
+    query = (
+        f'"ВЫБРАТЬ ПЕРВЫЕ 21 {columns} ИЗ "'
+        f' + МО.ПолноеИмя() + " КАК Т ГДЕ {condition} УПОРЯДОЧИТЬ ПО Ссылка"'
+    )
+    body = f"""
+УстановитьПривилегированныйРежим(Истина);
+МО = Метаданные.НайтиПоПолномуИмени({literal(source)});
+Если МО = Неопределено Тогда
+ВызватьИсключение "объект метаданных не найден";
+КонецЕсли;
+РеквизитНайден = Ложь;
+ОписаниеРеквизита = Неопределено;
+Для Каждого ОписаниеРеквизита Из МО.СтандартныеРеквизиты Цикл
+Если ВРег(ОписаниеРеквизита.Имя) = ВРег({literal(field)}) Тогда
+РеквизитНайден = Истина;
+Прервать;
+КонецЕсли;
+КонецЦикла;
+Если Не РеквизитНайден Тогда
+ВызватьИсключение "у объекта нет реквизита " + {literal(field)};
+КонецЕсли;
+Исходное = {literal(value)};
+Значение = ОписаниеРеквизита.Тип.ПривестиЗначение(Исходное);
+Если ТипЗнч(Значение) = Тип("Строка") Тогда
+Совпало = СокрП(Значение) = Исходное;
+Иначе
+Совпало = XMLСтрока(Значение) = Исходное;
+КонецЕсли;
+Если Не Совпало Тогда
+ВызватьИсключение "значение не подходит к типу реквизита " + {literal(field)}
++ ": " + XMLСтрока(Значение);
+КонецЕсли;
+ЗапросПоиска = Новый Запрос;
+ЗапросПоиска.Текст = {query};
+ЗапросПоиска.УстановитьПараметр("Значение", Значение);
+{bounds}
+Кандидаты = Новый Массив;
+Ещё = Ложь;
+ВыборкаПоиска = ЗапросПоиска.Выполнить().Выбрать();
+Пока ВыборкаПоиска.Следующий() Цикл
+Если Кандидаты.Количество() = 20 Тогда
+Ещё = Истина;
+Прервать;
+КонецЕсли;
+Кандидаты.Добавить(Новый Структура(
+"ref,value,date,presentation",
+Строка(ВыборкаПоиска.Ссылка.УникальныйИдентификатор()),
+?(ТипЗнч(ВыборкаПоиска.Значение) = Тип("Строка"), СокрП(ВыборкаПоиска.Значение),
+XMLСтрока(ВыборкаПоиска.Значение)),
+{date_expr},
+Лев(Строка(ВыборкаПоиска.Ссылка), 200)));
+КонецЦикла;
+Данные = Новый Структура("candidates,more", Кандидаты, Ещё);
+"""
+    return json_code(body)
+
+
+def parse_lookup(payload: object) -> tuple[list[dict[str, Any]], bool]:
+    """Кандидаты поиска и признак, что за двадцатой строкой есть ещё."""
+    if not isinstance(payload, dict) or set(payload) != {"candidates", "more"}:
+        raise LiveParseError("неверное поле ответа: lookup")
+    more = payload["more"]
+    rows = payload["candidates"]
+    if type(more) is not bool:
+        raise LiveParseError("неверное поле ответа: more")
+    if not isinstance(rows, list):
+        raise LiveParseError("неверное поле ответа: candidates")
+    return [_lookup_candidate(item) for item in rows], more
+
+
+def _lookup_text(value: object, label: str) -> str:
+    """Пробелы по краям не входят в номер или код; управляющие символы не вставляются."""
+    if not isinstance(value, str):
+        raise ValueError(f"неверный {label}")
+    text = value.strip(" \t")
+    if text == "":
+        raise ValueError(f"пустой {label}")
+    if len(text) > 50:
+        raise ValueError(f"{label} длиннее 50 знаков")
+    if _CONTROL.search(text):
+        raise ValueError(f"{label} содержит управляющие символы")
+    return text
+
+
+def _valid_day(value: object) -> str:
+    if not isinstance(value, str) or _DAY.fullmatch(value) is None:
+        raise ValueError("неверная дата")
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        raise ValueError("неверная дата") from None
+    return value
+
+
+def _day_bounds(value: str) -> tuple[str, str]:
+    day = _valid_day(value)
+    compact = day[:4] + day[5:7] + day[8:10]
+    return compact + "000000", compact + "235959"
+
+
+def _has_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name.startswith(prefix) for prefix in prefixes)
+
+
+def _lookup_candidate(item: object) -> dict[str, Any]:
+    if not isinstance(item, dict) or set(item) != _LOOKUP_FIELDS:
+        raise LiveParseError("неверное поле ответа: candidates")
+    ref = item["ref"]
+    value = item["value"]
+    day = item["date"]
+    presentation = item["presentation"]
+    if not isinstance(ref, str) or _UUID.fullmatch(ref) is None:
+        raise LiveParseError("неверное поле ответа: ref")
+    if not isinstance(value, str):
+        raise LiveParseError("неверное поле ответа: value")
+    if day is not None and not isinstance(day, str):
+        raise LiveParseError("неверное поле ответа: date")
+    if not isinstance(presentation, str):
+        raise LiveParseError("неверное поле ответа: presentation")
+    return {"ref": ref, "value": value, "date": day, "presentation": presentation}
+
+
 def _canonical_reference(name: object) -> str | None:
     """Префикс вида к каноническому написанию: 1С не различает регистр имён."""
     if not isinstance(name, str):
@@ -87,10 +292,6 @@ def _canonical_reference(name: object) -> str | None:
             return None
         return prefix + rest
     return None
-
-
-def _is_reference(name: object) -> bool:
-    return _canonical_reference(name) is not None
 
 
 def _encode_change(name: str, value: object) -> tuple[str, str]:

@@ -35,6 +35,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from kd_rules_mcp.errors import (
     AmbiguousAddressError,
+    CountMismatchError,
     DanglingReferenceError,
     DuplicateProjectError,
     DuplicateRuleError,
@@ -62,6 +63,7 @@ from kd_rules_mcp.errors import (
     Kd2Error,
     LiveError,
     ObjectNotFoundError,
+    PreviewRequiredError,
     ProjectNotFoundError,
     ReferenceUnavailableError,
     RegistrationDeliveryError,
@@ -119,6 +121,8 @@ ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (AmbiguousAddressError, "ambiguous_address"),
     (RuleNotFoundError, "rule_not_found"),
     (DanglingReferenceError, "dangling_reference"),
+    (CountMismatchError, "count_mismatch"),
+    (PreviewRequiredError, "preview_required"),
     (RuleEditError, "edit_rejected"),
     (RulesFormatError, "rules_format"),
     (StructureFormatError, "structure_format"),
@@ -130,38 +134,142 @@ ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
 
 INSTRUCTIONS = """KD 2 exchange rules (ПравилаОбмена 2.01) and registration rules
 (ПравилаРегистрации).
-ПКО (object conversion rule), ПКС (property conversion rule), ПВД (data export rule),
-ПОД (data cleanup rule in KD 2; data processing rule in ED), ПКПД (predefined data conversion
-rule), ПКЗ (value conversion rule), ПРО (object registration rule).
-Load configuration structures: project_list → structure_load_project, or
-structure_load_xml/structure_load_md83exp. Open/create rules → match_* → rule_* or
-pko_create_from_candidates → rules_validate → handlers_export for a syntax checker →
-rules_save to workspace or project rules_dir. Compare versions with rules_diff.
-rules_close removes the snapshot, keeping saved files. Use registration_build for registration
-rules and correspondent_draft for reverse rules. The agent makes semantic decisions.
-Retarget registration: registration_retarget preview → write with hash and notice IDs.
+Rules: ПКО object conversion, ПКС property conversion, ПВД data export, ПОД data cleanup
+(KD 2) or processing (ED), ПКПД predefined data conversion, ПКЗ value conversion, ПРО object
+registration.
+Effect tags: [read], [workspace], [project] (rules_dir/extension), [sandbox] (base writes).
+Path refused: write inside workspace/rules_dir, never widen allowed folders. live_*: sandboxes
+only; physical data deletion needs separate human consent.
+Structures: project_list → structure_load_project, or structure_load_xml/md83exp.
+Open/create rules → match_* → rule_* or pko_create_from_candidates → rules_validate →
+handlers_export for a syntax checker → rules_save to workspace or project rules_dir.
+Compare versions with rules_diff. rules_close removes the snapshot, keeping saved files.
+registration_build: registration rules; correspondent_draft: reverse rules. The agent makes
+semantic decisions.
+registration_retarget: preview → write with hash and notice IDs.
 Lists use offset, limit≤200, has_more. Tool errors are JSON with code.
 ED: ed_open → ed_overview → ed_list/get/locate → ed_validate. Reread with ed_close/open.
 Managers: ed_create → ed_apply preview/apply → ed_validate → ed_authoring_build.
-Manager projects persist; ed_close removes the project, keeping kits.
+Manager projects persist; ed_close deletes one, keeping kits.
 Layers: path + configuration_path + ordered extensions, or
-project + module; extensions=null uses project settings, [] disables extensions.
+project + module; extensions=null: project settings, []: none.
 ed_list/get return effective rules and origins by direction/headers_only; Слой/<id>/… selects
 a source revision. ed_validate checks contexts and ed.layer.*; supply route_profile_id for
 layer routes. Unknown code is skipped. Extension activation/order in the infobase is unverified.
-XDTO: ed_schema_open with an explicit version → ed_schema_types/type; snapshots stay in memory,
-reread with ed_schema_close/open. XSD is unsupported.
+XDTO: ed_schema_open (explicit version) → ed_schema_types/type; in memory, reread with
+ed_schema_close/open; no XSD.
 Routes: ed_routes for two dumps → ed_route_compare.
 Direct header ПКС: snapshots → ed_authoring_candidates → ed_authoring_build preview → write
 with hash and acknowledgements. A human installs the kit. Details: docs/tools.md."""
 
+# Эффект инструмента — максимальный: read, workspace, project (rules_dir или выгрузка расширения
+# из writable_extensions), sandbox (запись в базу-песочницу, в том числе в отменяемой транзакции).
+# Метка идёт в начало описания; условие записи — только в docs/tools.md (scripts/dump_tools.py).
+EFFECTS = ("read", "workspace", "project", "sandbox")
+_LIVE_LOG = (
+    "base is read only (temporary files on the 1C server are removed); protocol in workspace/.live"
+)
+_KIT = (
+    'workspace with mode="write"; project with delivery.mode="user_extension"; '
+    "preview writes nothing"
+)
+_APPLY = 'sandbox with mode="apply"; preview only reads the bases'
+TOOL_EFFECTS: dict[str, tuple[str, str]] = {
+    "project_list": ("read", ""),
+    "project_exchanges": ("read", ""),
+    "structure_load_project": ("read", "structure cache outside the workspace"),
+    "structure_list": ("read", ""),
+    "structure_load_xml": ("read", "structure cache outside the workspace"),
+    "structure_load_md83exp": ("read", "structure cache outside the workspace"),
+    "structure_objects": ("read", ""),
+    "structure_object": ("read", ""),
+    "structure_values": ("read", ""),
+    "structure_plan_content": ("read", ""),
+    "structure_compare": ("read", ""),
+    "match_objects": ("read", ""),
+    "match_properties": ("read", ""),
+    "match_values": ("read", ""),
+    "rules_open": ("workspace", "project snapshot in workspace/.projects"),
+    "rules_create": ("workspace", "project snapshot in workspace/.projects"),
+    "rules_projects": ("read", ""),
+    "rules_overview": ("read", ""),
+    "rules_list": ("read", ""),
+    "rules_get": ("read", ""),
+    "rules_save": ("project", "path inside a project rules_dir; otherwise workspace"),
+    "rules_close": ("workspace", "deletes the snapshot; saved files stay"),
+    "rules_pack": ("project", "ZIP path inside a project rules_dir; otherwise workspace"),
+    "rule_create": ("workspace", "updates the project snapshot"),
+    "rule_update": ("workspace", "updates the project snapshot"),
+    "rule_update_many": ("workspace", 'project snapshot with mode="apply"; preview writes nothing'),
+    "rule_delete": ("workspace", "updates the project snapshot"),
+    "pko_create_from_candidates": ("workspace", "updates the project snapshot"),
+    "pko_create_many": ("workspace", 'project snapshot with mode="apply"; preview writes nothing'),
+    "rules_validate": ("workspace", "remembers structures in the project snapshot"),
+    "rules_diff": ("read", ""),
+    "handlers_export": ("project", "folder inside a project rules_dir; otherwise workspace"),
+    "handlers_locate": ("read", ""),
+    "rules_trace": ("read", ""),
+    "handlers_queries": ("read", ""),
+    "handlers_search": ("read", ""),
+    "handlers_read": ("read", ""),
+    "handlers_context": ("read", ""),
+    "reference_get": ("read", ""),
+    "reference_search": ("read", ""),
+    "registration_build": ("workspace", "project snapshot in workspace/.projects"),
+    "registration_retarget": ("project", _KIT),
+    "correspondent_draft": ("workspace", "project snapshot in workspace/.projects"),
+    "live_base_check": ("workspace", _LIVE_LOG),
+    "live_status": ("workspace", _LIVE_LOG),
+    "live_rules_dump": (
+        "workspace",
+        "rules files in workspace/.live; open=true also opens projects",
+    ),
+    "live_rules_check": ("workspace", f"{_LIVE_LOG}; BSP loading test without rule records"),
+    "live_registration_check": (
+        "sandbox",
+        "write=true (default) writes in a rolled-back transaction; write=false only reads the base",
+    ),
+    "live_rules_install": ("sandbox", _APPLY),
+    "live_nodes_setup": ("sandbox", _APPLY),
+    "live_exchange_run": ("sandbox", _APPLY),
+    "ed_open": ("read", "snapshot in memory"),
+    "ed_overview": ("read", ""),
+    "ed_list": ("read", ""),
+    "ed_get": ("read", ""),
+    "ed_locate": ("read", ""),
+    "ed_validate": ("read", ""),
+    "ed_close": ("workspace", "deletes a manager project in workspace/.ed-projects"),
+    "ed_schema_open": ("read", "snapshot in memory"),
+    "ed_schema_types": ("read", ""),
+    "ed_schema_type": ("read", ""),
+    "ed_schema_close": ("read", ""),
+    "ed_routes": ("read", "snapshots in memory"),
+    "ed_route_compare": ("read", ""),
+    "ed_create": ("workspace", "manager project in workspace/.ed-projects"),
+    "ed_apply": ("workspace", "preview and apply both write to workspace/.ed-projects"),
+    "ed_authoring_candidates": ("read", ""),
+    "ed_authoring_build": ("project", _KIT),
+}
+
+
+def effect_tag(name: str) -> str:
+    """Метка эффекта `[…]` инструмента; инструмент без метки — ошибка."""
+    try:
+        effect, _ = TOOL_EFFECTS[name]
+    except KeyError:
+        raise RuntimeError(f"Инструмент {name} без метки эффекта в TOOL_EFFECTS") from None
+    return f"[{effect}]"
+
+
 StructureId = Annotated[str, Field(description="Cached structure ID")]
 ProjectId = Annotated[str, Field(description="Rules project ID")]
-Offset = Annotated[int, Field(description="Page offset", ge=0)]
-Limit = Annotated[int, Field(description="Page size", ge=1, le=200)]
+# Страница списка: смысл offset/limit — в INSTRUCTIONS («Lists use offset, limit≤200»), текст поля в
+# справочнике подставляет dump_tools.py; без описаний схемы короче на ~1 500 знаков (agent-ux, Р1).
+Offset = Annotated[int, Field(ge=0)]
+Limit = Annotated[int, Field(ge=1, le=200)]
 ReviewProject = Annotated[str, Field(description="Project")]
-ReviewOffset = Annotated[int, Field(description="Offset")]
-ReviewLimit = Annotated[int, Field(description="Limit")]
+ReviewOffset = int
+ReviewLimit = int
 ReviewAddress = Annotated[str, Field(description="Address")]
 ObjectName = Annotated[
     str,
@@ -231,7 +339,7 @@ def error_payload(error: Exception, service: Kd2Service | None = None) -> dict[s
         payload.update(error.details)
     if isinstance(error, EdAuthoringPreconditionError):
         payload.update(error.details)
-    if isinstance(error, RulesSaveErrorsError):
+    if isinstance(error, (RulesSaveErrorsError, CountMismatchError, PreviewRequiredError)):
         payload.update(error.details)
     if isinstance(error, (EdSchemaNotFoundError, StructureNotFoundError)):
         payload.update(getattr(error, "reopen_details", {}))
@@ -307,7 +415,9 @@ class _SchemaServer(MCPServer):
         return [
             tool.model_copy(
                 update={
-                    "description": inspect.cleandoc(tool.description or ""),
+                    "description": (
+                        f"{effect_tag(tool.name)} {inspect.cleandoc(tool.description or '')}"
+                    ),
                     "input_schema": _without_schema_titles(tool.input_schema),
                     "output_schema": (
                         _without_schema_titles(tool.output_schema)
@@ -347,9 +457,10 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         exchange: Annotated[str | None, Field(description="Exchange profile ID")] = None,
     ) -> dict[str, Any]:
-        """Read only: check base identity, versions, plans and profile technology. Structure
-        freshness compares configuration name, version and active extension names; extension
-        versions and edits without a version change are not detected."""
+        """Check base identity, session user, versions, universal XML processor,
+        plans and profile technology. Structure freshness compares configuration
+        name, version and active extension names; extension versions and edits without a
+        version change are not detected."""
         return await call(service.live_base_check, base, plan, exchange)
 
     @server.tool()
@@ -391,7 +502,10 @@ def create_server(service: Kd2Service) -> MCPServer:
     async def live_registration_check(
         base: Annotated[str, Field(description="Sandbox project.base")],
         object: Annotated[str, Field(description="Вид.Имя")],
-        ref: Annotated[str, Field(description="UUID")],
+        ref: Annotated[str | None, Field(description="UUID")] = None,
+        number: Annotated[str | None, Field(description="Document/process/task number")] = None,
+        date: Annotated[str | None, Field(description="YYYY-MM-DD with number")] = None,
+        code: Annotated[str | None, Field(description="Catalog/chart code")] = None,
         plan: Annotated[str | None, Field(description="One plan")] = None,
         changes: Annotated[
             dict[str, Any] | None,
@@ -399,9 +513,21 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         write: Annotated[bool, Field(description="false: read only")] = True,
     ) -> dict[str, Any]:
-        """Registration, recipients, node reasons. Writes in a rolled-back transaction;
-        effects outside the database (files, calls, jobs) are not rolled back."""
-        return await call(service.live_registration_check, base, object, ref, plan, changes, write)
+        """Registration, recipients, node reasons by ref, number(+date) or code. Writes in a
+        rolled-back transaction; effects outside the database (files, calls, jobs) are not rolled
+        back. Selective registration skips unchanged objects: see rule recipients."""
+        return await call(
+            service.live_registration_check,
+            base,
+            object,
+            ref,
+            number,
+            date,
+            code,
+            plan,
+            changes,
+            write,
+        )
 
     @server.tool()
     async def live_rules_install(
@@ -509,7 +635,8 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def project_list() -> dict[str, Any]:
         """List 1C projects, configurations, infobases, MCP names and exchange plans. Call before
-        structure loading or choosing writable rules_dir. Login is a boolean."""
+        structure loading or choosing writable rules_dir. Login is a boolean; connection omits
+        it."""
         return await call(service.project_list)
 
     @server.tool()
@@ -819,11 +946,7 @@ def create_server(service: Kd2Service) -> MCPServer:
         ] = None,
         exchange_project_id: Annotated[
             str | None,
-            Field(
-                description=(
-                    "Exchange project for registration ПВД coverage; default: last rules_validate"
-                )
-            ),
+            Field(description="Paired kit project; default: last rules_validate"),
         ] = None,
     ) -> dict[str, Any]:
         """Validate like rules_validate, then save XML to workspace/rules_dir. Errors refuse
@@ -930,38 +1053,45 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def rule_update_many(
         project_id: ProjectId,
-        kind: Annotated[
-            str,
-            Field(description=("Child kind: pks, pks_group, pkz")),
-        ],
-        owner: Annotated[str, Field(description="Owner ПКО code")],
-        fields: Annotated[
-            dict[str, Any],
-            Field(description=("Nonempty field map for all targets")),
-        ],
+        kind: Annotated[str, Field(description="pks, pks_group, pkz, pko, pvd")],
+        fields: Annotated[dict[str, Any], Field(description="Fields for all targets")],
+        owner: Annotated[str, Field(description="ПКО code for nested kinds")] = "",
         keys: Annotated[
             list[str] | None,
-            Field(description=("Rule addresses; null = all except except_keys")),
+            Field(description="Addresses or codes"),
         ] = None,
         except_keys: Annotated[
             list[str] | None,
-            Field(description=("Addresses skipped when keys is null")),
+            Field(description="Addresses to skip"),
         ] = None,
+        filter: Annotated[
+            dict[str, Any] | None,
+            Field(description="pko/pvd: source_kind, target_kind, group"),
+        ] = None,
+        mode: Annotated[str, Field(description="apply or preview")] = "apply",
+        expected_count: Annotated[int | None, Field(description="Expected selection size")] = None,
         source_structure: OptionalStructure = None,
         target_structure: OptionalStructure = None,
+        offset: Offset = 0,
+        limit: Limit = 200,
     ) -> dict[str, Any]:
-        """Update identical fields in pks/pks_group/pkz children of one ПКО atomically. Unknown
-        addresses or invalid edits reject the batch."""
+        """Update the same fields on many rules atomically. pko/pvd: keys or filter; nested: owner.
+        Preview first."""
         return await call(
             service.rule_update_many,
             project_id,
             kind,
-            owner,
             fields,
+            owner,
             keys,
             except_keys,
+            filter,
+            mode,
+            expected_count,
             source_structure,
             target_structure,
+            offset,
+            limit,
         )
 
     @server.tool()
@@ -1010,6 +1140,40 @@ def create_server(service: Kd2Service) -> MCPServer:
             group,
         )
 
+    @server.tool()
+    async def pko_create_many(
+        project_id: ProjectId,
+        source_structure: StructureId,
+        target_structure: StructureId,
+        kind: Annotated[str | None, Field(description="Object kind; auto pairs")] = None,
+        pairs: Annotated[
+            list[dict[str, str]] | None,
+            Field(description="[{source, target, code?}]"),
+        ] = None,
+        fields: Fields = None,
+        group: RuleGroup = "",
+        mode: Annotated[str, Field(description="preview or apply")] = "preview",
+        expected_preview_hash: Annotated[str | None, Field(description="Preview hash")] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Create ПКО/ПКС for many pairs: kind takes auto=true only, pairs are agent choices.
+        Preview, then apply with expected_preview_hash."""
+        return await call(
+            service.pko_create_many,
+            project_id,
+            source_structure,
+            target_structure,
+            kind,
+            pairs,
+            fields,
+            group,
+            mode,
+            expected_preview_hash,
+            offset,
+            limit,
+        )
+
     # --- Проверки ---------------------------------------------------------------------------
 
     @server.tool()
@@ -1031,11 +1195,12 @@ def create_server(service: Kd2Service) -> MCPServer:
         limit: Limit = 50,
         exchange_project_id: Annotated[
             str | None,
-            Field(description=("Exchange project for registration ПВД coverage")),
+            Field(description=("Paired kit project: exchange or registration rules")),
         ] = None,
     ) -> dict[str, Any]:
         """Validate rules against structures; inspect skipped checks. Registration uses
-        source_structure for the plan and exchange_project_id for ПВД coverage."""
+        source_structure for the plan and exchange_project_id for ПВД coverage; exchange
+        rules pass registration rules there for pko_ref_only."""
         return await call(
             service.rules_validate,
             project_id,
@@ -1178,12 +1343,12 @@ def create_server(service: Kd2Service) -> MCPServer:
     @server.tool()
     async def reference_get(
         section: Annotated[str | None, Field(description="Section")] = None,
-        key: Annotated[str | None, Field(description="Table row key")] = None,
+        key: Annotated[str | None, Field(description="Table row or heading key")] = None,
         offset: ReviewOffset = 0,
         limit: ReviewLimit = 60,
     ) -> dict[str, Any]:
-        """BSP reference from skill files: protocol codes, symptoms, phases, handler_params.
-        Omit section to list."""
+        """BSP reference from skill files: protocol codes, symptoms, phases, handler_params;
+        rule kinds pko, pks, pvd, pro, search (key picks headings). Omit section to list."""
         return await call(service.reference_get, section, key, offset, limit)
 
     @server.tool()
@@ -1959,6 +2124,9 @@ def create_server(service: Kd2Service) -> MCPServer:
             format_package,
         )
 
+    # Новый инструмент без метки эффекта не выходит наружу (agent-ux, Р1).
+    for tool in server._tool_manager.list_tools():
+        effect_tag(tool.name)
     return server
 
 

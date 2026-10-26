@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from kd_rules_mcp.authoring.candidates import Candidate, Confidence
-from kd_rules_mcp.authoring.edits import CONVERSION_KIND, EditResult
+from kd_rules_mcp.authoring.edits import (
+    CONVERSION_KIND,
+    BatchUpdate,
+    EditResult,
+    PkoBatch,
+    PkoBatchItem,
+)
 from kd_rules_mcp.authoring.registration import (
     RegistrationObject,
     parse_registration_object,
@@ -19,7 +25,14 @@ from kd_rules_mcp.errors import (
 from kd_rules_mcp.kd2.diff import TEXT_LIMIT, clip
 from kd_rules_mcp.kd2.model import ExchangeRules, Node, RegistrationRules, RulesDocument, rule_code
 from kd_rules_mcp.kd2.schema import CONVERSION_EVENTS
-from kd_rules_mcp.projects import Base, LocalSettings, base_login, dev_env_login, resolve
+from kd_rules_mcp.projects import (
+    Base,
+    LocalSettings,
+    base_login,
+    dev_env_login,
+    resolve,
+    without_login,
+)
 from kd_rules_mcp.structures.queries import MAX_LIMIT, NotFound, Page
 from kd_rules_mcp.validation.address import (
     CONVERSION_ADDRESS,
@@ -110,14 +123,16 @@ def project_base_view(
     local: LocalSettings | None,
     project_dir: Path | None,
 ) -> dict[str, Any]:
-    """Строка базы в `project_list`: роль, признак логина и сервер данных песочницы.
+    """Строка базы в `project_list`: роль, строка соединения, признак логина, сервер данных.
 
     `login` — задана ли пара пользователя (`logins` личного файла или `IB_USER` в `.dev.env`).
-    Личный файл серверу не виден — признак только по `.dev.env`. Имя и пароль не отдаются.
+    Личный файл серверу не виден — признак только по `.dev.env`. Имя и пароль не отдаются:
+    `connection` — строка из каталога без `Usr`/`Pwd`, для запуска Конфигуратора.
     """
     row: dict[str, Any] = {
         "role": base.role,
         "configuration": base.configuration,
+        "connection": without_login(base.connection),
         "login": _base_login_set(project_id, base, local, project_dir),
     }
     if base.data_mcp and base.is_sandbox:
@@ -841,13 +856,114 @@ def report_view(
 
 def edit_view(result: EditResult) -> dict[str, Any]:
     view: dict[str, Any] = {"address": result.address}
+    if result.changes:
+        view["changes"] = result.changes
     for name in ("warnings", "skipped", "not_applied", "unresolved", "disabled"):
-        values = getattr(result, name)
-        if values:
-            view[name] = values[:MAX_LIMIT]
-            if len(values) > MAX_LIMIT:
-                view[f"{name}_total"] = len(values)
+        _put_limited(view, name, getattr(result, name))
     return view
+
+
+def _put_limited(view: dict[str, Any], name: str, values: list[str]) -> None:
+    if not values:
+        return
+    view[name] = values[:MAX_LIMIT]
+    if len(values) > MAX_LIMIT:
+        view[f"{name}_total"] = len(values)
+
+
+_NESTED_BATCH_KINDS = frozenset({"pks", "pks_group", "pkz"})
+
+
+def batch_update_view(
+    kind: str, owner: str, mode: str, batch: BatchUpdate, offset: int = 0, limit: int = MAX_LIMIT
+) -> dict[str, Any]:
+    """Ответ `rule_update_many`. `owner` есть только у вложенных правил одного ПКО.
+
+    `matched` и `changed` — по всей пачке; `updated` — страница. `skipped` (структура стороны
+    не передана) одинаков у всех правил пачки и выводится один раз на ответ.
+    """
+    rows = []
+    for item in batch.results:
+        row = edit_view(item)
+        row.pop("skipped", None)
+        rows.append(row)
+    page = slice_rows(rows, offset, limit)
+    view: dict[str, Any] = {
+        "kind": kind,
+        "count": batch.matched,
+        "updated": page["items"],
+        "mode": mode,
+        "matched": batch.matched,
+        "changed": batch.changed,
+        "offset": page["offset"],
+        "limit": page["limit"],
+        "has_more": page["has_more"],
+    }
+    if batch.results and batch.results[0].skipped:
+        view["skipped"] = batch.results[0].skipped
+    if kind in _NESTED_BATCH_KINDS:
+        return {"owner": owner, **view}
+    return view
+
+
+def pko_batch_view(batch: PkoBatch, offset: int, limit: int) -> dict[str, Any]:
+    """Сводка пачки ПКО целиком и страница элементов. Хеш от страницы не зависит."""
+    created = [item for item in batch.items if item.status == "created"]
+    skipped = [item for item in batch.items if item.status == "skipped"]
+    reasons: dict[str, int] = {}
+    for item in skipped:
+        reasons[item.reason] = reasons.get(item.reason, 0) + 1
+    count_name = "planned" if batch.mode == "preview" else "created"
+    summary: dict[str, Any] = {
+        "requested": len(batch.items),
+        count_name: len(created),
+        "skipped": len(skipped),
+        "skip_reasons": reasons,
+        "pks": sum(_pks_count(item.node) for item in created if item.node is not None),
+        "unresolved": sum(len(item.result.unresolved) for item in created if item.result),
+        "not_applied": sum(len(item.result.not_applied) for item in created if item.result),
+    }
+    page = slice_rows(
+        [_pko_batch_item_view(item, batch.mode) for item in batch.items], offset, limit
+    )
+    return {"mode": batch.mode, "preview_hash": batch.preview_hash, "summary": summary, **page}
+
+
+def _pko_batch_item_view(item: PkoBatchItem, mode: str) -> dict[str, Any]:
+    if item.status == "skipped":
+        view: dict[str, Any] = {
+            "status": "skipped",
+            "source": item.source,
+            "target": item.target,
+            "reason": item.reason,
+        }
+        if item.reason == "exists":
+            view["existing"] = item.existing
+        else:
+            view["code"] = item.code
+        return view
+    result = item.result
+    view: dict[str, Any] = {
+        "status": "planned" if mode == "preview" else "created",
+        "code": item.code,
+        "source": item.source,
+        "target": item.target,
+        "pks": _pks_count(item.node) if item.node is not None else 0,
+        "disabled": len(result.disabled) if result is not None else 0,
+    }
+    if result is not None:
+        _put_limited(view, "unresolved", result.unresolved)
+        _put_limited(view, "not_applied", result.not_applied)
+        _put_limited(view, "warnings", result.warnings)
+    return view
+
+
+def _pks_count(node: Node) -> int:
+    """Число ПКС без групп ПКС."""
+    properties = node.child("Свойства")
+    if properties is None:
+        return 0
+    return sum(1 for _path, item in walk_pks(properties) if item.kind.name == "pks")
 
 
 def registration_object(item: Mapping[str, Any]) -> RegistrationObject:

@@ -31,6 +31,8 @@ class Database:
                 "version": "1.0.0.1",
             },
             "platform": "8.3.27.1",
+            "user": {"name": "Агент", "full_name": "Агент обмена"},
+            "universal_xml": True,
             "bsp": "3.1.12",
             "extensions": [
                 {"name": "Расширение", "version": "0.1.0.1", "active": True},
@@ -57,6 +59,8 @@ class Database:
             "СведенияСистемы = Новый СистемнаяИнформация;",
             "СведенияСистемы.ВерсияПриложения",
             "СтандартныеПодсистемыСервер.ВерсияБиблиотеки()",
+            'Новый Структура("name,full_name", ИмяПользователя(), ПолноеИмяПользователя())',
+            'Метаданные.Обработки.Найти("УниверсальныйОбменДаннымиXML") <> Неопределено',
             "РасширенияКонфигурации.Получить()",
             "Р.Активно",
             "Метаданные.ПланыОбмена.Найти(Имя) <> Неопределено",
@@ -65,12 +69,13 @@ class Database:
             "ОбменДаннымиПовтИсп.ЭтоПланОбменаРаспределеннойИнформационнойБазы(Имя)",
         ):
             assert expression in code
-        for section in ("connection", "configuration", "platform", "bsp", "extensions", "plans"):
+        sections = ("connection", "configuration", "platform", "user", "universal_xml", "bsp")
+        for section in (*sections, "extensions", "plans"):
             assert (
                 f'Данные.Вставить("{section}_error", '
                 "КраткоеПредставлениеОшибки(ИнформацияОбОшибке()))" in code
             )
-        assert code.count("Попытка") >= 8
+        assert code.count("Попытка") >= 10
         all_plans = "Имена = ОбменДаннымиПовтИсп.ПланыОбменаБСП();" in code
         if all_plans:
             assert 'Данные.Вставить("all", Истина)' in code
@@ -163,6 +168,8 @@ def test_same_base_fresh_structure(setup) -> None:
     assert result["connection"] == {"srvr": "server", "ref": "bp_dev"}
     assert result["configuration"]["version"] == "1.0.0.1"
     assert result["bsp"] == "3.1.12" and result["platform"] == "8.3.27.1"
+    assert result["user"] == {"name": "Агент", "full_name": "Агент обмена"}
+    assert result["universal_xml"] is True
     assert all(c["status"] == "ok" for c in result["checks"])
     assert result["problems"] == result["warnings"] == 0
     assert result["stages"][0]["stage"] == "БАЗА"
@@ -383,3 +390,37 @@ def test_missing_or_unread_plan_is_error(setup, patch) -> None:
 def test_codegen_all_plans_has_no_format_version_calls() -> None:
     code = base_check_code(None)
     assert "ВерсииФорматаОбмена" not in code and "ФорматОбмена" not in code
+
+
+@pytest.mark.parametrize("section", ["user", "universal_xml"])
+def test_user_and_universal_xml_section_errors_are_isolated(setup, section: str) -> None:
+    """Ошибка раздела пользователя или обработки — в `<раздел>_error`, остальное прочитано."""
+    service, database = setup
+    del database.payload[section]
+    database.payload[f"{section}_error"] = "Нет доступа"
+    result = service.live_base_check("bp.dev")
+    assert result["status"] == "OK"
+    assert result[section] is None and result[f"{section}_error"] == "Нет доступа"
+    assert result["bsp"] == "3.1.12" and result["plans"][0]["exists"] is True
+
+
+def test_missing_universal_xml_is_false_not_error(setup) -> None:
+    service, database = setup
+    database.payload["universal_xml"] = False
+    database.payload["user"] = {"name": "", "full_name": ""}
+    result = service.live_base_check("bp.dev")
+    assert result["universal_xml"] is False
+    assert result["user"] == {"name": "", "full_name": ""}
+    assert all(c["status"] == "ok" for c in result["checks"])
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [{"user": {"name": "Агент"}}, {"user": "Агент"}, {"universal_xml": "да"}],
+)
+def test_malformed_user_or_universal_xml_is_parse_error(setup, patch: dict) -> None:
+    service, database = setup
+    database.payload.update(patch)
+    with pytest.raises(LiveStageError) as caught:
+        service.live_base_check("bp.dev")
+    assert caught.value.details["stages"][0]["code"] == "live_parse"
