@@ -47,7 +47,8 @@ description: Разобрать, проверить и доработать об
 4. `ed_list` → `ed_get(address)`; текст — `include_text`; от строки модуля — `ed_locate(line)`.
 5. Что обработчик трогает — `ed_get(…, children_kind="reference")`; `unparsed` — читать глазами.
 6. Схема — `ed_schema_open` → `ed_schema_type`.
-7. `ed_validate(project_id, schema_id, structure_id, direction)`; без них — `skipped`, это «не проверено».
+7. `ed_validate(project_id, schema_id, structure_id)`; без них — `skipped`, это «не проверено». `direction`
+   send/receive — только на снимке со слоями.
 8. `ed_close`, `ed_schema_close`.
 
 Шаги с разбором ответов — `references/reading.md`, §1. Проект дорабатывает обмен расширениями — открывать модуль

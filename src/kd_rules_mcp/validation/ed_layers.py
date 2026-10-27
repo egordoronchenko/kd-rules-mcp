@@ -35,7 +35,7 @@ from kd_rules_mcp.ed.model import (
     PropertyGroup,
     PropertyRule,
 )
-from kd_rules_mcp.ed.refs import build_references, norm_name
+from kd_rules_mcp.ed.refs import build_references, near_hint, norm_name, rule_name_key
 from kd_rules_mcp.ed.route_model import RouteProfile
 from kd_rules_mcp.ed.schema.model import EdSchema
 from kd_rules_mcp.ed.schema.profile import Applicability, ValidationProfile
@@ -529,7 +529,15 @@ def _target_checks(
                     check,
                     address,
                     f"Правка {'.'.join(op.field_path)} не имеет цели {name} "
-                    f"в контексте {context.direction}",
+                    f"в контексте {context.direction}"
+                    + near_hint(
+                        name,
+                        (
+                            entity.name
+                            for entity in live.values()
+                            if entity is not None and isinstance(entity, kinds[collection])
+                        ),
+                    ),
                     op.origin,
                 )
 
@@ -545,7 +553,8 @@ def _rule_checks(
     names: dict[tuple[str, str], list[EntityVersion]] = defaultdict(list)
     for version in active:
         assert version.payload is not None
-        names[(version.collection, norm_name(version.payload.name))].append(version)
+        # Исполнитель различает имена правил точно (design Р5 kd3-silent-fixes).
+        names[(version.collection, rule_name_key(version.payload.name))].append(version)
         if version.certainty != Certainty.KNOWN:
             for check in (
                 "ed.layer.rule.duplicate",
@@ -1195,7 +1204,7 @@ def validate_effective_links(
     # Исключение по направлению не доказывает отсутствия исходной декларации.
     # Удалённое или неизвестное в текущем контексте правило этим не восстанавливается.
     declared_pko = frozenset(
-        norm_name(version.payload.name)
+        rule_name_key(version.payload.name)
         for other in layered.contexts
         for version in other.entities
         if isinstance(version.payload, ObjectRule)
@@ -1204,7 +1213,7 @@ def validate_effective_links(
         and version.certainty == Certainty.KNOWN
     )
     declared_rules = declared_pko | frozenset(
-        norm_name(version.payload.name)
+        rule_name_key(version.payload.name)
         for other in layered.contexts
         for version in other.entities
         if isinstance(version.payload, PredefinedRule)
@@ -1268,13 +1277,13 @@ def validate_effective_links(
         declared_pko=declared_pko,
         declared_rules=declared_rules,
         unknown_pko=frozenset(
-            norm_name(v.payload.name)
+            rule_name_key(v.payload.name)
             for other in layered.contexts
             for v in other.entities
             if isinstance(v.payload, ObjectRule) and v.certainty != Certainty.KNOWN
         ),
         unknown_rules=frozenset(
-            norm_name(v.payload.name)
+            rule_name_key(v.payload.name)
             for other in layered.contexts
             for v in other.entities
             if isinstance(v.payload, (ObjectRule, PredefinedRule))

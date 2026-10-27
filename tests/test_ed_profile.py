@@ -153,7 +153,8 @@ def test_direction_disjunction_uses_guards_and_nested_parent():
         1,
     )
     doc = document(text)
-    assert doc.rule_uses[0].direction == "send"
+    # «Отправка ИЛИ версия» — не только отправка: направление неизвестно (Fable D4).
+    assert doc.rule_uses[0].direction is None
     app = Applicability.build(doc, ValidationProfile.build(None, "1.2"))
     assert app.evaluate(doc.pko[0], "receive") is True
     app = Applicability.build(doc, ValidationProfile.build(None, "1.3"))

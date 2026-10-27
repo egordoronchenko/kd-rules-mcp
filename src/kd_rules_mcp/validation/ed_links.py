@@ -29,7 +29,9 @@ from kd_rules_mcp.ed.refs import (
     ReferenceIndex,
     classify_deferred_argument,
     deferred_cases,
+    near_hint,
     norm_name,
+    rule_name_key,
 )
 from kd_rules_mcp.validation.report import Level, ValidationReport
 
@@ -166,9 +168,11 @@ def validate_links(
     }
     cases: dict[str, list[DispatcherCase]] = defaultdict(list)
     for case in document.dispatcher_cases:
-        cases[norm_name(case.literal_name)].append(case)
-    pko_names = {norm_name(rule.name) for rule in document.pko} | declared_pko
-    rule_names = pko_names | {norm_name(rule.name) for rule in document.pkpd} | declared_rules
+        cases[rule_name_key(case.literal_name)].append(case)
+    # Имена правил — точно (XDTO:504, 1543: Найти), имена методов — без учёта регистра (BSL).
+    pko_names = {rule_name_key(rule.name) for rule in document.pko} | declared_pko
+    rule_names = pko_names | {rule_name_key(rule.name) for rule in document.pkpd} | declared_rules
+    literals = [case.literal_name for case in document.dispatcher_cases]
     procedures = {norm_name(rule.procedure_name) for rule in (*document.pko, *document.pod)}
     send_ids = {
         use.rule_id
@@ -184,6 +188,10 @@ def validate_links(
         use.rule_id for use in document.rule_uses if use.rule_id and use.direction is None
     }
     unknown_owners = {item.owner_id for item in document.unknown if item.owner_id}
+    uses: dict[str, set[str | None]] = defaultdict(set)
+    for use in document.rule_uses:
+        if use.rule_id:
+            uses[use.rule_id].add(use.direction)
     pod_formats = {
         rule.format_selection.value
         for rule in document.pod
@@ -214,6 +222,10 @@ def validate_links(
             if binding.event == _EXTENDED_EVENT:
                 extended = True
                 continue
+            if context is None and not _event_reachable(binding.event, rule.entity_id, uses):
+                # Событие другого направления: исполнитель его у этого правила не вызывает —
+                # как в слоях (event_direction), только при известных направлениях всех вызовов.
+                continue
             expected = function_ids if binding.event == "ВыборкаДанных" else procedure_ids
             if binding.resolution == "unknown":
                 skip(
@@ -232,7 +244,7 @@ def validate_links(
                 continue
             matched = [
                 case
-                for case in cases.get(norm_name(binding.target_name), ())
+                for case in cases.get(rule_name_key(binding.target_name), ())
                 if case.dispatcher_id in expected
             ]
             if not matched:
@@ -253,7 +265,8 @@ def validate_links(
                             binding.event,
                             binding.target_name,
                             bool(routines.get(binding.target_name.casefold())),
-                        ),
+                        )
+                        + near_hint(binding.target_name, literals),
                         owner_address,
                     )
             elif len(matched) > 1 or binding.resolution == "ambiguous":
@@ -300,8 +313,11 @@ def validate_links(
     for rule in document.pko:
         hidden = _unknown_of(document, rule.entity_id)
         for prop in _properties(rule):
-            if prop.conversion_rule.strip() and norm_name(prop.conversion_rule) not in rule_names:
-                if norm_name(prop.conversion_rule) in unknown_rules:
+            if (
+                prop.conversion_rule.strip()
+                and rule_name_key(prop.conversion_rule) not in rule_names
+            ):
+                if rule_name_key(prop.conversion_rule) in unknown_rules:
                     skip(
                         "ed.reference.property_rule_missing",
                         f"{_address(addresses, prop)}: определённость цели неизвестна",
@@ -313,7 +329,8 @@ def validate_links(
                     (
                         f"ПКС ссылается на отсутствующее правило «{prop.conversion_rule}»; "
                         "проверены ПКО и ПКПД."
-                    ),
+                    )
+                    + near_hint(prop.conversion_rule, rule_names),
                 )
         for item in (*_properties(rule), *rule.groups):
             if not item.namespace or item.namespace in rule.extensions:
@@ -429,8 +446,8 @@ def validate_links(
 
     for rule in document.pod:
         for ref in rule.used_pko:
-            if ref.name.strip() and norm_name(ref.name) not in pko_names:
-                if norm_name(ref.name) in unknown_pko:
+            if ref.name.strip() and rule_name_key(ref.name) not in pko_names:
+                if rule_name_key(ref.name) in unknown_pko:
                     skip("ed.reference.pod_pko_missing", f"Цель ПКО неизвестна: {ref.name}")
                     continue
                 emit(
@@ -440,7 +457,8 @@ def validate_links(
                     (
                         f"ПОД использует отсутствующее ПКО «{ref.name}»: при отправке оно "
                         "пропускается, при получении — ошибка обмена; проверьте условия версии."
-                    ),
+                    )
+                    + near_hint(ref.name, pko_names),
                 )
 
     for use in document.rule_uses:
@@ -508,7 +526,7 @@ def validate_links(
             ]
             if absent:
                 owner = by_entity.get(ref.owner_id)
-                presence = "есть" if norm_name(ref.name) in pko_names else "нет"
+                presence = "есть" if rule_name_key(ref.name) in pko_names else "нет"
                 for pod in absent:
                     emit_at(
                         "ed.reference.pod_usage_key_missing",
@@ -525,11 +543,20 @@ def validate_links(
                     )
                 continue
         pool = rule_names if ref.kind == "instruction_rule" else pko_names
-        if norm_name(ref.name) in pool:
+        if rule_name_key(ref.name) in pool:
+            continue
+        # ИспользованиеПКО — Структура: точка и индекс находят ключ без учёта регистра, а
+        # Вставить заменяет ключ своим текстом, и ПКО ищется по нему точно (XDTO:795, 7457;
+        # живая проба 26.10.2026).
+        if (
+            ref.kind == "pod_use"
+            and ref.form != "insert"
+            and norm_name(ref.name) in {norm_name(name) for name in pool}
+        ):
             continue
         owner = by_entity.get(ref.owner_id)
         unknown_pool = unknown_rules if ref.kind == "instruction_rule" else unknown_pko
-        if norm_name(ref.name) in unknown_pool:
+        if rule_name_key(ref.name) in unknown_pool:
             skip(
                 "ed.reference.code_rule_missing",
                 f"{_address(addresses, owner) if owner else ref.owner_id}: "
@@ -544,13 +571,14 @@ def validate_links(
             (
                 f"Строка {ref.span.line_start}: {_CODE_LABEL[ref.kind]} ссылается "
                 f"на отсутствующее правило «{ref.name}»."
-            ),
+            )
+            + near_hint(ref.name, pool),
         )
 
     for label, rules in (("ПКО", document.pko), ("ПОД", document.pod)):
         grouped: dict[str, list[Entity]] = defaultdict(list)
         for rule in rules:
-            grouped[norm_name(rule.name)].append(rule)
+            grouped[rule_name_key(rule.name)].append(rule)
         for group in grouped.values():
             if len(group) < 2:
                 continue
@@ -595,6 +623,17 @@ def _handler_missing_message(event: str, name: str, procedure_exists: bool) -> s
     else:
         effect = "Обработчик не будет вызван."
     return f"Для события «{event}» правило называет «{name}»: {gap}. {effect}"
+
+
+def _event_reachable(event: str, rule_id: str, uses: Mapping[str, set[str | None]]) -> bool:
+    """Ложь — только когда все вызовы правила известны и ни один не в направлении события."""
+    from .ed_projection import event_direction
+
+    wanted = event_direction(event)
+    directions = uses.get(rule_id)
+    if wanted is None or not directions or None in directions:
+        return True
+    return "both" in directions or wanted in directions
 
 
 def _order(item: _Row) -> tuple[str, int, str, str, str]:

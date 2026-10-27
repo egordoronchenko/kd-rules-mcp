@@ -137,9 +137,108 @@ def test_ed_opens_module_and_validates_side(tmp_path: Path) -> None:
         "module": "Managerbp",
         "configuration": "full",
     }
+    schemas = [s for s in exchange["steps"] if s["tool"] == "ed_schema_open"]
     checks = [s for s in exchange["steps"] if s["tool"] == "ed_validate"]
     assert checks[0]["arguments"] == {"structure_id": "bp-full"}
+    assert checks[0]["fill"] == {"project_id": opened[0]["n"], "schema_id": schemas[0]["n"]}
+
+
+_ED_SCHEMA_FILL = (
+    "format_version",
+    "path",
+    "project",
+    "configuration",
+    "package",
+    "imports",
+)
+_ED_VERSION_NOTE = (
+    "Версия формата узла по выгрузкам неизвестна; сравнение маршрутов показывает "
+    "статическую совместимость, версию выбирает агент по ответу, живой обмен — отдельно."
+)
+
+
+def test_ed_routes_compare_and_schema_per_side(tmp_path: Path) -> None:
+    """Два направления: сравнение на каждое, схема — один раз на сторону из первого."""
+    exchange = view(prepare(tmp_path, technology="ed"))
+    steps = exchange["steps"]
+    assert [s["tool"] for s in steps] == [
+        "structure_load_project",
+        "ed_open",
+        "ed_routes",
+        "structure_load_project",
+        "ed_open",
+        "ed_routes",
+        "ed_route_compare",
+        "ed_schema_open",
+        "ed_schema_open",
+        "ed_route_compare",
+        "ed_validate",
+        "ed_validate",
+        "live_base_check",
+        "live_status",
+        "live_base_check",
+        "live_status",
+    ]
+    assert all(s["stage"] == "разбор" for s in steps if s["tool"] == "ed_routes")
+    bp_routes, do_routes = (s for s in steps if s["tool"] == "ed_routes")
+    assert bp_routes["arguments"] == {
+        "project": "bp",
+        "configuration": "full",
+        "plan": "Планbp",
+    }
+    assert do_routes["arguments"] == {
+        "project": "do",
+        "configuration": "full",
+        "plan": "Планdo",
+    }
+    forward, reverse = (s for s in steps if s["tool"] == "ed_route_compare")
+    assert forward["arguments"] == {"left_plan": "Планbp", "right_plan": "Планdo"}
+    assert forward["fill"] == {
+        "left_profile_id": bp_routes["n"],
+        "right_profile_id": do_routes["n"],
+    }
+    assert reverse["arguments"] == {"left_plan": "Планdo", "right_plan": "Планbp"}
+    assert reverse["fill"] == {
+        "left_profile_id": do_routes["n"],
+        "right_profile_id": bp_routes["n"],
+    }
+    left_schema, right_schema = (s for s in steps if s["tool"] == "ed_schema_open")
+    assert left_schema["arguments"] == {}
+    assert left_schema["fill"] == {key: forward["n"] for key in _ED_SCHEMA_FILL}
+    assert "profile.selected.left.ed_schema_open" in left_schema["note"]
+    assert "profile.selected.left.ed_schema_reason" in left_schema["note"]
+    assert right_schema["fill"] == {key: forward["n"] for key in _ED_SCHEMA_FILL}
+    assert "profile.selected.right.ed_schema_open" in right_schema["note"]
+    assert "profile.selected.right.ed_schema_reason" in right_schema["note"]
+    bp_check, do_check = (s for s in steps if s["tool"] == "ed_validate")
+    assert bp_check["arguments"] == {"structure_id": "bp-full"}
+    assert bp_check["fill"] == {"project_id": steps[1]["n"], "schema_id": left_schema["n"]}
+    assert steps[1]["tool"] == "ed_open"
+    assert do_check["arguments"] == {"structure_id": "do-full"}
+    assert do_check["fill"] == {
+        "project_id": steps[4]["n"],
+        "schema_id": right_schema["n"],
+    }
+    assert steps[4]["tool"] == "ed_open"
+    assert _ED_VERSION_NOTE in exchange["notes"]
+
+
+def test_ed_side_without_module_has_no_routes(tmp_path: Path) -> None:
+    service = prepare(tmp_path, technology="ed")
+    path = service.settings.projects_file
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    del data["exchanges"][0]["sides"][1]["module"]
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    exchange = view(service)
+    routes = [s for s in exchange["steps"] if s["tool"] == "ed_routes"]
+    assert [s["arguments"]["project"] for s in routes] == ["bp"]
+    assert not any(s["tool"] in ("ed_route_compare", "ed_schema_open") for s in exchange["steps"])
+    opened = [s for s in exchange["steps"] if s["tool"] == "ed_open"]
+    checks = [s for s in exchange["steps"] if s["tool"] == "ed_validate"]
+    assert len(opened) == 1 and len(checks) == 1
+    assert checks[0]["arguments"] == {"structure_id": "bp-full"}
     assert checks[0]["fill"] == {"project_id": opened[0]["n"]}
+    assert _ED_VERSION_NOTE in exchange["notes"]
 
 
 def test_unspecified_technology_only_structure_and_base_check(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
+from ..validation.ed_globals import PLATFORM_FUNCTIONS
 from . import forms
 from .coverage import build_coverage
 from .errors import EdFormatError, EdReadError, EdResourceLimitError
@@ -143,6 +144,114 @@ def _call(tokens: tuple[Token, ...]) -> tuple[str, tuple[tuple[Token, ...], ...]
     return None
 
 
+_ALL_DIRECTIONS = frozenset({"send", "receive"})
+_DIRECTION_LITERALS = {"Отправка": "send", "Получение": "receive"}
+
+
+def _direction_set(tokens: tuple[Token, ...]) -> frozenset[str] | None:
+    """Направления, в которых выражение истинно; None — в выражении есть что-то кроме направления.
+
+    Атом — `НаправлениеОбмена = "…"` или `<>`; связки `НЕ`, `И`, `ИЛИ` и скобки. Строки сравниваются
+    точно, как оператор `=` платформы (живая проба 26.10.2026, протокол kd3-silent-fixes).
+    """
+    position = 0
+
+    def peek() -> Token | None:
+        return tokens[position] if position < len(tokens) else None
+
+    def word(value: str) -> bool:
+        token = peek()
+        return token is not None and token.kind == "identifier" and token.folded == value
+
+    def disjunction() -> frozenset[str] | None:
+        nonlocal position
+        result = conjunction()
+        while result is not None and word("или"):
+            position += 1
+            right = conjunction()
+            result = None if right is None else result | right
+        return result
+
+    def conjunction() -> frozenset[str] | None:
+        nonlocal position
+        result = negation()
+        while result is not None and word("и"):
+            position += 1
+            right = negation()
+            result = None if right is None else result & right
+        return result
+
+    def negation() -> frozenset[str] | None:
+        nonlocal position
+        if word("не"):
+            position += 1
+            inner = negation()
+            return None if inner is None else _ALL_DIRECTIONS - inner
+        token = peek()
+        if token is not None and token.kind == "symbol" and token.value == "(":
+            position += 1
+            inner = disjunction()
+            closing = peek()
+            if inner is None or closing is None or closing.value != ")":
+                return None
+            position += 1
+            return inner
+        return atom()
+
+    def atom() -> frozenset[str] | None:
+        nonlocal position
+        if position + 3 > len(tokens):
+            return None
+        left, operator, right = tokens[position : position + 3]
+        if left.kind == "string" and right.kind == "identifier":
+            left, right = right, left
+        if not (
+            left.kind == "identifier"
+            and left.folded == "направлениеобмена"
+            and operator.kind == "symbol"
+            and operator.value in ("=", "<>")
+            and right.kind == "string"
+        ):
+            return None
+        position += 3
+        direction = _DIRECTION_LITERALS.get(right.value)
+        equal = frozenset({direction}) if direction else frozenset()
+        return equal if operator.value == "=" else _ALL_DIRECTIONS - equal
+
+    if not tokens:
+        return None
+    result = disjunction()
+    return result if position == len(tokens) else None
+
+
+def _dispatcher_literals(tokens: tuple[Token, ...]) -> tuple[str, ...] | None:
+    """Литералы заголовка ветки `ИмяПроцедуры = "A" [ИЛИ ИмяПроцедуры = "B" …]`; иначе None."""
+    if len(tokens) < 3 or tokens[0].kind != "identifier":
+        return None
+    variable = tokens[0].folded
+    if variable not in ("имяпроцедуры", "имяфункции"):
+        return None
+    literals: list[str] = []
+    position = 0
+    while True:
+        part = tokens[position : position + 3]
+        if (
+            len(part) != 3
+            or part[0].kind != "identifier"
+            or part[0].folded != variable
+            or part[1].value != "="
+            or part[2].kind != "string"
+        ):
+            return None
+        literals.append(part[2].value)
+        position += 3
+        if position == len(tokens):
+            return tuple(literals)
+        if tokens[position].kind != "identifier" or tokens[position].folded != "или":
+            return None
+        position += 1
+
+
 @dataclass
 class _RoutineBlock:
     routine: Routine
@@ -163,6 +272,8 @@ class _Reader:
         self.uses: list[RuleUse] = []
         self.cases: list[DispatcherCase] = []
         self.version: int | None = None
+        self.routine_names: frozenset[str] = frozenset()
+        self.interleaved = False
 
     def common(self, kind: str, name: str, item: Statement | Entity | SourceSpan) -> dict[str, Any]:
         span = item if isinstance(item, SourceSpan) else item.span
@@ -237,6 +348,7 @@ class _Reader:
 
     def read(self) -> EdDocument:
         blocks = self.routine_blocks()
+        self.routine_names = frozenset(b.routine.name.casefold() for b in blocks)
         if not any(
             b.routine.name.casefold() in {n.casefold() for n in forms.ENTRYPOINTS} for b in blocks
         ):
@@ -253,7 +365,13 @@ class _Reader:
                 returns = [st for st in block.body if st.head == "возврат"]
                 if len(returns) == 1:
                     value = self.expr(_bare(returns[0].tokens)[1:], returns[0].span)
-                    if value.literal_type == "string" and str(value.literal_value).isdigit():
+                    literal = str(value.literal_value)
+                    # Исполнитель сравнивает строку с "3" (XDTO:4718, 4732): "03" для него не 3.
+                    if (
+                        value.literal_type == "string"
+                        and literal.isdigit()
+                        and str(int(literal)) == literal
+                    ):
                         self.version = int(str(value.literal_value))
         if self.version not in forms.MANAGER_VERSIONS:
             self.diagnostic("unsupported_manager_version", blocks[0].routine)
@@ -325,11 +443,8 @@ class _Reader:
         callback_ids: set[str] = set()
         for binding in self.bindings:
             matches = by_name.get(binding.target_name.casefold(), [])
-            routed = [
-                case
-                for case in self.cases
-                if case.literal_name.casefold() == binding.target_name.casefold()
-            ]
+            # Исполнитель сравнивает имя с литералом ветки оператором `=` — точно (design Р5).
+            routed = [case for case in self.cases if case.literal_name == binding.target_name]
             if not matches and len(routed) == 1:
                 matches = by_name.get(routed[0].target.raw.casefold(), [])
             state = "resolved" if len(matches) == 1 else "ambiguous" if matches else "missing"
@@ -364,11 +479,12 @@ class _Reader:
         pod = [replace(r, events=tuple(resolved[b.entity_id] for b in r.events)) for r in pod]
         pko_by_name: dict[str, list[ObjectRule]] = defaultdict(list)
         for object_rule in pko:
-            pko_by_name[object_rule.name.casefold()].append(object_rule)
+            # ИспользуемыеПКО → ПКО: исполнитель ищет Найти(…, "ИмяПКО") точно (XDTO:795).
+            pko_by_name[object_rule.name].append(object_rule)
         for index, processing_rule in enumerate(pod):
             refs: list[RuleRef] = []
             for ref in processing_rule.used_pko:
-                matches_pko = pko_by_name.get(ref.name.casefold(), [])
+                matches_pko = pko_by_name.get(ref.name, [])
                 refs.append(
                     replace(
                         ref,
@@ -555,6 +671,8 @@ class _Reader:
 
     def read_guards(self) -> None:
         stack: list[int] = []
+        # Условия уже прочитанных веток каждой открытой цепочки Если/ИначеЕсли/Иначе.
+        chains: list[list[frozenset[str] | None]] = []
         for st in self.lexical.statements:
             directive = st.tokens[0].kind == "directive"
             word = st.raw_text.split()[0].casefold() if directive else st.head
@@ -566,10 +684,17 @@ class _Reader:
                     raise EdFormatError("Ветка без начала условия")
                 old = stack.pop()
                 guard = self.guards[old]
+                if (guard.guard_kind == "preprocessor") != directive:
+                    # #Если и Если перекрываются: ветки цепочек смешались, направления
+                    # недостоверны (ревью kd3-silent-fixes, находка 2).
+                    self.interleaved = True
+                    self.diagnostic("interleaved_preprocessor", st)
                 span = self.source.span(guard.span.char_start, st.span.char_start)
                 self.guards[old] = replace(
                     guard, span=span, raw_text=self.source.text[span.char_start : span.char_end]
                 )
+                if is_end:
+                    chains.pop()
             if is_start or is_branch:
                 expression = (
                     self.expr(st.tokens[1:-1], st.span)
@@ -577,15 +702,39 @@ class _Reader:
                     else Expr(st.raw_text, st.span)
                 )
                 direction = None
+                directions: frozenset[str] | None = None
                 if not directive:
                     items = st.tokens
+                    # Простой атом — прежний known_direction: на нём держится импорт писателя.
                     if (
-                        len(items) >= 5
+                        len(items) == 5
                         and items[1].folded == "направлениеобмена"
                         and (items[2].value == "=" and items[3].kind == "string")
                     ):
-                        direction = {"Отправка": "send", "Получение": "receive"}.get(items[3].value)
-                kind = "preprocessor" if directive else "direction" if direction else "opaque"
+                        direction = _DIRECTION_LITERALS.get(items[3].value)
+                    condition = _direction_set(st.tokens[1:-1]) if word != "иначе" else frozenset()
+                    if is_start:
+                        chains.append([condition])
+                        directions = condition
+                    else:
+                        previous = chains[-1]
+                        if condition is not None and all(p is not None for p in previous):
+                            taken = frozenset().union(*cast(list[frozenset[str]], previous))
+                            directions = (
+                                _ALL_DIRECTIONS - taken if word == "иначе" else condition - taken
+                            )
+                        previous.append(condition)
+                elif is_start:
+                    chains.append([None])
+                else:
+                    chains[-1].append(None)
+                kind = (
+                    "preprocessor"
+                    if directive
+                    else "direction"
+                    if direction or directions is not None
+                    else "opaque"
+                )
                 if "толькозаголовки" in expression.raw.casefold():
                     kind = "headers_only"
                 if "условиеприменениявыполняется" in expression.raw.casefold():
@@ -597,6 +746,7 @@ class _Reader:
                     parent_id=self.guards[stack[-1]].entity_id if stack else None,
                     known_direction=direction,
                     guard_kind=kind,
+                    directions=tuple(sorted(directions)) if directions is not None else None,
                 )
                 # kind сущности остаётся guard, подвид хранится отдельно.
                 guard = replace(guard, name=kind)
@@ -721,9 +871,9 @@ class _Reader:
                 else:
                     parent = _name(call[1][0]).casefold()
                     in_group = parent == "свойстватч"
-                    if in_group and (
-                        group is None or group.guards != self.contexts.get(st.span.char_start, ())
-                    ):
+                    # Последняя ПКТЧ — родитель, если её ветка объемлет ПКС (design Р4).
+                    context = self.contexts.get(st.span.char_start, ())
+                    if in_group and (group is None or context[: len(group.guards)] != group.guards):
                         self.unknown_block(st, "ambiguous_property_parent", owner)
                         continue
                     prop = PropertyRule(
@@ -778,6 +928,11 @@ class _Reader:
                 continue
             if self.structural(st) or self.is_initialization(st, "pko"):
                 continue
+            if normalized(_bare(st.tokens)) == ("возврат",):
+                if not self.headers_only_return(st, block):
+                    # Возврат вне формы генератора меняет состав ПКС молча (design Р2).
+                    self.unknown_block(st, "early_return", owner)
+                continue
             self.unknown_block(st, "unsupported_pko_statement", owner)
         identification = values.get("ВариантИдентификации", Field())
         if identification.value and identification.value not in forms.IDENTIFICATIONS:
@@ -818,6 +973,36 @@ class _Reader:
                 return False
         return True
 
+    def headers_only_return(self, st: Statement, block: _RoutineBlock) -> bool:
+        """Форма генератора версии 3: `Если ТолькоЗаголовки Тогда Возврат; КонецЕсли;`.
+
+        reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:2300–2303: после
+        полей правила и до первой ПКС (`СвойстваШапки = …`, `ДобавитьПКС`/`ДобавитьПКТЧ`).
+        """
+        before = block.body[: block.body.index(st)]
+        initialized = any(self.is_initialization(other, "pko") for other in before[:1])
+        properties = any(
+            other.head == "свойствашапки"
+            or any(t.folded in ("добавитьпкс", "добавитьпктч") for t in other.tokens)
+            for other in before
+        )
+        if not initialized or properties:
+            return False
+        own = block.routine.guards
+        context = self.contexts.get(st.span.char_start, ())
+        if self.version != 3 or context[:-1] != own or len(context) != len(own) + 1:
+            return False
+        guard = next(g for g in self.guards if g.entity_id == context[-1])
+        if guard.branch != "if" or guard.expression_raw.casefold() != "толькозаголовки":
+            return False
+        inside = [
+            other
+            for other in block.body
+            if self.contexts.get(other.span.char_start, ())[: len(context)] == context
+            and not self.structural(other)
+        ]
+        return inside == [st]
+
     def is_initialization(self, st: Statement, kind: str) -> bool:
         tokens = normalized(st.tokens)
         expected = {
@@ -825,7 +1010,6 @@ class _Reader:
                 "ПравилоКонвертации = ОбменДаннымиXDTOСервер."
                 "ИнициализироватьПравилоКонвертацииОбъекта(ПравилаКонвертации);",
                 "СвойстваШапки = ПравилоКонвертации.Свойства;",
-                "Возврат;",
             ),
             "pod": ("ПравилоОбработки = ПравилаОбработкиДанных.Добавить();",),
             "pkpd": ("ПравилоКонвертации = ПравилаКонвертации.Добавить();",),
@@ -885,8 +1069,12 @@ class _Reader:
     def predefined_rules(self, block: _RoutineBlock) -> list[PredefinedRule]:
         result: list[PredefinedRule] = []
         starts = [i for i, st in enumerate(block.body) if self.is_initialization(st, "pkpd")]
+        preamble = self.pkpd_preamble(block.body)
         if not starts:
-            # Процедура без единого ПКПД (пустая или с одной преамбулой) — допустимая форма.
+            # Пустая процедура или одна преамбула — правил нет; иное тело — не понято (design Р3).
+            for st in block.body[preamble:]:
+                if not self.structural(st):
+                    self.unknown_block(st, "unsupported_pkpd_statement", block.routine.entity_id)
             return result
         ends = [*starts[1:], len(block.body)]
         for start, end in zip(starts, ends, strict=True):
@@ -954,10 +1142,19 @@ class _Reader:
                     mappings=tuple(mappings),
                 )
             )
-        for st in block.body[: starts[0] if starts else len(block.body)]:
+        for st in block.body[preamble : starts[0]]:
             if not self.structural(st):
                 self.unknown_block(st, "pkpd_preamble", block.routine.entity_id)
         return result
+
+    def pkpd_preamble(self, body: tuple[Statement, ...]) -> int:
+        """Число операторов преамбулы генератора версии 3 в начале тела, иначе 0.
+
+        reference/kd3-cfg/DataProcessors/ВыгрузкаМодуля/Ext/ObjectModule.bsl:1023–1036.
+        """
+        expected = [normalized(tokenize(text)) for text in forms.PKPD_PREAMBLE_V3]
+        actual = [normalized(st.tokens) for st in body[: len(expected)]]
+        return len(expected) if self.version == 3 and actual == expected else 0
 
     def parameters(self, block: _RoutineBlock) -> list[Parameter]:
         result: list[Parameter] = []
@@ -1000,9 +1197,20 @@ class _Reader:
                 if actual_args != expected_args:
                     self.unknown_block(st, "unsupported_rule_arguments", block.routine.entity_id)
                     continue
-                guards = self.contexts.get(st.span.char_start, ())
-                known = [directions[g].known_direction for g in guards]
-                direction = known[-1] if known and all(known) else None if guards else "both"
+                # Направление вызова — пересечение направлений всех объемлющих веток.
+                reachable: frozenset[str] | None = _ALL_DIRECTIONS
+                for guard_id in self.contexts.get(st.span.char_start, ()):
+                    branch = directions[guard_id].directions
+                    reachable = (
+                        None if reachable is None or branch is None else reachable & set(branch)
+                    )
+                direction = (
+                    None
+                    if not reachable or self.interleaved
+                    else "both"
+                    if reachable == _ALL_DIRECTIONS
+                    else next(iter(reachable))
+                )
                 self.uses.append(
                     RuleUse(
                         **self.common("use", call[0], st),
@@ -1031,33 +1239,47 @@ class _Reader:
 
     def read_dispatcher(self, block: _RoutineBlock) -> None:
         guard_lookup = {g.entity_id: g for g in self.guards}
+        headers = {s.span.char_start: s for s in block.body}
         for st in block.body:
             tokens = _bare(st.tokens)
             returns = st.head == "возврат"
             call = _call(tokens[1:] if returns else tokens)
             if call:
-                guard_ids = self.contexts.get(st.span.char_start, ())
-                literal = None
-                for guard_id in guard_ids:
-                    guard = guard_lookup[guard_id]
-                    # Выражение уже выделено лексером; литерал извлекается из заголовка ветки.
-                    header = next(
-                        (s for s in block.body if s.span.char_start == guard.span.char_start), None
-                    )
-                    if (
-                        header
-                        and len(header.tokens) >= 5
-                        and header.tokens[1].folded in ("имяпроцедуры", "имяфункции")
-                        and header.tokens[2].value == "="
-                        and header.tokens[3].kind == "string"
+                literals: tuple[str, ...] | None = None
+                understood = True
+                # Ближайшая объемлющая ветка с ИмяПроцедуры/ИмяФункции задаёт литералы (design Р6).
+                for guard_id in reversed(self.contexts.get(st.span.char_start, ())):
+                    header = headers.get(guard_lookup[guard_id].span.char_start)
+                    if header is None or not any(
+                        t.kind == "identifier" and t.folded in ("имяпроцедуры", "имяфункции")
+                        for t in header.tokens
                     ):
-                        literal = header.tokens[3].value
-                if literal is not None:
-                    opening = next(i for i, t in enumerate(tokens) if t.value == "(")
-                    target_tokens = tokens[1:opening] if returns else tokens[:opening]
+                        continue
+                    literals = _dispatcher_literals(header.tokens[1:-1])
+                    understood = literals is not None
+                    break
+                if not understood:
+                    self.unknown_block(
+                        st, "unsupported_dispatcher_condition", block.routine.entity_id
+                    )
+                    continue
+                opening = next(i for i, t in enumerate(tokens) if t.value == "(")
+                target_tokens = tokens[1:opening] if returns else tokens[:opening]
+                if (
+                    literals
+                    and len(target_tokens) == 1
+                    and target_tokens[0].folded in PLATFORM_FUNCTIONS
+                    and target_tokens[0].folded not in self.routine_names
+                ):
+                    # Функция глобального контекста в ветке — не цель вызова обработчика.
+                    continue
+                for number, literal in enumerate(literals or ()):
+                    common = self.common("case", literal, st)
+                    if number:
+                        common["entity_id"] += f":{number}"
                     self.cases.append(
                         DispatcherCase(
-                            **self.common("case", literal, st),
+                            **common,
                             dispatcher_id=block.routine.entity_id,
                             literal_name=literal,
                             target=self.expr(target_tokens, st.span),
@@ -1065,6 +1287,7 @@ class _Reader:
                             returns=returns,
                         )
                     )
+                if literals:
                     continue
             if not self.structural(st):
                 self.unknown_block(st, "unsupported_dispatcher_statement", block.routine.entity_id)

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
@@ -126,8 +126,40 @@ class _Draft:
 
 
 def norm_name(value: str) -> str:
-    """Сравнение имён правил: крайние пробелы и регистр не различаются."""
+    """Близкое имя: крайние пробелы и регистр не различаются.
+
+    Так сравниваются имена методов BSL и ключи `Структура` (`ИспользованиеПКО`, XDTO:8408).
+    Строковые имена правил и обработчиков исполнитель сравнивает точно — `rule_name_key`.
+    """
     return value.strip().casefold()
+
+
+def rule_name_key(value: str) -> str:
+    """Строковое имя правила или обработчика — как есть.
+
+    Исполнитель ищет правила `ТаблицаЗначений.Найти` (XDTO:504, 795, 1543, 7934, 8369), ветки
+    диспетчера — оператором `=`; живая проба 26.10.2026 (платформа 8.3.27.2170): регистр и концевые
+    пробелы значимы в обоих случаях. Протокол — kd3-silent-fixes.
+    """
+    return value
+
+
+def near_names(name: str, declared: Iterable[str]) -> tuple[str, ...]:
+    """Объявленные имена, совпадающие с `name` только без учёта регистра и крайних пробелов."""
+    key = norm_name(name)
+    return tuple(sorted({item for item in declared if item != name and norm_name(item) == key}))
+
+
+def near_hint(name: str, declared: Iterable[str]) -> str:
+    """Добавка к находке «нет»: близкое имя есть, но исполнитель его не найдёт."""
+    found = near_names(name, declared)
+    if not found:
+        return ""
+    listed = ", ".join(f"«{item}»" for item in found)
+    return (
+        f" Есть {listed} — отличается регистром или пробелами; исполнитель сравнивает имена "
+        "точно и это правило не найдёт."
+    )
 
 
 def classify_deferred_argument(argument: Expr) -> Literal["ok", "invalid", "unparsed"]:
@@ -144,7 +176,7 @@ def classify_deferred_argument(argument: Expr) -> Literal["ok", "invalid", "unpa
 def deferred_cases(document: EdDocument) -> tuple[DispatcherCase, ...]:
     """Ветки процедурного диспетчера, привязанные к ПослеЗагрузкиВсехДанных."""
     names = {
-        norm_name(binding.target_name)
+        rule_name_key(binding.target_name)
         for rule in document.pko
         for binding in rule.events
         if binding.event == _DEFERRED_EVENT and binding.target_name.strip()
@@ -159,7 +191,7 @@ def deferred_cases(document: EdDocument) -> tuple[DispatcherCase, ...]:
     return tuple(
         case
         for case in document.dispatcher_cases
-        if case.dispatcher_id in dispatcher_ids and norm_name(case.literal_name) in names
+        if case.dispatcher_id in dispatcher_ids and rule_name_key(case.literal_name) in names
     )
 
 

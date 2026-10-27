@@ -224,6 +224,8 @@ class Guard(Entity):
     parent_id: str | None = None
     known_direction: str | None = None
     guard_kind: str = "opaque"
+    # Направления, в которых ветка выполняется: подмножество ("receive", "send"); None — неизвестно.
+    directions: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

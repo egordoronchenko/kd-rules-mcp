@@ -436,11 +436,13 @@ def test_tag_ranges_and_conversion_header():
 def test_empty_predefined_procedure_is_a_valid_form():
     """Процедура ПКПД без единого правила читается: раньше падала на пустом списке блоков."""
     text = (DATA / "checks_base.bsl").read_text(encoding="utf-8")
-    assert "ЗаполнитьПравилаКонвертацииПредопределенныхДанных" not in text
-    text += (
-        "\nПроцедура ЗаполнитьПравилаКонвертацииПредопределенныхДанных("
+    procedure = (
+        "Процедура ЗаполнитьПравилаКонвертацииПредопределенныхДанных("
         "НаправлениеОбмена, ПравилаКонвертации) Экспорт\nКонецПроцедуры\n"
     )
+    # С kd3-silent-fixes пустая процедура ПКПД — часть «чистой» базы (интерфейс исполнителя).
+    assert procedure in text
     doc = read_manager_text(text)
+    assert doc.parse_status.value == "complete"
     assert doc.pkpd == ()
     assert doc.counts["pko"] == 1

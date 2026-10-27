@@ -16,6 +16,7 @@ from kd_rules_mcp.service import Kd2Service, Settings
 from kd_rules_mcp.service import ed as ed_service
 from kd_rules_mcp.service import ed_routes as routes_service
 from kd_rules_mcp.service.ed_views import references_summary, validation_view
+from kd_rules_mcp.validation.ed_interface import validate_interface
 from kd_rules_mcp.validation.ed_links import validate_links
 from kd_rules_mcp.validation.report import Issue
 from tests import session_inputs
@@ -63,6 +64,8 @@ def legacy_validate(service, project_id):
     project = service._ed_project(project_id)
     refs = ed.build_references(project.document)
     report = validate_links(project.document, project.index, refs)
+    # С kd3-silent-fixes обычный ed_validate проверяет и интерфейс менеджера.
+    report.extend(validate_interface(project.document, project.index))
     report.skip(
         "ed.schema",
         "Схема формата и структура конфигурации не переданы: проверки по схеме не выполнялись",

@@ -97,7 +97,7 @@ def test_open_overview(service, version):
             "file_id": "module",
             "path": str(path),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "lines": 139 if version == 2 else 53,
+            "lines": 139 if version == 2 else 59,
         }
     ]
     overview = service.ed_overview(result["project_id"])

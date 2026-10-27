@@ -33,6 +33,7 @@ from kd_rules_mcp.service.ed_reopen import with_reopen_hints
 from kd_rules_mcp.service.ed_routes import EdRoutesMixin
 from kd_rules_mcp.service.ed_schema import SchemaProject
 from kd_rules_mcp.service.paths import Settings
+from kd_rules_mcp.validation.ed_interface import validate_interface
 from kd_rules_mcp.validation.ed_layers import (
     validate_effective_links,
     validate_effective_schema,
@@ -843,6 +844,9 @@ class EdMixin(ServiceBase):
                 limit,
             )
         report = validate_links(project.document, project.index, references)
+        if project.manager_project_id is None:
+            # У проекта авторинга интерфейс проверяет ed.writer.entrypoint по модели.
+            report.extend(validate_interface(project.document, project.index))
         if schema_project:
             report.extend(
                 validate_schema(
@@ -1096,6 +1100,14 @@ class EdMixin(ServiceBase):
                     "ed.structure",
                     "Структура конфигурации не передана: проверки по структуре не выполнялись",
                 )
+        base = snap.manager.source_document or snap.manager.base
+        if base.files:
+            # Метод, которого нет в базовом модуле, может добавить слой — тогда skipped.
+            report.extend(
+                validate_interface(
+                    base, addresses.build_addresses(base), extensions=bool(snap.manager.layers)
+                )
+            )
         layer_index = layer_views.build_layer_addresses(snap.manager)
 
         def issue_order(issue):

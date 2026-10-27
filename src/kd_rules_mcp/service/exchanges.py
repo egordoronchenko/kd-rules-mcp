@@ -8,6 +8,28 @@ from kd_rules_mcp.projects import Catalog, Exchange, ExchangeSide, resolve
 from kd_rules_mcp.service.base import ServiceBase
 from kd_rules_mcp.service.views import project_structure_id
 
+# Аргументы, которые ed_route_compare кладёт в profile.selected.<сторона>.ed_schema_open.
+_ED_SCHEMA_ARGUMENTS = (
+    "format_version",
+    "path",
+    "project",
+    "configuration",
+    "package",
+    "imports",
+)
+_ED_VERSION_NOTE = (
+    "Версия формата узла по выгрузкам неизвестна; сравнение маршрутов показывает "
+    "статическую совместимость, версию выбирает агент по ответу, живой обмен — отдельно."
+)
+
+
+def _ed_schema_note(side: str) -> str:
+    """Поле ответа сравнения с готовыми аргументами ed_schema_open для одной стороны."""
+    return (
+        f"Готовые аргументы — profile.selected.{side}.ed_schema_open ответа шага сравнения; "
+        f"если null, причину называет profile.selected.{side}.ed_schema_reason."
+    )
+
 
 class ExchangesMixin(ServiceBase):
     """Представление общего каталога обменов для агента."""
@@ -101,6 +123,7 @@ class ExchangesMixin(ServiceBase):
                     "комплекта пропущены, пути — от папки проекта."
                 )
         opened: dict[tuple[str, str], int] = {}
+        routed: dict[str, int] = {}
         for side in sides:
             step(
                 "разбор",
@@ -124,6 +147,13 @@ class ExchangesMixin(ServiceBase):
                         "configuration": side["configuration"],
                     },
                 )
+                route_arguments = {
+                    "project": side["project"],
+                    "configuration": side["configuration"],
+                }
+                if side["plan"]:
+                    route_arguments["plan"] = side["plan"]
+                routed[side["project"]] = step("разбор", "ed_routes", route_arguments)
 
         directions = []
         for source, target in item.directions:
@@ -159,14 +189,47 @@ class ExchangesMixin(ServiceBase):
                         "rules_diff",
                         {"left": direction["export"], "right": direction["import"]},
                     )
+        # Сравнение — на направление; схему открываем один раз на сторону из первого сравнения,
+        # где она участвует: ответ несёт готовые аргументы и слева, и справа.
+        schema_steps: dict[str, int] = {}
+        for source, target in item.directions:
+            if source not in routed or target not in routed:
+                continue
+            left, right = by_project[source], by_project[target]
+            compare_arguments = {}
+            if left["plan"]:
+                compare_arguments["left_plan"] = left["plan"]
+            if right["plan"]:
+                compare_arguments["right_plan"] = right["plan"]
+            compared = step(
+                "разбор",
+                "ed_route_compare",
+                compare_arguments,
+                {"left_profile_id": routed[source], "right_profile_id": routed[target]},
+            )
+            for project, side_name in ((source, "left"), (target, "right")):
+                if project in schema_steps:
+                    continue
+                schema_steps[project] = step(
+                    "разбор",
+                    "ed_schema_open",
+                    {},
+                    {key: compared for key in _ED_SCHEMA_ARGUMENTS},
+                    _ed_schema_note(side_name),
+                )
         for side in sides:
             for kind, tool in (("registration", "rules_validate"), ("ed", "ed_validate")):
                 n = opened.get((side["project"], kind))
                 if n:
                     key = "structure_id" if kind == "ed" else "source_structure"
-                    step("проверка", tool, {key: side["structure_id"]}, {"project_id": n})
+                    fill = {"project_id": n}
+                    if kind == "ed" and side["project"] in schema_steps:
+                        fill["schema_id"] = schema_steps[side["project"]]
+                    step("проверка", tool, {key: side["structure_id"]}, fill)
         if item.technology is None:
             notes.append("Технологию покажет проверка базы.")
+        elif item.technology == "ed":
+            notes.append(_ED_VERSION_NOTE)
         for side in sides:
             if not side["base"]:
                 continue

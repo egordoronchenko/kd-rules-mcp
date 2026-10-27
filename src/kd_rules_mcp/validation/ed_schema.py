@@ -83,6 +83,34 @@ def enum_values(schema: EdSchema, typ: SchemaType) -> tuple[frozenset[str], bool
     return frozenset(), False
 
 
+def _check_table_row_name(
+    checking: CheckContext,
+    schema: EdSchema,
+    group: ed.PropertyGroup,
+    direction: str,
+    rule: ed.ObjectRule,
+    container: SchemaProperty,
+) -> None:
+    """Имя строки при получении. Отправка пишет фактическое имя (XDTO:1035–1038)."""
+    check = "ed.schema.table_row_name"
+    if not checking.start(check, group, direction, rule):
+        return
+    # Тот же критерий, что table_row: единственное повторяемое свойство контейнера.
+    typ = property_type(schema, container)
+    rows = schema.inherited.get(typ.id, ()) if typ and typ.status == "complete" else ()
+    row_name = rows[0].name.local if len(rows) == 1 and rows[0].upper != 1 else ""
+    checking.checked()
+    if row_name != "Строка":
+        # XDTO:6428–6451 читает свойство «Строка»; XDTO:5681–5691 узнаёт таблицу по любому имени.
+        checking.report.warning(
+            check,
+            checking.address(group),
+            f"Строки таблицы «{group.format_property}» в формате называются «{row_name}»: "
+            "исполнитель при получении читает только свойство «Строка» "
+            "(XDTO:6428–6451), строки не загрузятся.",
+        )
+
+
 def atomic_family(schema: EdSchema, prop: SchemaProperty) -> str | None:
     """Прежняя граница overlay: сохраняет отчёты опубликованных комплектов."""
     if prop.status != "complete":
@@ -185,7 +213,8 @@ def validate_schema(
     known_namespaces = {p.namespace for p in schema.packages} | set(schema.extension_namespaces)
     by_name: dict[str, list[ed.ObjectRule]] = {}
     for rule in document.pko:
-        by_name.setdefault(rule.name.casefold(), []).append(rule)
+        # ПКО по имени исполнитель ищет точно (XDTO:504, 1554): регистр и пробелы значимы.
+        by_name.setdefault(rule.name, []).append(rule)
 
     def owner_type(rule: ed.ObjectRule, direction: str) -> tuple[SchemaType | None, str]:
         return profile.owner_type(rule, direction, checking.applicability)
@@ -270,10 +299,10 @@ def validate_schema(
                         else:
                             resolved = profile.resolve(group_type, group.format_property)
                             group_status = resolved.status
+                            container = None
                             if group_status == "resolved":
-                                row_type = table_row(
-                                    schema, profile.properties[resolved.property_ids[0]]
-                                )
+                                container = profile.properties[resolved.property_ids[0]]
+                                row_type = table_row(schema, container)
                                 group_status = "resolved" if row_type else "not_table"
                             if group_status in ("missing", "not_table"):
                                 checking.checked()
@@ -283,8 +312,13 @@ def validate_schema(
                                     f"Группа «{group.format_property}» "
                                     "не разрешается как табличная часть формата.",
                                 )
-                            elif group_status == "resolved":
+                            elif group_status == "resolved" and container is not None:
                                 checking.checked()
+                                # Получение читает строки по фиксированному имени; отправка — нет.
+                                if direction == "receive":
+                                    _check_table_row_name(
+                                        checking, schema, group, direction, rule, container
+                                    )
                             else:
                                 checking.skip(check, resolved.reason or group_status, group)
                 supplied: set[str] = set()
@@ -295,10 +329,8 @@ def validate_schema(
                         and prop.configuration_property
                         and not prop.algorithm_flag
                         and prop.conversion_rule
-                        and not any(
-                            p.name.casefold() == prop.conversion_rule.casefold()
-                            for p in document.pkpd
-                        )
+                        # XDTO:1543, 6818: Найти по ИмяПКПД учитывает регистр и концевые пробелы.
+                        and not any(p.name == prop.conversion_rule for p in document.pkpd)
                     ):
                         check_reference_types(
                             checking,
@@ -307,7 +339,7 @@ def validate_schema(
                             rule,
                             group,
                             prop,
-                            by_name.get(prop.conversion_rule.casefold(), []),
+                            by_name.get(prop.conversion_rule, []),
                         )
                     property_owner = group_type
                     property_owner_status = group_type_status
@@ -376,7 +408,7 @@ def validate_schema(
                     if prop.conversion_rule and checking.start(
                         check, prop, direction, group or rule
                     ):
-                        targets = by_name.get(prop.conversion_rule.casefold(), [])
+                        targets = by_name.get(prop.conversion_rule, [])
                         if type_status != "resolved":
                             checking.skip(check, "owner_type_unavailable", prop)
                         elif len(targets) > 1:
