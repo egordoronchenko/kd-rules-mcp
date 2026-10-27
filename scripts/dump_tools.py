@@ -93,6 +93,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "Live sandbox checks": (
         "live_base_check",
         "live_status",
+        "live_format_support",
         "live_rules_dump",
         "live_rules_check",
         "live_registration_check",
@@ -109,6 +110,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "ed_validate",
         "ed_close",
     ),
+    "EnterpriseData path and pair": ("ed_trace", "ed_pair_validate"),
     "EnterpriseData format schema": (
         "ed_schema_open",
         "ed_schema_types",

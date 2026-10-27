@@ -115,7 +115,9 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
     # project_exchanges и live_base_check (#83) — около 1250 знаков схем и описаний.
     # rule_update_many для ПКО и ПВД (filter, mode, expected_count, страница) и pko_create_many —
     # около 1810 знаков при однословных описаниях полей.
-    assert len(serialized) <= 57_850, f"Схемы: {len(serialized)} знаков"
+    # ed_trace, ed_pair_validate и live_format_support (kd3-trace-pair) — около 3110 знаков при
+    # однословных описаниях полей (вместо урезания чужих описаний).
+    assert len(serialized) <= 60_970, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:

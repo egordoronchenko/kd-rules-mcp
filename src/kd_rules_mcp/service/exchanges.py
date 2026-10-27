@@ -226,6 +226,29 @@ class ExchangesMixin(ServiceBase):
                     if kind == "ed" and side["project"] in schema_steps:
                         fill["schema_id"] = schema_steps[side["project"]]
                     step("проверка", tool, {key: side["structure_id"]}, fill)
+        # Пара — на направление: источник при отправке, приёмник при получении (ed_pair_validate).
+        for source, target in item.directions:
+            sender, receiver = opened.get((source, "ed")), opened.get((target, "ed"))
+            if not sender or not receiver:
+                continue
+            fill = {"source_project_id": sender, "target_project_id": receiver}
+            if source in schema_steps and target in schema_steps:
+                fill.update(
+                    source_schema_id=schema_steps[source], target_schema_id=schema_steps[target]
+                )
+            step("проверка", "ed_pair_validate", {}, fill)
+            # Трассировка — заготовка: объект из жалобы подставляет агент.
+            for project, n, direction in ((source, sender, "send"), (target, receiver, "receive")):
+                trace_fill = {"project_id": n}
+                if project in schema_steps:
+                    trace_fill["schema_id"] = schema_steps[project]
+                step(
+                    "проверка",
+                    "ed_trace",
+                    {"object": "<объект>", "direction": direction},
+                    trace_fill,
+                    note="object — объект метаданных или тип формата из жалобы; заполняет агент.",
+                )
         if item.technology is None:
             notes.append("Технологию покажет проверка базы.")
         elif item.technology == "ed":
@@ -250,6 +273,14 @@ class ExchangesMixin(ServiceBase):
             if item.technology is None:
                 continue
             step("живая проверка", "live_status", args)
+            if item.technology == "ed" and side["plan"]:
+                step(
+                    "живая проверка",
+                    "live_format_support",
+                    args,
+                    note="Что база знает об объектах формата корреспондента; сравнить с "
+                    "разделом objects ed_pair_validate.",
+                )
             if item.technology == "kd2":
                 step("живая проверка", "live_rules_dump", args)
                 if "rules" in side and side["rules"]["files"]["exchange"]["exists"] is not None:

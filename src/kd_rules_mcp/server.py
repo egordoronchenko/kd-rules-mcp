@@ -220,6 +220,7 @@ TOOL_EFFECTS: dict[str, tuple[str, str]] = {
     "correspondent_draft": ("workspace", "project snapshot in workspace/.projects"),
     "live_base_check": ("workspace", _LIVE_LOG),
     "live_status": ("workspace", _LIVE_LOG),
+    "live_format_support": ("workspace", _LIVE_LOG),
     "live_rules_dump": (
         "workspace",
         "rules files in workspace/.live; open=true also opens projects",
@@ -238,6 +239,7 @@ TOOL_EFFECTS: dict[str, tuple[str, str]] = {
     "ed_get": ("read", ""),
     "ed_locate": ("read", ""),
     "ed_validate": ("read", ""),
+    "ed_trace": ("read", ""),
     "ed_close": ("workspace", "deletes a manager project in workspace/.ed-projects"),
     "ed_schema_open": ("read", "snapshot in memory"),
     "ed_schema_types": ("read", ""),
@@ -245,6 +247,7 @@ TOOL_EFFECTS: dict[str, tuple[str, str]] = {
     "ed_schema_close": ("read", ""),
     "ed_routes": ("read", "snapshots in memory"),
     "ed_route_compare": ("read", ""),
+    "ed_pair_validate": ("read", ""),
     "ed_create": ("workspace", "manager project in workspace/.ed-projects"),
     "ed_apply": ("workspace", "preview and apply both write to workspace/.ed-projects"),
     "ed_authoring_candidates": ("read", ""),
@@ -472,6 +475,22 @@ def create_server(service: Kd2Service) -> MCPServer:
     ) -> dict[str, Any]:
         """Read exchange nodes, message numbers, registrations and active rules."""
         return await call(service.live_status, base, plan)
+
+    @server.tool()
+    async def live_format_support(
+        base: Annotated[str, Field(description="Sandbox project.base")],
+        plan: Annotated[str, Field(description="Plan")],
+        node: Annotated[str | None, Field(description="Node code")] = None,
+        format_object: Annotated[str | None, Field(description="Format object")] = None,
+        version: Annotated[str | None, Field(description="Version")] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Read correspondent format objects known to the base per node: node version,
+        settings received, send/receive rows."""
+        return await call(
+            service.live_format_support, base, plan, node, format_object, version, offset, limit
+        )
 
     @server.tool()
     async def live_rules_dump(
@@ -1628,6 +1647,33 @@ def create_server(service: Kd2Service) -> MCPServer:
         )
 
     @server.tool()
+    async def ed_trace(
+        project_id: Annotated[str, Field(description="ED ID")],
+        object: Annotated[str, Field(description="Metadata/type/PKO or ПКО/name")],
+        direction: Annotated[str, Field(description="send/receive")] = "send",
+        schema_id: Annotated[str | None, Field(description="Schema ID")] = None,
+        version: Annotated[str | None, Field(description="Version or schema's")] = None,
+        property: Annotated[str | None, Field(description="Metadata/format property")] = None,
+        depth: Annotated[int, Field(description="Cascade depth 0..3")] = 1,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Trace one object through one ED module: links, first break, BSP lines. The
+        correspondent link is unknown: ed_pair_validate, live_format_support."""
+        return await call(
+            service.ed_trace,
+            project_id,
+            object,
+            direction,
+            schema_id,
+            version,
+            property,
+            depth,
+            offset,
+            limit,
+        )
+
+    @server.tool()
     async def ed_close(
         project_id: Annotated[str, Field(description="ED snapshot or manager project ID")],
     ) -> dict[str, Any]:
@@ -1820,6 +1866,39 @@ def create_server(service: Kd2Service) -> MCPServer:
             section,
             level,
             check_prefix,
+            offset,
+            limit,
+        )
+
+    @server.tool()
+    async def ed_pair_validate(
+        source_project_id: Annotated[str, Field(description="Sender ED ID")],
+        target_project_id: Annotated[str, Field(description="Receiver ED ID")],
+        version: Annotated[str | None, Field(description="Version; null = schemas")] = None,
+        source_schema_id: Annotated[str | None, Field(description="Sender schema")] = None,
+        target_schema_id: Annotated[str | None, Field(description="Receiver schema")] = None,
+        section: Annotated[str, Field(description="issues/objects/skipped")] = "issues",
+        level: Annotated[str | None, Field(description="Severity")] = None,
+        check_prefix: Annotated[str | None, Field(description="Check prefix")] = None,
+        address_prefix: Annotated[str | None, Field(description="Address prefix")] = None,
+        format_object: Annotated[str | None, Field(description="Format object")] = None,
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """Compare sender send rules with receiver receive rules statically in one version:
+        intersection, search fields, cleared tables/properties. Details: docs/tools.md."""
+        return await call(
+            service.ed_pair_validate,
+            source_project_id,
+            target_project_id,
+            version,
+            source_schema_id,
+            target_schema_id,
+            section,
+            level,
+            check_prefix,
+            address_prefix,
+            format_object,
             offset,
             limit,
         )

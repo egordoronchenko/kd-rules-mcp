@@ -174,10 +174,18 @@ def test_ed_routes_compare_and_schema_per_side(tmp_path: Path) -> None:
         "ed_route_compare",
         "ed_validate",
         "ed_validate",
+        "ed_pair_validate",
+        "ed_trace",
+        "ed_trace",
+        "ed_pair_validate",
+        "ed_trace",
+        "ed_trace",
         "live_base_check",
         "live_status",
+        "live_format_support",
         "live_base_check",
         "live_status",
+        "live_format_support",
     ]
     assert all(s["stage"] == "разбор" for s in steps if s["tool"] == "ed_routes")
     bp_routes, do_routes = (s for s in steps if s["tool"] == "ed_routes")
@@ -220,6 +228,23 @@ def test_ed_routes_compare_and_schema_per_side(tmp_path: Path) -> None:
         "schema_id": right_schema["n"],
     }
     assert steps[4]["tool"] == "ed_open"
+    forward_pair, reverse_pair = (s for s in steps if s["tool"] == "ed_pair_validate")
+    assert forward_pair["stage"] == "проверка" and forward_pair["arguments"] == {}
+    assert forward_pair["fill"] == {
+        "source_project_id": steps[1]["n"],
+        "target_project_id": steps[4]["n"],
+        "source_schema_id": left_schema["n"],
+        "target_schema_id": right_schema["n"],
+    }
+    assert reverse_pair["fill"]["source_project_id"] == steps[4]["n"]
+    assert reverse_pair["fill"]["target_schema_id"] == left_schema["n"]
+    send_trace, receive_trace = [s for s in steps if s["tool"] == "ed_trace"][:2]
+    assert send_trace["arguments"] == {"object": "<объект>", "direction": "send"}
+    assert send_trace["fill"] == {"project_id": steps[1]["n"], "schema_id": left_schema["n"]}
+    assert receive_trace["fill"] == {"project_id": steps[4]["n"], "schema_id": right_schema["n"]}
+    assert "заполняет агент" in send_trace["note"]
+    live = [s for s in steps if s["tool"] == "live_format_support"]
+    assert live[0]["arguments"] == {"base": "bp.dev", "plan": "Планbp"}
     assert _ED_VERSION_NOTE in exchange["notes"]
 
 
