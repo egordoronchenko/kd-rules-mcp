@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from typing import Any
 
 from kd_rules_mcp.authoring.ed.manager_operations import ManagerOperation
 from kd_rules_mcp.ed.address import build_addresses
@@ -21,6 +22,7 @@ from kd_rules_mcp.ed.lexer import lex, tokenize
 from kd_rules_mcp.ed.model import EdDocument
 from kd_rules_mcp.ed.reader import read_manager_text
 from kd_rules_mcp.ed.refs import ReferenceIndex, build_references, norm_name
+from kd_rules_mcp.ed.schema.model import EdSchema
 from kd_rules_mcp.ed.writer_import import (
     code_occurrences,
     code_rule_references,
@@ -634,6 +636,8 @@ def validate_writer(
     operations: Sequence[ManagerOperation] = (),
     common_modules: Sequence[str] | None = None,
     global_methods: Sequence[str] = (),
+    format_schema: EdSchema | None = None,
+    format_packages: Sequence[Any] = (),
 ) -> ValidationReport:
     """Возвращает ValidationReport; зелёный статический отчёт не удостоверяет живой обмен.
 
@@ -687,7 +691,7 @@ def validate_writer(
                 "\ufeff" if model.header.text_style.bom and not text.startswith("\ufeff") else ""
             ) + text
         document = read_manager_text(source)
-        mismatch = check_readback(model, document)
+        mismatch = check_readback(replace(model, format_packages=()), document)
     except (ValueError, UnicodeError, EdFormatError, EdReadError, EdResourceLimitError) as error:
         report.error(
             "ed.writer.read",
@@ -1120,6 +1124,9 @@ def validate_writer(
             inspect_entry(
                 container, addresses.get(container.owner_id or "", "Код/" + container.name)
             )
+    from .ed_format import validate_format
+
+    report.extend(validate_format(model, format_schema, format_packages))
     # Одинаковая причина может прийти от модели и результата повторного чтения.
     report.issues = list(dict.fromkeys(report.issues))
     report.skipped = list(dict.fromkeys(report.skipped))

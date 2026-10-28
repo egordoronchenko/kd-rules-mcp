@@ -258,7 +258,7 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
     def _authoring_format_package(
         self, path: str, schema: EdSchema | None, version: str
     ) -> FormatPackage:
-        """Пакет читается при каждом preview/write, в проект менеджера не записывается."""
+        """Общий читатель пакета для импорта в модель и внешнего входа сборки."""
         if schema is None:
             raise EdAuthoringPreconditionError(
                 "Для пакета требуется привязанная схема формата",

@@ -1185,7 +1185,7 @@ Effect: `workspace` — preview and apply both write to workspace/.ed-projects.
 |---|---|---|---|
 | `project_id` | string | required | Manager project |
 | `expected_revision` | string | required | Current revision |
-| `operations` | array of object \| null | `null` | Up to 100 manager ops: docs/tools.md. Код/ or Алгоритм/; client_id refs. after_id: omitted=last, null=first. Omit to reuse preview. Header: manager_name,title,generated_at,text_style; pko.extensions URIs; table_part/property namespace |
+| `operations` | array of object \| null | `null` | 100 manager ops; docs/tools.md. client_id/address refs. after_id: omitted=last,null=first. Omit to reuse preview. pko.extensions; property/table_part namespace; format_package/type/property CRUD (package source=JSON/XDTO) |
 | `mode` | string | `"preview"` | preview or apply |
 | `expected_preview_hash` | string \| null | `null` | Current preview_hash for apply |
 | `confirmations` | array of object \| null | `null` | Preview notices: code, notice_hash |
@@ -2141,7 +2141,7 @@ chain decides: `no_call` → `handler_missing`, `throws` → `handler_throws`; a
 `unknown`), `search` (receive only: identification, search variants, the ПКС and format property filling each
 field; `search_field_unfilled` — no ПКС and no conversion handler, the variant is always skipped, XDTO:6863–6887;
 `Родитель` (exact key, XDTO:6876) of catalogs and characteristic types is optional; `ЭтоГруппа` is set by the
-executor, `partial` `executor_fills`, XDTO:4399–4402), `cascades` (property ПКО up to `depth`) and `breaks` (all
+executor and a boolean is always filled — `ok`, reason `executor_fills`, XDTO:4399–4402), `cascades` (property ПКО up to `depth`) and `breaks` (all
 broken links and rows). A ПКО root used by a ПОД of another object or type is traced through that ПОД. With
 `property` (a property or table name), no matching ПКС gives
 `property_not_in_rules`; a handler of the direction makes it `partial` `handler_may_supply`, a literal
@@ -2531,6 +2531,9 @@ remains idempotent. Deletion does not erase the history needed to distinguish th
 | `conversion_event` | `update` | Event/code-unit target; no owner/position |
 | `algorithm` | `create`, `update`, `delete` | Module container on create; no owner |
 | `table_part` | `create`, `update`, `delete`, `move` | ПКО owner; header/conditional container. Owns its row properties. |
+| `format_package` | `create`, `update`, `delete` | Project format package; no owner. `source` imports a JSON/XDTO file |
+| `format_type` | `create`, `update`, `delete`, `move` | Package owner on create; order inside the package |
+| `format_property` | `create`, `update`, `delete`, `move` | Type owner on create; order = XDTO property order |
 | `routine` | — | Reserved (`unsupported_form`) |
 | `write_policy` | — | Reserved (`unsupported_form`) |
 <!-- /ed-writer-kinds -->
@@ -2579,6 +2582,9 @@ Directions: `["send"]`, `["receive"]`, `["send","receive"]`, `["both"]`; no dupl
 | `handler` | `event`!: name below, create only; new `body`!: string, or `target`: existing editable code-unit reference with exact event signature (without body). `restore_dispatcher`: boolean false, update only. Update accepts body/target/restore; deferred event requires a procedure algorithm target. | `body`; deferred body via `algorithm` |
 | `conversion_event` | `body`: exact string, required on update unless cleared. | `body` |
 | `algorithm` | `name`!: Identifier; `body`!: string; `routine_kind`: `procedure` (default)/`function`; `parameters`: formal-parameter text `""` (supports `Знач`, defaults, commas); `exported`: boolean false. Entrypoints, dispatchers/events, `ДобавитьПКО_…`/`ДобавитьПОД_…` and handler-template names reserved. | `body` |
+| `format_package` | `metadata_name`: Identifier; `namespace`: own URI ≠ base; `base_version`, `base_namespace`: default from the single binding; `imports`: URI list; `types`: full types, create only; `origin`: `authored`/`imported`; `source_sha256`: import file hash. Create may pass `source` (path) instead: the service expands it into these fields. | `imports` |
+| `format_type` | `name`: local name; `role`: `object`/`key`/`reference`/`row`/`table`/`enumeration`/`value`; `properties` (create only): `name` local, `type` QName, `lower`, `upper`, `nillable`, `form`, `inline_type`; `base`, `key_property`: QName; `facets`; `open`, `abstract`, `ordered`, `sequenced`: B; `variety`; `exported`: B. | `base`, `facets`, `open`, `abstract`, `ordered`, `sequenced`, `variety`, `key_property` |
+| `format_property` | `name`: local name; `type`: QName `{"namespace","local"}`; `lower` (default 1); `upper` (default 1, null unlimited); `nillable`; `form`: `element`/`attribute`/`text`; `inline_type`: full type. | `upper`, `form`, `inline_type` |
 <!-- /ed-writer-patches -->
 
 | ПКС form | Required combination |
@@ -2940,6 +2946,40 @@ revisions/hashes, changed input hashes or concurrent modifications; `ed_authorin
 for unconfirmed notices; `ed_authoring_path`, `ed_authoring_resource_limit`, `ed_authoring_io`
 for workspace safety, bounds and I/O failures. An unsupported interface never creates a project.
 
+### Format packages in the project
+
+A manager project stores its own format packages in the model and snapshot; they survive restart,
+`ed_close` is the only way to drop them, and `ed_create(mode="rebind")` keeps them. Edit them with
+`ed_apply` like rules (preview → apply):
+
+| Operation | Patch | Notes |
+|---|---|---|
+| `format_package` create | `metadata_name`, `namespace`, `imports`; `base_version`, `base_namespace` default to the single format binding | Or `source`: JSON/XDTO path (workspace-relative or absolute). The file is expanded into the operation; later file edits do not change the project. `origin="imported"`, `source_sha256` = file hash |
+| `format_package` update | same fields | Renaming `metadata_name` is free. A new `namespace` rewrites the package's own QNames; refused with `format_in_use` while rules use the URI |
+| `format_type` create | full type: `name` (local), `role`, `properties` (each `name` local, `type` QName, bounds, `nillable`, `form`, `inline_type`), `base`, `facets`, flags, `exported`, `key_property` | Object types are created with their properties |
+| `format_type` update | any field except `properties` | Rename with consumers → `format_in_use` |
+| `format_property` create/update | `name` (local), `type` (QName), `lower`, `upper`, `nillable`, `form`, `inline_type` | URI is always the package URI |
+| delete / move | — | Delete with consumers → `format_in_use`; move keeps the owner |
+
+Addresses: `Пакет/<metadata_name>`, `Пакет/<metadata_name>/Тип/<local>`,
+`Пакет/<metadata_name>/Тип/<local>/Свойство/<local>`; target IDs are derived from the package ID and
+are listed in preview `changes`. After every operation the package is checked against the bound schema
+(`format_package_invalid` with the reason); without a bound schema in memory or on saved paths —
+`format_schema_required`. Consumers (`references` of `format_in_use`): ПКО with the package URI in
+`extensions`; ПКС, table parts and row ПКС with that URI — or without a URI on a ПКО of the package's
+own type — and the property name; ПКО/ПОД/ПКПД whose format object is a package type; other package
+types referring to the QName. Nothing cascades.
+
+Preview and apply return `format_packages` (`address`, `namespace`, `package_hash`) and a
+`validation` block with the `ed.format.*` contract (`errors`, `warnings`, first issues and skipped
+rows; docs/checks.md). `package_hash` equals the package `model_sha256` in the kit manifest. The
+same package from the project and from a file yields byte-identical `XDTOPackages/…` files and
+UUIDs; `decision_hash` differs because the package is part of the model. `ed_validate` of a manager
+document with `schema_id` reads the project packages over that schema (a package with the same URI
+in the schema is replaced), so own types, keys and enumeration values are checked by `ed.schema.*`.
+`ed_pair_validate` of two manager documents compares packages of one URI by `Package.bin`
+(`ed.format.package_hash_mismatch`; `metadata_name` may differ).
+
 ### Format package file
 
 `ed_authoring_build(scope="manager", project_id="positions", format_package="format-package.json")`
@@ -2949,7 +2989,9 @@ use the ordinary path map. Write also requires the current `build_hash` and noti
 a JSON file or a single-package dump folder. Duplicate URI or `metadata_name` (case-insensitive)
 refuses with `format_package_invalid` and both source paths. List order does not affect kit bytes.
 Overlay scope refuses with `format_package_unsupported`; unreadable/invalid sources refuse with
-`format_package_invalid` and a reason. No package model is saved in the manager project.
+`format_package_invalid` and a reason. File packages are added to the project's packages (see
+"Format packages in the project"); the same URI or `metadata_name` in both refuses with
+`format_package_conflict`.
 
 The package model is read from a UTF-8 JSON file or a dump folder containing exactly one
 `XDTOPackages/<Name>.xml` and `XDTOPackages/<Name>/Ext/Package.bin` pair. The base schema resolves imports
@@ -2999,7 +3041,7 @@ The manifest records package/model/import hashes in `format_packages` for multip
 Changing the package or imported bytes changes `decision_hash`. A property/group URI absent from
 all supplied packages and the bound correspondent schema refuses with `format_uri_unknown`
 (`ed.author.format_uri_unknown` in the core renderer). Without a package, delivery bytes
-are unchanged. The package model is not stored in the manager project.
+are unchanged.
 `ed_validate(schema_id=...)` warns with `ed.schema.namespace_unknown` for a URI absent from the
 opened schema, including its explicitly loaded extensions; a build file is not an implicit schema.
 

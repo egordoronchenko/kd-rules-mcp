@@ -46,6 +46,91 @@ ASSUMPTIONS = (
 Supplied = bool | None
 
 
+def validate_format_pair(source, target, target_schema=None) -> ValidationReport:
+    """Пакеты сравниваются только у двух документов проектов менеджера."""
+    from kd_rules_mcp.authoring.ed.format_package import format_package_xml_hash
+    from kd_rules_mcp.ed.schema.model import QName
+    from kd_rules_mcp.ed.writer_import import property_directions
+    from kd_rules_mcp.ed.writer_model import Property, model_addresses
+
+    report = ValidationReport()
+    if source is None or target is None:
+        if (source and source.format_packages) or (target and target.format_packages):
+            report.skip("ed.format.package_hash_mismatch", "not_manager_documents")
+            report.skip("ed.format.package_one_sided", "not_manager_documents")
+        return report
+    receiving = {p.namespace: p for p in target.format_packages}
+    addresses = model_addresses(source)
+    for package in source.format_packages:
+        other = receiving.get(package.namespace)
+        if other and format_package_xml_hash(package) != format_package_xml_hash(other):
+            report.error(
+                "ed.format.package_hash_mismatch",
+                addresses[package.logical_id],
+                "Пакеты одного URI различаются составом (Package.bin)",
+            )
+    known = set(receiving)
+    if target_schema:
+        known.update(p.namespace for p in target_schema.packages)
+        known.update(target_schema.extension_namespaces)
+    guards = {g.logical_id: g for g in source.guards}
+    own_types = {
+        QName(p.namespace, t.name.local): p.namespace
+        for p in source.format_packages
+        for t in p.types
+    }
+    for rule in source.pko:
+        if not any(d in ("send", "both") for d in rule.directions):
+            continue
+        # ПКС без URI у ПКО своего типа пишет свойство в URI этого типа (XDTO:945–954).
+        type_uri = ""
+        if rule.format_object.state == "string":
+            type_uri = next(
+                (
+                    uri
+                    for uri in rule.extensions
+                    if QName(uri, str(rule.format_object.value)) in own_types
+                ),
+                "",
+            )
+        members = [(None, p) for p in rule.properties]
+        for group in rule.groups:
+            members.append((None, group))
+            members.extend((group, p) for p in group.properties)
+        for group, prop in members:
+            if "send" not in property_directions(rule, prop, guards, group.guards if group else ()):
+                continue
+            if (
+                isinstance(prop, Property)
+                and len(prop.argument_values) > 4
+                and prop.argument_values[4].state not in ("string", "unset")
+            ) or (
+                not isinstance(prop, Property)
+                and prop.state != "editable"
+                and not prop.namespace
+                and len(prop.argument_presence) > 3
+                and prop.argument_presence[3]
+            ):
+                report.skip(
+                    "ed.format.package_one_sided", "not_literal: " + addresses[prop.logical_id]
+                )
+                continue
+            namespace = prop.namespace or type_uri
+            if namespace and namespace not in known:
+                if target_schema is None:
+                    report.skip(
+                        "ed.format.package_one_sided",
+                        "schema_unavailable: " + addresses[prop.logical_id],
+                    )
+                else:
+                    report.warning(
+                        "ed.format.package_one_sided",
+                        addresses[prop.logical_id],
+                        "У получателя нет пакета URI " + namespace,
+                    )
+    return report
+
+
 def normalize(name: str) -> str:
     """Свойство формата в правиле пишут плоско или через `КлючевыеСвойства.` (XDTO:6746–6750)."""
     name = name.strip()
@@ -721,8 +806,8 @@ class _Checker:
                 if optional_parent and name == "Родитель":
                     continue
                 if optional_parent and name == "ЭтоГруппа":
-                    # Признак группы ставит исполнитель, не ПКС (XDTO:4399–4402).
-                    uncertain = True
+                    # Признак группы ставит исполнитель (XDTO:4399–4402), булево всегда
+                    # заполнено: ЗначениеЗаполнено(Ложь) = Истина (живая проба 28.10.2026).
                     continue
                 props = by_configuration.get(name.casefold(), [])
                 if not props:

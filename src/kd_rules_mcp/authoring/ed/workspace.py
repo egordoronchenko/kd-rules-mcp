@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
+from kd_rules_mcp.ed.schema.model import EdSchema
 from kd_rules_mcp.ed.writer_model import (
     SNAPSHOT_SCHEMA_SHA256,
     SNAPSHOT_STORAGE_VERSION,
@@ -193,12 +194,23 @@ class ManagerWorkspace:
             return self._persist(model)
 
     def preview(
-        self, project_id: str, operations: tuple[ManagerOperation, ...], *, expected_revision: str
+        self,
+        project_id: str,
+        operations: tuple[ManagerOperation, ...],
+        *,
+        expected_revision: str,
+        format_schema: EdSchema | None = None,
     ) -> ManagerPreview:
+        """format_schema — привязанная схема для инвариантов пакетов формата (операции format_*)."""
         with self._lock:
             project = self.get(project_id)
             self._check_current(project)
-            return preview(project.model, operations, expected_revision=expected_revision)
+            return preview(
+                project.model,
+                operations,
+                expected_revision=expected_revision,
+                format_schema=format_schema,
+            )
 
     def apply(
         self,
@@ -208,6 +220,7 @@ class ManagerWorkspace:
         expected_revision: str,
         expected_preview_hash: str,
         confirmations: tuple[tuple[str, str], ...] = (),
+        format_schema: EdSchema | None = None,
     ) -> ManagerProject:
         with self._lock, self._disk_lock(project_id):
             project = self.get(project_id)
@@ -218,6 +231,7 @@ class ManagerWorkspace:
                 expected_revision=expected_revision,
                 expected_preview_hash=expected_preview_hash,
                 confirmations=confirmations,
+                format_schema=format_schema,
             )
             if updated is project.model:
                 return project

@@ -385,6 +385,28 @@ def format_package_source(service, root):
     return path
 
 
+def with_init_type(path):
+    """Добавляет в пакет тип ПКО с init: без одноимённого типа БСП удаляет init (XDTO:4855–4881)."""
+    data = json.loads(path.read_text("utf-8"))
+    uri = data["namespace"]
+    data["types"].append(
+        {
+            "name": {"namespace": uri, "local": "Справочник.Должности"},
+            "role": "object",
+            "properties": [
+                {
+                    "name": {"namespace": uri, "local": name},
+                    "type": {"namespace": "http://www.w3.org/2001/XMLSchema", "local": "string"},
+                    "lower": 0,
+                }
+                for name in ("Наименование", "НаименованиеКраткое")
+            ],
+        }
+    )
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 @pytest.mark.parametrize("source_kind", ["relative", "absolute", "dump"])
 def test_manager_build_format_package_files_manifest_repeat(writer_setup, source_kind):
     from kd_rules_mcp.authoring.ed.format_package import render_format_package
@@ -520,7 +542,7 @@ def test_overlay_format_package_unsupported(writer_setup):
 )
 def test_service_namespace_validate_and_build(writer_setup, namespace, has_package, unknown):
     service, args, root = writer_setup
-    path = format_package_source(service, root)
+    path = with_init_type(format_package_source(service, root))
     created = service.ed_create(**args)
     operations = manager_operations()
     operations[0]["patch"]["extensions"] = [namespace]
@@ -588,7 +610,7 @@ def test_changed_format_package_invalidates_build_hash(writer_setup):
 @pytest.mark.parametrize("duplicate", [None, "namespace", "metadata_name"])
 def test_manager_multiple_package_paths(writer_setup, duplicate):
     service, args, root = writer_setup
-    first = format_package_source(service, root)
+    first = with_init_type(format_package_source(service, root))
     data = json.loads(first.read_text("utf-8"))
     second = first.with_name("second-package.json")
     if duplicate != "metadata_name":
@@ -643,7 +665,7 @@ def test_manager_multiple_package_paths(writer_setup, duplicate):
 @pytest.mark.parametrize("notice_kind", ["receive", "single_property"])
 def test_format_notices_require_build_acknowledgement(writer_setup, notice_kind):
     service, args, root = writer_setup
-    path = format_package_source(service, root)
+    path = with_init_type(format_package_source(service, root))
     created = service.ed_create(**args)
     package = service._authoring_format_package(
         str(path), service._manager_bound_schema(service._manager_metadata("positions")), "1.20"

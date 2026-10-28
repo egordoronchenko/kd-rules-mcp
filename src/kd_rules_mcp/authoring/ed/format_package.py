@@ -10,22 +10,45 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from lxml import etree
 
 from kd_rules_mcp.ed.errors import EdFormatError, EdReadError
+from kd_rules_mcp.ed.format_model import (
+    PRIMITIVES as PRIMITIVES,
+)
+from kd_rules_mcp.ed.format_model import (
+    ROLES as ROLES,
+)
+from kd_rules_mcp.ed.format_model import (
+    VALUE_ROLES as VALUE_ROLES,
+)
+from kd_rules_mcp.ed.format_model import (
+    FormatFacet as FormatFacet,
+)
+from kd_rules_mcp.ed.format_model import (
+    FormatProperty as FormatProperty,
+)
+from kd_rules_mcp.ed.format_model import (
+    FormatType as FormatType,
+)
+from kd_rules_mcp.ed.format_model import (
+    TypeRole as TypeRole,
+)
+from kd_rules_mcp.ed.format_model import (
+    _qname as _qname,
+)
 from kd_rules_mcp.ed.layer_reader import module_routines, source_from_text
 from kd_rules_mcp.ed.lexer import tokenize
 from kd_rules_mcp.ed.route_model import RouteProfile
 from kd_rules_mcp.ed.schema import load_schema
 from kd_rules_mcp.ed.schema.model import EdSchema, QName, SchemaType
-from kd_rules_mcp.ed.schema.xdto import FACETS, XDTO, XS, XSI
-from kd_rules_mcp.ed.writer_model import decode_dto
+from kd_rules_mcp.ed.schema.xdto import XDTO, XS, XSI
+from kd_rules_mcp.ed.writer_model import FormatPackageEntity, decode_dto
 from kd_rules_mcp.errors import (
     EdFormatDuplicateNameError,
-    EdFormatEmptyObjectError,
     EdFormatIdentifierError,
     EdFormatMissingKeyError,
     EdFormatNamespaceError,
@@ -53,172 +76,6 @@ from .xml_dump import (
     serialize,
     synonym,
 )
-
-TypeRole = Literal["object", "key", "reference", "row", "table", "enumeration", "value"]
-VALUE_ROLES = frozenset(("reference", "enumeration", "value"))
-ROLES = VALUE_ROLES | {"object", "key", "row", "table"}
-# Примитивы XML Schema 1.0; неизвестное имя в URI xs не считается разрешённым.
-PRIMITIVES = frozenset(
-    [
-        "anyType",
-        "anySimpleType",
-        "string",
-        "boolean",
-        "decimal",
-        "float",
-        "double",
-        "duration",
-        "dateTime",
-        "time",
-        "date",
-        "gYearMonth",
-        "gYear",
-        "gMonthDay",
-        "gDay",
-        "gMonth",
-        "hexBinary",
-        "base64Binary",
-        "anyURI",
-        "QName",
-        "NOTATION",
-        "normalizedString",
-        "token",
-        "language",
-        "NMTOKEN",
-        "NMTOKENS",
-        "Name",
-        "NCName",
-        "ID",
-        "IDREF",
-        "IDREFS",
-        "ENTITY",
-        "ENTITIES",
-        "integer",
-        "nonPositiveInteger",
-        "negativeInteger",
-        "long",
-        "int",
-        "short",
-        "byte",
-        "nonNegativeInteger",
-        "unsignedLong",
-        "unsignedInt",
-        "unsignedShort",
-        "unsignedByte",
-        "positiveInteger",
-    ]
-)
-
-
-def _qname(name: QName) -> None:
-    """Локальное имя XDTO — NCName: типовые имена Справочник.X содержат точку."""
-    try:
-        if not name.namespace or ":" in name.local:
-            raise ValueError
-        parsed = etree.QName(name.local)
-        if parsed.namespace is not None or parsed.localname != name.local:
-            raise ValueError
-    except ValueError as error:
-        raise EdFormatIdentifierError("Недопустимое QName: " + str(name)) from error
-
-
-@dataclass(frozen=True, slots=True)
-class FormatFacet:
-    kind: str
-    lexical: str
-    value_type: QName | None = None
-    fixed: bool | None = None
-    attribute: bool = False
-
-    def __post_init__(self) -> None:
-        if self.kind not in FACETS | {"enumeration"} or (
-            self.attribute
-            and (self.kind == "enumeration" or self.value_type or self.fixed is not None)
-        ):
-            raise EdFormatShapeError("Неподдерживаемая форма фасета: " + self.kind)
-        if self.value_type:
-            _qname(self.value_type)
-
-
-@dataclass(frozen=True, slots=True)
-class FormatProperty:
-    name: QName
-    type: QName
-    lower: int = 1
-    upper: int | None = 1
-    nillable: bool = False
-    form: Literal["element", "attribute", "text"] | None = None
-    inline_type: "FormatType | None" = None
-    # Наличие атрибута нужно для сверки платформенной формы, отдельно от его значения.
-    explicit_attributes: frozenset[str] | None = field(default=None, compare=False)
-
-    def __post_init__(self) -> None:
-        _qname(self.name)
-        _qname(self.type)
-        if self.explicit_attributes is not None:
-            object.__setattr__(self, "explicit_attributes", frozenset(self.explicit_attributes))
-        if (
-            type(self.lower) is not int
-            or (self.upper is not None and type(self.upper) is not int)
-            or self.lower < 0
-            or (self.upper is not None and self.upper < self.lower)
-        ):
-            raise EdFormatShapeError("Несогласованные границы свойства " + str(self.name))
-        if self.form not in (None, "element", "attribute", "text"):
-            raise EdFormatShapeError("Неизвестная форма свойства")
-        if self.inline_type and self.inline_type.name != self.type:
-            raise EdFormatShapeError("QName локального типа не совпадает с типом свойства")
-
-
-@dataclass(frozen=True, slots=True)
-class FormatType:
-    name: QName
-    role: TypeRole
-    properties: tuple[FormatProperty, ...] = ()
-    base: QName | None = None
-    facets: tuple[FormatFacet, ...] = ()
-    open: bool | None = None
-    abstract: bool | None = None
-    ordered: bool | None = None
-    sequenced: bool | None = None
-    variety: Literal["atomic", "list", "union"] | None = None
-    members: tuple[QName, ...] = ()
-    exported: bool = False
-    key_property: QName | None = None
-
-    def __post_init__(self) -> None:
-        _qname(self.name)
-        for attr in ("properties", "facets", "members"):
-            object.__setattr__(self, attr, tuple(getattr(self, attr)))
-        if self.role not in ROLES:
-            raise EdFormatShapeError("Неизвестное назначение типа")
-        if self.base:
-            _qname(self.base)
-        for member in self.members:
-            _qname(member)
-        if self.members or self.variety == "union":
-            raise EdFormatShapeError("Union/memberTypes вне профиля сериализации пакета")
-        if self.role in VALUE_ROLES:
-            if self.properties or self.exported or self.key_property:
-                raise EdFormatShapeError("Простой тип содержит объектные свойства")
-            if self.role == "enumeration" and not any(f.kind == "enumeration" for f in self.facets):
-                raise EdFormatShapeError("Перечисление без значений")
-            if self.role == "reference" and self.base is None:
-                raise EdFormatShapeError("Ссылочный тип без базового типа")
-            if self.variety not in (None, "atomic", "list", "union"):
-                raise EdFormatShapeError("Неизвестная разновидность простого типа")
-        elif not self.properties:
-            raise EdFormatEmptyObjectError("Пустой объектный тип: " + str(self.name))
-        elif self.facets or self.members or self.variety:
-            raise EdFormatShapeError("Объектный тип содержит фасеты простого типа")
-        if len({p.name for p in self.properties}) != len(self.properties):
-            raise EdFormatDuplicateNameError("Повтор свойства в " + str(self.name))
-        if any(p.name.namespace != self.name.namespace for p in self.properties):
-            raise EdFormatNamespaceError("URI свойства отличается от URI типа")
-        if self.exported and (self.role != "object" or self.key_property is None):
-            raise EdFormatMissingKeyError("Для выгружаемого объекта требуется свойство ключей")
-        if self.key_property:
-            _qname(self.key_property)
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,7 +278,7 @@ def format_package_from_schema(
     )
 
 
-def format_package_data(model: FormatPackage) -> dict[str, Any]:
+def format_package_data(model: FormatPackage | FormatPackageEntity) -> dict[str, Any]:
     """Поля JSON-файла без схемы хозяина; роли остаются явными решениями автора."""
 
     def plain(value: Any) -> Any:
@@ -433,7 +290,11 @@ def format_package_data(model: FormatPackage) -> dict[str, Any]:
             return [plain(v) for v in value]
         return value
 
-    return {f.name: plain(getattr(model, f.name)) for f in fields(model) if f.name != "base_schema"}
+    return {
+        f.name: plain(getattr(model, f.name))
+        for f in fields(FormatPackage)
+        if f.name != "base_schema"
+    }
 
 
 def load_format_package(path: Path, base_schema: EdSchema, base_version: str) -> FormatPackage:
@@ -442,6 +303,35 @@ def load_format_package(path: Path, base_schema: EdSchema, base_version: str) ->
         return _load_format_package(path, base_schema, base_version)
     except (OSError, ValueError, TypeError, Kd2Error) as error:
         refuse("format_package_invalid", str(error))
+
+
+def package_from_entity(entity: FormatPackageEntity, schema: EdSchema) -> FormatPackage:
+    """Проверяет снимок пакета в контексте текущей схемы хозяина."""
+    return FormatPackage(
+        **{
+            f.name: getattr(entity, f.name)
+            for f in fields(FormatPackage)
+            if f.name != "base_schema"
+        },
+        base_schema=schema,
+    )
+
+
+def format_package_hash(entity: FormatPackageEntity | FormatPackage) -> str:
+    """Отпечаток данных совпадает с model_sha256 манифеста комплекта."""
+    from .manifest import json_bytes, sha256
+
+    return sha256(json_bytes(format_package_data(entity)))
+
+
+def format_package_xml_hash(entity: FormatPackageEntity | FormatPackage) -> str:
+    """Хеш Package.bin: контракт двух сторон — URI и схема пакета (спецификация §6.6).
+
+    Имя метаданных, роли и признак выгрузки в XML не входят и на сторонах могут различаться.
+    """
+    from .manifest import sha256
+
+    return sha256(_xdto_xml(cast(FormatPackage, entity)))
 
 
 def _load_format_package(path: Path, base_schema: EdSchema, base_version: str) -> FormatPackage:

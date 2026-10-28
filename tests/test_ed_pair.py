@@ -701,3 +701,20 @@ def test_receive_pod_stub_without_rules_is_info():
     assert result.objects[0]["status"] == "not_loaded"
     [issue] = found(result, "ed.pair.receive_pko_filtered")
     assert issue.level.value == "info" and "заглушка" in issue.message
+
+
+def test_is_group_field_is_filled_by_executor():
+    # ЭтоГруппа ставит исполнитель; булево всегда заполнено (живая проба 28.10.2026).
+    target = module(
+        '    ДобавитьПКС(СвойстваШапки, "НомерДок", "Номер", 0);',
+        identification="ПоПолямПоиска",
+        search="НомерДок, ЭтоГруппа",
+    )
+    [issue] = found(pair(module(), target), "ed.pair.search_field_unsent")
+    assert issue.level.value == "предупреждение"
+    clean = second_search(
+        module(identification="ПоПолямПоиска", search="Код, ЭтоГруппа"), "Код, ЭтоГруппа", "Код"
+    )
+    result = pair(module(), clean)
+    assert found(result, "ed.pair.search_field_unsent") == []
+    assert skipped(result, "ed.pair.search_field_unsent") == []

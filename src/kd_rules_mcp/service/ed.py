@@ -818,6 +818,18 @@ class EdMixin(ServiceBase):
             if structure_id:
                 self._drop_layer_validations("structure", structure_id)
             raise
+        if project.manager_project_id and schema_project:
+            writer = cast("EdWriterMixin", self)
+            model = writer._manager_project(project.manager_project_id).model
+            if model.format_packages:
+                schema_project = replace(
+                    schema_project,
+                    schema=writer._manager_format_schema(
+                        model,
+                        writer._manager_metadata(project.manager_project_id),
+                        base=schema_project.schema,
+                    ),
+                )
         profile = ValidationProfile.build(
             schema_project.schema if schema_project else None,
             schema_project.format_version if schema_project else None,

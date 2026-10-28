@@ -112,7 +112,12 @@ def migrate_imported(model: ManagerModel) -> ManagerModel:
             return value
 
         back = rewrite(back)
-        back = replace(back, decisions=model.decisions, confirmations=model.confirmations)
+        back = replace(
+            back,
+            decisions=model.decisions,
+            confirmations=model.confirmations,
+            format_packages=model.format_packages,
+        )
         members = {m.logical_id: m for m in back.members()}
 
         def stamped(source, item):

@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from kd_rules_mcp.authoring.ed.artifacts import artifact_name, validate_manager_files
-from kd_rules_mcp.authoring.ed.format_package import format_package_data
+from kd_rules_mcp.authoring.ed.format_package import (
+    format_package_data,
+    format_package_hash,
+    package_from_entity,
+    render_format_package,
+)
 from kd_rules_mcp.authoring.ed.hook import valid_identifier
 from kd_rules_mcp.authoring.ed.instruction import render_data_preflight
 from kd_rules_mcp.authoring.ed.manager_candidates import object_candidates, property_candidates
@@ -84,6 +89,7 @@ from kd_rules_mcp.service.extension_delivery import (
 from kd_rules_mcp.service.paths import Settings
 from kd_rules_mcp.structures.store import dump_fingerprint
 from kd_rules_mcp.structures.xmldump import registration_events
+from kd_rules_mcp.validation.ed_format import validate_format
 from kd_rules_mcp.validation.ed_handler_enum import validate_enum_handlers
 from kd_rules_mcp.validation.ed_links import validate_links
 from kd_rules_mcp.validation.ed_plan import (
@@ -103,6 +109,22 @@ from kd_rules_mcp.validation.ed_writer import validate_writer
 from kd_rules_mcp.validation.report import Level, ValidationReport
 
 MAX_PREVIEW_PACKETS = 8
+
+
+def _model_uses_format(model) -> bool:
+    """Есть пакеты, init или URI свойств — нужен контракт ed.format.*."""
+    return bool(model.format_packages) or any(
+        rule.extensions
+        or any(
+            m.namespace
+            for m in (
+                *rule.properties,
+                *rule.groups,
+                *(x for g in rule.groups for x in g.properties),
+            )
+        )
+        for rule in model.pko
+    )
 
 
 def _manager_address_aliases(value: Any) -> Any:
@@ -151,7 +173,17 @@ def _compact_property_candidates(result: dict) -> dict:
 
 def _refuse(reason: str, message: str, **details) -> NoReturn:
     raise EdAuthoringPreconditionError(
-        message, {"failures": [{"id": reason, "message": message}], **details}
+        message,
+        {
+            "failures": [
+                {
+                    "id": reason,
+                    "message": message,
+                    **({"address": details["address"]} if "address" in details else {}),
+                }
+            ],
+            **details,
+        },
     )
 
 
@@ -652,13 +684,62 @@ class EdWriterMixin(EdAuthoringMixin):
             )
         return schema
 
+    def _manager_optional_schema(self, metadata: dict):
+        """Недоступная привязка даёт skipped в контракте формата."""
+        try:
+            return self._manager_bound_schema(metadata)
+        except (OSError, ValueError, Kd2Error):
+            return None
+
+    def _manager_format_schema(self, model, metadata: dict, *, base=None, packages=None):
+        """Читает пакеты проекта поверх привязки, не меняя снимок schema_id."""
+        schema = base if base is not None else self._manager_bound_schema(metadata)
+        if schema is None:
+            return None
+        packages = (
+            tuple(package_from_entity(p, schema) for p in model.format_packages)
+            if packages is None
+            else packages
+        )
+        if not packages:
+            return schema
+        folder = self.manager_workspace._folder(model.project_id) / "format"
+        self._safe_path(folder)
+        if not folder.resolve().is_relative_to(self.manager_workspace.directory.resolve()):
+            raise ValueError("Папка формата вне проекта")
+        if folder.exists():
+            shutil.rmtree(folder)
+        extensions = []
+        for package in packages:
+            for relative, data in render_format_package(package).items():
+                path = folder / relative
+                self._safe_path(path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            extensions.append(folder / "XDTOPackages" / (package.metadata_name + ".xml"))
+        imports = {p.namespace: Path(p.sources[0].path) for p in schema.packages}
+        return load_schema(
+            Path(schema.packages[0].sources[0].path),
+            extensions=(
+                *tuple(
+                    Path(p.sources[0].path)
+                    for p in schema.packages
+                    # Пакет проекта заменяет пакет схемы того же URI (установленный комплект).
+                    if p.namespace in schema.extension_namespaces
+                    and p.namespace not in {m.namespace for m in packages}
+                ),
+                *extensions,
+            ),
+            locate_import=imports.get,
+        )
+
     def _manager_schema_checks(
         self, model, metadata: dict, *, required_unfilled: list[RequiredUnfilled] | None = None
     ) -> ValidationReport:
         """Проверяет прямые типы, границы и обязательные источники перед сборкой."""
         args = metadata["arguments"]
         _, snapshot = self._manager_snapshot(model, publish=False)
-        schema = self._manager_bound_schema(metadata)
+        schema = self._manager_format_schema(model, metadata)
         if schema is None:
             return validate_enum_handlers(
                 model, snapshot.document, ValidationProfile.build(None, args["format_version"])
@@ -737,6 +818,7 @@ class EdWriterMixin(EdAuthoringMixin):
             model,
             snapshot.document.files[0].text,
             detection=detection,
+            format_schema=self._manager_optional_schema(metadata),
             **self._manager_name_scope(metadata),
         )
         report.extend(
@@ -1075,6 +1157,7 @@ class EdWriterMixin(EdAuthoringMixin):
                         "errors": sum(i.level == Level.ERROR for i in report.issues),
                         "warnings": sum(i.level == Level.WARNING for i in report.issues),
                         "issue_count": len(report.issues),
+                        "issues": [i.to_dict() for i in report.issues],
                     }
                     notices.extend({"id": i.check, **i.to_dict()} for i in report.issues)
                     # Журнал публикуется первым; решение в сохранённой модели
@@ -1329,7 +1412,84 @@ class EdWriterMixin(EdAuthoringMixin):
                         'Входы проекта меняются только через ed_create с mode="rebind"',
                         fields=sorted(forbidden),
                     )
-        parsed = tuple(parse_operation(_manager_address_aliases(op)) for op in operations)
+        has_format_operations = any(
+            isinstance(op, dict) and str(op.get("kind", "")).startswith("format_")
+            for op in operations
+        )
+        if has_format_operations:
+            metadata = self._manager_metadata(project_id)
+            schema = self._manager_optional_schema(metadata)
+            expanded = []
+            for operation in operations:
+                operation = dict(operation)
+                patch = operation.get("patch")
+                if (
+                    operation.get("kind") == "format_package"
+                    and operation.get("action") == "create"
+                    and isinstance(patch, dict)
+                    and "source" in patch
+                ):
+                    if schema is None:
+                        _refuse(
+                            "format_schema_required", "Откройте привязанную схему той же версии"
+                        )
+                    patch = dict(patch)
+                    source = patch.pop("source")
+                    try:
+                        package = self._authoring_format_package(
+                            source, schema, metadata["arguments"]["format_version"]
+                        )
+                        data = format_package_data(package)
+                        for name in ("metadata_name", "namespace"):
+                            if name in patch and patch[name] != data[name]:
+                                _refuse(
+                                    "format_package_invalid",
+                                    "Поле " + name + " расходится с файлом",
+                                )
+                        if set(patch) - {"metadata_name", "namespace", "client_id"}:
+                            _refuse(
+                                "format_package_invalid",
+                                "Импорт допускает только совпадающие metadata_name/namespace",
+                            )
+                        if "client_id" in patch and patch.pop("client_id") != operation.get(
+                            "client_id"
+                        ):
+                            _refuse("format_package_invalid", "client_id расходится с операцией")
+                        path = self._read_path(
+                            source
+                            if Path(source).is_absolute()
+                            else self._host(self.workspace.root / source)
+                        )
+                        if path.is_dir():
+                            bins = list(path.rglob("Package.bin"))
+                            if len(bins) != 1:
+                                _refuse(
+                                    "format_package_invalid",
+                                    "Папка должна содержать один Package.bin",
+                                )
+                            path = bins[0]
+                        operation["patch"] = {
+                            **data,
+                            "origin": "imported",
+                            "source_sha256": sha256(path.read_bytes()),
+                        }
+                    except (OSError, ValueError, TypeError, Kd2Error) as error:
+                        _refuse("format_package_invalid", str(error))
+                expanded.append(operation)
+            operations = expanded
+        parsed_operations = []
+        for operation in operations:
+            try:
+                parsed_operations.append(parse_operation(_manager_address_aliases(operation)))
+            except (ValueError, Kd2Error) as error:
+                if str(operation.get("kind", "")).startswith("format_"):
+                    _refuse(
+                        "format_package_invalid",
+                        str(error),
+                        address="Операция/" + str(operation.get("client_id", "")),
+                    )
+                raise
+        parsed = tuple(parsed_operations)
         acknowledgements = tuple(
             (
                 _text(_mapping(c, "confirmation", {"code", "notice_hash"}).get("code"), "code"),
@@ -1430,8 +1590,12 @@ class EdWriterMixin(EdAuthoringMixin):
                 raise EdAuthoringStaleError(
                     "Ревизия менеджера устарела", {"revision": project.model.revision}
                 )
+            # Схему читаем только там, где расширение формата есть: preview обычных правок
+            # не должен платить за загрузку пакетов схемы с диска.
+            uses_format = has_format_operations or _model_uses_format(project.model)
+            format_schema = self._manager_optional_schema(metadata) if uses_format else None
             planned = self.manager_workspace.preview(
-                project_id, parsed, expected_revision=expected_revision
+                project_id, parsed, expected_revision=expected_revision, format_schema=format_schema
             )
             preview_hash = digest((planned.preview_hash, inputs))
             if mode == "apply" and expected_preview_hash != preview_hash:
@@ -1492,6 +1656,30 @@ class EdWriterMixin(EdAuthoringMixin):
                 "change_count": len(planned.changes),
                 "operation_count": len(planned.operations),
             }
+            # Контракт формата — только ed.format.*; полный validate_writer с рендером модуля
+            # здесь не нужен (его выполняют ed_validate и сборка).
+            report = validate_format(planned.model, format_schema)
+            format_issues = [i for i in report.issues if i.check.startswith("ed.format.")]
+            format_skipped = [s for s in report.skipped if s.check.startswith("ed.format.")]
+            base["validation"] = {
+                "errors": sum(i.level == Level.ERROR for i in format_issues),
+                "warnings": sum(i.level == Level.WARNING for i in format_issues),
+                "issues": [i.to_dict() for i in format_issues[:5]],
+                "issue_count": len(format_issues),
+                "issues_has_more": len(format_issues) > 5,
+                "skipped": [s.to_dict() for s in format_skipped[:5]],
+                "skipped_count": len(format_skipped),
+                "skipped_has_more": len(format_skipped) > 5,
+            }
+            if has_format_operations or planned.model.format_packages:
+                base["format_packages"] = [
+                    {
+                        "address": "Пакет/" + p.metadata_name,
+                        "namespace": p.namespace,
+                        "package_hash": format_package_hash(p),
+                    }
+                    for p in planned.model.format_packages
+                ]
             if planned.future_revision == project.model.revision and not planned.failures:
                 base["reason"] = "already_applied" if parsed else "no_operations"
             if mode == "apply":
@@ -1526,6 +1714,7 @@ class EdWriterMixin(EdAuthoringMixin):
                     parsed,
                     expected_revision=expected_revision,
                     expected_preview_hash=planned.preview_hash,
+                    format_schema=format_schema,
                     confirmations=acknowledgements,
                 )
                 current_id, _ = self._manager_snapshot(updated.model)
@@ -1584,6 +1773,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 model,
                 text,
                 detection=detection,
+                format_schema=self._manager_optional_schema(self._manager_metadata(project_id)),
                 **self._manager_name_scope(self._manager_metadata(project_id), structure_id),
             )
             report.extend(self._manager_plan_content(model, self._manager_metadata(project_id))[0])
@@ -2021,17 +2211,27 @@ class EdWriterMixin(EdAuthoringMixin):
                 declaration = None
                 package_fingerprint = None
 
-                def package_inputs(source: str | list[str]):
-                    sources = [source] if isinstance(source, str) else source
+                def package_inputs(source: str | list[str] | None):
+                    sources = (
+                        [] if source is None else [source] if isinstance(source, str) else source
+                    )
                     if (
                         not isinstance(sources, list)
-                        or not sources
+                        or (not sources and source is not None)
                         or any(not isinstance(path, str) or not path.strip() for path in sources)
                     ):
                         _refuse("format_package_invalid", "Нужен путь или непустой список путей")
-                    loaded = []
-                    uris = {}
-                    names = {}
+                    loaded = (
+                        [package_from_entity(p, schema) for p in model.format_packages]
+                        if schema
+                        else []
+                    )
+                    if model.format_packages and schema is None:
+                        _refuse("format_schema_required", "Пакетам модели нужна привязанная схема")
+                    uris = {p.namespace: "model:Пакет/" + p.metadata_name for p in loaded}
+                    names = {
+                        p.metadata_name.casefold(): "model:Пакет/" + p.metadata_name for p in loaded
+                    }
                     with _phase("format_read"):
                         for path in sources:
                             package = self._authoring_format_package(
@@ -2043,9 +2243,12 @@ class EdWriterMixin(EdAuthoringMixin):
                             ):
                                 if value in seen:
                                     _refuse(
-                                        "format_package_invalid",
+                                        "format_package_conflict"
+                                        if str(seen[value]).startswith("model:")
+                                        else "format_package_invalid",
                                         f"Повтор URI или metadata_name «{value}»: "
                                         f"«{seen[value]}» и «{path}»",
+                                        sources=[seen[value], path],
                                     )
                                 seen[value] = path
                             loaded.append(package)
@@ -2068,7 +2271,7 @@ class EdWriterMixin(EdAuthoringMixin):
                         ),
                     )
 
-                if format_package is not None:
+                if format_package is not None or model.format_packages:
                     packages, declaration, package_fingerprint = package_inputs(format_package)
                 with _phase("prepare"):
                     detection = self._manager_detection(metadata, model.executor_profile.profile_id)
@@ -2077,6 +2280,9 @@ class EdWriterMixin(EdAuthoringMixin):
                         model,
                         rendered.data,
                         detection=detection,
+                        format_schema=self._manager_optional_schema(metadata),
+                        # Пакеты из файлов сборки — свои URI наравне с пакетами проекта.
+                        format_packages=packages,
                         **self._manager_name_scope(metadata),
                     )
                     report.issues.extend(format_receive_notices(model))
@@ -2145,6 +2351,7 @@ class EdWriterMixin(EdAuthoringMixin):
                             delivery_model,
                             rendered.data,
                             detection=detection,
+                            format_schema=self._manager_optional_schema(metadata),
                             **self._manager_name_scope(metadata),
                         )
                     )
@@ -2187,7 +2394,12 @@ class EdWriterMixin(EdAuthoringMixin):
                             + name,
                         )
                 errors = [
-                    {"id": i.check, **i.to_dict()}
+                    {
+                        "id": "format_uri_unknown"
+                        if i.check == "ed.format.uri_unknown" and not model.format_packages
+                        else i.check,
+                        **i.to_dict(),
+                    }
                     for i in report.issues
                     if i.level == Level.ERROR
                     and not (
@@ -2196,6 +2408,14 @@ class EdWriterMixin(EdAuthoringMixin):
                     )
                 ]
                 if errors:
+                    # Прежние клиенты получают сначала адрес ПКС, как в renderer.
+                    if not model.format_packages:
+                        errors.sort(
+                            key=lambda item: (
+                                item["id"] == "format_uri_unknown"
+                                and "/ПКС/" not in item["address"]
+                            )
+                        )
                     raise EdAuthoringPreconditionError(
                         "Менеджер не прошёл проверки", {"failures": errors}
                     )
@@ -2340,10 +2560,9 @@ class EdWriterMixin(EdAuthoringMixin):
                             metadata, model.executor_profile.profile_id
                         )
                         _, current_host_hash = self._manager_host(metadata, selected)
-                        if (
-                            format_package is not None
-                            and package_inputs(format_package)[2] != package_fingerprint
-                        ):
+                        if (format_package is not None or model.format_packages) and package_inputs(
+                            format_package
+                        )[2] != package_fingerprint:
                             raise EdAuthoringStaleError(
                                 "Пакет или объявление URI изменились во время записи", {}
                             )

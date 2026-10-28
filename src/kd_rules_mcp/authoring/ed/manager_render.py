@@ -26,6 +26,7 @@ from kd_rules_mcp.ed.writer_model import (
     RetainedBlock,
     digest,
     dump_model,
+    json_value,
     validate_model,
 )
 from kd_rules_mcp.ed.writer_readback import check_readback
@@ -386,7 +387,7 @@ def _reread(model: ManagerModel, rendered: RenderResult) -> EdDocument:
         if document.parse_status != "complete":
             address = document.unknown[0].name if document.unknown else "Конвертация"
             refuse("model_invalid", "Порождённый модуль прочитан не полностью", address=address)
-        mismatch = check_readback(model, document)
+        mismatch = check_readback(replace(model, format_packages=()), document)
         if mismatch is not None:
             refuse("model_invalid", mismatch.message, address=mismatch.address)
         expected = render(
@@ -688,6 +689,8 @@ def render_manager_kit(
     settings_parameter = "Настройки"
     known_namespaces = set(schema_namespaces)
     for package in packages:
+        if not package.types:
+            refuse("format_package_invalid", "Пакет не содержит типов")
         known_namespaces.update(p.namespace for p in package.base_schema.packages)
         known_namespaces.update(package.base_schema.extension_namespaces)
         known_namespaces.add(package.namespace)
@@ -734,8 +737,11 @@ def render_manager_kit(
     template = (
         files("kd_rules_mcp.authoring.ed").joinpath("templates/manager_instruction.md").read_bytes()
     )
+    canonical = json_value(canonicalize(model))
+    if not model.format_packages:
+        canonical.pop("format_packages", None)
     inputs = {
-        "canonical_model_sha256": sha256(json_bytes(canonicalize(model))),
+        "canonical_model_sha256": sha256(json_bytes(canonical)),
         "module_sha256": sha256(rendered.data),
         "route": {"plan_name": route.plan_name, "version_key": key},
         "executor_profile_id": executor_profile_id,

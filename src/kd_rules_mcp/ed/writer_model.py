@@ -15,6 +15,7 @@ from functools import cache, lru_cache
 from itertools import pairwise
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
+from kd_rules_mcp.ed.format_model import FormatType
 from kd_rules_mcp.errors import EdAuthoringResourceLimitError
 
 ImportState = Literal["editable", "retained", "blocked"]
@@ -46,6 +47,8 @@ def json_value(value: Any) -> Any:
             and not (item.name == "restore_dispatcher" and getattr(value, item.name) is None)
             and not (item.name == "identification" and getattr(value, item.name) is None)
         }
+    if isinstance(value, frozenset):
+        return sorted(value)
     if isinstance(value, tuple | list):
         return [json_value(item) for item in value]
     if isinstance(value, dict):
@@ -54,6 +57,16 @@ def json_value(value: Any) -> Any:
 
 
 def json_bytes(value: Any) -> bytes:
+    # Workspace пишет ту же оболочку, что dump_model. Пустое расширение схемы
+    # сохраняет прежний заголовок и байты также у внешнего хранилища снимков.
+    if (
+        isinstance(value, dict)
+        and value.get("storage_version") == SNAPSHOT_STORAGE_VERSION
+        and value.get("schema_sha256") == SNAPSHOT_SCHEMA_SHA256
+        and "model" in value
+        and not unpack_json(value["model"]).get("format_packages")
+    ):
+        value = {**value, "schema_sha256": EMPTY_SNAPSHOT_SCHEMA_SHA256}
     return (
         json.dumps(
             value,
@@ -67,7 +80,7 @@ def json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def _json_default(value: Any) -> dict[str, Any]:
+def _json_default(value: Any) -> Any:
     """JSON-кодировщик сам обходит готовые словари; DTO раскрываются по одному узлу."""
     if is_dataclass(value) and not isinstance(value, type):
         return {
@@ -77,10 +90,20 @@ def _json_default(value: Any) -> dict[str, Any]:
             and not (f.name == "restore_dispatcher" and getattr(value, f.name) is None)
             and not (f.name == "identification" and getattr(value, f.name) is None)
         }
+    if isinstance(value, frozenset):
+        return sorted(value)
     raise TypeError("Значение не поддержано форматом JSON ED")
 
 
 def digest(value: Any) -> str:
+    # Пустое новое поле не меняет смысловой отпечаток прежних проектов.
+    if (
+        isinstance(value, dict)
+        and "header" in value
+        and "layouts" in value
+        and value.get("format_packages") == []
+    ):
+        value = {k: v for k, v in value.items() if k != "format_packages"}
     return hashlib.sha256(json_bytes(value)).hexdigest()
 
 
@@ -147,6 +170,7 @@ def content_hash(value: Any) -> str:
                     and getattr(value, name) is None
                 )
                 or (kind is ManagerModel and name == "module_styles" and not getattr(value, name))
+                or (kind is ManagerModel and name == "format_packages" and not getattr(value, name))
                 or (kind is CodeUnit and name == "parameters_text" and getattr(value, name) is None)
                 or (kind is CodeUnit and name == "frame_comment" and not getattr(value, name))
                 or (
@@ -343,6 +367,25 @@ class Member:
 class Event(Member):
     event: str
     target: Reference
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FormatPackageEntity(Member):
+    name: str = ""
+    metadata_name: str
+    namespace: str
+    base_version: str
+    base_namespace: str
+    imports: tuple[str, ...] = ()
+    types: tuple[FormatType, ...] = ()
+    origin: Literal["authored", "imported"] = "authored"
+    source_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            object.__setattr__(self, "name", self.metadata_name)
+        if self.name != self.metadata_name:
+            raise ValueError("Имя сущности должно совпадать с metadata_name")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -798,6 +841,7 @@ class ManagerModel:
     confirmations: tuple[tuple[str, str], ...] = ()
     import_report: ImportReport = ImportReport(())
     revision: str = ""
+    format_packages: tuple[FormatPackageEntity, ...] = ()
     _cached_hash: str = field(default="", init=False, compare=False, repr=False)
     _cached_addresses: dict[str, str] | None = field(
         default=None, init=False, compare=False, repr=False
@@ -875,6 +919,45 @@ class ManagerModel:
         return replace(self, revision=content_hash(self))
 
 
+def format_members(model: ManagerModel):
+    """ID вложенных узлов выводятся из пакета и локального имени, не хранятся."""
+    for package in model.format_packages:
+        yield package.logical_id, package, None, None
+        for typ in package.types:
+            key = logical_id(model.project_id, package.logical_id + "/type/" + typ.name.local)
+            yield key, package, typ, None
+            for prop in typ.properties:
+                yield (
+                    logical_id(
+                        model.project_id,
+                        package.logical_id
+                        + "/type/"
+                        + typ.name.local
+                        + "/property/"
+                        + prop.name.local,
+                    ),
+                    package,
+                    typ,
+                    prop,
+                )
+
+
+def model_addresses(model: ManagerModel) -> dict[str, str]:
+    """Адреса правил и пакетов; пакеты не являются листьями модуля BSL."""
+    from .address import escape_segment
+    from .canonical import model_addresses as rule_addresses
+
+    result = rule_addresses(model)
+    for key, package, typ, prop in format_members(model):
+        address = "Пакет/" + escape_segment(package.metadata_name)
+        if typ is not None:
+            address += "/Тип/" + escape_segment(typ.name.local)
+        if prop is not None:
+            address += "/Свойство/" + escape_segment(prop.name.local)
+        result[key] = address
+    return result
+
+
 def _compact(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
         cached = getattr(value, "_cached_json", None)
@@ -894,6 +977,8 @@ def _compact(value: Any) -> Any:
         return result
     if isinstance(value, tuple):
         return [_compact(item) for item in value]
+    if isinstance(value, frozenset):
+        return sorted(value)
     return value
 
 
@@ -955,12 +1040,16 @@ def snapshot_parts(model: ManagerModel) -> tuple[dict[str, Any], dict[str, bytes
 
 SNAPSHOT_STORAGE_VERSION = 5
 # Отпечаток закрытых DTO фиксируется тестом; изменение требует версии и миграции.
-SNAPSHOT_SCHEMA_SHA256 = "ecacd6013751942c65be263953b85d27f35171288aac9b4c60fb24d89127ce33"
+SNAPSHOT_SCHEMA_SHA256 = "2f699e1b7a9a706c3919e25416b500e191c3e33b90c0de9b4d3666047c0e7f5b"
+EMPTY_SNAPSHOT_SCHEMA_SHA256 = "ecacd6013751942c65be263953b85d27f35171288aac9b4c60fb24d89127ce33"
 # Отпечатки той же схемы, посчитанные до того, как имя пакета перестало входить в строки типов
 # (переименование kd2_rules_mcp → kd_rules_mcp, 08.10.2026): такие снимки читаются, при записи
 # получают текущий отпечаток.
 LEGACY_SNAPSHOT_SCHEMA_SHA256 = frozenset(
-    {"ecfb5f2da1648d8ab72be2f0e0b26863bcbc062c5830bab76d366b1f038e3759"}
+    {
+        "ecfb5f2da1648d8ab72be2f0e0b26863bcbc062c5830bab76d366b1f038e3759",
+        EMPTY_SNAPSHOT_SCHEMA_SHA256,
+    }
 )
 _PACKAGE_PREFIX = re.compile(r"\bkd2?_rules_mcp\.")
 
@@ -999,7 +1088,9 @@ def dump_model(model: ManagerModel) -> bytes:
     result = json_bytes(
         {
             "storage_version": SNAPSHOT_STORAGE_VERSION,
-            "schema_sha256": SNAPSHOT_SCHEMA_SHA256,
+            "schema_sha256": SNAPSHOT_SCHEMA_SHA256
+            if model.format_packages
+            else EMPTY_SNAPSHOT_SCHEMA_SHA256,
             "model": pack_json(value),
             "blobs": {k: base64.b64encode(v).decode("ascii") for k, v in blobs.items()},
             "import_report": pack_json(_compact(model.import_report)),
@@ -1195,7 +1286,7 @@ def _legacy_profile_revision(model: ManagerModel, payload: Any) -> str:
         )
     result = hashlib.sha256(b"ManagerModel")
     for name, label in _hash_fields(ManagerModel):
-        if name == "module_styles" and not model.module_styles:
+        if name in ("module_styles", "format_packages") and not getattr(model, name):
             continue
         hashed = (
             profile_hash.hexdigest()
@@ -1250,8 +1341,13 @@ def validate_model(model: ManagerModel) -> None:
         or any(c in str(model.header.module_identifier.value) for c in "\r\n")
     ):
         raise ValueError("Неверные поля шапки W3")
-    members = model.members()
+    members = (*model.members(), *model.format_packages)
+    if len({p.namespace for p in model.format_packages}) != len(model.format_packages) or len(
+        {p.metadata_name.casefold() for p in model.format_packages}
+    ) != len(model.format_packages):
+        raise ValueError("Повтор URI или имени пакета")
     ids = [member.logical_id for member in members]
+    ids.extend(key for key, _, typ, _ in format_members(model) if typ is not None)
     if len(ids) > MAX_ENTITIES:
         raise EdAuthoringResourceLimitError("Превышен лимит сущностей ED")
     if len(ids) != len(set(ids)) or any(not key for key in ids):

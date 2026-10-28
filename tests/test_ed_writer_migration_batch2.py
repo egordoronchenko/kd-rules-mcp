@@ -18,6 +18,7 @@ from kd_rules_mcp.authoring.ed.manager_operations import (
 from kd_rules_mcp.authoring.ed.workspace import ManagerWorkspace
 from kd_rules_mcp.ed.writer import new_manager, render
 from kd_rules_mcp.ed.writer_model import (
+    EMPTY_SNAPSHOT_SCHEMA_SHA256,
     LEGACY_SNAPSHOT_SCHEMA_SHA256,
     SNAPSHOT_SCHEMA_SHA256,
     SNAPSHOT_STORAGE_VERSION,
@@ -156,12 +157,15 @@ def test_address_owner_from_previous_packet_accepts_handler_and_property():
 
 
 def test_snapshot_schema_is_pinned_to_version_and_rejects_unknown_schema():
-    known = {5: "ecacd6013751942c65be263953b85d27f35171288aac9b4c60fb24d89127ce33"}
+    # С пакетами формата (#74) схема модели новая; снимок без пакетов пишет прежний отпечаток,
+    # чтобы байты и ревизия старых проектов не менялись (design Р2 format-extension-model).
+    known = {5: "2f699e1b7a9a706c3919e25416b500e191c3e33b90c0de9b4d3666047c0e7f5b"}
     assert (
         snapshot_schema_fingerprint() == SNAPSHOT_SCHEMA_SHA256 == known[SNAPSHOT_STORAGE_VERSION]
     )
     payload = json.loads(dump_model(bank_model()))
     assert payload["storage_version"] == SNAPSHOT_STORAGE_VERSION
+    assert payload["schema_sha256"] == EMPTY_SNAPSHOT_SCHEMA_SHA256
     payload["schema_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="схема"):
         load_model(json.dumps(payload))
@@ -174,7 +178,8 @@ def test_snapshot_with_legacy_schema_fingerprint_still_loads():
     assert legacy in LEGACY_SNAPSHOT_SCHEMA_SHA256 and legacy != SNAPSHOT_SCHEMA_SHA256
     payload["schema_sha256"] = legacy
     loaded = load_model(json.dumps(payload))
-    assert json.loads(dump_model(loaded))["schema_sha256"] == SNAPSHOT_SCHEMA_SHA256
+    # Модель без пакетов формата пишет прежний отпечаток (design Р2 format-extension-model).
+    assert json.loads(dump_model(loaded))["schema_sha256"] == EMPTY_SNAPSHOT_SCHEMA_SHA256
 
 
 def test_legacy_revision_is_verified_before_migration():

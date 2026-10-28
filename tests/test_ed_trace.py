@@ -355,9 +355,9 @@ def test_search_fields_handler_parent_key_and_identification():
         {"field": "Родитель", "status": "ok", "reason": "parent_optional"}
     ]
     assert run(direction="receive")["search"][0]["reasons"] == ["identification_unknown"]
-    # Признак группы ставит исполнитель: это не поле без ПКС, но и не доказанное значение.
+    # Признак группы ставит исполнитель, булево всегда заполнено (живая проба 28.10.2026).
     group = run(searching("ЭтоГруппа"), "receive")["search"][0]["variants"][0]
-    assert group["status"] == "partial"
+    assert group["status"] == "ok"
     assert group["items"][0]["reason"] == "executor_fills"
     # Ключ «Родитель» исполнитель сравнивает точно (XDTO:6876).
     lower = run(searching("родитель"), "receive")

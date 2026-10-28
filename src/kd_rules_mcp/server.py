@@ -1966,11 +1966,10 @@ def create_server(service: Kd2Service) -> MCPServer:
         operations: Annotated[
             list[dict[str, Any]] | None,
             Field(
-                description="Up to 100 manager ops: docs/tools.md. "
-                "Код/ or Алгоритм/; client_id refs. "
-                "after_id: omitted=last, null=first. Omit to reuse preview. "
-                "Header: manager_name,title,generated_at,text_style; "
-                "pko.extensions URIs; table_part/property namespace"
+                description="100 manager ops; docs/tools.md. client_id/address refs. "
+                "after_id: omitted=last,null=first. Omit to reuse preview. "
+                "pko.extensions; property/table_part namespace; "
+                "format_package/type/property CRUD (package source=JSON/XDTO)"
             ),
         ] = None,
         mode: Annotated[str, Field(description="preview or apply")] = "preview",

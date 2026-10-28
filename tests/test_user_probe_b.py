@@ -187,6 +187,26 @@ def test_rules_diff_brief_lists_addresses_without_body(tmp_path: Path) -> None:
         service.rules_diff(str(EXCHANGE), str(saved), False, False, None, 0, 50, "short")
 
 
+def test_rules_diff_section_filter(tmp_path: Path) -> None:
+    left = load_exchange_rules(EXCHANGE)
+    right = load_exchange_rules(dump_rules(left))
+    pko = next(node for node in right.pko() if node.code == "Организации")
+    pko.values["Комментарий"] = "ПКО"
+    properties = pko.child("Свойства")
+    assert properties is not None
+    properties.items[0].values["Комментарий"] = "ПКС"
+    saved = tmp_path / "right.xml"
+    saved.write_bytes(dump_rules(right))
+    service = _service(tmp_path)
+    every = service.rules_diff(str(EXCHANGE), str(saved), False, False, None, 0, 50)
+    assert set(every["summary"]) == {"pko", "pks"}
+    only = service.rules_diff(str(EXCHANGE), str(saved), False, False, "pks", 0, 50)
+    assert set(only["summary"]) == {"pks"}
+    assert {item["section"] for item in only["changes"]["items"]} == {"pks"}
+    with pytest.raises(Kd2Error, match="разделы: header"):
+        service.rules_diff(str(EXCHANGE), str(saved), False, False, "ПКС", 0, 50)
+
+
 def test_added_algorithm_shows_size_and_preview() -> None:
     left = load_exchange_rules(EXCHANGE)
     right = load_exchange_rules(dump_rules(left))

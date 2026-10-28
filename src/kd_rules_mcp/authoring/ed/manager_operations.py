@@ -6,9 +6,9 @@ import re
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, Literal, NoReturn, get_args
 
-from kd_rules_mcp.ed.canonical import model_addresses
 from kd_rules_mcp.ed.diff import ManagerChange, compare_models
 from kd_rules_mcp.ed.errors import EdFormatError
+from kd_rules_mcp.ed.format_model import FormatFacet, FormatProperty, FormatType, TypeRole
 from kd_rules_mcp.ed.forms import (
     CONVERSION_EVENTS,
     DISPATCHERS,
@@ -21,6 +21,7 @@ from kd_rules_mcp.ed.forms import (
     event_name,
 )
 from kd_rules_mcp.ed.lexer import split_arguments, tokenize
+from kd_rules_mcp.ed.schema.model import EdSchema, QName
 from kd_rules_mcp.ed.writer_forms import literal
 from kd_rules_mcp.ed.writer_import import (
     code_occurrences,
@@ -40,6 +41,7 @@ from kd_rules_mcp.ed.writer_model import (
     ExecutorProfile,
     Formal,
     FormatBinding,
+    FormatPackageEntity,
     Guard,
     Host,
     Identification,
@@ -63,10 +65,12 @@ from kd_rules_mcp.ed.writer_model import (
     content_hash,
     decode_dto,
     digest,
+    format_members,
     json_bytes,
     json_value,
     leaf_fingerprint,
     logical_id,
+    model_addresses,
     text_hash,
     validate_model,
 )
@@ -74,6 +78,7 @@ from kd_rules_mcp.errors import (
     EdAuthoringPreconditionError,
     EdAuthoringResourceLimitError,
     EdAuthoringStaleError,
+    Kd2Error,
 )
 
 OperationKind = Literal[
@@ -91,6 +96,9 @@ OperationKind = Literal[
     "handler",
     "conversion_event",
     "write_policy",
+    "format_package",
+    "format_type",
+    "format_property",
 ]
 Action = Literal["create", "update", "delete", "move"]
 MAX_OPERATIONS = 100
@@ -110,6 +118,58 @@ class ManagerPatch:
     host: Host | None = None
     format_bindings: tuple[FormatBinding, ...] | None = None
     executor_profile: ExecutorProfile | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FormatPackagePatch:
+    metadata_name: str | None = None
+    namespace: str | None = None
+    base_version: str | None = None
+    base_namespace: str | None = None
+    imports: tuple[str, ...] | None = None
+    types: tuple[FormatType, ...] | None = None
+    origin: Literal["authored", "imported"] | None = None
+    source_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FormatTypePatch:
+    name: str | None = None
+    role: TypeRole | None = None
+    properties: tuple[FormatProperty | FormatPropertyDefinition, ...] | None = None
+    base: QName | None = None
+    facets: tuple[FormatFacet, ...] | None = None
+    open: bool | None = None
+    abstract: bool | None = None
+    ordered: bool | None = None
+    sequenced: bool | None = None
+    variety: Literal["atomic", "list", "union"] | None = None
+    exported: bool | None = None
+    key_property: QName | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FormatPropertyPatch:
+    name: str | None = None
+    type: QName | None = None
+    lower: int | None = None
+    upper: int | None = None
+    nillable: bool | None = None
+    form: Literal["element", "attribute", "text"] | None = None
+    inline_type: FormatType | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FormatPropertyDefinition:
+    """Свойство при создании типа: локальное имя и явная неограниченная граница."""
+
+    name: str
+    type: QName
+    lower: int = 1
+    upper: int | None = 1
+    nillable: bool = False
+    form: Literal["element", "attribute", "text"] | None = None
+    inline_type: FormatType | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +278,10 @@ class AlgorithmPatch:
 
 
 Patch = (
-    ManagerPatch
+    FormatPackagePatch
+    | FormatTypePatch
+    | FormatPropertyPatch
+    | ManagerPatch
     | PodPatch
     | PkoPatch
     | PropertyPatch
@@ -232,6 +295,9 @@ Patch = (
     | AlgorithmPatch
 )
 _PATCHES = {
+    "format_package": FormatPackagePatch,
+    "format_type": FormatTypePatch,
+    "format_property": FormatPropertyPatch,
     "manager": ManagerPatch,
     "pod": PodPatch,
     "pko": PkoPatch,
@@ -287,6 +353,8 @@ class ManagerOperation:
                     "parameter",
                     "handler",
                     "algorithm",
+                    "format_type",
+                    "format_property",
                 )
                 or self.action != "create"
             )
@@ -376,7 +444,14 @@ def parse_operation(data: dict[str, Any]) -> ManagerOperation:
                 raise ValueError("Ожидался объект полей операции")
             return replace(dto, unsupported_payload=json_bytes(patch).decode("utf-8"))
         dto = replace(dto, patch=decode_dto(kind, patch))
-    return replace(dto, _packet_refs=tuple(packet_refs), _address_refs=tuple(address_refs))
+    return replace(
+        dto,
+        _packet_refs=tuple(packet_refs),
+        _address_refs=tuple(address_refs),
+        clear=tuple(dict.fromkeys((*dto.clear, *(k for k, v in patch.items() if v is None))))
+        if isinstance(patch, dict) and dto.kind.startswith("format_")
+        else dto.clear,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,6 +668,8 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
                     )
                 key = decision.result_ids[0]
             member = next((m for m in model.members() if m.logical_id == key), None)
+            if member is None and op.kind.startswith("format_"):
+                member = next((p for ident, p, _, _ in format_members(model) if ident == key), None)
             if member is None:
                 _fail(
                     "model_invalid",
@@ -675,6 +752,8 @@ def _resolve_operation(model: ManagerModel, op: ManagerOperation) -> ManagerOper
         if len(matches) != 1:
             _fail("model_invalid", op.address, "Адрес отсутствует или неоднозначен")
         op = replace(op, target_id=matches[0], address=None)
+    if op.kind.startswith("format_"):
+        return op
     previous = next((d for d in model.decisions if d.client_id == op.client_id), None)
     if op.action == "create" and op.after_id == "" and previous is not None:
         op = replace(
@@ -1646,6 +1725,346 @@ def references_to(
     return tuple(dict.fromkeys(result))
 
 
+def format_consumers(model: ManagerModel, target_id: str) -> tuple[str, ...]:
+    """Потребители QName и URI; непрозрачный объект ПКО трактуется осторожно.
+
+    Для строки ТЧ достаточно имени группы, шаблон имени типа строки не требуется.
+    """
+    selected = next((row for row in format_members(model) if row[0] == target_id), None)
+    if selected is None:
+        return ()
+    _, package, typ, prop = selected
+    if prop is not None:
+        assert typ is not None
+    addresses = model_addresses(model)
+    found = set()
+    names = {t.name for t in package.types} if typ is None else {typ.name}
+    types = {t.name: t for t in package.types}
+
+    def property_owner(literal_name, group):
+        if literal_name is None or (typ is not None and literal_name == typ.name.local):
+            return True
+        root = types.get(QName(package.namespace, literal_name))
+        if root is None or typ is None:
+            return False
+        local = group.format_property if group else "КлючевыеСвойства"
+        owner_property = next((p for p in root.properties if p.name.local == local), None)
+        if owner_property is None:
+            return False
+        if owner_property.type == typ.name:
+            return True
+        table = types.get(owner_property.type)
+        return bool(
+            group
+            and table
+            and any(p.name.local == "Строка" and p.type == typ.name for p in table.properties)
+        )
+
+    for rule in model.pko:
+        literal_name = rule.format_object.value if rule.format_object.state == "string" else None
+        if prop is None and (
+            (typ is None and package.namespace in rule.extensions)
+            or literal_name in {n.local for n in names}
+            or (literal_name is None and package.namespace in rule.extensions)
+        ):
+            found.add(addresses[rule.logical_id])
+        for group in (None, *rule.groups):
+            items = rule.properties if group is None else (group, *group.properties)
+            for item in items:
+                # Пустой URI у ПКО своего типа — URI типа (XDTO:945–954 ищет по имени).
+                if item.namespace != package.namespace and not (
+                    not item.namespace
+                    and literal_name is not None
+                    and QName(package.namespace, str(literal_name)) in types
+                ):
+                    continue
+                if prop is None or (
+                    item.format_property in (prop.name.local, "КлючевыеСвойства." + prop.name.local)
+                    and (
+                        property_owner(literal_name, group)
+                        or (
+                            group is not None
+                            and typ is not None
+                            and group.format_property == typ.name.local
+                        )
+                    )
+                ):
+                    found.add(addresses[item.logical_id])
+    if prop is None:
+        for rule in (*model.pod, *model.pkpd):
+            value = rule.format_selection if isinstance(rule, ProcessingRule) else rule.format_type
+            if value.state == "string" and value.value in {n.local for n in names}:
+                found.add(addresses[rule.logical_id])
+    for key, other, other_type, other_prop in format_members(model):
+        if key == target_id or other_type is None:
+            continue
+        if prop is not None:
+            if (
+                other_type.key_property == prop.name
+                and typ is not None
+                and other_type.name == typ.name
+                and other_prop is None
+            ):
+                found.add(addresses[key])
+            continue
+        if other == package and (typ is None or other_type == typ):
+            continue
+        refs = (
+            (other_prop.type,)
+            if other_prop
+            else tuple(n for n in (other_type.base, *other_type.members) if n is not None)
+        )
+        if set(refs) & names:
+            found.add(addresses[key])
+    return tuple(sorted(found))
+
+
+def _renamed_namespace(value: Any, old: str, new: str) -> Any:
+    """QName пакета переводятся на новый URI; чужие URI (базовый, xs) не трогаются."""
+    if isinstance(value, QName):
+        return QName(new, value.local) if value.namespace == old else value
+    if isinstance(value, tuple):
+        return tuple(_renamed_namespace(item, old, new) for item in value)
+    if isinstance(value, FormatType | FormatProperty | FormatFacet):
+        return replace(
+            value,
+            **{
+                f.name: _renamed_namespace(getattr(value, f.name), old, new)
+                for f in fields(value)
+                if f.init
+            },
+        )
+    return value
+
+
+def _apply_format(
+    model: ManagerModel, op: ManagerOperation, schema: EdSchema | None
+) -> tuple[ManagerModel, str]:
+    from .format_package import package_from_entity
+
+    if op.kind == "format_package" and op.action == "move":
+        _fail("unsupported_form", op.address or "Пакет", "Пакет не перемещается")
+    address = op.address or model_addresses(model).get(op.target_id or op.owner_id or "", "Пакет")
+    if schema is None:
+        _fail(
+            "format_schema_required",
+            address,
+            "Откройте привязанную схему той же версии через ed_schema_open",
+        )
+    rows: dict[str, Any] = {row[0]: row for row in format_members(model)}
+    package: Any = None
+    typ: Any = None
+    prop: Any = None
+    target = rows.get(op.target_id or "")
+    if op.action != "create" and target is None:
+        _fail("format_package_invalid", address, "Цель пакета отсутствует")
+    if op.clear:
+        allowed = (
+            {
+                "base",
+                "facets",
+                "open",
+                "abstract",
+                "ordered",
+                "sequenced",
+                "variety",
+                "key_property",
+            }
+            if op.kind == "format_type"
+            else {"upper", "form", "inline_type"}
+            if op.kind == "format_property"
+            else {"imports"}
+        )
+        if set(op.clear) - allowed:
+            _fail("format_package_invalid", address, "Недопустимое очищаемое поле")
+    updates = _updates(op.patch)
+    if set(op.clear) & set(updates):
+        _fail("format_package_invalid", address, "Поле одновременно задано и очищается")
+    updates.update({k: () if k in ("facets", "imports") else None for k in op.clear})
+    if op.action != "create" and ("types" in updates or "properties" in updates):
+        _fail(
+            "format_package_invalid",
+            address,
+            "Вложенные типы и свойства задаются только при create",
+        )
+    owner = rows.get(op.owner_id or op.container_id or "")
+    if (op.owner_id or op.container_id) and owner is None:
+        _fail("format_package_invalid", address, "Владелец отсутствует")
+    if target:
+        _, package, typ, prop = target
+        expected = "format_property" if prop else "format_type" if typ else "format_package"
+        if op.kind != expected:
+            _fail("format_package_invalid", address, "Вид цели не соответствует операции")
+        destructive = (
+            op.action == "delete"
+            or any(
+                k in updates and updates[k] != v
+                # Имя метаданных правила не адресуют; URI — новый контракт.
+                for k, v in (("namespace", package.namespace),)
+                if op.kind == "format_package"
+            )
+            or (
+                "name" in updates and updates["name"] != (prop or typ).name.local
+                if prop or typ
+                else False
+            )
+        )
+        if destructive:
+            refs = format_consumers(model, target[0])
+            if refs:
+                _fail("format_in_use", address, "Сущность формата используется", refs)
+    elif op.kind != "format_package":
+        if owner is None:
+            _fail("format_package_invalid", address, "Владелец не найден")
+        _, package, typ, prop = owner
+        if (op.kind == "format_type" and typ is not None) or (
+            op.kind == "format_property" and (typ is None or prop is not None)
+        ):
+            _fail("format_package_invalid", address, "Неверный вид владельца")
+    if op.action == "create":
+        from kd_rules_mcp.ed.address import escape_segment
+
+        if op.kind == "format_package":
+            address = "Пакет/" + escape_segment(updates.get("metadata_name", op.client_id))
+        else:
+            assert owner is not None
+            address = (
+                model_addresses(model)[owner[0]]
+                + ("/Тип/" if op.kind == "format_type" else "/Свойство/")
+                + escape_segment(updates.get("name", op.client_id))
+            )
+    try:
+        if op.kind == "format_package":
+            key = target[0] if target else logical_id(model.project_id, op.client_id)
+            if op.action == "create":
+                if len(model.format_bindings) == 1:
+                    updates.setdefault("base_version", model.format_bindings[0].key)
+                    updates.setdefault("base_namespace", model.format_bindings[0].uri)
+                package = FormatPackageEntity(
+                    logical_id=key, name=updates.get("metadata_name", ""), **updates
+                )
+            elif op.action == "update":
+                if updates.get("namespace", package.namespace) != package.namespace:
+                    updates["types"] = _renamed_namespace(
+                        package.types, package.namespace, updates["namespace"]
+                    )
+                package = replace(
+                    package, name=updates.get("metadata_name", package.metadata_name), **updates
+                )
+            packages = (
+                tuple(p for p in model.format_packages if p.logical_id != key)
+                if op.action == "delete"
+                else (*model.format_packages, package)
+                if op.action == "create"
+                else tuple(package if p.logical_id == key else p for p in model.format_packages)
+            )
+        else:
+            if op.kind == "format_property":
+                assert typ is not None
+
+            def sibling_for(row):
+                if row is None or row[1].logical_id != package.logical_id:
+                    return None
+                if op.kind == "format_property":
+                    return row[3] if row[2] == typ else None
+                return row[2] if row[3] is None else None
+
+            if "name" in updates:
+                updates["name"] = QName(package.namespace, updates["name"])
+            if op.kind == "format_type" and "properties" in updates:
+                updates["properties"] = tuple(
+                    p
+                    if isinstance(p, FormatProperty)
+                    else FormatProperty(
+                        name=QName(package.namespace, p.name),
+                        **{f.name: getattr(p, f.name) for f in fields(p) if f.name != "name"},
+                    )
+                    for p in updates["properties"]
+                )
+            item = prop if op.kind == "format_property" else typ
+            if op.action == "create":
+                item = (
+                    FormatProperty(**updates)
+                    if op.kind == "format_property"
+                    else FormatType(**updates)
+                )
+            elif op.action == "update":
+                assert item is not None
+                item = replace(item, **updates)
+            values = list(
+                typ.properties
+                if op.kind == "format_property" and typ is not None
+                else package.types
+            )
+            if op.action == "create":
+                if op.after_id == "" or op.position_mode == "default":
+                    values.append(item)
+                elif op.after_id is None:
+                    values.insert(0, item)
+                else:
+                    anchor = rows.get(op.after_id)
+                    sibling = sibling_for(anchor)
+                    if sibling not in values:
+                        _fail("format_package_invalid", address, "Якорь не принадлежит владельцу")
+                    values.insert(values.index(sibling) + 1, item)
+            elif op.action == "delete":
+                values.remove(item)
+            elif op.action == "update":
+                values[values.index(prop if op.kind == "format_property" else typ)] = item
+            else:
+                if owner and (
+                    owner[1].logical_id != package.logical_id
+                    or (op.kind == "format_type" and owner[2] is not None)
+                    or (op.kind == "format_property" and owner[2] != typ)
+                ):
+                    _fail(
+                        "format_package_invalid",
+                        address,
+                        "Перемещение допустимо только внутри владельца",
+                    )
+                values.remove(item)
+                if op.after_id is None:
+                    position = 0
+                else:
+                    after = rows.get(op.after_id or "")
+                    sibling = sibling_for(after)
+                    if sibling not in values:
+                        _fail("format_package_invalid", address, "Якорь не принадлежит владельцу")
+                    position = values.index(sibling) + 1
+                values.insert(position, item)
+            if op.kind == "format_property":
+                assert typ is not None and item is not None
+                new_type = replace(typ, properties=tuple(values))
+                package = replace(
+                    package, types=tuple(new_type if t == typ else t for t in package.types)
+                )
+                local = typ.name.local + "/property/" + item.name.local
+            else:
+                assert item is not None
+                package = replace(package, types=tuple(values))
+                local = item.name.local
+            key = (
+                target[0]
+                if target and op.action == "delete"
+                else logical_id(model.project_id, package.logical_id + "/type/" + local)
+            )
+            packages = tuple(
+                package if p.logical_id == package.logical_id else p for p in model.format_packages
+            )
+        result = replace(model, format_packages=tuple(packages))
+        for entity in result.format_packages:
+            package_from_entity(entity, schema)
+        if len({p.namespace for p in packages}) != len(packages) or len(
+            {p.metadata_name.casefold() for p in packages}
+        ) != len(packages):
+            raise ValueError("Повтор URI или имени пакета")
+        return result, key
+    except (Kd2Error, ValueError, TypeError) as error:
+        if isinstance(error, ManagerOperationError):
+            raise
+        _fail("format_package_invalid", address, str(error))
+
+
 def _validate_patch(kind: str, updates: dict[str, Any], address: str) -> None:
     if "extensions" in updates and (
         len(set(updates["extensions"])) != len(updates["extensions"])
@@ -1958,7 +2377,11 @@ def _apply_table_part(model: ManagerModel, op: ManagerOperation) -> tuple[Manage
     return replace(changed, layouts=tuple(containers.values())), key
 
 
-def _apply_one(model: ManagerModel, op: ManagerOperation) -> tuple[ManagerModel, str]:
+def _apply_one(
+    model: ManagerModel, op: ManagerOperation, format_schema: EdSchema | None = None
+) -> tuple[ManagerModel, str]:
+    if op.kind in ("format_package", "format_type", "format_property"):
+        return _apply_format(model, op, format_schema)
     if op.kind == "table_part":
         return _apply_table_part(model, op)
     if op.kind in ("handler", "conversion_event", "algorithm"):
@@ -5268,7 +5691,11 @@ def _validate_code_directions(
 
 
 def preview(
-    model: ManagerModel, operations: tuple[ManagerOperation, ...], *, expected_revision: str
+    model: ManagerModel,
+    operations: tuple[ManagerOperation, ...],
+    *,
+    expected_revision: str,
+    format_schema: EdSchema | None = None,
 ) -> ManagerPreview:
     validate_model(model)
     if expected_revision != model.revision or model.revision != content_hash(model):
@@ -5399,7 +5826,7 @@ def preview(
                             digest((op, refs, result.revision)),
                         )
             code_notices = _code_notices(result, op)
-            changed, key = _apply_one(result, op)
+            changed, key = _apply_one(result, op, format_schema)
             notices.extend(_code_change_notices(result, changed, op))
             if (
                 op.kind == "table_part"
@@ -5587,6 +6014,53 @@ def preview(
         ).with_revision()
     )
     changes = compare_models(model, result).changes
+    if model.format_packages != result.format_packages:
+        from .format_package import format_package_hash
+
+        old_rows = {key: (p, t, prop) for key, p, t, prop in format_members(model)}
+        new_rows = {key: (p, t, prop) for key, p, t, prop in format_members(result)}
+        package_changes = []
+        for key in sorted(old_rows.keys() | new_rows.keys()):
+            left, right = old_rows.get(key), new_rows.get(key)
+            if left == right:
+                continue
+            if (
+                left
+                and right
+                and (left[2] or left[1]) == (right[2] or right[1])
+                and (left[1] is not None)
+            ):
+                continue
+            manager = result if right else model
+
+            def data(row):
+                if row is None:
+                    return None
+                member = row[2] or row[1] or row[0]
+                value = {
+                    f.name: json_value(getattr(member, f.name))
+                    for f in fields(member)
+                    if not f.name.startswith("_") and f.name not in ("types", "properties")
+                }
+                value["package_hash"] = format_package_hash(row[0])
+                return value
+
+            left_data, right_data = data(left), data(right)
+            different = (
+                tuple(k for k in left_data if left_data[k] != right_data[k])
+                if left_data and right_data
+                else ()
+            )
+            package_changes.append(
+                ManagerChange(
+                    model_addresses(manager)[key],
+                    "create" if left is None else "delete" if right is None else "update",
+                    different,
+                    left_data,
+                    right_data,
+                )
+            )
+        changes += tuple(package_changes)
     plan_hash = digest(
         (expected_revision, canonical, result.revision, changes, failures, skipped, notices)
     )
@@ -5610,16 +6084,21 @@ def apply(
     expected_revision: str,
     expected_preview_hash: str,
     confirmations: tuple[tuple[str, str], ...] = (),
+    format_schema: EdSchema | None = None,
 ) -> ManagerModel:
     # Повтор уже применённого решения не требует отката на прежнюю ревизию.
     if operations and all(
         any(d.client_id == op.client_id for d in model.decisions) for op in operations
     ):
-        replayed = preview(model, operations, expected_revision=model.revision)
+        replayed = preview(
+            model, operations, expected_revision=model.revision, format_schema=format_schema
+        )
         if replayed.failures:
             raise ManagerOperationError(replayed.failures)
         return replayed.model
-    planned = preview(model, operations, expected_revision=expected_revision)
+    planned = preview(
+        model, operations, expected_revision=expected_revision, format_schema=format_schema
+    )
     if planned.preview_hash != expected_preview_hash:
         raise EdAuthoringStaleError("Хеш просмотра менеджера не совпадает")
     if planned.failures:

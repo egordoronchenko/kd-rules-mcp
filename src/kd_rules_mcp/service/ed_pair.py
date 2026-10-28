@@ -8,7 +8,7 @@ from kd_rules_mcp.errors import EdSchemaNotFoundError
 from kd_rules_mcp.service import ed_views as views
 from kd_rules_mcp.service.base import ServiceBase
 from kd_rules_mcp.service.ed_chain import chain_view, resolve_version
-from kd_rules_mcp.validation.ed_pair import ASSUMPTIONS, validate_pair
+from kd_rules_mcp.validation.ed_pair import ASSUMPTIONS, validate_format_pair, validate_pair
 from kd_rules_mcp.validation.report import Level
 
 if TYPE_CHECKING:
@@ -80,6 +80,29 @@ class EdPairMixin(ServiceBase):
                     with_references=True,
                 ),
             )
+            from kd_rules_mcp.service.ed_writer import EdWriterMixin
+
+            writer = cast(EdWriterMixin, self)
+            source_model = (
+                writer._manager_project(source.manager_project_id).model
+                if source.manager_project_id
+                else None
+            )
+            target_model = (
+                writer._manager_project(target.manager_project_id).model
+                if target.manager_project_id
+                else None
+            )
+            receiving_schema = (
+                target_schema.schema
+                if target_schema
+                else writer._manager_optional_schema(
+                    writer._manager_metadata(target.manager_project_id)
+                )
+                if target.manager_project_id
+                else None
+            )
+            result.report.extend(validate_format_pair(source_model, target_model, receiving_schema))
         objects = result.objects
         if format_object is not None:
             objects = [row for row in objects if row["format_object"] == format_object.strip()]
