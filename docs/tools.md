@@ -2795,6 +2795,16 @@ Both plain and reference object pages expose `offset,limit,total,has_more,next_o
 Add `target.project_id` to check that the structure comes from the manager's configuration
 dump and exactly its selected extensions; this applies to both candidate kinds, even when
 the manager has no bound structure ID. An unknown project ID refuses.
+With `target.project_id`, the project's format packages are read over the opened schema as
+extension namespaces, the same way as in the `ed_validate` profile, for both kinds and for
+reference rows; the opened `schema_id` is not changed. An own object type gives a row with the
+package URI in `namespace`. An extension type with a base type's name is not a separate object
+row (it adds properties to the base type): its properties appear in the base type's property
+candidates with the package URI; the ПКО keeps the base name and adds the URI to `extensions`
+(init). An own type paired by name leaves the synonym contest, so other synonym pairs may appear.
+Use `{URI}Name` in `format_type` for an own type. IDs also bind the packages: requery after a
+`format_*` operation. A schema whose version or base URI differs from the packages refuses with
+`format_schema_mismatch`; an unreadable package refuses with `format_package_invalid`.
 
 Property class `needs_pkpd` means a configuration enumeration meets a format enumeration:
 create a predefined-data rule explicitly. These rows have `needs_rule=true`, `auto=false`,

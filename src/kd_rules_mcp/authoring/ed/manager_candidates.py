@@ -396,6 +396,11 @@ def _format_objects(schema: EdSchema) -> list[_FormatObject]:
         for qname, typ in schema.types.items():
             if qname.namespace != namespace or typ.kind != "object" or typ.qname is None:
                 continue
+            base = schema.types.get(QName(schema.base_namespace, typ.qname.local))
+            if namespace != schema.base_namespace and base is not None and base.kind == "object":
+                # Одноимённый тип расширения дополняет свойства базового (XDTO:9903–9949),
+                # а не второй кандидат: иначе он гасил бы пару базового типа по синониму.
+                continue
             head, separator, tail = typ.qname.local.partition(".")
             kind = _KIND_BY_FOLDED.get(head.casefold())
             if separator and kind is not None and "." not in tail and tail:

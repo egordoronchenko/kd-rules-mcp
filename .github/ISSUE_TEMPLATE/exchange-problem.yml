@@ -1,0 +1,60 @@
+name: Проблема с обменом
+description: Правила, модуль или проверка ведут себя не так, как ожидали
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Не прикладывайте логины, пароли, адреса баз и персональные данные. Правила и выгрузки конфигураций
+        можно сократить до объектов, на которых видна проблема.
+  - type: input
+    id: version
+    attributes:
+      label: Версия kd-rules-mcp
+      description: Тег образа или коммит клона
+      placeholder: "1.11.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Вид обмена
+      options:
+        - «Конвертация данных 2» (ПравилаОбмена)
+        - Универсальный формат (EnterpriseData, «Конвертация данных 3»)
+        - Правила регистрации
+        - Не знаю
+    validations:
+      required: true
+  - type: textarea
+    id: configurations
+    attributes:
+      label: Конфигурации
+      description: Источник и приёмник с версиями, версия БСП, версия формата для универсального обмена
+      placeholder: "Источник — …, приёмник — …, БСП 3.1.…"
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: Что делали
+      description: Постановка агенту или вызов инструмента сервера
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что ожидали и что получили
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Вывод агента или инструмента
+      description: Ответ инструмента (ошибка — JSON с полем `code`), замечания `rules_validate` или `ed_validate`
+      render: text
+  - type: textarea
+    id: files
+    attributes:
+      label: Правила, модуль, выгрузка
+      description: Файлы или фрагменты, на которых проблема повторяется

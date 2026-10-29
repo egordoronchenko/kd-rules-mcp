@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,7 +17,9 @@ from kd_rules_mcp.authoring.ed.format_package import (
     render_format_package,
 )
 from kd_rules_mcp.authoring.ed.workspace import ManagerWorkspace
+from kd_rules_mcp.ed.format_model import FormatProperty, FormatType
 from kd_rules_mcp.ed.schema import QName
+from kd_rules_mcp.ed.schema.xdto import XS
 from kd_rules_mcp.ed.writer_model import dump_model, logical_id
 from kd_rules_mcp.errors import EdAuthoringPreconditionError
 from kd_rules_mcp.server import create_server
@@ -649,3 +652,112 @@ def test_f4_schema_roundtrip_own_properties_and_missing_property(writer_setup):
     )
     result = service.ed_validate(applied["document_id"], check_prefix="ed.format.pkpd_unsupported")
     assert result["issues"]["total"] == 1
+
+
+def test_candidates_include_project_package_types(writer_setup):
+    service, args, _ = writer_setup
+    created = service.ed_create(**args)
+    base = service._manager_bound_schema(service._manager_metadata(created["project_id"]))
+    package = package_c(base)
+    package = replace(
+        package,
+        types=(
+            *(
+                replace(t, name=QName(URI, "Справочник.Склад1")) if t.name.local == OBJECT else t
+                for t in package.types
+            ),
+            # Одноимённый тип расширения добавляет свойства базовому (XDTO:9903–9949).
+            *(
+                FormatType(
+                    QName(URI, name),
+                    "object",
+                    (FormatProperty(QName(URI, "Код"), QName(XS, "string"), lower=0),),
+                )
+                for name in ("Справочник.Должности", "Справочник.Склады")
+            ),
+        ),
+    )
+    applied = create_package(service, created, package=package)
+    target = {"schema_id": args["schema_id"], "structure_id": "host", "direction": "send"}
+
+    def objects(value):
+        page = service.ed_authoring_candidates(scope="manager", kind="objects", target=value)
+        return {(r["configuration"], r["format_type"], r["namespace"]): r for r in page["items"]}
+
+    def properties(value, format_type):
+        return service.ed_authoring_candidates(
+            scope="manager",
+            kind="properties",
+            target={
+                **value,
+                "configuration_object": "Справочник.Должности",
+                "format_type": format_type,
+            },
+        )
+
+    plain = objects(target)
+    own = objects({**target, "project_id": created["project_id"]})
+    pair = ("Справочник.Склад1", "Справочник.Склад1", URI)
+    assert pair not in plain
+    assert own[pair]["confidence"] == "точно" and own[pair]["auto"] is False
+    assert ("Справочник.Должности", "Справочник.Должности", "urn:test:writer") in own
+    # Ревью: одноимённый тип расширения — не второй кандидат и не гасит пару по синониму.
+    assert not any(ns == URI and fmt != "Справочник.Склад1" for _, fmt, ns in own)
+    synonym = ("Справочник.Склад2", "Справочник.Склады", "urn:test:writer")
+    assert own[synonym]["confidence"] == "по синониму"
+    # Идентификатор связан с пакетами проекта: другой пакет — другой идентификатор.
+    assert (
+        own[("Справочник.Должности", "Справочник.Должности", "urn:test:writer")]["candidate_id"]
+        != plain[("Справочник.Должности", "Справочник.Должности", "urn:test:writer")][
+            "candidate_id"
+        ]
+    )
+    with_project = {**target, "project_id": created["project_id"]}
+    rows = properties(with_project, "Справочник.Должности")["properties"]["items"]
+    assert any(r["format_path"] == "Код" and r["namespace"] == URI for r in rows)
+    assert not any(
+        r["namespace"] == URI
+        for r in properties(target, "Справочник.Должности")["properties"]["items"]
+    )
+    own_type = properties(with_project, "{" + URI + "}Справочник.Склад1")
+    assert own_type["namespace"] == URI
+    assert {r["path"] for r in own_type["unmatched_format"]["items"]} >= {"Состояние"}
+    # Схема проекта не подменяет открытую схему.
+    assert (
+        QName(URI, "Справочник.Склад1") not in service._ed_schemas[args["schema_id"]].schema.types
+    )
+    assert applied["revision"]
+    # Ревью: схема другой версии, чем пакеты проекта, — отказ о схеме, а не о пакете.
+    other = service.ed_schema_open(
+        "1.21",
+        path=str(Path(service._ed_schemas[args["schema_id"]].schema.packages[0].sources[0].path)),
+        imports={
+            "urn:test:writer-message": str(Path(__file__).parent / "data/ed/writer/message.bin")
+        },
+    )
+    with pytest.raises(EdAuthoringPreconditionError) as caught:
+        objects({**with_project, "schema_id": other["schema_id"]})
+    assert caught.value.details["failures"][0]["id"] == "format_schema_mismatch"
+    assert objects({**target, "schema_id": other["schema_id"]})
+    # Ревью: кандидаты и ed_validate одного проекта переписывают папку пакетов — без гонки.
+    failures = []
+
+    def run(call):
+        try:
+            for _ in range(8):
+                call()
+        except Exception as error:  # проба собирает любой отказ потока
+            failures.append(repr(error))
+
+    calls = (
+        lambda: objects(with_project),
+        lambda: service.ed_validate(
+            applied["document_id"], schema_id=args["schema_id"], check_prefix="ed.schema."
+        ),
+    )
+    threads = [threading.Thread(target=run, args=(c,)) for c in calls * 2]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not failures, failures

@@ -328,6 +328,9 @@ def test_legacy_runtime_notice_silent_while_names_are_current(
     assert calls == []
 
 
+@pytest.mark.skipif(
+    shutil.which("docker") is None, reason="нет Docker: `docker compose config` не запустить"
+)
 def test_compose_config_resolves_publication_from_env(tmp_path: Path) -> None:
     """`docker compose config` подставляет .env; контейнер не запускается.
 

@@ -1,0 +1,18 @@
+name: Идея
+description: Чего не хватает серверу, скиллам или документации
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую задачу решаете
+      description: Что делаете с обменом сейчас и где мешает
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Что предлагаете
+      description: Как это могло бы выглядеть — инструмент, проверка, скилл, раздел документации
+    validations:
+      required: true

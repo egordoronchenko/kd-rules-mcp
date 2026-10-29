@@ -111,8 +111,11 @@ def test_missing_file_inside_workspace_is_not_found(tmp_path: Path) -> None:
     missing = service.workspace.root / "no.xml"
     with pytest.raises(Kd2Error, match="Файл не найден"):
         service.rules_open(str(missing))
+    # Абсолютный путь своей платформы: на Linux путь Windows без сопоставления папок
+    # серверу не виден вовсе
+    outside = Path(tmp_path.anchor) / "kd2-rules-missing" / "no.xml"
     with pytest.raises(Kd2Error, match="не входит в подключённые папки"):
-        service.rules_open(r"C:\kd2-rules-missing\no.xml")
+        service.rules_open(str(outside))
 
 
 def test_rules_validate_level_aliases_fail_before_the_project(tmp_path: Path) -> None:

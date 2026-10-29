@@ -95,6 +95,8 @@ class _BuiltStructure:
 
 
 _VOLATILE_ROOT = Path(tempfile.gettempdir()).resolve()
+# Каталог тестов со статическими данными: репозиторий могут склонировать и во временный каталог.
+_STATIC_ROOT = Path(__file__).resolve().parent
 
 
 def _file_key(path: Path) -> _FileKey:
@@ -102,10 +104,11 @@ def _file_key(path: Path) -> _FileKey:
 
     Файл во временном каталоге ключа не получает (`OSError` — обёртки тогда читают по-настоящему):
     такие выгрузки тесты переписывают между вызовами и проверяют на них именно повторное чтение,
-    свежесть и учёт прочитанных файлов в сервисе. Кэшируются корпус и статические данные тестов.
+    свежесть и учёт прочитанных файлов в сервисе. Кэшируются корпус и статические данные тестов,
+    даже если сам репозиторий лежит во временном каталоге.
     """
     resolved = path.resolve()
-    if resolved.is_relative_to(_VOLATILE_ROOT):
+    if resolved.is_relative_to(_VOLATILE_ROOT) and not resolved.is_relative_to(_STATIC_ROOT):
         raise OSError("временный файл теста не кэшируется")
     stat = resolved.stat()
     return (str(resolved), stat.st_mtime_ns, stat.st_size)

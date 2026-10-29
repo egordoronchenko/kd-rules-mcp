@@ -1,0 +1,28 @@
+name: Checks
+
+"on":
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: ruff format
+        run: uvx ruff format --check
+      - name: ruff check
+        run: uvx ruff check
+      - name: pyright
+        run: uvx pyright
+      - name: pytest (без slow)
+        run: uv run pytest -q -m "not slow"

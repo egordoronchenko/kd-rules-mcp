@@ -307,6 +307,8 @@ server.py (MCP, streamable HTTP /mcp) ──→ service/ (Kd2Service, PathMap, S
 Второй job устанавливает основные зависимости и собирает упаковки `claude` и `agents` через
 `scripts/build_packs.py --dest`; ZIP прикладываются к релизу тега, который создаётся при отсутствии.
 Тело релиза — раздел версии из CHANGELOG, извлечённый `scripts/changelog_section.py`.
+`.github/workflows/checks.yml` при каждом push в `main` гоняет на Linux `ruff format --check`, `ruff check`,
+`pyright` и `pytest -m "not slow"` — без переменных `KD2_*`, как на чистой машине; бейдж — в README.
 
 Образ — `python:3.12-slim` в две стадии, зависимости строго по `uv.lock`; сервер работает от пользователя
 uid 1000, корень нужен точке входа, чтобы отдать тома. OCI-метки: source, version (`ARG VERSION`), licenses.

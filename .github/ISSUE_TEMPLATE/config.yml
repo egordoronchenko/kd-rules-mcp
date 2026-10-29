@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Установка и частые симптомы
+    url: https://github.com/egordoronchenko/kd-rules-mcp/blob/main/docs/troubleshooting.md
+    about: Прежде чем писать о проблеме установки, проверьте разбор частых симптомов

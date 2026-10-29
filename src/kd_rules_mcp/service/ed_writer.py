@@ -703,6 +703,12 @@ class EdWriterMixin(EdAuthoringMixin):
         )
         if not packages:
             return schema
+        # Папку пакетов переписывают и кандидаты, и ed_validate: запись и чтение — под общей
+        # блокировкой, иначе соседний вызов удаляет файлы, пока этот их читает.
+        with self._lock:
+            return self._manager_format_schema_files(model, schema, packages)
+
+    def _manager_format_schema_files(self, model, schema, packages):
         folder = self.manager_workspace._folder(model.project_id) / "format"
         self._safe_path(folder)
         if not folder.resolve().is_relative_to(self.manager_workspace.directory.resolve()):
@@ -1853,11 +1859,35 @@ class EdWriterMixin(EdAuthoringMixin):
                 provenance = dict(connection.execute("SELECT key,value FROM meta"))
                 manager_id = value.get("project_id")
                 metadata = None
+                format_schema = schema.schema
                 if manager_id is not None:
                     model = self._manager_project(_text(manager_id, "project_id")).model
                     metadata = self._manager_metadata(manager_id)
                     self._manager_structure_provenance(structure_id, metadata)
                     root = self._read_path(model.host.configuration).resolve()
+                    if model.format_packages:
+                        # Свои типы пакетов проекта — пространства расширения поверх схемы,
+                        # как в профиле ed_validate; идентификаторы связаны и с пакетами.
+                        mismatched = sorted(
+                            p.metadata_name
+                            for p in model.format_packages
+                            if (p.base_version, p.base_namespace)
+                            != (schema.format_version, schema.schema.base_namespace)
+                        )
+                        if mismatched:
+                            _refuse(
+                                "format_schema_mismatch",
+                                "Схема target.schema_id не той версии или базового URI, что пакеты "
+                                "проекта: " + ", ".join(mismatched) + "; откройте схему привязки",
+                            )
+                        try:
+                            effective = self._manager_format_schema(
+                                model, metadata, base=schema.schema
+                            )
+                        except (OSError, ValueError, Kd2Error) as error:
+                            _refuse("format_package_invalid", str(error))
+                        if effective is not None:
+                            format_schema = effective
                 else:
                     root = (
                         self._read_path(self._host_text(provenance["source_path"])).resolve()
@@ -1868,7 +1898,7 @@ class EdWriterMixin(EdAuthoringMixin):
                     return _compact_property_candidates(
                         property_candidates(
                             connection,
-                            schema.schema,
+                            format_schema,
                             _text(value.get("configuration_object"), "configuration_object"),
                             _text(value.get("format_type"), "format_type"),
                             direction=direction,
@@ -1879,7 +1909,7 @@ class EdWriterMixin(EdAuthoringMixin):
                 if reference_document_id is None:
                     page = object_candidates(
                         connection,
-                        schema.schema,
+                        format_schema,
                         direction=direction,
                         text=text,
                         offset=offset,
@@ -2000,7 +2030,7 @@ class EdWriterMixin(EdAuthoringMixin):
                     return _compact_property_candidates(
                         property_candidates(
                             connection,
-                            schema.schema,
+                            format_schema,
                             _text(value.get("configuration_object"), "configuration_object"),
                             _text(value.get("format_type"), "format_type"),
                             direction=direction,
@@ -2013,24 +2043,27 @@ class EdWriterMixin(EdAuthoringMixin):
                     )
                 # Собираем все страницы перед объединением: offset применяется к общему списку.
                 result = object_candidates(
-                    connection, schema.schema, direction=direction, text=text, limit=200
+                    connection, format_schema, direction=direction, text=text, limit=200
                 )
                 rows = list(result["items"])
                 while result["has_more"]:
                     result = object_candidates(
                         connection,
-                        schema.schema,
+                        format_schema,
                         direction=direction,
                         text=text,
                         offset=result["offset"] + len(result["items"]),
                         limit=200,
                     )
                     rows.extend(result["items"])
-                namespaces = {
-                    t.qname.local: t.qname.namespace
-                    for t in schema.schema.types.values()
-                    if t.qname
-                }
+                # Одноимённый тип расширения не подменяет тип базовой схемы.
+                namespaces: dict[str, str] = {}
+                for t in format_schema.types.values():
+                    if t.qname and (
+                        t.qname.local not in namespaces
+                        or t.qname.namespace == format_schema.base_namespace
+                    ):
+                        namespaces[t.qname.local] = t.qname.namespace
                 config_names = {
                     (k.casefold(), n.casefold()): (k, n)
                     for k, n in connection.execute("SELECT kind, name FROM objects")
@@ -2041,13 +2074,13 @@ class EdWriterMixin(EdAuthoringMixin):
                 binding = digest(
                     (
                         sha256(connection.serialize()),
-                        schema.schema.schema_id,
+                        format_schema.schema_id,
                         source_fingerprint,
                     )
                 )
                 applicability = Applicability.build(
                     reference_document,
-                    ValidationProfile.build(schema.schema, schema.format_version, direction),
+                    ValidationProfile.build(format_schema, schema.format_version, direction),
                 )
                 for rule in reference_document.pko:
                     if applicability.evaluate(rule, direction) is False:

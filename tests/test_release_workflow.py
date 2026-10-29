@@ -53,3 +53,37 @@ def test_release_workflow() -> None:
         for step in job["steps"]:
             if "uses" in step:
                 assert re.fullmatch(r"[\w/-]+@v\d+", step["uses"])
+
+
+def test_checks_workflow() -> None:
+    """Проверки кода на Linux при каждом push в main: те же, что требует готовность задачи."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/checks.yml").read_text(encoding="utf-8"))
+    assert workflow["on"] == {"push": {"branches": ["main"]}, "workflow_dispatch": None}
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["checks"]
+    assert job["runs-on"] == "ubuntu-latest"
+    commands = [step["run"] for step in job["steps"] if "run" in step]
+    assert commands == [
+        "uv sync --frozen",
+        "uvx ruff format --check",
+        "uvx ruff check",
+        "uvx pyright",
+        'uv run pytest -q -m "not slow"',
+    ]
+    for step in job["steps"]:
+        if "uses" in step:
+            assert re.fullmatch(r"[\w/-]+@v\d+", step["uses"])
+
+
+def test_issue_templates() -> None:
+    """Шаблоны issue — формы GitHub; шаблон PR отправляет в Issues."""
+    templates = ROOT / ".github/ISSUE_TEMPLATE"
+    for name in ("exchange-problem.yml", "idea.yml"):
+        form = yaml.safe_load((templates / name).read_text(encoding="utf-8"))
+        assert form["name"] and form["description"] and form["body"]
+        ids = [item["id"] for item in form["body"] if "id" in item]
+        assert len(ids) == len(set(ids))
+    config = yaml.safe_load((templates / "config.yml").read_text(encoding="utf-8"))
+    assert config["blank_issues_enabled"] is True
+    pr = (ROOT / ".github/pull_request_template.md").read_text(encoding="utf-8")
+    assert "issues/new/choose" in pr
