@@ -85,6 +85,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "handlers_context",
     ),
     "Reference": ("reference_get", "reference_search"),
+    "File transfer": ("download_link", "upload_link"),
     "Registration and correspondent rules": (
         "registration_build",
         "registration_retarget",

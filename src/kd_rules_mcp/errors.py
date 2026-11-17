@@ -184,6 +184,10 @@ class WorkspacePathError(Kd2Error):
     """Путь записи лежит вне рабочей папки и папок живых правил проектов (rules_dir)."""
 
 
+class FileLinkNotFoundError(Kd2Error):
+    """File is missing or the path is a directory."""
+
+
 class RulesSaveErrorsError(Kd2Error):
     """Validation found errors; repeat with acknowledge_errors to write anyway."""
 

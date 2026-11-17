@@ -80,7 +80,13 @@ def test_instructions_name_tags_and_boundaries() -> None:
     """Инструкция сервера: легенда меток эффекта и границы (agent-ux, Р2)."""
     for tag in ("[read]", "[workspace]", "[project]", "[sandbox]"):
         assert tag in INSTRUCTIONS
-    for words in ("never widen allowed", "sandboxes", "deletion needs separate human consent"):
+    for words in (
+        "never widen allowed",
+        "sandboxes",
+        "deletion needs separate human consent",
+        "download_link",
+        "upload_link",
+    ):
         assert words in " ".join(INSTRUCTIONS.split()), words
 
 
@@ -117,7 +123,8 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
     # около 1810 знаков при однословных описаниях полей.
     # ed_trace, ed_pair_validate и live_format_support (kd3-trace-pair) — около 3110 знаков при
     # однословных описаниях полей (вместо урезания чужих описаний).
-    assert len(serialized) <= 60_970, f"Схемы: {len(serialized)} знаков"
+    # download_link и upload_link (remote-file-links, #88) — около 870 знаков.
+    assert len(serialized) <= 61_850, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:
@@ -137,7 +144,8 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
     cyrillic = sum("\u0400" <= char <= "\u04ff" for char in serialized)
     assert cyrillic / len(serialized) <= 0.08, f"Кириллица: {cyrillic / len(serialized):.2%}"
     # Писатель и перенос регистрации добавили по строке о порядке работы.
-    assert len(INSTRUCTIONS) <= 2_100, f"INSTRUCTIONS: {len(INSTRUCTIONS)} знаков"
+    # Ссылки на файлы для сервера на другой машине (#88) — строка около 50 знаков.
+    assert len(INSTRUCTIONS) <= 2_150, f"INSTRUCTIONS: {len(INSTRUCTIONS)} знаков"
 
 
 def test_schema_titles_keep_named_properties_and_literal_values() -> None:

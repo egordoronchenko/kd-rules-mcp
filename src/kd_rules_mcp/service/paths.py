@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import urlsplit
 
 from kd_rules_mcp.errors import Kd2Error
 from kd_rules_mcp.projects import load_local, parse_project_dirs
@@ -91,15 +92,25 @@ class Settings:
     extension_dirs: dict[str, Path] = field(default_factory=dict)
     # Папка скиллов сервера для справки (`KD2_REFERENCE_DIR`); пусто — рядом с исходниками.
     reference_dir: Path | None = None
+    # Публичный адрес ссылок на файлы (`KD2_PUBLIC_URL`); пусто — схема и Host запроса.
+    public_url: str | None = None
+    # Срок ссылки по умолчанию, секунды (`KD2_LINK_TTL`); параметр инструмента не больше часа.
+    link_ttl: int = 600
+    # Предел тела закачки, байты (`KD2_UPLOAD_MAX_MB`, по умолчанию 64 МиБ).
+    upload_max_bytes: int = 64 * 1024 * 1024
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         """`KD2_CACHE_DIR`, `KD2_WORKSPACE`, `KD2_PATH_MAP`, `KD2_HOST`, `KD2_PORT`, `KD2_TOKEN`,
-        `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`, `KD2_REFERENCE_DIR`.
+        `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`, `KD2_REFERENCE_DIR`,
+        `KD2_PUBLIC_URL`, `KD2_LINK_TTL`, `KD2_UPLOAD_MAX_MB`.
 
         Без `KD2_PROJECT_DIRS` папки проектов берутся из `projects.local.yaml` рядом с
         `projects.yaml` (локальный запуск без Docker); без `KD2_RULES_DIRS` папки живых правил —
         `rules_dir` проектов от этих папок. Пустой `KD2_TOKEN` — токена нет.
+        `KD2_PUBLIC_URL` — база ссылок на файлы (схема и хост обязательны); пусто — из запроса.
+        `KD2_LINK_TTL` — срок по умолчанию в секундах (600), не больше 3600.
+        `KD2_UPLOAD_MAX_MB` — предел закачки в мебибайтах (64).
         """
         source = os.environ if env is None else env
         projects_file = Path(source.get("KD2_PROJECTS_FILE", "projects.yaml"))
@@ -123,4 +134,35 @@ class Settings:
                 source.get("KD2_EXTENSION_DIRS", ""), "KD2_EXTENSION_DIRS"
             ),
             reference_dir=Path(text) if (text := source.get("KD2_REFERENCE_DIR", "")) else None,
+            public_url=_public_url(source.get("KD2_PUBLIC_URL", "")),
+            link_ttl=_bounded_int(source, "KD2_LINK_TTL", 600, maximum=3600),
+            upload_max_bytes=_bounded_int(source, "KD2_UPLOAD_MAX_MB", 64, maximum=None)
+            * 1024
+            * 1024,
         )
+
+
+def _public_url(text: str) -> str | None:
+    """База ссылок. Пустая строка — не задана. Хвост `/` снимается, путь-префикс сохраняется."""
+    raw = text.strip()
+    if not raw:
+        return None
+    parts = urlsplit(raw)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise Kd2Error(f"KD2_PUBLIC_URL «{raw}» должен быть адресом http или https с хостом")
+    return raw.rstrip("/")
+
+
+def _bounded_int(source: Mapping[str, str], key: str, default: int, *, maximum: int | None) -> int:
+    """Целое из окружения. Пусто — `default`. Меньше 1 или больше `maximum` — ошибка старта."""
+    raw = source.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise Kd2Error(f"{key} «{raw}» должно быть целым числом") from error
+    if value < 1 or (maximum is not None and value > maximum):
+        limit = f" от 1 до {maximum}" if maximum is not None else " не меньше 1"
+        raise Kd2Error(f"{key}={value}: нужно целое{limit}")
+    return value

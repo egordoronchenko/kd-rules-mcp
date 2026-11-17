@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from kd_rules_mcp.projects import LocalSettings, load_catalog
 from scripts import setup_local
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,3 +138,21 @@ def test_project_mount_reads_mcp_without_changing_host_volumes(
     override = (tmp_path / "docker-compose.override.yml").read_text(encoding="utf-8")
     assert "D:/Repos/bp:/projects/bp:ro" in override
     assert str(mounted) not in override
+
+
+def test_setup_public_url_from_server_url() -> None:
+    """KD2_PUBLIC_URL — схема, хост и порт из server_url; петлевой адрес не пишется."""
+    catalog = load_catalog(ROOT / "projects.example.yaml")
+    remote = LocalSettings(server_url="https://mcp.example:9443/mcp")
+    env = yaml.safe_load(setup_local.compose_override(catalog, remote))["services"]["kd-rules-mcp"][
+        "environment"
+    ]
+    assert env["KD2_PUBLIC_URL"] == "https://mcp.example:9443"
+    loop = LocalSettings(server_url="http://127.0.0.1:8060/mcp")
+    loop_env = yaml.safe_load(setup_local.compose_override(catalog, loop))["services"][
+        "kd-rules-mcp"
+    ]["environment"]
+    assert "KD2_PUBLIC_URL" not in loop_env
+    for loop_url in ("http://localhost:8060/mcp", "http://[::1]:8060/mcp"):
+        assert setup_local.public_base_url(loop_url) == ""
+    assert setup_local.public_base_url("http://[fd00::5]:8060/mcp") == "http://[fd00::5]:8060"

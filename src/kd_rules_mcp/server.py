@@ -25,7 +25,7 @@ from typing import Annotated, Any
 
 import anyio
 import uvicorn
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import Tool as MCPTool
 from pydantic import Field
@@ -60,6 +60,7 @@ from kd_rules_mcp.errors import (
     EdSchemaReadError,
     EdSchemaResourceLimitError,
     EdSchemaTypeNotFoundError,
+    FileLinkNotFoundError,
     Kd2Error,
     LiveError,
     ObjectNotFoundError,
@@ -80,6 +81,7 @@ from kd_rules_mcp.errors import (
 )
 from kd_rules_mcp.projects import ProjectConfigError, is_loopback_host
 from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service.file_links import FilesASGI, mcp_base_url
 
 logger = logging.getLogger("kd_rules_mcp")
 
@@ -115,6 +117,7 @@ ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (ProjectNotFoundError, "project_not_found"),
     (DuplicateProjectError, "duplicate_project"),
     (WorkspacePathError, "path_outside_workspace"),
+    (FileLinkNotFoundError, "file_not_found"),
     (RulesSaveErrorsError, "rules_save_errors"),
     (UnknownFieldError, "unknown_field"),
     (DuplicateRuleError, "duplicate_rule"),
@@ -144,6 +147,7 @@ Structures: project_list → structure_load_project, or structure_load_xml/md83e
 Open/create rules → match_* → rule_* or pko_create_from_candidates → rules_validate →
 handlers_export for a syntax checker → rules_save to workspace or project rules_dir.
 Compare versions with rules_diff. rules_close removes the snapshot, keeping saved files.
+Remote server files: download_link/upload_link.
 registration_build: registration rules; correspondent_draft: reverse rules. The agent makes
 semantic decisions.
 registration_retarget: preview → write with hash and notice IDs.
@@ -252,6 +256,8 @@ TOOL_EFFECTS: dict[str, tuple[str, str]] = {
     "ed_apply": ("workspace", "preview and apply both write to workspace/.ed-projects"),
     "ed_authoring_candidates": ("read", ""),
     "ed_authoring_build": ("project", _KIT),
+    "download_link": ("read", ""),
+    "upload_link": ("workspace", "file in workspace/inbox"),
 }
 
 
@@ -2202,6 +2208,33 @@ def create_server(service: Kd2Service) -> MCPServer:
             format_package,
         )
 
+    @server.tool()
+    async def download_link(
+        path: Annotated[
+            str, Field(description="Agent path of one file in the workspace or rules_dir")
+        ],
+        ttl_seconds: Annotated[
+            int | None,
+            Field(description="Lifetime in seconds, 1..3600; default KD2_LINK_TTL"),
+        ] = None,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Signed URL to download one file byte for byte."""
+        return await call(service.download_link, path, ttl_seconds, mcp_base_url(ctx))
+
+    @server.tool()
+    async def upload_link(
+        name: Annotated[str, Field(description="File name without directories")],
+        overwrite: Annotated[bool, Field(description="Replace an existing inbox file")] = False,
+        ttl_seconds: Annotated[
+            int | None,
+            Field(description="Lifetime in seconds, 1..3600; default KD2_LINK_TTL"),
+        ] = None,
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Signed URL to upload one file into workspace/inbox."""
+        return await call(service.upload_link, name, overwrite, ttl_seconds, mcp_base_url(ctx))
+
     # Новый инструмент без метки эффекта не выходит наружу (agent-ux, Р1).
     for tool in server._tool_manager.list_tools():
         effect_tag(tool.name)
@@ -2272,15 +2305,18 @@ def _bearer_ok(scope: Scope, expected: bytes) -> bool:
 def create_app(
     service: Kd2Service, token: str | None = None, *, host: str = "127.0.0.1"
 ) -> Starlette:
-    """ASGI-приложение MCP (`/mcp`).
+    """ASGI-приложение MCP (`/mcp`) и маршрут файлов `/files`.
 
     `host` передаётся в `streamable_http_app`, как это делает `MCPServer.run`: для петли
     SDK включает защиту от DNS rebinding. При заданном токене запрос к `/mcp` без
-    `Authorization: Bearer <token>` отвечает 401.
+    `Authorization: Bearer <token>` отвечает 401. `/files` проверяет подпись ссылки,
+    а не заголовок Authorization.
     """
     app = create_server(service).streamable_http_app(streamable_http_path="/mcp", host=host)
     if token:
         app.add_middleware(_BearerTokenMiddleware, token=token)
+    # Снаружи Bearer: маршрут забирает `/files` до проверки токена MCP.
+    app.add_middleware(FilesASGI, service=service)
     return app
 
 

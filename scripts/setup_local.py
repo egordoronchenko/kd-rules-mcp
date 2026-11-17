@@ -10,7 +10,9 @@
 - `docker-compose.override.yml` — папки проектов подключаются к контейнеру только на чтение как
   `/projects/<проект>`, папки живых правил (`rules_dir`) — на запись как `/rules/<проект>`,
   переменные `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS` и `KD2_PATH_MAP` (перевод путей агента);
-  при `token` — `KD2_TOKEN`. Порт сюда не пишется: его задаёт `.env`;
+  при `token` — `KD2_TOKEN`. `KD2_PUBLIC_URL` — схема, хост и порт из `server_url`
+  (путь `/mcp` отбрасывается); для петлевого адреса не пишется.
+  Порт сюда не пишется: его задаёт `.env`;
 - `.mcp.json` (Claude Code) и `.cursor/mcp.json` (Cursor) — наш сервер, общие серверы 1С и серверы
   поиска по коду каждого проекта с префиксом `<проект>-` и серверы данных песочниц (с
   Basic-авторизацией логином базы, если он есть); адреса берутся из `.mcp.json` проектов.
@@ -50,6 +52,7 @@ from kd_rules_mcp.projects import (
     basic_auth,
     bearer_auth,
     compose_env,
+    is_loopback_host,
     load_catalog,
     load_local,
     project_mcp_servers,
@@ -187,6 +190,9 @@ def compose_override(
         service["environment"]["KD2_HOST_MAP"] = hosts
     if local.token:
         service["environment"]["KD2_TOKEN"] = local.token
+    public = public_base_url(local.server_url)
+    if public:
+        service["environment"]["KD2_PUBLIC_URL"] = public
     if volumes:
         service["volumes"] = volumes
     body = yaml.dump(
@@ -539,6 +545,21 @@ def _compose_names(stdout: str) -> bool:
     return any(
         isinstance(item, dict) and item.get("Name") == LEGACY_COMPOSE_PROJECT for item in payload
     )
+
+
+def public_base_url(server_url: str) -> str:
+    """Схема, хост и порт из адреса сервера для клиентов; путь `/mcp` отбрасывается."""
+    parts = urlsplit(server_url.strip())
+    host = parts.hostname
+    # Петлевой адрес не пишем: агенту с другой машины он не годится, а локальному агенту
+    # сервер построит тот же адрес из запроса.
+    if not parts.scheme or not host or is_loopback_host(host):
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    if parts.port is None:
+        return f"{parts.scheme}://{host}"
+    return f"{parts.scheme}://{host}:{parts.port}"
 
 
 def localhost_server_url_warning(local: LocalSettings) -> str | None:

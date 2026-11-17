@@ -103,3 +103,18 @@ uv run python scripts/check_server.py
 Итоговая проверка — **в начале следующей сессии**, после одобрения (в `docs/INSTALL.md` это «первая задача —
 проверка всей цепочки»): вызвать инструменты сервера `project_list`, затем `structure_load_project` для одного
 проекта. Ответ с числом объектов — установка готова. Первая загрузка большой конфигурации — до пары минут.
+
+**Сервер на другой машине** (шаг 4, «Сервер на отдельной машине») — в той же сессии на машине агента ещё
+проверка ссылок на файлы:
+
+1. Создать маленький файл, например `kd-check.txt` с одной строкой.
+2. `upload_link(name="kd-check.txt")` → выполнить `command` ответа, подставив свой файл:
+   `curl.exe -fsS -T "kd-check.txt" "<url>"` (в PowerShell 5 — именно `curl.exe`: `curl` там —
+   `Invoke-WebRequest`). Сервер отвечает JSON с `path`, `size`, `sha256`.
+3. `download_link(path=<path из ответа upload_link>)` → `curl.exe -fsS -o "kd-check-back.txt" "<url>"`.
+4. Хеш скачанного файла равен `sha256` ответа: Windows — `(Get-FileHash -Algorithm SHA256 kd-check-back.txt).Hash`
+   (сравнивать без учёта регистра), Linux — `sha256sum kd-check-back.txt`.
+
+Ссылка начинается с `127.0.0.1`, `localhost` или `0.0.0.0`, соединения нет — у сервера неверный `server_url`
+(шаг 4), затем снова `setup_local.py` (или `setup` образа) и `docker compose up -d`. Сервер на той же машине —
+эту проверку не делать: файлы и так лежат по путям из ответов.

@@ -16,6 +16,7 @@ from kd_rules_mcp.service.ed_pair import EdPairMixin
 from kd_rules_mcp.service.ed_trace import EdTraceMixin
 from kd_rules_mcp.service.ed_writer import EdWriterMixin
 from kd_rules_mcp.service.exchanges import ExchangesMixin
+from kd_rules_mcp.service.file_links import FileLinksMixin
 from kd_rules_mcp.service.generate import GenerateMixin
 from kd_rules_mcp.service.live import LiveMixin
 from kd_rules_mcp.service.live_format import LiveFormatMixin
@@ -31,6 +32,7 @@ __all__ = ["Kd2Service", "PathMap", "Settings"]
 
 
 class Kd2Service(
+    FileLinksMixin,
     LiveFormatMixin,
     LiveMixin,
     ExchangesMixin,
