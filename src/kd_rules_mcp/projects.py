@@ -197,6 +197,8 @@ class LocalSettings:
     instance: str | None = None
     # None — поле не задано; в образе это повод подсказать про неперечисленные адреса.
     host_addresses: tuple[str, ...] | None = None
+    # Имена и маски инструментов, которых сервер не выставляет (`KD2_DISABLE_TOOLS`).
+    disable_tools: tuple[str, ...] = ()
 
     def login(self, project_id: str, base_id: str) -> tuple[str, str] | None:
         """Пользователь и пароль базы, если заданы."""
@@ -544,7 +546,24 @@ def load_local(path: Path) -> LocalSettings:
         port=_optional_port(data.get("port")),
         instance=_instance_name(data.get("instance")),
         host_addresses=_host_addresses(data.get("host_addresses")),
+        disable_tools=_disable_tools(data.get("disable_tools")),
     )
+
+
+def _disable_tools(value: Any) -> tuple[str, ...]:
+    """Маски отключаемых инструментов: список непустых строк без запятых."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ProjectConfigError("disable_tools: нужен список имён или масок инструментов")
+    result = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or "," in item:
+            raise ProjectConfigError(
+                "disable_tools: нужны непустые имена или маски без запятых (ed_*, live_*)"
+            )
+        result.append(item.strip())
+    return tuple(result)
 
 
 def _host_addresses(value: Any) -> tuple[str, ...] | None:

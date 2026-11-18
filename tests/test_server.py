@@ -15,7 +15,7 @@ from mcp import Client
 from kd_rules_mcp.errors import DuplicateRuleError, RuleNotFoundError
 from kd_rules_mcp.kd2.model import ExchangeRules
 from kd_rules_mcp.kd2.rules_io import load_registration_rules
-from kd_rules_mcp.server import create_app, create_server
+from kd_rules_mcp.server import DESTRUCTIVE_TOOLS, TOOL_EFFECTS, create_app, create_server
 from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 from tests.sqlite_structure import StructureBuilder
 from tests.test_authoring_candidates import _composition_props
@@ -490,6 +490,70 @@ async def test_rules_open_schema_has_private(service: Kd2Service) -> None:
     assert private["default"] is False
     assert private.get("description")
     assert "private" not in tools["rules_open"].input_schema.get("required", [])
+
+
+async def test_tool_annotations_from_effects(service: Kd2Service) -> None:
+    """Аннотации MCP выведены из меток эффекта и DESTRUCTIVE_TOOLS (tool-annotations, Р1, Р2)."""
+    async with Client(create_server(service)) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    for name, tool in tools.items():
+        hints = tool.annotations
+        assert hints is not None, name
+        effect, _ = TOOL_EFFECTS[name]
+        assert hints.read_only_hint is (effect == "read"), name
+        assert hints.open_world_hint is name.startswith("live_"), name
+        if effect == "read":
+            assert hints.destructive_hint is None, name
+        else:
+            assert hints.destructive_hint is (name in DESTRUCTIVE_TOOLS), name
+    rules_get = tools["rules_get"]
+    assert rules_get.annotations is not None and rules_get.annotations.read_only_hint is True
+    assert (rules_get.description or "").startswith("[read]")
+    for name, destructive in (("rule_create", False), ("rule_delete", True), ("rules_save", True)):
+        hints = tools[name].annotations
+        assert hints is not None and hints.read_only_hint is False
+        assert hints.destructive_hint is destructive, name
+    install = tools["live_rules_install"].annotations
+    status = tools["live_status"].annotations
+    assert install is not None and install.destructive_hint and install.open_world_hint
+    assert status is not None and status.open_world_hint and status.destructive_hint is False
+
+
+def test_destructive_tools_are_known_writers() -> None:
+    """Каждое имя DESTRUCTIVE_TOOLS — инструмент из TOOL_EFFECTS с меткой записи."""
+    for name in DESTRUCTIVE_TOOLS:
+        assert name in TOOL_EFFECTS, name
+        assert TOOL_EFFECTS[name][0] != "read", name
+
+
+async def test_disable_tools_by_mask(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """KD2_DISABLE_TOOLS снимает инструменты по маскам; маска без совпадений — предупреждение."""
+    settings = Settings.from_env(
+        {
+            "KD2_CACHE_DIR": str(tmp_path / "cache"),
+            "KD2_WORKSPACE": str(tmp_path / "workspace"),
+            "KD2_PROJECTS_FILE": str(tmp_path / "projects.yaml"),
+            "KD2_DISABLE_TOOLS": " ed_*, live_rules_install ,kd3_*",
+        }
+    )
+    assert settings.disabled_tools == ("ed_*", "live_rules_install", "kd3_*")
+    with caplog.at_level(logging.WARNING, logger="kd_rules_mcp"):
+        server = create_server(Kd2Service(settings))
+    assert "kd3_*" in caplog.text
+    async with Client(server) as client:
+        names = {tool.name for tool in (await client.list_tools()).tools}
+        assert not {name for name in names if name.startswith("ed_")}
+        assert "live_rules_install" not in names
+        assert {"rules_get", "live_status", "download_link"} <= names
+        result = await client.call_tool("ed_open", {"path": "x"})
+        assert result.is_error
+    full = {
+        tool.name
+        for tool in create_server(
+            Kd2Service(Settings(cache_dir=tmp_path / "c2", workspace=tmp_path / "w2"))
+        )._tool_manager.list_tools()
+    }
+    assert len(full) == len(TOOL_EFFECTS)
 
 
 async def test_pro_only_in_read_rule_kind_schema(service: Kd2Service) -> None:

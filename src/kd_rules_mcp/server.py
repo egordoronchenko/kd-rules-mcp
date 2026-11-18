@@ -13,6 +13,7 @@
 INFO, в лог пишется предупреждение. `create_server` логирование не настраивает.
 """
 
+import fnmatch
 import hmac
 import inspect
 import json
@@ -28,6 +29,7 @@ import uvicorn
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import Tool as MCPTool
+from mcp.types import ToolAnnotations
 from pydantic import Field
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -261,6 +263,45 @@ TOOL_EFFECTS: dict[str, tuple[str, str]] = {
 }
 
 
+# Пишущие инструменты, которые могут удалить или заменить сохранённое, в том числе под флагом
+# перезаписи или режимом применения: destructiveHint MCP (tool-annotations, Р2). Остальные пишущие
+# только добавляют. Новый пишущий инструмент — решить, место ли ему здесь.
+DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
+    {
+        "rules_close",
+        "rule_update",
+        "rule_update_many",
+        "rule_delete",
+        "rules_save",
+        "rules_pack",
+        "handlers_export",
+        "registration_build",
+        "registration_retarget",
+        "ed_close",
+        "ed_create",
+        "ed_apply",
+        "ed_authoring_build",
+        "upload_link",
+        "live_rules_install",
+        "live_nodes_setup",
+        "live_exchange_run",
+    }
+)
+# К базе 1С через сервер данных ходят только живые инструменты: openWorldHint MCP.
+_OPEN_WORLD_PREFIX = "live_"
+
+
+def tool_annotations(name: str) -> ToolAnnotations:
+    """Аннотации MCP инструмента из метки эффекта и `DESTRUCTIVE_TOOLS` (tool-annotations, Р1)."""
+    effect, _ = TOOL_EFFECTS[name]
+    read_only = effect == "read"
+    return ToolAnnotations(
+        read_only_hint=read_only,
+        destructive_hint=None if read_only else name in DESTRUCTIVE_TOOLS,
+        open_world_hint=name.startswith(_OPEN_WORLD_PREFIX),
+    )
+
+
 def effect_tag(name: str) -> str:
     """Метка эффекта `[…]` инструмента; инструмент без метки — ошибка."""
     try:
@@ -427,6 +468,7 @@ class _SchemaServer(MCPServer):
                     "description": (
                         f"{effect_tag(tool.name)} {inspect.cleandoc(tool.description or '')}"
                     ),
+                    "annotations": tool_annotations(tool.name),
                     "input_schema": _without_schema_titles(tool.input_schema),
                     "output_schema": (
                         _without_schema_titles(tool.output_schema)
@@ -2235,10 +2277,26 @@ def create_server(service: Kd2Service) -> MCPServer:
         """Signed URL to upload one file into workspace/inbox."""
         return await call(service.upload_link, name, overwrite, ttl_seconds, mcp_base_url(ctx))
 
+    disable_tools(server, service.settings.disabled_tools)
     # Новый инструмент без метки эффекта не выходит наружу (agent-ux, Р1).
     for tool in server._tool_manager.list_tools():
         effect_tag(tool.name)
     return server
+
+
+def disable_tools(server: MCPServer, patterns: tuple[str, ...]) -> None:
+    """Снимает инструменты по именам и маскам `KD2_DISABLE_TOOLS` (tool-annotations, Р3)."""
+    names = [tool.name for tool in server._tool_manager.list_tools()]
+    disabled: set[str] = set()
+    for pattern in patterns:
+        matched = {name for name in names if fnmatch.fnmatchcase(name, pattern)}
+        if not matched:
+            logger.warning(
+                "KD2_DISABLE_TOOLS: маска %s не совпала ни с одним инструментом", pattern
+            )
+        disabled |= matched
+    for name in sorted(disabled):
+        server._tool_manager.remove_tool(name)
 
 
 def _log_call(name: str, started: float, outcome: str) -> None:

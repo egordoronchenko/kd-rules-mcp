@@ -24,6 +24,12 @@ details, examples and constraints; update it when the corresponding tool changes
 - **Where the server writes.** Only to its workspace and to project folders opened for writing: `rules_dir` and
   extension dumps listed in `writable_extensions`. Project sources and dumps are read-only. The tag at the start of
   each description and the `Effect` line below say what a tool may change: `read`, `workspace`, `project`, `sandbox`.
+- **MCP annotations.** Clients get the same facts as hints: `readOnlyHint` for `read` tools; `destructiveHint` for
+  writers that may delete or replace saved data, even behind `overwrite` or `mode="apply"` (`rule_delete`,
+  `rules_save`, `ed_apply`, `live_rules_install` and others; `DESTRUCTIVE_TOOLS` in `server.py`), false for writers
+  that only add; `openWorldHint` for `live_*` tools that reach a 1C base through a data server.
+- **Hidden tools.** `KD2_DISABLE_TOOLS` (names and masks, comma-separated, e.g. `ed_*,live_*`) removes tools from
+  the list; a hidden tool cannot be called. A mask that matches nothing is logged as a warning at start.
 - **Path refusal.** A write path outside these folders fails with `path_outside_workspace`, which lists `workspace`
   and `writable`. Save inside one of them. Do not widen the allowed folders (`projects.yaml`, container mounts) to
   get around the refusal — ask the human.

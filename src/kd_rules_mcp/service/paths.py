@@ -98,12 +98,14 @@ class Settings:
     link_ttl: int = 600
     # Предел тела закачки, байты (`KD2_UPLOAD_MAX_MB`, по умолчанию 64 МиБ).
     upload_max_bytes: int = 64 * 1024 * 1024
+    # Имена и маски инструментов, которых нет в списке (`KD2_DISABLE_TOOLS`, через запятую).
+    disabled_tools: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         """`KD2_CACHE_DIR`, `KD2_WORKSPACE`, `KD2_PATH_MAP`, `KD2_HOST`, `KD2_PORT`, `KD2_TOKEN`,
         `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`, `KD2_REFERENCE_DIR`,
-        `KD2_PUBLIC_URL`, `KD2_LINK_TTL`, `KD2_UPLOAD_MAX_MB`.
+        `KD2_PUBLIC_URL`, `KD2_LINK_TTL`, `KD2_UPLOAD_MAX_MB`, `KD2_DISABLE_TOOLS`.
 
         Без `KD2_PROJECT_DIRS` папки проектов берутся из `projects.local.yaml` рядом с
         `projects.yaml` (локальный запуск без Docker); без `KD2_RULES_DIRS` папки живых правил —
@@ -111,6 +113,7 @@ class Settings:
         `KD2_PUBLIC_URL` — база ссылок на файлы (схема и хост обязательны); пусто — из запроса.
         `KD2_LINK_TTL` — срок по умолчанию в секундах (600), не больше 3600.
         `KD2_UPLOAD_MAX_MB` — предел закачки в мебибайтах (64).
+        `KD2_DISABLE_TOOLS` — имена и маски инструментов через запятую, которых нет в списке.
         """
         source = os.environ if env is None else env
         projects_file = Path(source.get("KD2_PROJECTS_FILE", "projects.yaml"))
@@ -139,6 +142,11 @@ class Settings:
             upload_max_bytes=_bounded_int(source, "KD2_UPLOAD_MAX_MB", 64, maximum=None)
             * 1024
             * 1024,
+            disabled_tools=tuple(
+                part.strip()
+                for part in source.get("KD2_DISABLE_TOOLS", "").split(",")
+                if part.strip()
+            ),
         )
 
 

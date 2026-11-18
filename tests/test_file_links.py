@@ -518,6 +518,20 @@ def test_put_route_stores_bytes_and_json(tmp_path: Path) -> None:
     assert parsed["path"] == link["path"]
 
 
+def test_put_route_then_rules_open(tmp_path: Path) -> None:
+    """Сценарий «Закачать правила и открыть»: PUT по ссылке, затем rules_open по пути из ответа."""
+    service = _service(tmp_path)
+    payload = (Path(__file__).parent / "data" / "exchange_rules.xml").read_bytes()
+    link = service.upload_link("ПравилаОбмена.xml")
+    status, _, body = _http(create_app(service), "PUT", _route(link["url"]), content=payload)
+    assert status == 200
+    parsed = json.loads(body)
+    assert parsed["sha256"] == hashlib.sha256(payload).hexdigest()
+    opened = service.rules_open(parsed["path"])
+    assert opened["project_id"]
+    service.rules_close(opened["project_id"])
+
+
 def test_put_route_too_large_content_length_skips_body_and_chunked(tmp_path: Path) -> None:
     """Content-Length больше предела не читает тело; chunked не оставляет временный файл."""
     service = _service(tmp_path, upload_max_bytes=8)

@@ -193,6 +193,8 @@ def compose_override(
     public = public_base_url(local.server_url)
     if public:
         service["environment"]["KD2_PUBLIC_URL"] = public
+    if local.disable_tools:
+        service["environment"]["KD2_DISABLE_TOOLS"] = ",".join(local.disable_tools)
     if volumes:
         service["volumes"] = volumes
     body = yaml.dump(

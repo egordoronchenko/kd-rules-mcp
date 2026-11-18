@@ -18,6 +18,7 @@ from kd_rules_mcp.server import (
     _without_schema_titles,
     create_server,
     effect_tag,
+    tool_annotations,
 )
 from kd_rules_mcp.service import Kd2Service, Settings
 
@@ -244,6 +245,8 @@ def test_public_schemas_preserve_calls_and_argument_errors(
         tool["description"] = (
             f"{effect_tag(tool['name'])} {inspect.cleandoc(tool['description'] or '')}"
         )
+        # Аннотации MCP добавляет только выдача (tool-annotations, Р1).
+        tool["annotations"] = tool_annotations(tool["name"]).model_dump()
 
     # Восстанавливаем простые union-типы для сравнения листьев с исходной схемой SDK.
     def expand_types(value: Any) -> Any:

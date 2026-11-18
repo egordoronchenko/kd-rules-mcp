@@ -428,7 +428,11 @@ uid 1000, корень нужен точке входа, чтобы отдать
 каждый параметр — `Annotated[…, Field(description=…)]`, docstring — описание инструмента для агента; вызов —
 `await call(service.<метод>, …)`. Метка эффекта — строка в `TOOL_EFFECTS` того же файла (`read`, `workspace`,
 `project`, `sandbox` и когда инструмент пишет); без неё `create_server` падает, в описание метка попадает сама,
-повторять её в docstring не нужно. Новый вид отказа — подкласс `Kd2Error` в `errors.py` и строка в
+повторять её в docstring не нужно. Из метки выводятся аннотации MCP (`tool_annotations`): пишущий инструмент,
+который может удалить или заменить сохранённое (в том числе под флагом `overwrite` или режимом `apply`), добавьте
+в `DESTRUCTIVE_TOOLS`, иначе клиент получит `destructiveHint: false`; живой (`live_*`) получает `openWorldHint`
+по имени. Установка может скрыть инструмент `KD2_DISABLE_TOOLS` (`disable_tools` в `projects.local.yaml`) —
+снятие идёт в конце `create_server`. Новый вид отказа — подкласс `Kd2Error` в `errors.py` и строка в
 `ERROR_CODES` (подклассы раньше базовых). Тесты: имя — в `EXPECTED_TOOLS` и вызов в `tests/test_server.py`
 (проверяет описания всех параметров), содержательные — отдельным файлом; затем `uv run python
 scripts/dump_tools.py` обновляет [tools.md](tools.md), а ключи ответа дописываются в его ручную часть. Если
