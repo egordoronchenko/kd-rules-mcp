@@ -7,3 +7,7 @@
 `uv run python kdbase/bsp_check.py <ExchangeRules.xml> <CorrespondentExchangeRules.xml> --plan <план> --project <проект> --base <песочница>`
 → `ИТОГ OK`. «Недопустимая строка с указанием класса» — **закончить ход**: человек от администратора регистрирует
 `comcntr.dll` платформы (`regsvr32 "<каталог платформы>\bin\comcntr.dll"`).
+
+Загрузка правил в рабочую базу — не шаг установки. Если человек спросит, почему на БСП 3.1.12+ форма не даёт
+выбрать файл правил, — расширение `kd2-rules-file-load.cfe` из релиза
+([INSTALL.md, «Загрузка правил КД 2 в базу на БСП 3.1.12 и новее»](https://github.com/egordoronchenko/kd-rules-mcp/blob/main/docs/INSTALL.md#загрузка-правил-кд-2-в-базу-на-бсп-3112-и-новее)).

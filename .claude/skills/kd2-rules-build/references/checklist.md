@@ -21,7 +21,8 @@ kd-rules-mcp (путь спросить у человека, если его н�
       сохранения или ошибки, которую человек признал ложной; в отчёте — какие ошибки и почему. В ответе
       `validation.errors` = 0.
 - [ ] Правила загружаются в базу из файла — `rules_pack` (папка комплекта или файлы): `warnings` пусты,
-      `load_with` — какой формой загружать.
+      `load_with` — чем загружать (форма; на БСП 3.1.12+ — расширение `kd2-rules-file-load` из релиза
+      или `live_rules_install`).
 - [ ] `kd_check` — база КД принимает файл: `uv run python kdbase\kd_check.py check <файл>` → `ИТОГ OK`.
 - [ ] `bsp_check` — БСП песочницы принимает комплект без записи в базу:
       `uv run python kdbase\bsp_check.py --archive <ZIP> --plan <план> --project <проект> --base <песочница>`

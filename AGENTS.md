@@ -20,7 +20,8 @@
 | Путь | Что это | В git |
 |---|---|---|
 | `src/kd_rules_mcp/` | сервер: `kd2/` (модель и чтение/запись правил), `ed/` (чтение модуля менеджера обмена EnterpriseData и схемы формата), `structures/` (структуры метаданных), `validation/`, `authoring/`, `service/`, `server.py` | да |
-| `kdbase/` | финальные проверки: `kd_check.py` (база КД), `bsp_check.py` (загрузка правил БСП), `exchange_check.py` (живой обмен между песочницами), `ed_exchange_check.py` (живой обмен через универсальный формат), `ed_kd3_check.py` (круг «модуль менеджера → база КД 3 → модуль» на копии файловой базы, отчёт потерь), исходники EPF | да |
+| `kdbase/` | финальные проверки: `kd_check.py` (база КД), `bsp_check.py` (загрузка правил БСП), `exchange_check.py` (живой обмен между песочницами), `ed_exchange_check.py` (живой обмен через универсальный формат), `ed_kd3_check.py` (круг «модуль менеджера → база КД 3 → модуль» на копии файловой базы, отчёт потерь), `extension_build.py` (сборка `.cfe` из `extensions/` на копии файловой базы), исходники EPF | да |
+| `extensions/kd2-rules-file-load/` | расширение «загрузка правил КД 2 из файла» для БСП 3.1.12+: XML-исходники и README; `.cfe` — во вложении к релизу (`scripts/publish.py --attach-cfe`) | да (`.cfe` — нет) |
 | `scripts/setup_local.py` | настройка машины по `projects.local.yaml` | да |
 | `scripts/dump_tools.py` | генерирует справочник `docs/tools.md` из сервера (`--write`; `--check` — устарел ли) | да |
 | `scripts/build_packs.py` | копии справочников `docs/` в `references/` скилла (`--write`, `--check`); установка скиллов сервера (имена `kd-`, `kd2-` или `kd3-`) и записи сервера в папку проекта 1С (`--dest <папка> --client claude\|agents`) | да |

@@ -124,6 +124,59 @@ def test_success_is_code_0(target: Path, git: Git, status: str, committed: bool)
     assert not any(call[0] == "push" for call in git.calls)
 
 
+def test_publish_without_message_is_setup_error(target: Path, git: Git) -> None:
+    args = _args(target)
+    args.message = None
+    assert publish.publish(args) == publish.EXIT_SETUP
+    assert not any(call[0] == "commit" for call in git.calls)
+
+
+def _attach_args(target: Path, cfe: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        message=None, target=target, push=False, no_checks=True, attach_cfe="v9.9.9", cfe=cfe
+    )
+
+
+@pytest.mark.parametrize(
+    ("verify_code", "upload_code", "expected", "uploaded"),
+    [
+        (0, 0, publish.EXIT_OK, True),
+        (2, 0, publish.EXIT_RELEASE, False),
+        (0, 1, publish.EXIT_RELEASE, True),
+    ],
+)
+def test_attach_cfe_verifies_before_upload(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    tmp_path: Path,
+    verify_code: int,
+    upload_code: int,
+    expected: int,
+    uploaded: bool,
+) -> None:
+    """Устаревшая сборка к релизу не прикладывается; `gh` запускается из открытой копии."""
+    calls: list[tuple[list[str], object]] = []
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append((command, kwargs.get("cwd")))
+        code = verify_code if "verify" in command else upload_code
+        return subprocess.CompletedProcess(command, code, "", "нет релиза")
+
+    monkeypatch.setattr(publish.subprocess, "run", run)
+    cfe = tmp_path / "ext.cfe"
+    assert publish.publish(_attach_args(target, cfe)) == expected
+    assert "verify" in calls[0][0] and str(cfe) in calls[0][0]
+    gh = [(command, cwd) for command, cwd in calls if command[0] == "gh"]
+    assert bool(gh) is uploaded
+    if gh:
+        assert gh[0][0] == ["gh", "release", "upload", "v9.9.9", str(cfe), "--clobber"]
+        assert gh[0][1] == target
+
+
+def test_attach_cfe_needs_git_copy(tmp_path: Path) -> None:
+    assert publish.publish(_attach_args(tmp_path, tmp_path / "x.cfe")) == publish.EXIT_SETUP
+
+
 def test_main_exits_with_publish_code(
     monkeypatch: pytest.MonkeyPatch, target: Path, git: Git
 ) -> None:

@@ -11,9 +11,17 @@
 Запуск: `uv run python scripts/publish.py -m "сообщение" [--target КАТАЛОГ] [--push] [--no-checks]`;
 каталог по умолчанию — `KD2_PUBLISH_DIR` или соседний `kd-rules-mcp-public`.
 
+Вложение к релизу: `uv run python scripts/publish.py --attach-cfe vX.Y.Z [--cfe ФАЙЛ]
+[--target КАТАЛОГ]` прикладывает собранное расширение (по умолчанию
+`kdbase/build/kd2-rules-file-load.cfe`) к уже созданному релизу тега: сначала
+`kdbase/extension_build.py verify` (сборка соответствует исходникам), затем `gh release upload …
+--clobber` из открытой копии. Релиз тега создаёт GitHub Actions после push тега; `.cfe` в Actions
+не собрать (нужны платформа 1С и база), поэтому этот шаг — локальный, после релиза.
+
 Код выхода: 0 — опубликовано или открытая копия уже совпадает; 1 — запретные слова; 2 — проверки в
 собранной копии не прошли; 3 — не выполнено условие запуска (нет `publish/`, копия не git, есть
-незакоммиченные изменения); 4 — ошибка команды git. Причина печатается в stderr.
+незакоммиченные изменения, не передан `-m`); 4 — ошибка команды git; 5 — расширение не приложено
+к релизу (сборка устарела, нет релиза, ошибка `gh`). Причина печатается в stderr.
 """
 
 import argparse
@@ -36,6 +44,8 @@ EXIT_FORBIDDEN = 1
 EXIT_CHECKS = 2
 EXIT_SETUP = 3
 EXIT_GIT = 4
+EXIT_RELEASE = 5
+CFE = ROOT / "kdbase" / "build" / "kd2-rules-file-load.cfe"
 
 
 class PublishStop(Exception):
@@ -49,10 +59,16 @@ class PublishStop(Exception):
 def main() -> None:
     utf8_stdout()
     parser = argparse.ArgumentParser(description="Сборка и публикация открытого репозитория")
-    parser.add_argument("-m", "--message", required=True, help="сообщение коммита открытой копии")
+    parser.add_argument("-m", "--message", help="сообщение коммита открытой копии")
     parser.add_argument("--target", type=Path, help="каталог открытой копии (git-репозиторий)")
     parser.add_argument("--push", action="store_true", help="после коммита отправить в origin")
     parser.add_argument("--no-checks", action="store_true", help="не запускать ruff/pyright/pytest")
+    parser.add_argument(
+        "--attach-cfe",
+        metavar="ТЕГ",
+        help="приложить собранный .cfe к релизу тега (вместо публикации)",
+    )
+    parser.add_argument("--cfe", type=Path, default=CFE, help="файл расширения для --attach-cfe")
     args = parser.parse_args()
     raise SystemExit(publish(args))
 
@@ -60,7 +76,10 @@ def main() -> None:
 def publish(args: argparse.Namespace) -> int:
     """Публикация целиком; возвращает код выхода, причину остановки печатает в stderr."""
     try:
-        _publish(args)
+        if getattr(args, "attach_cfe", None):
+            _attach_cfe(args.attach_cfe, args.cfe, (args.target or _default_target()).resolve())
+        else:
+            _publish(args)
     except PublishStop as stop:
         print(stop, file=sys.stderr)
         return stop.code
@@ -68,6 +87,8 @@ def publish(args: argparse.Namespace) -> int:
 
 
 def _publish(args: argparse.Namespace) -> None:
+    if not args.message:
+        raise PublishStop(EXIT_SETUP, "Нужно сообщение коммита: -m «…»")
     if not CONFIG.is_dir():
         raise PublishStop(
             EXIT_SETUP, "Нет каталога publish/: публикация делается из рабочего репозитория"
@@ -110,6 +131,43 @@ def _publish(args: argparse.Namespace) -> None:
         print("Отправлено в origin")
     else:
         print("Не отправлено: проверьте и запустите с --push (или git push в открытой копии)")
+
+
+def _attach_cfe(tag: str, cfe: Path, target: Path) -> None:
+    """Проверенная сборка расширения → вложение к релизу тега в открытом репозитории."""
+    if not (target / ".git").is_dir():
+        raise PublishStop(
+            EXIT_SETUP, f"{target} — не git-репозиторий: склонируйте открытый репозиторий туда"
+        )
+    verify = subprocess.run(
+        [sys.executable, str(ROOT / "kdbase" / "extension_build.py"), "verify", "--cfe", str(cfe)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if verify.returncode != 0:
+        print(verify.stdout[-2000:])
+        raise PublishStop(
+            EXIT_RELEASE,
+            f"{cfe.name} не прошёл verify: соберите заново (kdbase/extension_build.py build)",
+        )
+    upload = subprocess.run(
+        ["gh", "release", "upload", tag, str(cfe), "--clobber"],
+        cwd=target,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if upload.returncode != 0:
+        raise PublishStop(
+            EXIT_RELEASE,
+            f"gh release upload {tag}: {upload.stderr.strip()} "
+            "(релиз создаёт Actions после push тега)",
+        )
+    print(f"{cfe.name} приложен к релизу {tag}")
 
 
 def _default_target() -> Path:
