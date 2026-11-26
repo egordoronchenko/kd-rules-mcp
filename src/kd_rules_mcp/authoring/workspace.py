@@ -7,6 +7,7 @@
 `meta.json` читается сразу, `rules.xml` — при первом `get`.
 """
 
+import base64
 import hashlib
 import json
 import logging
@@ -16,7 +17,7 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -81,6 +82,9 @@ class RulesProject:
     handlers: HandlerExport | None = None
     private: bool = False
     validation_inputs: tuple[str | None, str | None, str | None] | None = None
+    # Свидетельство последнего сохранения; старый снимок без хеша не связывает файл с проектом.
+    saved_sha256: str | None = None
+    saved_structures: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +229,7 @@ class RulesWorkspace:
         *,
         overwrite: bool = False,
         allowed: Sequence[Path] = (),
+        saved_structures: dict[str, dict[str, str]] | None = None,
     ) -> Path:
         """Пишет XML проекта внутрь рабочей папки (или разрешённой папки) и запоминает путь.
 
@@ -244,6 +249,9 @@ class RulesWorkspace:
             data = dump_rules(document)
         destination.write_bytes(data)
         project.saved_path = destination
+        project.saved_sha256 = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+        if saved_structures is not None:
+            project.saved_structures = saved_structures
         project.modified = False
         self.snapshot(project_id)
         return destination
@@ -485,6 +493,10 @@ class RulesWorkspace:
             source_size=_meta_int(payload.get("source_size")),
             private=private,
             validation_inputs=_meta_inputs(payload.get("validation_inputs"), directory),
+            saved_sha256=(
+                payload["saved_sha256"] if isinstance(payload.get("saved_sha256"), str) else None
+            ),
+            saved_structures=_meta_structures(payload.get("saved_structures")),
         )
         self._projects[project.id] = project
         # Копия делит путь с общим проектом и не должна подменять его в `_by_source`.
@@ -612,6 +624,19 @@ def _meta_int(value: object) -> int | None:
 _INPUT_KEYS = ("source_structure", "target_structure", "exchange_project_id")
 
 
+def _meta_structures(value: object) -> dict[str, dict[str, str]]:
+    """Старый снимок без происхождения структур читается с пустой картой."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        side: dict(meta)
+        for side, meta in value.items()
+        if side in ("source", "target")
+        and isinstance(meta, dict)
+        and all(isinstance(key, str) and isinstance(item, str) for key, item in meta.items())
+    }
+
+
 def _meta_inputs(
     value: object, directory: Path
 ) -> tuple[str | None, str | None, str | None] | None:
@@ -637,6 +662,8 @@ def _dump_meta(project: RulesProject) -> bytes:
         "kind": project.kind,
         "source_path": os.fspath(project.source_path) if project.source_path else None,
         "saved_path": os.fspath(project.saved_path) if project.saved_path else None,
+        "saved_sha256": project.saved_sha256,
+        "saved_structures": project.saved_structures,
         "modified": project.modified,
     }
     if project.private:

@@ -1,6 +1,7 @@
 """Проекты правил, списки и точечные правки."""
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from kd_rules_mcp.authoring.edits import (
@@ -14,11 +15,12 @@ from kd_rules_mcp.authoring.edits import (
     update_rules,
 )
 from kd_rules_mcp.authoring.pack import collect, pack_rules
-from kd_rules_mcp.authoring.workspace import RulesProject
+from kd_rules_mcp.authoring.workspace import RulesProject, identity_path
 from kd_rules_mcp.errors import Kd2Error, RulesSaveErrorsError
 from kd_rules_mcp.kd2.diff import SECTIONS, RuleChange, diff_rules, ignored_header_fields
 from kd_rules_mcp.kd2.model import ExchangeRules, RegistrationRules, RulesDocument
 from kd_rules_mcp.kd2.rules_io import load_rules
+from kd_rules_mcp.projects import resolve
 from kd_rules_mcp.service.base import ServiceBase
 from kd_rules_mcp.service.checks import validation_report
 from kd_rules_mcp.service.views import (
@@ -95,6 +97,8 @@ class RulesMixin(ServiceBase):
             project = self.workspace.create_exchange(
                 self.store, source_structure, target_structure, project_id
             )
+            project.saved_structures = self._pack_structures(source_structure, target_structure)
+            self.workspace.snapshot(project.id)
             return self._project_view(project)
 
     def rules_projects(self) -> dict[str, Any]:
@@ -210,7 +214,14 @@ class RulesMixin(ServiceBase):
                         "errors_total": len(error_items),
                     },
                 )
-            saved = self.workspace.save(project_id, local, overwrite=overwrite, allowed=allowed)
+            structures = self._pack_structures(source_id, target_id)
+            saved = self.workspace.save(
+                project_id,
+                local,
+                overwrite=overwrite,
+                allowed=allowed,
+                saved_structures=structures or project.saved_structures,
+            )
             result: dict[str, Any] = {
                 "project_id": project_id,
                 "path": self._host(saved),
@@ -280,11 +291,19 @@ class RulesMixin(ServiceBase):
             }
             files = collect(source_dir, explicit)
             default = source_dir.name if source_dir is not None else files["exchange"].stem
+            destination = self._writable(path or f"{default}.zip")
+            # Манифест тоже проходит проверку пути, в том числе существующих симлинков.
+            self._writable(str(destination.with_suffix(".manifest.json")))
             result = pack_rules(
-                files, self._writable(path or f"{default}.zip"), overwrite=overwrite
+                files,
+                destination,
+                overwrite=overwrite,
+                host_path=self._host,
+                project_origin=self._pack_project_origin,
             )
             return {
                 "path": self._host(result.path),
+                "manifest": self._host(result.manifest),
                 "size_bytes": result.path.stat().st_size,
                 "sha256": result.sha256,
                 "load_with": result.form,
@@ -300,6 +319,57 @@ class RulesMixin(ServiceBase):
                 ],
                 "warnings": result.warnings,
             }
+
+    def _pack_project_origin(self, path: Path, sha256: str) -> dict[str, object]:
+        """Связь только по последнему сохранению и точному хешу упакованных байтов."""
+        changed = False
+        for project in self.workspace.iter_projects():
+            if project.saved_path is None or project.saved_sha256 is None:
+                continue
+            if identity_path(project.saved_path) != identity_path(path):
+                continue
+            if project.saved_sha256 == sha256:
+                return {
+                    "rules_project": {
+                        "project_id": project.id,
+                        "structures": project.saved_structures,
+                    }
+                }
+            changed = True
+        return {
+            "rules_project": None,
+            "rules_project_reason": "changed_since_save" if changed else "not_tracked",
+        }
+
+    def _pack_structures(
+        self, source_id: str | None, target_id: str | None
+    ) -> dict[str, dict[str, str]]:
+        """Отпечатки кэша фиксируются при сохранении, чтобы перезагрузка кэша их не подменяла."""
+        structures = {}
+        for side, structure_id in (("source", source_id), ("target", target_id)):
+            if not structure_id:
+                continue
+            meta = self.store.meta(structure_id)
+            origin = {
+                "structure_id": structure_id,
+                "source": meta.get("source", ""),
+                "input_hash": meta.get("input_hash", ""),
+            }
+            if meta.get("source") == "xml" and self.settings.projects_file.is_file():
+                source_path = identity_path(Path(meta.get("source_path", "")))
+                for project in self._catalog().projects.values():
+                    folder = self.settings.project_dirs.get(project.id)
+                    if folder is None:
+                        continue
+                    for config in project.configurations.values():
+                        if identity_path(resolve(folder, config.dump)) == source_path:
+                            origin |= {
+                                "source": "project",
+                                "project": project.id,
+                                "configuration": config.id,
+                            }
+            structures[side] = origin
+        return structures
 
     def rule_create(
         self, project_id: str, kind: str, key: str, group: str = "", **options: Any

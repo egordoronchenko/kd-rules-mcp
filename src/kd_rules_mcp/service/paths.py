@@ -100,12 +100,15 @@ class Settings:
     upload_max_bytes: int = 64 * 1024 * 1024
     # Имена и маски инструментов, которых нет в списке (`KD2_DISABLE_TOOLS`, через запятую).
     disabled_tools: tuple[str, ...] = ()
+    # Режим поддержки (`KD2_READ_ONLY`): без инструментов, пишущих в папки проектов и в базы.
+    read_only: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         """`KD2_CACHE_DIR`, `KD2_WORKSPACE`, `KD2_PATH_MAP`, `KD2_HOST`, `KD2_PORT`, `KD2_TOKEN`,
         `KD2_PROJECTS_FILE`, `KD2_PROJECT_DIRS`, `KD2_RULES_DIRS`, `KD2_REFERENCE_DIR`,
-        `KD2_PUBLIC_URL`, `KD2_LINK_TTL`, `KD2_UPLOAD_MAX_MB`, `KD2_DISABLE_TOOLS`.
+        `KD2_PUBLIC_URL`, `KD2_LINK_TTL`, `KD2_UPLOAD_MAX_MB`, `KD2_DISABLE_TOOLS`,
+        `KD2_READ_ONLY`.
 
         Без `KD2_PROJECT_DIRS` папки проектов берутся из `projects.local.yaml` рядом с
         `projects.yaml` (локальный запуск без Docker); без `KD2_RULES_DIRS` папки живых правил —
@@ -114,6 +117,8 @@ class Settings:
         `KD2_LINK_TTL` — срок по умолчанию в секундах (600), не больше 3600.
         `KD2_UPLOAD_MAX_MB` — предел закачки в мебибайтах (64).
         `KD2_DISABLE_TOOLS` — имена и маски инструментов через запятую, которых нет в списке.
+        `KD2_READ_ONLY` — `1`/`true`/`yes`: скрыть инструменты с эффектом `project` и `sandbox`;
+        `0`/`false`/`no`/пусто — выключено; другое значение — ошибка запуска.
         """
         source = os.environ if env is None else env
         projects_file = Path(source.get("KD2_PROJECTS_FILE", "projects.yaml"))
@@ -147,7 +152,18 @@ class Settings:
                 for part in source.get("KD2_DISABLE_TOOLS", "").split(",")
                 if part.strip()
             ),
+            read_only=_flag(source, "KD2_READ_ONLY"),
         )
+
+
+def _flag(source: Mapping[str, str], name: str) -> bool:
+    """Логическая переменная окружения; непонятное значение — отказ, а не молчаливое «нет»."""
+    raw = source.get(name, "").strip().lower()
+    if raw in {"", "0", "false", "no"}:
+        return False
+    if raw in {"1", "true", "yes"}:
+        return True
+    raise Kd2Error(f"{name} «{raw}»: нужно 1/true/yes или 0/false/no")
 
 
 def _public_url(text: str) -> str | None:

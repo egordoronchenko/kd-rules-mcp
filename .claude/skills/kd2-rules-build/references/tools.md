@@ -30,6 +30,10 @@ details, examples and constraints; update it when the corresponding tool changes
   that only add; `openWorldHint` for `live_*` tools that reach a 1C base through a data server.
 - **Hidden tools.** `KD2_DISABLE_TOOLS` (names and masks, comma-separated, e.g. `ed_*,live_*`) removes tools from
   the list; a hidden tool cannot be called. A mask that matches nothing is logged as a warning at start.
+- **Read-only server.** `KD2_READ_ONLY=1` (`read_only: true` in `projects.local.yaml`) hides every `project` and
+  `sandbox` tool (`READ_ONLY_HIDDEN` in `server.py`); `setup_local.py` also mounts `rules_dir` and extension dumps
+  read-only. The workspace stays writable: `rules_open` needs it for the snapshot. Any other value than
+  `1/true/yes` or `0/false/no` stops the start.
 - **Path refusal.** A write path outside these folders fails with `path_outside_workspace`, which lists `workspace`
   and `writable`. Save inside one of them. Do not widen the allowed folders (`projects.yaml`, container mounts) to
   get around the refusal — ask the human.
@@ -399,7 +403,7 @@ Effect: `workspace` — deletes the snapshot; saved files stay.
 ### `rules_pack`
 
 Pack a БСП ZIP from a folder or files, preserving bytes and checking kinds. Inspect
-warnings for rule/registration mismatches.
+warnings for rule/registration mismatches. Writes a sibling provenance .manifest.json.
 
 Effect: `project` — ZIP path inside a project rules_dir; otherwise workspace.
 
@@ -1521,7 +1525,7 @@ Each list contains up to 200 rows; larger lists add `<key>_total`.
 | `rules_list` | List page: `address`, `code`, optional `group` path separated by `/`, populated row fields, flags `Отключить`/`ИспользуетсяПриЗагрузке`, `pks_count`. `КодПравилаКонвертации` has no trailing spaces. `conversion` returns one row: `address=Конвертация`, filled `events` count and optional event `names`. `registration` rows: `address` (`ПРО «ОбъектМетаданныхИмя»`, repeated objects add `#N`), `ОбъектМетаданныхИмя`, `code`, `disabled`, `filters`, `handlers`, optional `group`. Exchange sections on registration projects are rejected with the available `registration` section. `pks` spans all ПКО: `address`, ПКО `code`, `source`, `target`, `search`, `disabled`; `text` searches source/target names. Other sections search all row values case-insensitively |
 | `rules_get` | `kind`, `title`, optional `group`, `attrs` (`ПравилоКонвертации` stripped of trailing spaces), `fields` (texts truncated at 2000 characters, `КодПравилаКонвертации` stripped), `sides` for ПКС, `properties` (`total`, `items`; ПКС `conversion` stripped), `values` (`total`, `items`), `nested`. ПКО always has `address` and `properties`; absent `Свойства` means `total=0`. `conversion`: `address=Конвертация`, `events` (`name`, full `lines` count, `text` truncated at 2000), `header` (format version, configuration names, date and other stored header fields). `pro`: `address`, `code`, `ОбъектМетаданныхИмя`, `disabled`, `Валидное` (ЗПР:289-293), optional `ОбъектНастройки`/`РеквизитРежимаВыгрузки` (node attribute name, ЗПР:309-311), `ОтборПоСвойствамПланаОбмена`/`ОтборПоСвойствамОбъекта` trees (`operator`, `items`; root `И`, ЗПР:1203; leaf comparison/value, group `group`), `handlers` (`name`, `lines`, `text` up to 2000: `ПередОбработкой`, `ПриОбработке`, `ПриОбработкеДополнительный`, `ПослеОбработки`, ЗПР:327-349), nonempty `fields` (name, description, comment, type). Other kinds on registration projects are rejected with `pro` and `registration` guidance |
 | `rules_save` | `project_id`, `path`, `size_bytes`, `counts`, `validation` (`errors`, `warnings`, optional `info`, `skipped` count, `by_check`, `text`, `structures` {`source`, `target`, `exchange_project`} actually used, optional `dropped` — remembered inputs no longer available, e.g. `source:<id>`), `saved_with_errors`; with `saved_with_errors: true` also `errors` (first 50 issues: `level`, `check`, `address`, `message`) and `errors_total`. Validation is the same as `rules_validate`; without explicit structures it reuses the inputs of the last `rules_validate` of this project; their IDs (not the structures) are kept in the project snapshot and survive a server restart. Path refusals come before validation. Validation errors without `acknowledge_errors` give `rules_save_errors` with `validation`, `errors`, `errors_total`; nothing is written and the project stays modified |
-| `rules_pack` | `path`, `size_bytes`, `sha256`, `load_with` (how to load into БСП, old and 3.1.12+), `files` (`file`, `path`, `size_bytes`, `sha256`, `rules`), `warnings` |
+| `rules_pack` | `path`, `manifest` (sibling `.manifest.json`), `size_bytes`, `sha256`, `load_with` (how to load into БСП, old and 3.1.12+), `files` (`file`, `path`, `size_bytes`, `sha256`, `rules`), `warnings` |
 | `rule_create`, `rule_update`, `rule_delete`, `pko_create_from_candidates` | Edit result; `warnings` rows are `<check>: <text>`. Absent list keys mean empty lists |
 | `rule_update_many` | `owner`, `kind`, `count`, `updated`: one edit result per target |
 | `rules_validate` | `summary` (`errors`, `warnings`, `skipped`, `by_check`, `text`), `skipped` (`check`, `reason`), `issues` page (`level`, `check`, `address`, `message`). `level` accepts `ошибка`, `предупреждение`, `error`, `warning` case-insensitively; other values give `invalid_argument` with allowed values before validation |
@@ -1623,6 +1627,17 @@ each file is base64 SHA-256 of the bytes in the ZIP — the same form as the rul
 and `live_rules_dump`. BSP stores each file of a loaded kit unchanged (`ПравилаДляОбменаДанными`
 manager module: kit 678–685 and 794–804, conversion pair 485–491 and 613–618), so equal file hashes
 mean the base runs this kit.
+
+Next to the ZIP `rules_pack` writes `<zip-stem>.manifest.json` (never inside: БСП counts every file of the
+unpacked archive). It records `format` (`kd2-rules-pack/1`), `server_version`, `created_at`, the archive
+(`file`, `size_bytes`, `sha256`) and per file: `role`, `file`, `path`, `size_bytes`, `sha256`, `rules`
+(name, sides, `id`, `created_at`, `format_version`, configuration versions from the header) and
+`rules_project`. `rules_project` links the file to the rules project whose last `rules_save` wrote exactly
+these bytes: `project_id` and `structures` (`source`/`target`: `structure_id`, origin, `input_hash`, and
+`project`/`configuration` for a project dump). Otherwise it is `null` with `rules_project_reason`
+`not_tracked` (no such project, or a snapshot from before 1.17) or `changed_since_save`. An existing
+manifest is replaced only with `overwrite`, like the ZIP. `rules_save` of an unchanged project writes the
+same bytes again: `ДатаВремяСоздания` and `Ид` are set when the project is created, not on save.
 
 `rules_validate` returns the result, skipped checks and a page of issues. For registration,
 `source_structure` contains the exchange plan. Supplying `exchange_project_id` checks that each

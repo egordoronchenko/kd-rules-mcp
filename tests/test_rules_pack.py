@@ -4,6 +4,8 @@ import base64
 import hashlib
 import json
 import zipfile
+from datetime import UTC, datetime
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +23,9 @@ from kd_rules_mcp.authoring.pack import (
     pack_rules,
 )
 from kd_rules_mcp.errors import Kd2Error, RulesFormatError
+from kd_rules_mcp.kd2.rules_io import load_rules
 from kd_rules_mcp.server import create_server
-from kd_rules_mcp.service import Kd2Service, Settings
+from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 
 DATA = Path(__file__).parent / "data"
 
@@ -103,6 +106,227 @@ def test_existing_archive_needs_overwrite(rules_set: Path, tmp_path: Path) -> No
     pack_rules(collect(rules_set, {}), target, overwrite=True)
 
 
+def test_manifest_describes_exact_archive_and_headers(rules_set: Path, tmp_path: Path) -> None:
+    before = datetime.now(UTC).replace(microsecond=0)
+    result = pack_rules(collect(rules_set, {}), tmp_path / "set.zip")
+    after = datetime.now(UTC)
+    assert result.manifest == result.path.with_suffix(".manifest.json")
+    raw = result.manifest.read_bytes()
+    manifest = json.loads(raw)
+    assert (
+        raw == (json.dumps(manifest, sort_keys=True, ensure_ascii=False, indent=2) + "\n").encode()
+    )
+    assert b"\r" not in raw
+    assert manifest["format"] == "kd2-rules-pack/1"
+    assert manifest["server_version"] == version("kd-rules-mcp")
+    created = datetime.fromisoformat(manifest["created_at"])
+    assert created.utcoffset() == UTC.utcoffset(created) and created.microsecond == 0
+    assert before <= created <= after
+    assert manifest["archive"] == {
+        "file": "set.zip",
+        "size_bytes": result.path.stat().st_size,
+        "sha256": result.sha256,
+    }
+    assert [item["role"] for item in manifest["files"]] == [
+        "exchange",
+        "correspondent",
+        "registration",
+    ]
+    with zipfile.ZipFile(result.path) as archive:
+        assert archive.namelist() == [EXCHANGE, CORRESPONDENT, REGISTRATION]
+        for item, packed in zip(manifest["files"], result.files, strict=True):
+            content = archive.read(item["file"])
+            document = load_rules(content)
+            assert item["path"] == str(packed.source)
+            assert item["size_bytes"] == len(content)
+            assert item["sha256"] == base64.b64encode(hashlib.sha256(content).digest()).decode()
+            assert item["rules"] == {
+                **packed.summary,
+                "id": document.root.values["Ид"],
+                "created_at": document.root.values["ДатаВремяСоздания"],
+                "format_version": "2.01",
+                **(
+                    {"configuration_version": "3.0"}
+                    if item["role"] == "registration"
+                    else {
+                        "source_version": "3.0" if item["role"] == "exchange" else "3.1",
+                        "target_version": "3.1" if item["role"] == "exchange" else "3.0",
+                    }
+                ),
+            }
+            assert item["rules_project"] is None
+            assert item["rules_project_reason"] == "not_tracked"
+
+
+@pytest.mark.parametrize("has_manifest", [False, True])
+def test_existing_zip_refusal_writes_nothing(
+    rules_set: Path, tmp_path: Path, has_manifest: bool
+) -> None:
+    archive = tmp_path / "set.zip"
+    manifest = archive.with_suffix(".manifest.json")
+    archive.write_bytes(b"existing archive")
+    if has_manifest:
+        manifest.write_bytes(b"existing manifest")
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
+    with pytest.raises(Kd2Error, match="overwrite"):
+        pack_rules(collect(rules_set, {}), archive)
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()} == before
+
+
+def test_orphan_manifest_requires_overwrite(rules_set: Path, tmp_path: Path) -> None:
+    archive = tmp_path / "set.zip"
+    manifest = archive.with_suffix(".manifest.json")
+    manifest.write_bytes(b"old manifest")
+    with pytest.raises(Kd2Error, match="overwrite"):
+        pack_rules(collect(rules_set, {}), archive)
+    assert not archive.exists() and manifest.read_bytes() == b"old manifest"
+    pack_rules(collect(rules_set, {}), archive, overwrite=True)
+    assert json.loads(manifest.read_bytes())["archive"]["file"] == archive.name
+    manifest.unlink()
+    pack_rules(collect(rules_set, {}), archive, overwrite=True)
+    assert manifest.is_file()
+
+
+def _pack(service: Kd2Service, folder: Path, name: str = "set.zip") -> dict[str, Any]:
+    return service.rules_pack(str(folder), "", "", "", name, False)
+
+
+@pytest.mark.parametrize("source_kind", ["xml", "md83exp", "project"])
+def test_saved_file_tracks_project_and_structure_fingerprints_after_restart(
+    rules_set: Path, tmp_path: Path, source_kind: str
+) -> None:
+    catalog = tmp_path / "projects.yaml"
+    catalog.write_text(
+        "projects:\n  alpha:\n    configurations:\n      full:\n        dump: main\n",
+        encoding="utf-8",
+    )
+    settings = Settings(
+        cache_dir=tmp_path / "cache",
+        workspace=tmp_path / "ws",
+        projects_file=catalog,
+        project_dirs={"alpha": DATA / "xmldump"} if source_kind == "project" else {},
+        rules_dirs={"kit": rules_set},
+    )
+    service = Kd2Service(settings)
+    if source_kind == "md83exp":
+        service.structure_load_md83exp("source", str(DATA / "md83exp_small.xml"))
+    elif source_kind == "project":
+        service.structure_load_project("alpha", "full", "source")
+    else:
+        service.structure_load_xml("source", str(DATA / "xmldump/main"))
+    service.structure_load_md83exp("target", str(DATA / "md83exp_small.xml"))
+    source_hash = service.store.meta("source")["input_hash"]
+    target_hash = service.store.meta("target")["input_hash"]
+    project_id = service.rules_open(str(rules_set / EXCHANGE))["project_id"]
+    service.rules_save(
+        project_id,
+        str(rules_set / EXCHANGE),
+        True,
+        True,
+        source_structure="source",
+        target_structure="target",
+    )
+    # Кэш структуры может измениться; манифест описывает входы последнего сохранения.
+    service.structure_load_xml("source", str(DATA / "xmldump/ext"), force=True)
+    service = Kd2Service(settings)
+    result = _pack(service, rules_set)
+    manifest = json.loads(Path(result["manifest"]).read_bytes())
+    origin = manifest["files"][0]["rules_project"]
+    assert origin["project_id"] == project_id
+    expected_source = {
+        "structure_id": "source",
+        "source": source_kind,
+        "input_hash": source_hash,
+    }
+    if source_kind == "project":
+        expected_source |= {"project": "alpha", "configuration": "full"}
+    assert origin["structures"] == {
+        "source": expected_source,
+        "target": {"structure_id": "target", "source": "md83exp", "input_hash": target_hash},
+    }
+    # Даже корректный XML с изменённым содержимым больше не подтверждён снимком.
+    path = rules_set / EXCHANGE
+    path.write_bytes(path.read_bytes().replace("БП --&gt; ЗУП".encode(), "Новые правила".encode()))
+    changed = json.loads(Path(_pack(service, rules_set, "changed.zip")["manifest"]).read_bytes())
+    assert changed["files"][0]["rules_project"] is None
+    assert changed["files"][0]["rules_project_reason"] == "changed_since_save"
+
+
+def test_created_project_keeps_structure_origins_without_validation(
+    rules_set: Path, tmp_path: Path
+) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "ws"))
+    service.structure_load_xml("source", str(DATA / "xmldump/main"))
+    service.structure_load_xml("target", str(DATA / "xmldump/ext"))
+    project_id = service.rules_create("source", "target")["project_id"]
+    service.rules_save(project_id, "exchange.xml", False, True)
+    result = service.rules_pack(
+        str(rules_set), str(service.workspace.root / "exchange.xml"), "", "", "set.zip", False
+    )
+    origin = json.loads(Path(result["manifest"]).read_bytes())["files"][0]["rules_project"]
+    assert origin["project_id"] == project_id
+    assert origin["structures"]["source"]["structure_id"] == "source"
+    assert origin["structures"]["target"]["structure_id"] == "target"
+
+
+def test_old_snapshot_without_saved_provenance_is_not_tracked(
+    rules_set: Path, tmp_path: Path
+) -> None:
+    settings = Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "ws")
+    service = Kd2Service(settings)
+    project_id = service.rules_open(str(rules_set / EXCHANGE))["project_id"]
+    service.rules_save(project_id, "exchange.xml", False, True)
+    meta_path = settings.workspace / ".projects" / project_id / "meta.json"
+    meta = json.loads(meta_path.read_bytes())
+    meta.pop("saved_sha256")
+    meta.pop("saved_structures")
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    service = Kd2Service(settings)
+    project = service.workspace.get(project_id)
+    assert project.document is not None and project.saved_sha256 is None
+    assert project.saved_structures == {}
+    result = service.rules_pack(
+        str(rules_set), str(settings.workspace / "exchange.xml"), "", "", "set.zip", False
+    )
+    item = json.loads(Path(result["manifest"]).read_bytes())["files"][0]
+    assert item["rules_project"] is None and item["rules_project_reason"] == "not_tracked"
+
+
+def test_only_last_saved_path_is_tracked(rules_set: Path, tmp_path: Path) -> None:
+    service = Kd2Service(Settings(cache_dir=tmp_path / "cache", workspace=tmp_path / "ws"))
+    project_id = service.rules_open(str(rules_set / EXCHANGE))["project_id"]
+    opened = json.loads(Path(_pack(service, rules_set, "opened.zip")["manifest"]).read_bytes())
+    assert opened["files"][0]["rules_project_reason"] == "not_tracked"
+    service.rules_save(project_id, "first.xml", False, True)
+    service.rules_save(project_id, "last.xml", False, True)
+    assert (service.workspace.root / "first.xml").read_bytes() == (
+        service.workspace.root / "last.xml"
+    ).read_bytes()
+    result = service.rules_pack(
+        str(rules_set), str(service.workspace.root / "first.xml"), "", "", "old.zip", False
+    )
+    old = json.loads(Path(result["manifest"]).read_bytes())["files"][0]
+    assert old["rules_project"] is None and old["rules_project_reason"] == "not_tracked"
+
+
+def test_manifest_paths_use_agent_path_mapping(rules_set: Path, tmp_path: Path) -> None:
+    agent = "Z:/Agent"
+    service = Kd2Service(
+        Settings(
+            cache_dir=tmp_path / "cache",
+            workspace=tmp_path / "ws",
+            path_map=PathMap.parse(f"{agent}={tmp_path.resolve()}"),
+        )
+    )
+    result = _pack(service, rules_set)
+    assert result["manifest"] == service._host(service.workspace.root / "set.manifest.json")
+    manifest = json.loads((service.workspace.root / "set.manifest.json").read_bytes())
+    assert [item["path"] for item in manifest["files"]] == [
+        item["path"] for item in result["files"]
+    ]
+    assert all(item["path"].replace("\\", "/").startswith(agent) for item in manifest["files"])
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
@@ -132,6 +356,16 @@ async def test_tool_packs_folder_into_workspace_or_rules_dir(
             "rules_pack", {"folder": str(rules_set), "path": str(tmp_path / "x.zip")}
         )
     assert default["path"] == str((tmp_path / "ws" / "ОбменЗУП.zip").resolve())
+    assert default["manifest"] == str((tmp_path / "ws" / "ОбменЗУП.manifest.json").resolve())
+    assert set(default) == {
+        "path",
+        "manifest",
+        "size_bytes",
+        "sha256",
+        "load_with",
+        "files",
+        "warnings",
+    }
     assert default["load_with"] == FORM_SET
     assert [item["file"] for item in default["files"]] == [EXCHANGE, CORRESPONDENT, REGISTRATION]
     assert default["files"][0]["path"] == str((rules_set / EXCHANGE).resolve())

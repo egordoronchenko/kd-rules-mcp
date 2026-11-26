@@ -141,7 +141,8 @@ def compose_override(
         # Единственное место проекта на запись; путь агента длиннее папки проекта, поэтому
         # PathMap переводит файлы внутри неё сюда, а не в /projects (там только чтение).
         target = f"/rules/{project_id}"
-        volumes.append(f"{_posix(folder)}:{target}")
+        # Режим поддержки: папки правил видны, но запись в них закрыта и на уровне Docker.
+        volumes.append(f"{_posix(folder)}:{target}" + (":ro" if local.read_only else ""))
         rules.append(f"{project_id}={target}")
         path_map.append(f"{folder}={target}")
     workspace = local.workspace
@@ -168,7 +169,7 @@ def compose_override(
                     continue
                 key = f"{project_id}.{configuration.id}.{index}"
                 target = f"/extensions/{key}"
-                volumes.append(f"{_posix(path)}:{target}")
+                volumes.append(f"{_posix(path)}:{target}" + (":ro" if local.read_only else ""))
                 extensions.append(f"{key}={target}")
                 path_map.append(f"{path}={target}")
     if workspace is not None:
@@ -195,6 +196,8 @@ def compose_override(
         service["environment"]["KD2_PUBLIC_URL"] = public
     if local.disable_tools:
         service["environment"]["KD2_DISABLE_TOOLS"] = ",".join(local.disable_tools)
+    if local.read_only:
+        service["environment"]["KD2_READ_ONLY"] = "1"
     if volumes:
         service["volumes"] = volumes
     body = yaml.dump(

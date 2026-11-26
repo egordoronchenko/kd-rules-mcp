@@ -432,7 +432,9 @@ uid 1000, корень нужен точке входа, чтобы отдать
 который может удалить или заменить сохранённое (в том числе под флагом `overwrite` или режимом `apply`), добавьте
 в `DESTRUCTIVE_TOOLS`, иначе клиент получит `destructiveHint: false`; живой (`live_*`) получает `openWorldHint`
 по имени. Установка может скрыть инструмент `KD2_DISABLE_TOOLS` (`disable_tools` в `projects.local.yaml`) —
-снятие идёт в конце `create_server`. Новый вид отказа — подкласс `Kd2Error` в `errors.py` и строка в
+снятие идёт в конце `create_server`; `KD2_READ_ONLY` снимает там же все инструменты с метками из
+`READ_ONLY_HIDDEN` (`project`, `sandbox`), поэтому метка нового инструмента решает и то, виден ли он серверу
+поддержки. Новый вид отказа — подкласс `Kd2Error` в `errors.py` и строка в
 `ERROR_CODES` (подклассы раньше базовых). Тесты: имя — в `EXPECTED_TOOLS` и вызов в `tests/test_server.py`
 (проверяет описания всех параметров), содержательные — отдельным файлом; затем `uv run python
 scripts/dump_tools.py` обновляет [tools.md](tools.md), а ключи ответа дописываются в его ручную часть. Если

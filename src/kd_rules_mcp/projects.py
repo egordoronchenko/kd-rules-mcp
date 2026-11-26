@@ -199,6 +199,8 @@ class LocalSettings:
     host_addresses: tuple[str, ...] | None = None
     # Имена и маски инструментов, которых сервер не выставляет (`KD2_DISABLE_TOOLS`).
     disable_tools: tuple[str, ...] = ()
+    # Сервер для поддержки: без записи в папки проектов и в базы (`KD2_READ_ONLY`).
+    read_only: bool = False
 
     def login(self, project_id: str, base_id: str) -> tuple[str, str] | None:
         """Пользователь и пароль базы, если заданы."""
@@ -547,7 +549,17 @@ def load_local(path: Path) -> LocalSettings:
         instance=_instance_name(data.get("instance")),
         host_addresses=_host_addresses(data.get("host_addresses")),
         disable_tools=_disable_tools(data.get("disable_tools")),
+        read_only=_read_only(data.get("read_only")),
     )
+
+
+def _read_only(value: Any) -> bool:
+    """`read_only`: только `true` или `false`, без строк — опечатка не должна открыть запись."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ProjectConfigError("read_only: нужно true или false")
+    return value
 
 
 def _disable_tools(value: Any) -> tuple[str, ...]:

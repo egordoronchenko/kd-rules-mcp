@@ -173,6 +173,7 @@ def test_setup_disable_tools_env(tmp_path: Path) -> None:
         "kd-rules-mcp"
     ]["environment"]
     assert "KD2_DISABLE_TOOLS" not in plain
+    assert "KD2_READ_ONLY" not in plain
     for bad in (
         "disable_tools: ed_*\n",
         "disable_tools: ['ed_*,live_*']\n",
@@ -181,3 +182,24 @@ def test_setup_disable_tools_env(tmp_path: Path) -> None:
         local_file.write_text(bad, encoding="utf-8")
         with pytest.raises(ProjectConfigError, match="disable_tools"):
             load_local(local_file)
+
+
+def test_setup_read_only_env_and_mounts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """read_only → KD2_READ_ONLY=1 и папки правил и расширений под :ro; не bool — отказ."""
+    (tmp_path / "projects.yaml").write_bytes((ROOT / "projects.example.yaml").read_bytes())
+    local_file = tmp_path / "projects.local.yaml"
+    example = (ROOT / "projects.local.example.yaml").read_text(encoding="utf-8")
+    local_file.write_text(example + "\nread_only: true\n", encoding="utf-8")
+    assert load_local(local_file).read_only
+    monkeypatch.setattr(setup_local, "ROOT", tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    setup_local.main(["--root", str(tmp_path), "--host-paths"])
+    service = yaml.safe_load((tmp_path / "docker-compose.override.yml").read_bytes())["services"][
+        "kd-rules-mcp"
+    ]
+    assert service["environment"]["KD2_READ_ONLY"] == "1"
+    assert "D:/Repos/bp/ПравилаОбмена:/rules/bp:ro" in service["volumes"]
+    assert "D:/Repos/bp/src/cfe/МоёРасширение:/extensions/bp.full.0:ro" in service["volumes"]
+    local_file.write_text("read_only: 'yes'\n", encoding="utf-8")
+    with pytest.raises(ProjectConfigError, match="read_only"):
+        load_local(local_file)

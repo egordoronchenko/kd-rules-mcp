@@ -22,10 +22,13 @@
 import base64
 import hashlib
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from importlib.metadata import version
 from pathlib import Path
 
+from kd_rules_mcp.authoring.ed.manifest import json_bytes
 from kd_rules_mcp.errors import Kd2Error, RulesFormatError
 from kd_rules_mcp.kd2.model import ExchangeRules, RegistrationRules
 from kd_rules_mcp.kd2.rules_io import load_rules
@@ -66,6 +69,7 @@ class PackedFile:
     size_bytes: int
     summary: dict[str, str]
     sha256: str
+    header: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +79,7 @@ class PackResult:
     path: Path
     files: list[PackedFile]
     form: str
+    manifest: Path
     warnings: list[str] = field(default_factory=list)
     sha256: str = ""
 
@@ -109,15 +114,26 @@ def collect(folder: Path | None, explicit: Mapping[str, Path | None]) -> dict[st
 
 
 def pack_rules(
-    files: Mapping[str, Path], destination: Path, *, overwrite: bool = False
+    files: Mapping[str, Path],
+    destination: Path,
+    *,
+    overwrite: bool = False,
+    host_path: Callable[[Path], str] = str,
+    project_origin: Callable[[Path, str], dict[str, object]] | None = None,
 ) -> PackResult:
-    """Проверяет файлы комплекта и пишет ZIP; существующий архив — только при `overwrite`."""
+    """Пишет ZIP и отдельный манифест; замена обоих файлов — только при `overwrite`."""
+    manifest = destination.with_suffix(".manifest.json")
+    for target in (destination, manifest):
+        if target.exists() and not overwrite:
+            raise Kd2Error(f"Файл «{target}» уже существует; замена только при overwrite=True")
     documents: dict[str, ExchangeRules | RegistrationRules] = {}
+    contents: dict[str, bytes] = {}
     for role, path in files.items():
         if role not in ROLES:
             raise Kd2Error(f"Неизвестная роль файла «{role}»: {', '.join(ROLES)}")
         try:
-            document = load_rules(path)
+            contents[role] = path.read_bytes()
+            document = load_rules(contents[role])
         except RulesFormatError as error:
             raise RulesFormatError(f"{ROLES[role]} ({path}): {error}") from error
         expected = RegistrationRules if role == "registration" else ExchangeRules
@@ -125,8 +141,6 @@ def pack_rules(
             kind = "правила регистрации" if expected is RegistrationRules else "правила обмена"
             raise RulesFormatError(f"{ROLES[role]} ({path}): ожидаются {kind}")
         documents[role] = document
-    if destination.exists() and not overwrite:
-        raise Kd2Error(f"Файл «{destination}» уже существует; замена только при overwrite=True")
     destination.parent.mkdir(parents=True, exist_ok=True)
     packed: list[PackedFile] = []
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -134,7 +148,7 @@ def pack_rules(
             if role not in files:
                 continue
             # Байты читаются один раз: хеш — ровно того, что легло в архив.
-            data = files[role].read_bytes()
+            data = contents[role]
             info = zipfile.ZipInfo.from_file(files[role], ROLES[role])
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, data)
@@ -145,11 +159,68 @@ def pack_rules(
                     len(data),
                     _summary(documents[role]),
                     sha256_base64(data),
+                    _header(documents[role]),
                 )
             )
     form = FORM_SET if "registration" in files else FORM_CONVERSION
     digest = sha256_base64(destination.read_bytes())
-    return PackResult(destination, packed, form, _warnings(documents), digest)
+    manifest_files = []
+    for item in packed:
+        origin = (
+            project_origin(item.source, item.sha256)
+            if project_origin is not None
+            else {"rules_project": None, "rules_project_reason": "not_tracked"}
+        )
+        manifest_files.append(
+            {
+                "role": next(role for role, name in ROLES.items() if name == item.name),
+                "file": item.name,
+                "path": host_path(item.source),
+                "size_bytes": item.size_bytes,
+                "sha256": item.sha256,
+                "rules": item.header,
+                **origin,
+            }
+        )
+    manifest.write_bytes(
+        json_bytes(
+            {
+                "format": "kd2-rules-pack/1",
+                "server_version": version("kd-rules-mcp"),
+                "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "archive": {
+                    "file": destination.name,
+                    "size_bytes": destination.stat().st_size,
+                    "sha256": digest,
+                },
+                "files": manifest_files,
+            }
+        )
+    )
+    return PackResult(destination, packed, form, manifest, _warnings(documents), digest)
+
+
+def _header(document: ExchangeRules | RegistrationRules) -> dict[str, str]:
+    """Шапка из уже прочитанной модели; исходные значения, включая пробелы в Ид."""
+    header = _summary(document)
+    header["id"] = str(document.root.values.get("Ид", ""))
+    header["created_at"] = str(document.root.values.get("ДатаВремяСоздания", ""))
+    format_node = document.root.child("ВерсияФормата")
+    header["format_version"] = (
+        (format_node.text or "")
+        if format_node is not None
+        else str(document.root.values.get("ВерсияФормата", ""))
+    )
+    sides = (
+        (("Источник", "source_version"), ("Приемник", "target_version"))
+        if isinstance(document, ExchangeRules)
+        else (("Конфигурация", "configuration_version"),)
+    )
+    for tag, key in sides:
+        node = document.root.child(tag)
+        if node is not None and "ВерсияКонфигурации" in node.attrs:
+            header[key] = str(node.attrs["ВерсияКонфигурации"])
+    return header
 
 
 def _summary(document: ExchangeRules | RegistrationRules) -> dict[str, str]:

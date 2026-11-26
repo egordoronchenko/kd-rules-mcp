@@ -12,10 +12,16 @@ import httpx2 as httpx
 import pytest
 from mcp import Client
 
-from kd_rules_mcp.errors import DuplicateRuleError, RuleNotFoundError
+from kd_rules_mcp.errors import DuplicateRuleError, Kd2Error, RuleNotFoundError
 from kd_rules_mcp.kd2.model import ExchangeRules
 from kd_rules_mcp.kd2.rules_io import load_registration_rules
-from kd_rules_mcp.server import DESTRUCTIVE_TOOLS, TOOL_EFFECTS, create_app, create_server
+from kd_rules_mcp.server import (
+    DESTRUCTIVE_TOOLS,
+    READ_ONLY_HIDDEN,
+    TOOL_EFFECTS,
+    create_app,
+    create_server,
+)
 from kd_rules_mcp.service import Kd2Service, PathMap, Settings
 from tests.sqlite_structure import StructureBuilder
 from tests.test_authoring_candidates import _composition_props
@@ -555,6 +561,40 @@ async def test_disable_tools_by_mask(tmp_path: Path, caplog: pytest.LogCaptureFi
         )._tool_manager.list_tools()
     }
     assert len(full) == len(TOOL_EFFECTS)
+
+
+async def test_read_only_hides_project_and_sandbox_writers(tmp_path: Path) -> None:
+    """KD2_READ_ONLY: нет инструментов с эффектом project/sandbox, чтение и снимки остаются."""
+    settings = Settings.from_env(
+        {
+            "KD2_CACHE_DIR": str(tmp_path / "cache"),
+            "KD2_WORKSPACE": str(tmp_path / "workspace"),
+            "KD2_PROJECTS_FILE": str(tmp_path / "projects.yaml"),
+            "KD2_READ_ONLY": " True ",
+        }
+    )
+    assert settings.read_only
+    async with Client(create_server(Kd2Service(settings))) as client:
+        names = {tool.name for tool in (await client.list_tools()).tools}
+        hidden = {name for name, (effect, _) in TOOL_EFFECTS.items() if effect in READ_ONLY_HIDDEN}
+        assert {"rules_save", "rules_pack", "live_rules_install", "ed_authoring_build"} <= hidden
+        assert not names & hidden
+        # Правила открываются снимком в рабочей папке — без этого поддержке нечего читать.
+        assert {"rules_open", "rules_get", "rules_validate", "ed_open", "live_status"} <= names
+        assert names | hidden == set(TOOL_EFFECTS)
+        result = await client.call_tool("rules_save", {"project_id": "x"})
+        assert result.is_error
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("", False), ("0", False), ("no", False), ("1", True), ("YES", True)]
+)
+def test_read_only_flag_values(tmp_path: Path, raw: str, expected: bool) -> None:
+    """Понятные значения KD2_READ_ONLY; опечатка — отказ запуска, а не молчаливая запись."""
+    env = {"KD2_CACHE_DIR": str(tmp_path / "c"), "KD2_WORKSPACE": str(tmp_path / "w")}
+    assert Settings.from_env({**env, "KD2_READ_ONLY": raw}).read_only is expected
+    with pytest.raises(Kd2Error, match="KD2_READ_ONLY"):
+        Settings.from_env({**env, "KD2_READ_ONLY": "on-ish"})
 
 
 async def test_pro_only_in_read_rule_kind_schema(service: Kd2Service) -> None:

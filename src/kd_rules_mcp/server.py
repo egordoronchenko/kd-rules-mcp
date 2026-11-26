@@ -288,6 +288,9 @@ DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
         "live_exchange_run",
     }
 )
+# Эффекты, которых нет у сервера в режиме поддержки (`KD2_READ_ONLY`): запись в папки проектов
+# (`rules_dir`, выгрузки расширений) и в базы-песочницы.
+READ_ONLY_HIDDEN: frozenset[str] = frozenset({"project", "sandbox"})
 # К базе 1С через сервер данных ходят только живые инструменты: openWorldHint MCP.
 _OPEN_WORLD_PREFIX = "live_"
 
@@ -1057,7 +1060,7 @@ def create_server(service: Kd2Service) -> MCPServer:
         overwrite: Annotated[bool, Field(description="Replace existing ZIP")] = False,
     ) -> dict[str, Any]:
         """Pack a БСП ZIP from a folder or files, preserving bytes and checking kinds. Inspect
-        warnings for rule/registration mismatches."""
+        warnings for rule/registration mismatches. Writes a sibling provenance .manifest.json."""
         return await call(
             service.rules_pack,
             folder,
@@ -2322,17 +2325,24 @@ def create_server(service: Kd2Service) -> MCPServer:
         """Signed URL to upload one file into workspace/inbox."""
         return await call(service.upload_link, name, overwrite, ttl_seconds, mcp_base_url(ctx))
 
-    disable_tools(server, service.settings.disabled_tools)
+    disable_tools(server, service.settings.disabled_tools, read_only=service.settings.read_only)
     # Новый инструмент без метки эффекта не выходит наружу (agent-ux, Р1).
     for tool in server._tool_manager.list_tools():
         effect_tag(tool.name)
     return server
 
 
-def disable_tools(server: MCPServer, patterns: tuple[str, ...]) -> None:
-    """Снимает инструменты по именам и маскам `KD2_DISABLE_TOOLS` (tool-annotations, Р3)."""
+def disable_tools(server: MCPServer, patterns: tuple[str, ...], *, read_only: bool = False) -> None:
+    """Снимает инструменты по именам и маскам `KD2_DISABLE_TOOLS` (tool-annotations, Р3).
+
+    `read_only` (`KD2_READ_ONLY`) снимает ещё все инструменты с эффектом из `READ_ONLY_HIDDEN`:
+    сервер для поддержки читает проекты и правила, а рабочая папка (снимки проектов, логи)
+    остаётся — без неё не открыть правила на чтение.
+    """
     names = [tool.name for tool in server._tool_manager.list_tools()]
     disabled: set[str] = set()
+    if read_only:
+        disabled |= {name for name in names if TOOL_EFFECTS[name][0] in READ_ONLY_HIDDEN}
     for pattern in patterns:
         matched = {name for name in names if fnmatch.fnmatchcase(name, pattern)}
         if not matched:
