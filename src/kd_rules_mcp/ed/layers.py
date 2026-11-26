@@ -9,6 +9,7 @@ from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
 
+from .address import escape_segment
 from .errors import EdFormatError, EdReadError
 from .forms import DISPATCHERS, EVENT_INVOCATIONS, EVENT_SIGNATURES
 from .layer_model import (
@@ -129,7 +130,15 @@ def read_layers(
         origin = _dump_origin(base_layer, base_path)
         return _failed(
             base_layer,
-            (LayerSkip("resource_limit", origin, ("manager",), str(len(roots)), ("manager",)),),
+            (
+                LayerSkip(
+                    "resource_limit",
+                    origin,
+                    ("manager",),
+                    f"слоёв {len(roots)} > {MAX_LAYERS}",
+                    ("manager",),
+                ),
+            ),
         )
     ext_layers: list[LayerDescriptor] = []
     ext_dumps: list[DumpInfo] = []
@@ -1643,7 +1652,8 @@ def _taint_from_skips(
     skips: tuple[LayerSkip, ...],
     live_skips: set[tuple[int, str, bool]] | None = None,
 ) -> None:
-    for skip in skips:
+    for number, skip in enumerate(skips, 1):
+        address = f"Слой/{escape_segment(skip.origin.layer_id)}/Неизвестное/{number}"
         refs = skip.affected_ids
         for context in contexts:
             tips = {item.logical_id: item for item in context.entities}
@@ -1672,27 +1682,45 @@ def _taint_from_skips(
             ):
                 continue
             taints = set(context.taints)
+
+            def lower(tip: EntityVersion, rank: str = skip.certainty, cause: str = address):
+                return replace(
+                    tip,
+                    certainty=_worse(tip.certainty, rank),
+                    uncertain_by=tuple(dict.fromkeys((*tip.uncertain_by, cause)))
+                    if rank != Certainty.KNOWN
+                    else tip.uncertain_by,
+                )
+
             for scope in scopes:
                 if skip.certainty == Certainty.UNKNOWN:
                     taints.add(scope)
                 if scope in ("manager", "filler", "hook", "dispatcher"):
-                    tips = {
-                        key: replace(tip, certainty=_worse(tip.certainty, skip.certainty))
-                        for key, tip in tips.items()
-                    }
+                    tips = {key: lower(tip) for key, tip in tips.items()}
                 elif scope in ("pko", "pod", "pkpd", "parameters"):
                     tips = {
-                        key: replace(tip, certainty=_worse(tip.certainty, skip.certainty))
-                        if tip.collection == scope
-                        else tip
+                        key: lower(tip) if tip.collection == scope else tip
                         for key, tip in tips.items()
                     }
                 else:
                     tips = {
-                        key: replace(tip, certainty=_worse(tip.certainty, skip.certainty))
+                        key: lower(tip)
                         if key == scope
                         or _entity_ref(tip) == scope
                         or getattr(tip.payload, "procedure_name", "").casefold() == scope.casefold()
+                        or (
+                            skip.reason == "unmodeled_hook"
+                            and isinstance(tip.payload, (ObjectRule, ProcessingRule))
+                            and any(
+                                binding.target_name.casefold() == scope.casefold()
+                                or binding.target_id == scope
+                                or any(
+                                    change.origin.hook_id == skip.origin.hook_id
+                                    for change in getattr(binding, "body_changes", ())
+                                )
+                                for binding in tip.payload.events
+                            )
+                        )
                         else tip
                         for key, tip in tips.items()
                     }

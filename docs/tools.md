@@ -1896,10 +1896,10 @@ Without layers, `direction=send/receive` and `headers_only=true` give `invalid_a
 
 | Tool | Additional layered snapshot fields |
 |---|---|
-| `ed_open` | `composition_status`, `layers` (`total,items,has_more`, up to 16 rows), `contexts`, per-context `effective_counts`, `changes_summary` (`added,changed,deleted`), `skipped_summary` (`total,by_reason`); no operation text |
-| `ed_overview` | `composition`: `status`, `base_parse_status`, `effective_counts`, `changes_summary`, `known_operations`, `unknown_operations`, `coverage` separated into `base` and `layers` |
-| `ed_list` | Effective entities: `contexts`, `state`, `layer_id`, `certainty`; rules add history `entity_id` |
-| `ed_get` | `state`, `layer_id`, `logical_id`, `certainty`, `origins`/`changed_fields` pages; or `requires_context`, `message`, `variants` page |
+| `ed_open` | `composition_status`, `dropped_layers`, `layers` (`total,items,has_more`, up to 16 rows), `contexts`, per-context `effective_counts`, `changes_summary` (`added,changed,deleted`), `skipped_summary` (`total,by_reason`); no operation text |
+| `ed_overview` | `composition`: `status`, `dropped_layers`, `base_parse_status`, `effective_counts`, `changes_summary`, `known_operations`, `unknown_operations`, `coverage` separated into `base` and `layers` |
+| `ed_list` | Effective entities: `contexts`, `state`, `layer_id`, `certainty` (+ `uncertain_by` when not `known`); rules add history `entity_id` |
+| `ed_get` | `state`, `layer_id`, `logical_id`, `certainty` (+ `uncertain_by` when not `known`), `origins`/`changed_fields` pages; or `requires_context`, `message`, `variants` page |
 | `ed_validate` | `composition` (`status`, selected `contexts`, `known_operations`, `unknown_operations`); `references.contexts` counts |
 | `ed_routes` | `extension_policy=ordered_layers`, ordered `extensions`; versions `source` has `location`/`layer_id`; comparison opening arguments preserve `configuration_path`/`extensions` |
 
@@ -1921,6 +1921,22 @@ Handler bodies remain opaque; `handler_execution_note` in `ed_overview`/`ed_vali
 the runtime limitation. `fields.body_changes` on bindings identifies standard-handler hook kind,
 layer, file and annotation line. Unmodeled hooks appear in `layer_unknown`/`skipped` with the
 target name/class; function dispatchers produce an unknown function chain.
+
+An unmodeled hook lowers only what it can change: a rule builder (`ДобавитьПКО_…`, class
+`rule_builder`) lowers the rules it builds; a hook on a handler or helper procedure (classes
+`handler`, `base_routine`) lowers the rules that call that procedure. `&ИзменениеИКонтроль`
+bodies are not modeled, so such a rule is `unknown` and shows the base declaration. The
+exception is a known handler with a matching signature: it is recorded as a body change
+(`body_changes`, kind `change_control`) and the rule stays `known`. Unrelated procedures
+lower nothing. A non-`known` rule (and its properties and search fields) carries
+`uncertain_by` (`items,has_more`, up to 8 `Слой/<id>/Неизвестное/<n>` addresses, numbered as in
+`ed_list kind=layer_unknown`).
+
+A layer file read as empty is listed in `dropped_layers` (`items,total,has_more`, up to 16
+rows: `layer_id`, `file_id`, `reason`, `detail`, `address`). Reasons: `resource_limit` (methods
+> 512, bytes, layers > 16, operations, calls, nested conditions; `detail` such as
+`методов 513 > 512`), `bsl_syntax`, `recursion`. Such a file lowers every rule of its manager.
+`diagnostics_summary` still describes only the base document.
 `ed.layer.handler.touches_rules` is only a lexical hint about rule access in an owned body/helper;
 it does not reduce parse status or certainty.
 

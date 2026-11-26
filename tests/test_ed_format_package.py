@@ -292,6 +292,25 @@ def test_roundtrip_all_declared_values(tmp_path: Path):
     assert schema.types[QName(OWN, "ItemRows")].properties[0].upper is None
 
 
+def test_package_members_ordered_value_before_object(tmp_path: Path):
+    """#90: объектный тип объявлен раньше своей ссылки — пакет всё равно
+    import → valueType → objectType."""
+    model = sample_model()
+    objects_first = sorted(model.types, key=lambda t: t.name.local in ("ItemRef", "Color"))
+    assert objects_first[0].name.local == "ItemKey"
+    shuffled = replace(model, types=tuple(objects_first))
+    raw = render_format_package(shuffled)["XDTOPackages/fmt_Package/Ext/Package.bin"]
+    tags = [etree.QName(child).localname for child in etree.fromstring(raw)]
+    assert tags == sorted(tags, key=("import", "valueType", "objectType").index)
+    assert tags.count("valueType") == 2 and tags.count("objectType") == 4
+    # Внутри групп порядок объявления сохраняется: тот же байт-в-байт пакет, что у исходной модели.
+    assert render_format_package(shuffled) == render_format_package(model)
+    write_files(tmp_path, render_format_package(shuffled))
+    schema = load_schema(DATA / "base.bin", extensions=(tmp_path / "XDTOPackages/fmt_Package.xml",))
+    assert schema.status == "complete"
+    assert not schema.diagnostics
+
+
 @pytest.mark.parametrize("local", ["", "1Name", "Bad Name", "Bad:Name", "../Name", "{urn:x}Name"])
 def test_invalid_type_name(local: str):
     with pytest.raises(EdFormatIdentifierError):

@@ -76,7 +76,7 @@ from .model import (
 )
 
 MAX_FILE_BYTES = 16 * 1024 * 1024
-MAX_METHODS = 64
+MAX_METHODS = 512
 MAX_CALLS = 256
 MAX_CONDITIONS = 32
 MAX_EDGES = 4
@@ -180,8 +180,8 @@ class FillerCall:
 
 
 class _Abort(Exception):
-    def __init__(self, reason: str, origin: Origin) -> None:
-        super().__init__(reason)
+    def __init__(self, reason: str, origin: Origin, detail: str = "") -> None:
+        super().__init__(detail or reason)
         self.reason = reason
         self.origin = origin
 
@@ -1328,7 +1328,11 @@ class _Walker:
         chain: tuple[SourceSpan, ...] = (),
     ) -> None:
         if len(self.operations) >= MAX_OPS:
-            raise _Abort("resource_limit", self.origin(span, procedure, hook_id))
+            raise _Abort(
+                "resource_limit",
+                self.origin(span, procedure, hook_id),
+                f"операций {len(self.operations) + 1} > {MAX_OPS}",
+            )
         if self.opaque_depth and resolution == "applied":
             resolution = "unknown"
             footprint = footprint or Footprint(
@@ -1887,7 +1891,11 @@ class _Walker:
         self._materialize(env, hook_id, procedure)
         self.cond_depth += 1
         if self.cond_depth > MAX_CONDITIONS:
-            raise _Abort("resource_limit", self.origin(node.statement.span, procedure, hook_id))
+            raise _Abort(
+                "resource_limit",
+                self.origin(node.statement.span, procedure, hook_id),
+                f"вложенных условий {self.cond_depth} > {MAX_CONDITIONS}",
+            )
         self.marks.append((node.statement.span, Classification.DECLARATIVE))
         self.marks.append((node.end.span, Classification.DECLARATIVE))
         try:
@@ -2936,7 +2944,11 @@ class _Walker:
             return True
         self.calls += 1
         if self.calls > MAX_CALLS:
-            raise _Abort("resource_limit", self.origin(statement.span, procedure, hook_id))
+            raise _Abort(
+                "resource_limit",
+                self.origin(statement.span, procedure, hook_id),
+                f"вызовов {self.calls} > {MAX_CALLS}",
+            )
         if call[0].casefold() in self.stack:
             raise _Abort("recursion", self.origin(statement.span, procedure, hook_id))
         routine, tree = local
@@ -4264,11 +4276,18 @@ def _read_module(
     origin = _origin(
         layer, metadata_kind, metadata_name, source, source.span(0, min(1, len(source.text))), None
     )
-    if len(source.text.encode("utf-8")) > MAX_FILE_BYTES:
+    source_bytes = len(source.text.encode("utf-8"))
+    if source_bytes > MAX_FILE_BYTES:
         return _empty_reading(
             layer,
             source,
-            LayerSkip("resource_limit", origin, ("manager",), source.path, ("manager",)),
+            LayerSkip(
+                "resource_limit",
+                origin,
+                ("manager",),
+                f"байт {source_bytes} > {MAX_FILE_BYTES}",
+                ("manager",),
+            ),
         )
     try:
         parsed, warnings = _routine_trees(source)
@@ -4282,7 +4301,13 @@ def _read_module(
         return _empty_reading(
             layer,
             source,
-            LayerSkip("resource_limit", origin, ("manager",), source.path, ("manager",)),
+            LayerSkip(
+                "resource_limit",
+                origin,
+                ("manager",),
+                f"методов {len(parsed)} > {MAX_METHODS}",
+                ("manager",),
+            ),
         )
     routines = [item[0] for item in parsed]
     trust = {name: True for name in helpers}
@@ -4304,7 +4329,7 @@ def _read_module(
         return _empty_reading(
             layer,
             source,
-            LayerSkip(aborted.reason, aborted.origin, ("manager",), aborted.reason, ("manager",)),
+            LayerSkip(aborted.reason, aborted.origin, ("manager",), str(aborted), ("manager",)),
         )
     bindings = _local_handler_uses(walker.operations) if bindings is None else bindings
     for offset, operation in enumerate(walker.operations):
@@ -4949,7 +4974,7 @@ def _empty_reading(layer: LayerDescriptor, source: SourceFile, skip: LayerSkip) 
     except EdFormatError:
         lexical_error = True
     coverage = build_coverage(source, tokens, (), (), lexical_error=lexical_error)
-    return ExtensionReading(layer.id, (), (), (), (skip,), source, coverage)
+    return ExtensionReading(layer.id, (), (), (), (skip,), source, coverage, dropped=True)
 
 
 def _collect_hooks(
@@ -5162,7 +5187,15 @@ def _bind_hook(
             else "missing"
         )
         if known is not None or variants:
-            scopes = builders or collections or (hook_id,)
+            scopes = (
+                builders
+                or collections
+                or (
+                    (target, known.entity_id)
+                    if known is not None and target_class in {"handler", "base_routine"}
+                    else (hook_id,)
+                )
+            )
             walker.skip(
                 "unmodeled_hook",
                 routine.span,

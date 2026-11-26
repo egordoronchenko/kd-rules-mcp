@@ -257,6 +257,7 @@ def member_version(
         layer_id=layer_id,
         direction=parent.direction if parent else "",
         headers_only=parent.headers_only if parent else False,
+        uncertain_by=parent.uncertain_by if parent else (),
     )
 
 
@@ -460,6 +461,8 @@ def snapshot(manager: LayeredManager, key: tuple[str, ...]) -> LayerSnapshot:
             if isinstance(version.payload, ed.ObjectRule):
                 for prop in version.payload.properties:
                     versions[prop.entity_id] = member_version(manager, prop, version, originals)
+                for search in version.payload.search_sets:
+                    versions[search.entity_id] = member_version(manager, search, version, originals)
                 for group in version.payload.groups:
                     versions[group.entity_id] = member_version(manager, group, version, originals)
                     for prop in group.properties:
@@ -675,6 +678,24 @@ def layer_row(layer) -> dict[str, Any]:
 
 def composition(snap: LayerSnapshot, *, overview: bool = False) -> dict[str, Any]:
     manager = snap.manager
+    dropped_files = {
+        (reading.layer_id, reading.source.file_id)
+        for reading in manager.readings
+        if reading.dropped
+    }
+    dropped = [
+        {
+            "layer_id": skip.origin.layer_id,
+            "file_id": skip.origin.file_id,
+            "reason": skip.reason,
+            "detail": views.short(skip.raw),
+            "address": f"Слой/{escape_segment(skip.origin.layer_id)}/Неизвестное/{number}",
+        }
+        for number, skip in enumerate(manager.skipped, 1)
+        if (skip.origin.layer_id, skip.origin.file_id) in dropped_files
+        and skip.reason in {"resource_limit", "bsl_syntax", "recursion"}
+    ]
+    dropped_layers = {"items": dropped[:16], "total": len(dropped), "has_more": len(dropped) > 16}
     effective = []
     for view in snap.contexts:
         counts = {k: v for k, v in view.document.counts.items() if k != "values"}
@@ -703,6 +724,7 @@ def composition(snap: LayerSnapshot, *, overview: bool = False) -> dict[str, Any
     result = {
         **executor_warning,
         "composition_status": manager.status,
+        "dropped_layers": dropped_layers,
         "layers": {
             "total": len(manager.layers),
             "items": [layer_row(layer) for layer in manager.layers[:16]],
@@ -734,6 +756,7 @@ def composition(snap: LayerSnapshot, *, overview: bool = False) -> dict[str, Any
     return {
         **executor_warning,
         "status": manager.status,
+        "dropped_layers": dropped_layers,
         "base_parse_status": manager.base.parse_status.value,
         "unselected_managers": result["unselected_managers"],
         "executor_overrides": result["executor_overrides"],
@@ -795,7 +818,7 @@ def provenance(
         "state": version.state,
         "layer_id": version.layer_id,
         "logical_id": version.logical_id,
-        "certainty": version.certainty,
+        **certainty_row(version),
         "origins": views.page([origin_row(o) for o in version.origins], offset, limit),
         "changed_fields": views.page(
             [
@@ -812,6 +835,17 @@ def provenance(
             limit,
         ),
     }
+
+
+def certainty_row(version: EntityVersion) -> dict[str, Any]:
+    """Причины берутся из того же понижения, что и certainty, а не из всех пропусков слоя."""
+    result: dict[str, Any] = {"certainty": version.certainty}
+    if version.certainty != "known":
+        result["uncertain_by"] = {
+            "items": list(version.uncertain_by[:8]),
+            "has_more": len(version.uncertain_by) > 8,
+        }
+    return result
 
 
 def change_value(value: Any) -> Any:
@@ -904,7 +938,8 @@ def list_rows(
                 "check_scope": views.page(list(s.check_scope)),
                 "certainty": s.certainty,
                 "detail": views.short(s.raw)
-                if s.reason in {"unmodeled_hook", "unsupported_event"}
+                if s.reason
+                in {"unmodeled_hook", "unsupported_event", "resource_limit", "bsl_syntax"}
                 else None,
             }
             for n, s in enumerate(manager.skipped, 1)
@@ -961,6 +996,7 @@ def list_rows(
                 certainty=version.certainty if version else "known",
             )
             if version:
+                row.update(certainty_row(version))
                 row["entity_id"] = version.logical_id
             key = json.dumps(row, ensure_ascii=False, sort_keys=True)
             if key in grouped:
@@ -1220,7 +1256,7 @@ def get_view(
                         "address": h.address,
                         **context_row(v.context),
                         "state": h.version.state if h.version else "base",
-                        "certainty": h.version.certainty if h.version else "known",
+                        **(certainty_row(h.version) if h.version else {"certainty": "known"}),
                         "fields": views.entity_fields(h.entity) if h.entity else {},
                     }
                     for h, v in hits
@@ -1277,6 +1313,8 @@ def get_view(
                     )
                 elif hit.address.startswith("Действующее/"):
                     row["address"] = "Действующее/" + row["address"]
+                if not hit.address.startswith("Слой/") and item.entity_id in view.versions:
+                    row.update(certainty_row(view.versions[item.entity_id]))
             rows.append(row)
         selected = views.page(rows, offset, limit)
     result = {
@@ -1289,6 +1327,13 @@ def get_view(
     }
     if hit.version:
         result.update(provenance(hit.version, offset, limit, snap.manager))
+        if hit.version.certainty != "known":
+            reasons = tuple(
+                dict.fromkeys(
+                    reason for h, _ in hits if h.version for reason in h.version.uncertain_by
+                )
+            )
+            result.update(certainty_row(replace(hit.version, uncertain_by=reasons)))
     else:
         layer_id = (
             hit.hook.origin.layer_id

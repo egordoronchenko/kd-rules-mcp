@@ -1079,7 +1079,7 @@ def test_change_control_recursion_and_method_limit(demo):
     )
     assert "recursion" in _reasons(recursive)
     assert ("Товар", "Recur") not in _pks(_send(recursive))
-    methods = "\n".join(f"Процедура Метод{index}()\nКонецПроцедуры" for index in range(65))
+    methods = "\n".join(f"Процедура Метод{index}()\nКонецПроцедуры" for index in range(512))
     limited = _overlay(
         demo.base,
         methods

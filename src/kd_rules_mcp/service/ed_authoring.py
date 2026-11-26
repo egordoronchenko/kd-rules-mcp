@@ -66,7 +66,7 @@ from kd_rules_mcp.authoring.ed.render import (
 from kd_rules_mcp.authoring.ed.xml_dump import M, parse_xml, read_description
 from kd_rules_mcp.ed.address import AmbiguousAddressError, EntityNotFoundError, build_addresses
 from kd_rules_mcp.ed.layer_model import LayerDescriptor
-from kd_rules_mcp.ed.layer_reader import read_extension_text
+from kd_rules_mcp.ed.layer_reader import layer_key, read_extension_text
 from kd_rules_mcp.ed.layers import compose_manager
 from kd_rules_mcp.ed.lexer import lex
 from kd_rules_mcp.ed.model import Classification, ObjectRule
@@ -1268,6 +1268,98 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
             self._limit(len(body.encode("utf-8")), 64 * 1024, "байты тела")
             self._limit(len(body.splitlines()), 2000, "строки тела")
 
+    def _with_layer_uncertainty(
+        self, entry: _Inputs, bundle: RenderedAuthoring
+    ) -> RenderedAuthoring:
+        """Базовый снимок тоже требует подтверждения неизвестных настроенных слоёв.
+
+        Прямые конфликты по-прежнему отсекаются предусловиями. Здесь остаются,
+        например, файлы сверх лимита читателя: их нельзя молча считать типовыми.
+        """
+        document = entry.value.document
+        module_path = (
+            "CommonModules/" + document.files[0].path.replace("\\", "/").split("CommonModules/")[-1]
+        )
+        targets = {routine.name.casefold(): routine for routine in document.routines}
+        flagged = {
+            (d.span.file_id, d.span.char_start)
+            for d in document.diagnostics
+            if d.code == "helper_semantics_unverified"
+        }
+        helpers = frozenset(
+            r.name.casefold()
+            for r in document.routines
+            if r.name.casefold() in {"добавитьпкс", "добавитьпктч"}
+            and (r.span.file_id, r.span.char_start) not in flagged
+        )
+        readings = []
+        descriptors = []
+        for number, root in enumerate(entry.roots[1:], 1):
+            key = f"extensions/{number - 1}/{module_path}"
+            if key not in entry.value.extension_sources:
+                continue
+            configuration = parse_xml(
+                "Configuration.xml",
+                entry.value.extension_sources[f"extensions/{number - 1}/Configuration.xml"],
+            )[0]
+            name = configuration.findtext(f"{{{M}}}Properties/{{{M}}}Name") or root.name
+            layer = LayerDescriptor(layer_key(number, name), number, name, str(root), None, "")
+            descriptors.append(layer)
+            readings.append(
+                read_extension_text(
+                    entry.value.extension_sources[key],
+                    layer=layer,
+                    version=document.manager_version,
+                    helpers=helpers,
+                    targets=targets,
+                    path=str(root / module_path),
+                    file_id=f"{layer.id}:{module_path}",
+                )
+            )
+        if not readings:
+            return bundle
+        manager = compose_manager(document, readings=readings, layers=tuple(descriptors))
+        index = build_addresses(document)
+        notices = []
+        for operation in bundle.prepared.operations:
+            rule = index.find(operation.target.pko_address)
+            context = select_context(manager, operation.target.direction)
+            version = next((v for v in context.entities if v.logical_id == rule.entity_id), None)
+            if version is not None and version.certainty != "known":
+                notices.append(
+                    Notice(
+                        "layer_uncertain_rule",
+                        operation.operation_id,
+                        operation.target.pko_address,
+                        "Действующее правило неизвестно из-за расширений; "
+                        "правка использует базовую декларацию",
+                        methods=version.uncertain_by,
+                        detail_key=digest(version.uncertain_by),
+                    )
+                )
+        if not notices:
+            return bundle
+        prepared = replace(bundle.prepared, notices=(*bundle.prepared.notices, *notices))
+        validation = json.loads(bundle.files["validation.json"])
+        validation["notices"] = [
+            asdict(n)
+            | {"notice_id": n.notice_id}
+            | (
+                {"uncertain_by": {"items": list(n.methods[:8]), "has_more": len(n.methods) > 8}}
+                if n.id == "layer_uncertain_rule"
+                else {}
+            )
+            for n in prepared.notices
+        ]
+        files = dict(bundle.files) | {"validation.json": json_bytes(validation)}
+        manifest = replace(
+            bundle.manifest,
+            notices=tuple(n.notice_id for n in prepared.notices),
+            file_hashes={p: sha256(b) for p, b in files.items() if p != "manifest.json"},
+        )
+        files["manifest.json"] = manifest.to_bytes()
+        return replace(bundle, prepared=prepared, files=files, manifest=manifest)
+
     def _validate_handler_layer(
         self, entry: _Inputs, bundle: RenderedAuthoring, plan: HandlerOperationsPlan
     ) -> RenderedAuthoring:
@@ -2220,7 +2312,8 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                         if isinstance(prepared, HandlerOperationsPlan):
                             rendered = self._validate_handler_layer(entry, rendered, prepared)
                             handler_plans.append(prepared)
-                        preparations.append(rendered.prepared if use_handlers else prepared)
+                        rendered = self._with_layer_uncertainty(entry, rendered)
+                        preparations.append(rendered.prepared)
                         bundles.append(
                             with_source_hashes(
                                 rendered,
@@ -2332,6 +2425,14 @@ class EdAuthoringMixin(EdRoutesMixin, EdSchemaMixin, EdMixin):
                     self._authoring_previews.move_to_end(build_hash)
                     while len(self._authoring_previews) > MAX_INPUTS:
                         self._authoring_previews.popitem(last=False)
+                for rows in (result.get("items", []), result.get("acknowledgement_notices", [])):
+                    for row in rows:
+                        if row.get("id") == "layer_uncertain_rule" and "methods" in row:
+                            reasons = row.pop("methods", ())
+                            row["uncertain_by"] = {
+                                "items": list(reasons[:8]),
+                                "has_more": len(reasons) > 8,
+                            }
                 return result
             except AuthoringPreconditionError as error:
                 mapped = _failure(error)

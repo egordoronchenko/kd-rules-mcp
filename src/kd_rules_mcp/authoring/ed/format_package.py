@@ -482,7 +482,11 @@ def _xdto_xml(model: FormatPackage) -> bytes:
             if prop.inline_type:
                 render_type(item, prop.inline_type, depth + 2, True)
 
-    for typ in model.types:
+    # Пакет XDTO принимает члены только по порядку: import → valueType → objectType
+    # (EnterpriseData_1_20_2/Ext/Package.bin:2, 3-1073, 1077); objectType выше valueType
+    # платформа отвергает «Нарушен порядок следования значений свойств» (#90).
+    # Внутри каждой группы — порядок объявления.
+    for typ in sorted(model.types, key=lambda t: t.role not in VALUE_ROLES):
         render_type(root, typ, 2)
     etree.indent(root, space="\t")
     return etree.tostring(root, encoding="UTF-8") + b"\n"

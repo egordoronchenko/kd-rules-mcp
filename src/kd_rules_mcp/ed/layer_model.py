@@ -268,6 +268,7 @@ class EntityVersion:
     layer_id: str = "base"
     direction: str = ""
     headers_only: bool = False
+    uncertain_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +366,7 @@ class ExtensionReading:
     source: SourceFile
     coverage: Coverage
     previous_calls: tuple[PreviousCall, ...] = ()
+    dropped: bool = False
 
 
 @dataclass(frozen=True, slots=True)
