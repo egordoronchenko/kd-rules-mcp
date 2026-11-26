@@ -125,7 +125,8 @@ def test_tool_schema_context_budget(tmp_path: Path) -> None:
     # ed_trace, ed_pair_validate и live_format_support (kd3-trace-pair) — около 3110 знаков при
     # однословных описаниях полей (вместо урезания чужих описаний).
     # download_link и upload_link (remote-file-links, #88) — около 870 знаков.
-    assert len(serialized) <= 61_850, f"Схемы: {len(serialized)} знаков"
+    # ed_migration_draft — один инструмент, около 1500 знаков схемы и описания.
+    assert len(serialized) <= 63_350, f"Схемы: {len(serialized)} знаков"
     descriptions = sum(len(tool.description or "") for tool in tools)
     assert descriptions >= 6_000, f"Описания инструментов: {descriptions} знаков"
     for tool in tools:

@@ -257,6 +257,7 @@ TOOL_EFFECTS: dict[str, tuple[str, str]] = {
     "ed_create": ("workspace", "manager project in workspace/.ed-projects"),
     "ed_apply": ("workspace", "preview and apply both write to workspace/.ed-projects"),
     "ed_authoring_candidates": ("read", ""),
+    "ed_migration_draft": ("read", ""),
     "ed_authoring_build": ("project", _KIT),
     "download_link": ("read", ""),
     "upload_link": ("workspace", "file in workspace/inbox"),
@@ -2047,6 +2048,50 @@ def create_server(service: Kd2Service) -> MCPServer:
             offset,
             limit,
             section,
+        )
+
+    @server.tool()
+    async def ed_migration_draft(
+        project_id: Annotated[str, Field(description="Manager project")],
+        schema_id: Annotated[str, Field(description="Bound format schema")],
+        structure_id: Annotated[str, Field(description="Host structure")],
+        rules: Annotated[
+            list[dict[str, Any]],
+            Field(description="1–2 {rules_id,role:send|receive}; distinct files/roles"),
+        ],
+        reference_document_id: Annotated[
+            str | None, Field(description="Typical manager or auto")
+        ] = None,
+        decisions: Annotated[
+            list[dict[str, Any]] | None,
+            Field(
+                description="{origin,format_type|format_property|format_value|name|exclude,reason?}"
+            ),
+        ] = None,
+        accept_single: Annotated[
+            bool, Field(description="Explicitly accept single candidates")
+        ] = False,
+        section: Annotated[
+            str, Field(description="summary,coverage,decisions,operations,manual")
+        ] = "summary",
+        offset: Offset = 0,
+        limit: Limit = 50,
+    ) -> dict[str, Any]:
+        """KD2 inventory, manual tasks and ed_apply packets; no writes or bodies.
+        Top-3 auto=false candidates and candidates_total; blocked dependencies; hashes.
+        Pages: next_offset."""
+        return await call(
+            service.ed_migration_draft,
+            project_id,
+            schema_id,
+            structure_id,
+            rules,
+            reference_document_id,
+            decisions,
+            accept_single,
+            section,
+            offset,
+            limit,
         )
 
     @server.tool()

@@ -168,6 +168,7 @@ EXPECTED_TOOLS = {
     "ed_authoring_candidates",
     "ed_authoring_build",
     "ed_create",
+    "ed_migration_draft",
     "ed_apply",
     "ed_schema_open",
     "ed_schema_types",

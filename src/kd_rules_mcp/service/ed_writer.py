@@ -31,6 +31,7 @@ from kd_rules_mcp.authoring.ed.manager_render import (
     render_manager_route,
 )
 from kd_rules_mcp.authoring.ed.manifest import sha256
+from kd_rules_mcp.authoring.ed.migration import build_migration_draft
 from kd_rules_mcp.authoring.ed.model import AuthoringPreconditionError, ExtensionIdentity
 from kd_rules_mcp.authoring.ed.plan_stubs import add_plan_stubs
 from kd_rules_mcp.authoring.ed.workspace import ManagerWorkspace
@@ -2121,6 +2122,162 @@ class EdWriterMixin(EdAuthoringMixin):
                         }
                     )
                 return compact_page({"notices": []}, rows, offset, min(limit, 200))
+
+    def _migration_reference(self, document_id: str, model, metadata: dict):
+        """Тот же типовой менеджер и ограничения происхождения, что у кандидатов."""
+        root = self._read_path(model.host.configuration).resolve()
+        roots = extension_paths(metadata["arguments"]["extensions"], self._read_path)
+        automatic = document_id == "auto"
+        if automatic:
+            info, reason = self._manager_reference(
+                root, roots, metadata["arguments"]["plan"], metadata["arguments"]["format_version"]
+            )
+            if info is None:
+                return None, reason
+            opened = self.ed_open(
+                path=info["path"],
+                **(
+                    {
+                        "configuration_path": self._host(root),
+                        "extensions": [self._host(p) for p in roots],
+                    }
+                    if roots
+                    else {}
+                ),
+            )
+            if opened.get("source_changed"):
+                raise EdAuthoringStaleError(
+                    "Типовой менеджер изменился; закройте и откройте его заново"
+                )
+            document_id = opened["project_id"]
+        project = self._ed_project(document_id)
+        if (
+            not (root / "Configuration.xml").is_file()
+            or (project.layered and not automatic)
+            or not any(
+                project.path.resolve().is_relative_to(folder / "CommonModules")
+                for folder in (root, *(roots if automatic else ()))
+            )
+        ):
+            _refuse("model_invalid", "Типовой менеджер должен быть из той же конфигурации")
+        return project, None
+
+    def ed_migration_draft(
+        self,
+        project_id: str,
+        schema_id: str,
+        structure_id: str,
+        rules: list[dict[str, Any]],
+        reference_document_id: str | None = None,
+        decisions: list[dict[str, Any]] | None = None,
+        accept_single: bool = False,
+        section: str = "summary",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Читает входы черновика; не вызывает писатель и не сохраняет снимки."""
+        validate_page(offset, limit)
+        if section not in ("summary", "coverage", "decisions", "operations", "manual"):
+            raise ValueError("section: summary, coverage, decisions, operations или manual")
+        if not isinstance(rules, list) or not 1 <= len(rules) <= 2:
+            raise ValueError("rules: нужны один или два проекта правил КД 2")
+        entries = [_mapping(r, "rules[]", {"rules_id", "role"}) for r in rules]
+        if any(
+            set(r) != {"rules_id", "role"}
+            or r["role"] not in ("send", "receive")
+            or not isinstance(r["rules_id"], str)
+            for r in entries
+        ):
+            raise ValueError("rules[]: нужны rules_id и роль send/receive")
+        if len({r["rules_id"] for r in entries}) != len(entries) or len(
+            {r["role"] for r in entries}
+        ) != len(entries):
+            raise ValueError("Файл и роль в rules не должны повторяться")
+        with self._lock:
+            model = self._manager_project(project_id).model
+            metadata = self._manager_metadata(project_id)
+            opened_schema = self._ed_schemas.get(schema_id)
+            if opened_schema is None:
+                raise EdSchemaNotFoundError("Схема формата не открыта")
+            self._manager_structure_provenance(structure_id, metadata)
+            if self._schema_changed(opened_schema):
+                raise EdAuthoringStaleError("Схема изменилась; откройте её заново")
+            if opened_schema.format_version != metadata["arguments"]["format_version"] or any(
+                b.uri and b.uri != opened_schema.schema.base_namespace
+                for b in model.format_bindings
+            ):
+                _refuse(
+                    "format_schema_mismatch", "Схема не соответствует версии и URI привязки проекта"
+                )
+            if any(
+                (p.base_version, p.base_namespace)
+                != (opened_schema.format_version, opened_schema.schema.base_namespace)
+                for p in model.format_packages
+            ):
+                _refuse("format_schema_mismatch", "Пакеты проекта привязаны к другой схеме")
+            schema = self._manager_format_schema(model, metadata, base=opened_schema.schema)
+            assert schema is not None
+            sources = []
+            inputs = []
+            for entry in entries:
+                document = self._exchange(entry["rules_id"])
+                source = self.workspace.get(entry["rules_id"]).source_path
+                if source is not None:
+                    source = source.resolve()
+                    if source in sources:
+                        raise ValueError("Один файл правил передан дважды")
+                    sources.append(source)
+                inputs.append((entry["role"], document))
+            notices = []
+            reference_project = None
+            if reference_document_id is not None:
+                reference_project, reason = self._migration_reference(
+                    reference_document_id, model, metadata
+                )
+                if reference_project is None:
+                    notices.append(
+                        {
+                            "id": "reference_manager_unavailable",
+                            "message": "Типовой менеджер этой версии не определён",
+                            "reason": reason,
+                        }
+                    )
+            host_name = read_description(
+                "Configuration.xml",
+                (self._read_path(model.host.configuration) / "Configuration.xml").read_text(
+                    "utf-8-sig"
+                ),
+                "Configuration",
+            ).name
+            for role, document in inputs:
+                name = document.source_name if role == "send" else document.target_name
+                if name.strip().casefold() != host_name.casefold():
+                    notices.append(
+                        {
+                            "id": "side_mismatch",
+                            "role": role,
+                            "message": "Имя стороны КД 2 отличается от конфигурации проекта",
+                        }
+                    )
+            with self._structure(structure_id) as connection:
+                # Слои типового менеджера имеют отдельное эффективное представление направления.
+                # Для слоёв используем независимый эффективный документ каждого направления.
+                reference_document = reference_project.document if reference_project else None
+                if reference_project and reference_project.layered:
+                    reference_document = {
+                        role: select_views(reference_project.layered, role, False)[0].document
+                        for role, _ in sorted(inputs)
+                    }
+                draft = build_migration_draft(
+                    inputs,
+                    connection,
+                    schema,
+                    model,
+                    reference_document=reference_document,
+                    decisions=decisions,
+                    accept_single=accept_single,
+                )
+            return replace(draft, notices=notices).page(section, offset, min(limit, 200))
 
     def _manager_previous(
         self, destination: Path

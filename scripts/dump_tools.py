@@ -121,6 +121,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "EnterpriseData routes": ("ed_routes", "ed_route_compare"),
     "EnterpriseData authoring": (
         "ed_create",
+        "ed_migration_draft",
         "ed_apply",
         "ed_authoring_candidates",
         "ed_authoring_build",
